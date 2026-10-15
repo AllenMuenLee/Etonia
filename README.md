@@ -1,0 +1,1001 @@
+# Greatnote
+
+A handwriting-focused note app for Android tablets and iPads, built with
+Flutter. The current build is an editor with a single pen, selectable ink
+color, adjustable stroke width, adaptive One Euro stroke smoothing, an
+eraser with area and stroke modes, a Select tool that lassos ink to move,
+scale, rotate, copy, cut, and paste it, and an AI assistant that explains or
+grades the selected ink. Notes live in memory for the session; nothing is
+saved yet.
+
+## Versions
+
+| Item | Value |
+| --- | --- |
+| Flutter | 3.44.2 (stable), pinned in `.fvmrc` |
+| Dart | 3.12.2 (bundled with that Flutter) |
+| Android `minSdk` | 24 (Android 7.0), set in `android/app/build.gradle.kts` |
+| Android `compileSdk` / `targetSdk` | 36, from the Flutter Gradle plugin |
+| iOS deployment target | 13.0, set in `ios/Runner.xcodeproj` |
+| Application ID / bundle ID | `com.greatnote.app` |
+
+The layout targets tablets. Widths below 600 logical pixels get a working
+compact fallback, not the primary experience.
+
+## Prerequisites
+
+All platforms:
+
+- Git
+- [FVM](https://fvm.app/documentation/getting-started/installation), which
+  installs the pinned Flutter SDK. Do not rely on a global `flutter`.
+- Android Studio with the Android SDK, platform tools, and an Android tablet
+  emulator image.
+- JDK 17 or newer. The JDK bundled with Android Studio works.
+
+**Android development works on Windows, macOS, and Linux.**
+
+**iOS development and simulator builds require macOS** with Xcode, CocoaPods,
+and the Xcode license accepted. Windows and Linux cannot produce or run an iOS
+build locally; use the CI job or a Mac.
+
+## Setup
+
+Run these from the repository root. Every later command in this README is
+written as `fvm flutter ...` / `fvm dart ...` so that the pinned SDK is used.
+
+### Windows (PowerShell)
+
+```powershell
+choco install fvm          # or: dart pub global activate fvm
+fvm install                # installs the Flutter version from .fvmrc
+fvm flutter doctor -v
+fvm flutter doctor --android-licenses
+fvm flutter pub get
+```
+
+### macOS
+
+```sh
+brew tap leoafarias/fvm && brew install fvm
+fvm install
+sudo xcode-select --switch /Applications/Xcode.app/Contents/Developer
+sudo xcodebuild -license accept
+sudo xcodebuild -runFirstLaunch
+brew install cocoapods
+fvm flutter doctor -v
+fvm flutter doctor --android-licenses
+fvm flutter pub get
+```
+
+### Linux
+
+```sh
+curl -fsSL https://fvm.app/install.sh | bash
+fvm install
+fvm flutter doctor -v
+fvm flutter doctor --android-licenses
+fvm flutter pub get
+```
+
+## Devices
+
+Emulators and simulators are fine for layout work. **Test pen input on
+physical tablets**: emulators do not reproduce stylus sampling rate, latency,
+pressure, or palm contact.
+
+### Android tablet emulator
+
+In Android Studio open **Device Manager > Create Virtual Device**, choose a
+device from the **Tablet** category (for example Pixel Tablet), pick a recent
+system image, and finish. Or from a terminal, with the SDK's `cmdline-tools`
+on your `PATH`:
+
+```sh
+sdkmanager "system-images;android-36;google_apis;x86_64"
+avdmanager create avd -n greatnote_tablet -k "system-images;android-36;google_apis;x86_64" -d pixel_tablet
+fvm flutter emulators --launch greatnote_tablet
+```
+
+Use an `arm64-v8a` image instead of `x86_64` on Apple silicon.
+
+### iPad simulator (macOS only)
+
+```sh
+xcrun simctl list devicetypes | grep iPad      # pick a device type
+xcrun simctl create "Greatnote iPad" "iPad Pro 11-inch (M4)"
+open -a Simulator
+```
+
+### Run the app
+
+```sh
+fvm flutter devices
+fvm flutter run -d <device-id>
+```
+
+## Commands
+
+| Task | Command |
+| --- | --- |
+| Run with the AI assistant enabled | `fvm flutter run -d <device-id> --dart-define=GEMINI_API_KEY=<your key>` |
+| Format | `fvm dart format .` |
+| Verify formatting | `fvm dart format --output=none --set-exit-if-changed .` |
+| Static analysis | `fvm flutter analyze` |
+| Unit and widget tests | `fvm flutter test --exclude-tags golden` |
+| Golden tests | `fvm flutter test --tags golden` |
+| Update golden baselines | `fvm flutter test --tags golden --update-goldens` |
+| All tests | `fvm flutter test` |
+| Integration smoke test | `fvm flutter test integration_test/app_smoke_test.dart -d <device-id>` |
+| Android debug build | `fvm flutter build apk --debug` |
+| iOS simulator build (macOS) | `fvm flutter build ios --simulator` |
+| Smoothing micro-benchmark | `fvm dart run benchmark/smoothing_benchmark.dart` |
+| Eraser micro-benchmark | `fvm flutter test benchmark/eraser_benchmark.dart` |
+| Selection micro-benchmark | `fvm flutter test benchmark/selection_benchmark.dart` |
+| Ink, eraser, selection, and AI-notation frame timing | `fvm flutter drive --profile --no-dds --driver=test_driver/perf_driver.dart --target=integration_test/ink_performance_test.dart -d <device-id>` |
+
+Golden baselines in `test/features/editor/goldens/` are rendered on Windows.
+Regenerate and compare them on Windows (CI does this on `windows-latest`);
+other hosts can differ by a few anti-aliased pixels.
+
+CI (`.github/workflows/ci.yml`) runs formatting, analysis, tests, golden
+tests, an Android debug build, and an unsigned iOS simulator build on every
+push and pull request. It needs no secrets: no test calls the AI service.
+
+## Project layout
+
+```
+lib/
+  main.dart                 entry point
+  app/                      app widget, theme, design tokens
+  features/library/         home screen, note storage, autosave
+  features/editor/          editor screen
+    widgets/                app bar, page frame, palette, popovers,
+                            page controls, selection actions, clipboard
+                            shortcuts, AI panel
+    page/                   pages, page setup, backgrounds, page viewport
+    ai/                     selection image, AI client, Gemini client,
+                            assistant state, AI configuration
+    ink/                    samples, smoothing, strokes, erasing, selection,
+                            shape recognition, canvas
+  shared/layout/            breakpoints
+test/                       unit, widget, and golden tests
+  helpers/                  viewport, editor, and AI test helpers
+integration_test/           on-device smoke test and profiling harness
+benchmark/                  smoothing, eraser, and selection micro-benchmarks
+```
+
+Test helpers in `test/helpers/pump_app.dart` pump the app at the three
+reference viewports: `390 x 844` (compact), `800 x 1280` (8-inch tablet
+portrait), and `1194 x 834` (11-inch tablet landscape).
+
+## Design system
+
+Tokens live in `lib/app/theme/app_tokens.dart`: semantic colors (`AppColors`,
+a `ThemeExtension`), spacing on a 4 px grid, three corner radii, control
+sizes, two shadow styles, and motion durations. Feature widgets read these
+rather than literals.
+
+Breakpoints are width-based and defined once in
+`lib/shared/layout/breakpoints.dart`:
+
+| Class | Width | Palette |
+| --- | --- | --- |
+| compact | below 600 | horizontal strip floating along the page's bottom |
+| medium | 600-839 | dense vertical strip floating near the leading edge |
+| expanded | 840 and up | vertical strip floating near the leading edge, centered title |
+
+The page spans the whole area below the top bar, edge to edge, and the top
+bar spans the whole width; only the AI panel, when open beside the editor,
+takes space from the page. The palette floats over the page, and the page's
+own floating bars (selection actions, Paste) move clear of it.
+
+## Undo and redo
+
+Undo and Redo sit in the top bar, before the page controls, and answer to
+`Ctrl`/`Cmd`+Z, `Ctrl`/`Cmd`+Shift+Z, and `Ctrl`+Y. History is per page and
+per session, kept by `InkController`: every committed change (a stroke, a
+shape, a whole erase gesture, a transform, a cut, a paste, an inserted
+image, an AI notation) is one step, at most `historyLimit` (100) deep. A
+step is a snapshot of the page's strokes and images, which are immutable and
+shared, so it costs one list each. Undo and redo drop the selection, bump
+the document revision (so autosave and AI staleness checks follow), and do
+nothing while a gesture is in progress. Page add, delete, and setup changes
+are not part of the history.
+
+## Handwriting
+
+Pointer events flow through these steps:
+
+1. `InkCanvas` listens to raw pointer events (not gesture callbacks) and turns
+   each into a `RawInkSample`: position in page-local logical pixels, the
+   platform timestamp, and the device kind.
+2. `InkController` owns the active stroke and the completed strokes. Only one
+   pointer writes at a time; others are ignored while a stroke is active.
+3. `OneEuroSmoother` (pure Dart) filters each sample as it arrives.
+4. Each filtered point extends a cached `Path` by one segment. Two painters,
+   each behind a repaint boundary, draw the active stroke and the completed
+   strokes; a pointer move repaints only the active layer and rebuilds no
+   widgets.
+
+### Smoothing
+
+The smoother implements the [One Euro filter](https://doi.org/10.1145/2207676.2208639),
+an adaptive first-order low-pass filter designed for noisy interactive input.
+At low pen speeds its low cutoff suppresses jitter. The cutoff rises with the
+filtered pen speed to reduce lag during fast handwriting. The actual interval
+between pointer samples is part of the filter coefficient, so irregular event
+delivery does not change the time response. A single 2D speed controls both
+axes, avoiding direction-dependent distortion. When the stroke ends, a short
+tail brings the visible endpoint to the raw endpoint.
+
+Everything is tunable in `SmoothingConfig`
+(`lib/features/editor/ink/smoothing_config.dart`):
+
+| Value | Default | Meaning |
+| --- | --- | --- |
+| `minCutoff` | 1 Hz | base cutoff; lower values suppress more low-speed jitter |
+| `beta` | 0.02 Hz/(px/s) | raises the cutoff with speed to reduce fast-motion lag |
+| `derivativeCutoff` | 1 Hz | cutoff used to stabilize the speed estimate |
+| `minDtSeconds` | 0.001 | lower clamp on time between samples |
+| `maxDtSeconds` | 0.1 | upper clamp on time between samples |
+| `maxFinalizationPoints` | 8 | cap on end-of-stroke tail points |
+| `finalizationSpacing` | 2 px | target distance between tail points |
+| `endpointTolerance` | 0.01 px | no tail if the output is already this close |
+
+**Tuning note.** Start with `beta = 0`, adjust `minCutoff` until a stationary
+or slowly moving pen is stable, then raise `beta` until fast strokes feel
+responsive. `derivativeCutoff` normally stays at the published 1 Hz default.
+The checked-in defaults are tuned for logical-pixel tablet coordinates and
+should still be validated on physical hardware.
+
+### Known limitations
+
+- Flutter delivers one sample per pointer event. Android's batched historical
+  samples arrive as separate events; iOS coalesced touches are not exposed to
+  the framework.
+- There is no platform palm rejection. A palm that lands before the pen
+  becomes the writing pointer.
+- Pressure and tilt are ignored. Stroke width is constant.
+- Rotating the device mid-stroke ends that stroke. Existing ink keeps its
+  page coordinates and is clipped if the page becomes smaller.
+
+### Hold to shape
+
+Keep the pen on the page and hold it still at the end of a stroke: after
+`holdDuration` the stroke is replaced by a clean version of the shape it was
+meant to be, with the same color and width. Lifting without holding keeps the
+freehand stroke. Nothing is converted when no shape fits well, so handwriting
+and scribbles are left alone.
+
+After the snap, keep the pen down to adjust the shape: moving it scales and
+turns the shape about its pivot, a closed shape's center or an open shape's
+start, so the point the pen held follows the pen. Turns under 4° and scales
+within 2% of 1 are ignored, so a shape that snapped straight stays straight.
+The width never changes. The shape is a preview until the pen lifts, and is
+then committed as one change.
+
+`ShapeRecognizer` (`lib/features/editor/ink/shape_recognizer.dart`, pure Dart)
+resamples the stroke to evenly spaced points and finds corners where it turns
+sharply. A nearly straight stroke is a line. A closed stroke with three or
+more corners is a polygon, beautified to the most specific shape that still
+fits: star (outline or pentagram), rectangle, square, rhombus, regular n-gon,
+or a plain polygon with straight edges; with fewer corners it is an ellipse or
+a circle. An open stroke whose long first segment ends in a short head that
+turns back is an arrow; any other open stroke becomes whichever of polyline,
+arc, sine wave, and Archimedean spiral fits best. Lines, rectangles, ellipse
+axes, and wave axes snap to horizontal or vertical when close.
+
+Every candidate is scored the same way: the root-mean-square distance between
+stroke and shape, both ways, divided by the stroke's size. Tuning lives in
+`ShapeConfig` (`lib/features/editor/ink/shape_config.dart`):
+
+| Value | Default | Meaning |
+| --- | --- | --- |
+| `holdDuration` | 550 ms | how long the pen must stay still |
+| `holdSlop` | 6 px | moving further restarts the hold |
+| `minStrokeLength` | 24 px | shorter strokes never convert |
+| `resampleCount` | 64 | points the stroke is resampled to |
+| `closedGapFraction` | 0.15 | a gap this fraction of the length still closes |
+| `cornerAngle` | 34° | turn that counts as a corner |
+| `lineTolerance` | 0.045 | a line strays at most this fraction of its length |
+| `fitTolerance` | 0.028 | other shapes' fit error, as a fraction of the size |
+| `maxPolygonSides` | 12 | largest polygon recognized |
+| `maxPolylineSegments` | 8 | longest open polyline recognized |
+| `axisSnapAngle` | 7° | snapping to horizontal or vertical |
+| `circleRoundness` | 0.85 | minor/major radius above which an ellipse is a circle |
+| `rightAngleTolerance` | 14° | rectangle corners |
+| `equalSideTolerance` | 0.18 | sides this close count as equal |
+| `regularAngleTolerance` | 18° | regular polygon and star angles |
+| `minSpiralTurns` | 1.25 | turns a spiral must wind |
+| `minSineCrossings` | 2 | axis crossings a sine wave must make |
+| `arrowHeadAngle` | 30° | angle between shaft and barb |
+| `maxPoints` | 200 | points in any generated shape |
+
+## Pages
+
+A note is a list of pages shown as one continuous column: each page sits
+directly below the one before, with a hairline seam between them. The current
+page is the one a pointer last went down on, or, after scrolling, the one in
+the middle of the area; selection, Paste, and the page panel act on it. The
+app bar shows `current / count`, which opens the page panel; on tablets
+previous, next, and add-page buttons sit beside it and scroll to their page.
+The panel adds and deletes pages and sets the current page's size and
+background. When the current page changes, the page left ends its gesture and
+drops its selection, and the clipboard comes along. One pointer owns the
+whole note at a time, so a palm on one page cannot let the pen write on
+another.
+
+| Size | Shown |
+| --- | --- |
+| Fit to screen (default) | as big as the writing area |
+| A4, US Letter (portrait or landscape), Square | scaled to the area's width |
+| Infinite | at scale 1, grows right or down when ink comes within `edgeMargin` of an edge; the column scrolls sideways when it is wider than the area |
+
+Backgrounds are Blank, Lined, Grid, and Dotted, painted under the ink in page
+coordinates. A scrollable page scrolls with two fingers, a mouse wheel, or a
+trackpad, never with one finger or the pen; a second finger that starts a
+scroll drops the stroke the first finger began. Spacings and growth are in
+`PageConfig` (`lib/features/editor/page/page_setup.dart`): `lineSpacing` 32,
+`gridSpacing` 24, `dotSpacing` 24, `edgeMargin` 96, `growthFraction` 0.5,
+`minGrowthStep` 256, `maxExtent` 20000.
+
+## Library
+
+The app opens to the library: folders first, then notes, sorted by last
+modified, date created, or title, as a grid of cards with first-page
+thumbnails or as a list. Folders nest, with a breadcrumb trail. Each item's
+menu (also on long press) renames, moves, duplicates (notes), and deletes,
+with confirmation. Search matches titles in every folder.
+
+Notes are stored under the app's documents directory by `FileNoteRepository`
+(`lib/features/library/`): `greatnote/library.json` indexes folders and notes,
+and `greatnote/notes/<id>.json` holds each note's pages and strokes. Both carry
+a schema number; a newer one is refused rather than misread. Every file is
+written to a temporary file and renamed into place. Only a stroke's color,
+width, and filtered points are stored, so a loaded stroke has no raw samples.
+
+An open note saves itself 800 ms after its ink, pages, or page setups change,
+waits for a gesture in progress to end, and saves again when leaving the
+editor or when the app is paused. The editor's back arrow returns to the
+library, and its title renames the note.
+
+### Known limitations
+
+- Saving encodes JSON on the main isolate; very large notes may cause a short
+  pause.
+- Thumbnails are painted from each note's content and cached for the session
+  only.
+- There is no trash, sync, import, or export.
+
+## Eraser
+
+The palette has one eraser beside the pen. Pressing it selects it; pressing
+it again opens its options: the mode, and the size used in area mode. An
+inverted stylus erases with the current eraser settings whichever tool is
+selected.
+
+| Mode | Effect |
+| --- | --- |
+| Area | removes only the ink under the eraser; crossed strokes are cut |
+| Stroke | removes every stroke the eraser touches, whole |
+
+Erasing is vector-based: it edits the stroke collection, it does not paint
+over ink. An eraser pointer event takes this path:
+
+1. `InkCanvas` sends the position to `InkController.startErase`, `eraseTo`,
+   or `endErase`. Writing and erasing share the single active pointer.
+2. Between two samples the eraser covers a capsule: every point within its
+   radius of the segment joining the two positions, so a fast flick cannot
+   skip over ink. The controller skips every stroke whose cached bounding
+   box misses the capsule's box.
+3. `EraseGeometry` (pure Dart) tests the remaining strokes. A stroke of
+   width `w` is treated as its centerline, so in area mode everything within
+   `size / 2 + w / 2` of the eraser's path is removed, and in stroke mode a
+   stroke is hit within `strokeHitRadius + w / 2`. Cut points are computed
+   on the crossed segment, which leaves each piece's round cap tangent to
+   the eraser's edge.
+4. The pieces replace the original stroke at its index, in order, so
+   stacking does not change. The completed-strokes layer repaints only if
+   the collection changed; the eraser outline has its own layer.
+
+A piece is a new `Stroke` whose `source` is `StrokeSource.derived`. It keeps
+the original style and the original filtered points plus the cut points; it
+is never smoothed again, and it has no `rawSamples`, because raw samples do
+not map onto filtered points.
+
+The limits live in `EraserConfig`
+(`lib/features/editor/ink/eraser_settings.dart`):
+
+| Value | Default | Meaning |
+| --- | --- | --- |
+| `minSize` | 8 px | smallest area eraser diameter |
+| `maxSize` | 80 px | largest area eraser diameter |
+| `defaultSize` | 24 px | area eraser diameter on launch |
+| `strokeHitRadius` | 6 px | eraser radius in stroke mode |
+| `minPieceLength` | 0.01 px | shorter leftover pieces are discarded |
+
+`EraseGeometry.cutTolerance` (0.001 px) is the length below which a removal
+is skipped and a cut point snaps to a neighboring vertex. It is what makes
+erasing the same place twice a no-op.
+
+### Known limitations
+
+- Each erase gesture is one `EraseGesture` with its own `id`, and one step
+  of undo history.
+- The eraser outline shows only while a pointer is down; there is no hover
+  preview.
+- Every eraser move that removes ink repaints the whole completed-strokes
+  layer. On a dense page that raster work, not the erase geometry, is the
+  cost that grows.
+## Selection
+
+The palette has one Select tool beside the eraser. With it, a drag on empty
+paper selects every stroke whose ink overlaps the region drawn, whole:
+
+- A nearly straight drag, in any diagonal direction, selects the rectangle
+  with the drag's start and end as opposite corners. A drag counts as
+  straight while its path is no longer than `rectangleMaxDetour` times the
+  distance between its ends.
+- Anything more wandering is a freeform lasso. It selects only if it ends
+  nearly where it began: the gap between its ends must be within
+  `lassoClosingFraction` of the length drawn. A loop left open selects
+  nothing.
+
+The outline is dashed while it is drawn. A freeform loop is shown as drawn,
+with no line added back to its start.
+
+Paste is offered in two places: holding a pointer still on the page for
+`pasteHoldDuration` shows a Paste button there, which pastes centered on
+that point, and pressing Select again opens its options, which hold Paste
+too.
+
+A selection gets a frame with a handle at each corner and a rotation handle
+above its top edge, and a small bar with Copy, Cut, and AI, which ends level
+with the frame's top-right corner. A pointer going down
+does one thing, chosen in `SelectionFrame.hitTest`:
+
+1. on a handle, within `handleHitRadius`: the nearest one, with ties going
+   to the rotation handle and then to the earlier corner (top-left,
+   top-right, bottom-right, bottom-left);
+2. elsewhere on or inside the frame, ink included: a move;
+3. anywhere else: a new selection drag, which replaces the selection when
+   it ends. A tap has no area, so it clears the selection.
+
+Inside a frame smaller than its handle targets, a handle wins only where
+the pointer is at least as near to it as to the frame's center, so a small
+selection can still be moved.
+
+Selecting, like erasing, is vector-based and never smooths or rasterizes
+ink:
+
+- **Overlap.** `LassoRegion` (pure Dart) closes the region from its last
+  point to its first. A stroke of width `w` is selected when its centerline
+  comes within `w / 2 + geometryTolerance` of the lasso's outline, or lies
+  in its interior. That covers a segment crossing the lasso between two
+  stored points, wide ink that only grazes it, and a lasso drawn inside
+  wide ink. A dot is the disc around its point. Strokes whose cached bounds
+  miss the lasso's bounds are skipped without reading their points.
+- **Even-odd.** The interior is decided by an even-odd crossing count in
+  `LassoRegion.containsPoint`, not by a platform path: an area the lasso
+  wraps twice is outside.
+- **Transforms.** `SelectionTransforms` (pure Dart) derives each preview
+  from where the pointer went down and where it is now, never from the
+  previous preview, so the result does not depend on the sample rate. A
+  move adds the pointer's delta. A corner scales uniformly about the
+  opposite corner by the ratio of the pointer's distances from it, clamped
+  to `minScale`..`maxScale`, and multiplies stroke widths by the same
+  factor; pen width limits do not apply. The rotation handle turns the ink
+  about the frame's center, leaving widths alone. The frame keeps its
+  orientation: it turns with the ink instead of becoming a new upright box.
+- **Preview and commit.** Selected strokes are painted by the selection
+  layer for as long as they are selected. A preview draws their cached
+  paths through the transform, so a pointer move repaints that layer only
+  and builds no path. Lifting the pointer replaces each selected stroke at
+  its own index with one built from its transformed points, once. A gesture
+  that ends where it began changes nothing.
+- **Result.** A transformed or pasted stroke is `StrokeSource.derived`: it
+  keeps its color, has its filtered points transformed as they are, and has
+  no `rawSamples`.
+
+Copy and Cut put a snapshot of the selected strokes and images on an in-app
+clipboard that lasts for the editor session and survives tool changes. On a
+PDF-backed page, the lasso also selects the rectangular PDF-paper region
+inside its bounds. Copy or Cut rasterizes that region on demand and adds it
+to the clipboard as an ordinary image; the source PDF paper is never
+modified. Pasting therefore produces a movable, scalable image excerpt,
+along with any ink or placed images selected over it. Paste adds independent
+copies above the existing ink and selects them. From the Select options or
+the keyboard, the first paste lands
+`pasteOffset` from the copied ink and each further paste another
+`pasteOffset` on; a new Copy or Cut starts the cascade over. A paste from a
+hold lands where the pointer was held and leaves the cascade alone. `Ctrl` or `Cmd` with C, X, and V do the same while the editor
+has keyboard focus, and leave a focused text field's own shortcuts alone.
+Nothing is written to the system clipboard.
+
+Leaving the Select tool commits a transform in progress and clears the
+selection. Erasing, including with an inverted stylus while Select is
+active, clears it too.
+
+The values live in `SelectionConfig`
+(`lib/features/editor/ink/selection_config.dart`):
+
+| Value | Default | Meaning |
+| --- | --- | --- |
+| `minLassoPointSpacing` | 2 px | distance before another lasso point is stored |
+| `geometryTolerance` | 0.001 px | inclusive slack for overlap, zero-area, and identity checks |
+| `handleVisualRadius` | 6 px | painted radius of the handles |
+| `handleHitRadius` | 24 px | grab radius of a handle: a 48 px target |
+| `rotationHandleOffset` | 32 px | from the frame's top edge to the rotation handle |
+| `minScale` | 0.1 | smallest scale in one gesture |
+| `maxScale` | 10 | largest scale in one gesture |
+| `pasteOffset` | (24, 24) px | added by each paste in a cascade |
+| `minStrokeWidth` | 0.01 px | scaling down stops where a stroke would get thinner |
+| `maxCoordinate` | 1,000,000 px | a transform or paste that takes the frame further out is refused |
+| `rectangleMaxDetour` | 1.25 | a drag this close to straight selects a rectangle |
+| `lassoClosingFraction` | 0.2 | largest gap, as a share of its length, for a lasso to count as closed |
+| `lassoDashLength` | 6 px | dash length of the outline while it is drawn |
+| `lassoDashGap` | 4 px | gap between those dashes |
+| `pasteHoldDuration` | 500 ms | how long a still pointer is held before Paste is offered |
+| `pasteHoldSlop` | 10 px | how far a held pointer may drift |
+
+### Known limitations
+
+- A committed transform, a cut, and a paste each replace the stroke
+  collection once and notify once, and each is one step of undo history.
+- Scaling is uniform only, and there is no skew, mirror, or angle snapping.
+- Transforms use one pointer; there is no pinch or two-finger rotation.
+- Strokes are selected whole; a lasso cannot take part of one.
+- Selected strokes are drawn above unselected ones while they are selected.
+  Their place in the document does not change, and they drop back when the
+  selection is cleared.
+- The clipboard is in memory, for this session, and private to the app.
+
+## AI assistant
+
+A selection's bar ends with an **AI** button. Pressing it opens a chat panel
+about the selected ink. Nothing is sent until you press **Explain this**,
+**Grade this**, or Send.
+
+| Width | Panel |
+| --- | --- |
+| medium and expanded | 360 px beside the editor, on the right to begin with; the page and palette move over, so nothing is covered |
+| compact | a modal sheet from the chosen edge, at most `min(360, 88% of the width)`, over a barrier that closes it |
+
+**Panel side** in the editor's **Settings** chooses the screen's physical
+left or right edge, whatever the text direction. The side, the conversation, the
+unsent draft, and the captured image live in the editor's state: they
+survive rotation, breakpoint changes, and closing the panel. Pressing AI
+again on the same ink brings the conversation back; pressing it on other
+ink starts a new one. If the selection changes while the panel is open, the
+conversation and its image stay as they are and the panel offers **Use
+current selection**, which starts over with the new ink.
+
+Enter starts a new line in the message field; `Ctrl` or `Cmd` with Enter
+sends. Escape closes the panel.
+
+The **Enable notation** switch is in the editor's **Settings** and is off
+when an editor session starts. When enabled,
+the assistant may add handwritten labels, arrows, circles, checks, and other
+short teaching marks directly to the vector note. The switch survives panel
+close/reopen, side changes, and rotation in that editor session. Turning it on
+does not send anything; it affects only messages submitted while it is on.
+Turning it off while a request is running revokes permission to apply that
+request's drawing.
+
+**Enable animation** is a separate opt-in setting. With notation enabled and
+animation disabled, every accepted drawing is static. With both enabled, the
+model may add timing only when motion carries explanatory meaning; ordinary
+labels and formulas remain static. These preferences and the panel-side
+choice stay out of the chat panel so the conversation remains uncluttered.
+
+### What is sent
+
+With Notation off, only an image of the selected strokes plus conversation
+text is sent. Pressing AI copies the selected strokes' points, widths,
+resolved colors, and order
+into an immutable snapshot, and `SelectionImageRenderer`
+(`lib/features/editor/ai/selection_image_renderer.dart`) draws that snapshot
+off screen with `dart:ui`:
+
+- the crop is the union of the strokes' rendered bounds plus 12 logical
+  pixels on every side;
+- it is drawn at 2 physical pixels per logical pixel, or less when that
+  would make a side longer than 2048 pixels; never more;
+- the background is the writing surface's color in the theme at the moment
+  of capture, opaque, and the ink uses that theme's colors. A later theme
+  change does not alter an open conversation's image;
+- strokes are painted in document order by the same function the editor's
+  layers use: round caps and joins, and a disc for a dot;
+- unselected ink, the selection frame, its handles, and the action bar are
+  never drawn;
+- a selection that is empty, not finite, or too large to shrink legibly is
+  refused with a message, before any bitmap is allocated.
+
+The panel's preview shows those same PNG bytes. They are held in memory for
+the conversation and written nowhere.
+
+With Notation on, sending a message also snapshots and renders the complete
+current writing surface through `NoteImageRenderer`. That PNG contains normal
+document ink over the opaque paper color, but no active gesture, selection
+chrome, controls, or AI panel. It is rendered at up to 2x and capped at 2048
+pixels per side. The image, logical surface size, selected focus bounds, and
+document revision form one immutable request context. These bytes also stay
+in memory only. Settings explains that enabling notation sends this broader
+context.
+
+The quick actions send fixed prompts, which are in `AiPrompts`
+(`lib/features/editor/ai/ai_config.dart`) with the system instruction. The
+transcript shows a quick action under its short label.
+
+### Service
+
+Requests go to Google's hosted `gemma-4-31b-it` through the Gemini API:
+
+```text
+POST https://generativelanguage.googleapis.com/v1beta/models/gemma-4-31b-it:generateContent
+```
+
+The endpoint keeps no state, so every request carries the system instruction,
+the selected image as `inline_data` in the first user turn, and the whole
+conversation in order. A notation-enabled request attaches its fresh
+whole-note image and normalized focus metadata to the latest user turn. The
+key travels in the `x-goog-api-key`
+header, never in the URL. The model's thinking is turned off
+(`thinkingLevel: minimal`), which roughly halves the wait; answers still
+take 10 to 70 seconds, so an attempt gets 120 seconds.
+
+The service intermittently answers 500 or 503 at once, having generated
+nothing; those are sent once more after a second. Nothing else is retried
+automatically, because a retry could be another billable generation. A
+failed message stays in the conversation with a **Retry** button; sending a different message instead replaces it. Timeouts,
+connection failures, HTTP errors, blocked or empty answers, and unreadable
+responses each have their own message. No message, and nothing logged,
+contains the key, the image, the chat, or a response body. An answer that
+arrives for a conversation that has since been replaced is dropped.
+
+Every successful model answer is JSON matching a closed, versioned schema:
+
+```json
+{
+  "version": 2,
+  "message": "Readable Markdown answer",
+  "notation": null
+}
+```
+
+When enabled, `notation` may instead hold a label and 1–48 items. The model
+says what to draw; Greatnote draws it. Every item has a palette ID and a
+1–20 logical-pixel pen width, and is one of:
+
+| `type` | The model gives | Greatnote draws |
+| --- | --- | --- |
+| `text` | the words, the top-left corner, and the capital height (8–120 px) | them in its built-in single-stroke handwriting font (letters, digits, punctuation, and common math symbols such as `× ÷ √ π ² ≤ → ✓`) |
+| `plot` | the box on the note, the x range and an optional y range, whether to draw `axes` and number them with `ticks`, and `children` placed in the plot's own units (below) | a coordinate plane: axes through 0 (or along the box edge), round tick numbers, and every child mapped into the box and cut off at its edge |
+| `graph` | a formula in x (`x^2 - 2x + 1`, `2 sin(x)`), where it starts and ends (`x_from`, `x_to`), an optional y range, the box on the note, and whether to draw axes | the curve, worked out at 240 points, broken where it is undefined or jumps, with axes in graphite; a plot is preferred |
+| `line` | two points, a `line_style` (`solid`, `dashed`, `dotted`), and an `arrow` (`none`, `start`, `end`, `both`) | the line, cut into dashes or dots, with solid arrowheads sized to the pen |
+| `shape` | `ellipse`, `circle`, `rectangle`, `triangle`, `triangle_down`, `triangle_left`, `triangle_right`, `right_triangle`, `diamond`, `pentagon`, `hexagon`, or `star`, the box it fills, and a `line_style` | the closed outline; directional triangles put their apex on the named edge, while `right_triangle` has a right angle; an `ellipse` around something circles it |
+| `path` | key points (2–64) and, for each gap between neighbours, `straight` or `curve`; `closed` joins the last back to the first; a `line_style` and an `arrow` as for a line | straight lines, or a smooth centripetal Catmull–Rom curve through the points, with arrowheads that follow the curve |
+| `stroke` | 1–128 points | one pen stroke through them, for small marks |
+
+A plot's children use the graph's own x and y, never note coordinates, so
+the model does no mapping arithmetic. Each has an ink; the plot's width is
+theirs too:
+
+| Child | The model gives | Greatnote draws |
+| --- | --- | --- |
+| `function` | a formula, an optional `line_style`, and optional `marks`: `roots`, `extrema`, `y_intercept` | the curve, and for each mark the points it finds (`plot_features.dart`: sign changes refined by bisection, turning points by golden-section search, breaks such as `1/x` ignored), each dotted and labelled with its coordinates |
+| `intersections` | `of`, two formulas | a labelled dot wherever their curves meet |
+| `point` | `x`, `y`, an optional `label` | a dot, with the label beside it |
+| `segment` | `from`, `to`, an optional `line_style` and `arrow` | the line, cut at the box |
+| `label` | `x`, `y`, `text` | the text just above and right of the point |
+| `shade` | a formula, an optional `base` (y = 0 by default), `from`, `to` | vertical hatching between the two curves |
+
+The labels Greatnote writes itself, tick numbers and marked coordinates, are
+moved back onto the paper if they would run off it. A plot holds at most 16
+children, and each mark labels at most 8 points.
+
+```json
+{
+  "label": "Graph of y = x² - 1",
+  "coordinate_space": "note_normalized",
+  "items": [
+    {"type": "plot", "left": 0.55, "top": 0.1, "right": 0.9, "bottom": 0.45,
+     "x_from": -3, "x_to": 3, "y_from": -2, "y_to": 8, "axes": true,
+     "ticks": true, "ink": "graphite", "width": 2, "children": [
+       {"type": "function", "formula": "x^2 - 1",
+        "marks": ["roots", "extrema"], "ink": "blue"},
+       {"type": "label", "x": 2.2, "y": 6, "text": "y = x² - 1",
+        "ink": "blue"}
+     ]}
+  ]
+}
+```
+
+Formulas are read by a small arithmetic parser (`notation_formula.dart`):
+numbers, `x`, `+ - * / ^`, parentheses, `pi`, `e`, and one-argument
+functions such as `sin`, `sqrt`, `ln`, and `abs`. It never runs code. The
+app validates the provider output again locally. A notation that breaks the
+contract, such as unknown text characters or a formula that does not read,
+is dropped whole and the text answer kept. Model turns are replayed to the
+stateless service using this canonical JSON; local application state is never
+sent.
+
+Notation coordinates address the whole writing surface: `(0, 0)` is its
+top-left and `(1, 1)` is its bottom-right. Greatnote maps them with
+`pageX = x * width` and `pageY = y * height`, without smoothing or clamping.
+If the mode was disabled, the document or surface changed, a gesture is
+active, or any trace falls outside the note, the whole notation is rejected
+and the text answer is retained. Otherwise all traces are appended in one
+`InkController` mutation and one completed-ink notification. They are normal
+derived vector strokes and can be selected, transformed, copied, cut, and
+erased.
+
+### Timed notation playback
+
+A notation may give items a `step` only when **Enable animation** is on.
+The model is encouraged to animate, but only what moves or changes: current
+or another flow travelling along a path, a body or wave changing position,
+forces acting in turn, the stages of a mechanism or causal sequence, atoms
+combining, separating, or rearranging. Fixed labeling is never animated:
+labels, titles, axes, ticks, legends, formulas, worked text, pointer arrows,
+and the figure the motion happens on carry no step. In a timed notation an
+item without a step is fixed: it is shown whole from the start of every loop
+and never redrawn, while the stepped items play over it. A notation with
+nothing that moves has no steps at all and appears immediately.
+
+A step is an integer from 1 through 24. The model gives only the order:
+items are drawn lowest step first, and items that share a step are drawn
+together. Steps need not be consecutive. Greatnote works out the times
+itself (`AiNotationTimeline.fromSteps`): each item takes about as long as a
+hand would to draw it (about 140 ms a character of text, about 1.5 s for a
+line across the whole note, longer for a plot with more children), each step
+lasts as long as its slowest item, steps are 250 ms apart, and the loop holds
+600 ms before it repeats. An animation that would run past 12000 ms is sped
+up to fit; fixed items do not count toward it. If any step given is not an
+integer in range, Greatnote keeps the validated drawing but shows it
+immediately.
+
+Greatnote lays each item out once into its final page-local vector strokes,
+then distributes its time span over those strokes at a constant pen speed.
+The final strokes are appended atomically before playback starts. While they
+are being revealed, the completed-ink layer omits those exact stroke objects
+and a clipped animation layer paints their time-dependent prefixes. A partial
+segment is linearly interpolated from elapsed ticker time, so missed frames
+and 60, 90, or 120 Hz displays reach the same geometry. Playback frames do
+not mutate the document, increment its revision, or notify completed-ink
+listeners. At the end of the loop the elapsed phase wraps to zero and the reveal
+repeats continuously, like a GIF, without recommitting the strokes. Closing
+the AI panel does not stop or finish it; playback belongs to the note and
+continues across the resulting canvas resize. The chat shows no drawing
+status or completion button.
+
+A pointer down or any ink mutation finishes the reveal first, then preserves
+the initiating input. Turning **Enable animation** off also shows the current
+drawing whole. Disabling future notation or merely closing the AI panel does
+not. When the platform requests reduced motion, the same final strokes are
+committed and shown immediately.
+
+The profile command in [Commands](#commands) records separate timeline
+summaries for ordinary animation frames, loop rollover, and forced finish. It
+also writes `build/ai_notation_metrics.json` with the existing and animated
+ink sizes, animation tick count, completed-layer invalidations, and the peak
+cached path-measure count. The near-limit scenario animates 57,344 points over
+a 30,000-point page. Run it on an emulator or simulator for repeatable
+development comparisons and on physical target tablets for representative
+build/raster times; do not treat debug-mode or emulator timing as device
+performance.
+
+### API key
+
+The key is read at build time from `GEMINI_API_KEY`:
+
+```sh
+fvm flutter run -d <device-id> --dart-define=GEMINI_API_KEY=<your key>
+```
+
+or from a file that Git ignores (`.env`, `.env.*`, and `dart_defines*.json`
+are in `.gitignore`):
+
+```sh
+fvm flutter run -d <device-id> --dart-define-from-file=dart_defines.json
+```
+
+```json
+{
+  "GEMINI_API_KEY": "<your key>",
+  "GEMINI_MODEL": "gemini-3.5-flash-lite",
+  "GEMINI_THINKING_LEVEL": "LOW"
+}
+```
+
+### Thinking
+
+`GEMINI_THINKING_LEVEL` sets how long the model thinks before answering:
+`MINIMAL`, `LOW`, `MEDIUM`, or `HIGH`, the values of the SDKs'
+`ThinkingLevel` (`ThinkingLevel.LOW` and `low` are accepted too). It is sent
+as `generationConfig.thinkingConfig.thinkingLevel`, as the SDKs'
+`thinkingConfig: { thinkingLevel: ThinkingLevel.LOW }` sends it. Leave it
+out for the model's default.
+
+Gemini 2.5 models refuse a thinking level with a 400, so for them the level
+is sent as a `thinkingBudget` instead: `MINIMAL` 0 (128 for 2.5 Pro, which
+cannot stop thinking), `LOW` 1024, `MEDIUM` 4096, `HIGH` 16384 tokens.
+`GEMINI_THINKING_BUDGET` sets a budget directly, for any model, and wins
+over the level; `-1` lets the model decide.
+
+### Model
+
+`GEMINI_MODEL` picks the model, by its ID in the Gemini API's model list
+(a `models/` prefix copied from that list is accepted). Leave it out, or
+blank, for the default, `gemini-2.5-flash`. It is fixed when the app is
+built, so a change takes a full restart, not a hot reload. The panel
+header shows the model's name, or its ID for one the app has no name for.
+
+Things to know when changing it:
+
+- **Notation quality varies.** `gemini-2.5-flash` was the only model tried
+  that drew where it was asked, legibly. The Gemma 4 models often answered
+  in words alone, or drew small marks in the right place without writing.
+- **Thinking settings are per model family.** The app sends none by
+  default, which every model accepts. `thinkingLevel` (Gemini 3, Gemma 4)
+  is refused by Gemini 2.5 with a 400; Gemini 2.5 takes `thinkingBudget`.
+- **Free-tier quotas are per model.** On the free tier,
+  `gemini-2.5-flash` allows 20 requests a day; switching models is one way
+  to keep working after that runs out.
+
+Without a key the panel still opens, shows the preview, and says how to add
+one; the quick actions and Send are disabled. Never put a key in source,
+tests, fixtures, or documentation.
+
+**This is not safe for production.** `--dart-define` compiles the key into
+the app, and anything compiled into a mobile binary can be extracted from
+it. Use it for development and prototypes only, with a key you can revoke,
+and rotate any key that has been shared. A released app should send
+requests to a backend that authenticates the user and holds the provider
+key. The editor depends only on the `AiClient` interface
+(`lib/features/editor/ai/ai_client.dart`), so that backend client can be
+passed to `EditorScreen(aiClient: ...)` in place of `GeminiAiClient`. The
+backend itself is not part of this repository.
+
+Android declares `android.permission.INTERNET` in the main manifest. iOS
+needs nothing extra: the service is HTTPS, and App Transport Security is
+left at its default.
+
+The sizes and limits live in `AiLayoutConfig`, `AiImageConfig`, and
+`AiNotationConfig`
+(`lib/features/editor/ai/ai_config.dart`):
+
+| Value | Default | Meaning |
+| --- | --- | --- |
+| `panelWidth` | 360 px | width beside the editor, and the widest a sheet gets |
+| `minEditorWidth` | 280 px | what a panel beside the editor leaves for the page and palette |
+| `sheetMaxWidthFraction` | 0.88 | most of the screen's width a compact sheet takes |
+| `previewMaxHeight` | 160 px | tallest the selection preview gets |
+| `composerMaxLines` | 4 | lines the message field grows to before it scrolls |
+| `padding` | 12 px | background kept around the ink in the image |
+| `pixelRatio` | 2 | physical pixels per logical pixel, at most |
+| `maxDimension` | 2048 px | longest side of the image |
+| `minPixelRatio` | 0.05 | a selection needing a smaller ratio is refused |
+| `maxLabelRunes` | 80 | longest notation description |
+| `maxItems` | 48 | most texts, plots, graphs, paths, and strokes in one response |
+| `maxPointsPerStroke` | 128 | most points the model gives one stroke |
+| `maxPathPoints` | 64 | most key points in one path |
+| `maxTotalPoints` | 4096 | points the model gives over all strokes and paths |
+| `maxTextRunes` / `maxTotalTextRunes` | 120 / 600 | characters in one text, and in all |
+| `minTextSize` / `maxTextSize` | 8 / 120 px | height of a capital letter |
+| `maxFormulaLength` | 160 | longest graph formula |
+| `graphSamples` | 240 | points a graph's curve is worked out at |
+| `GeneratedInkLimits` | 3000 strokes, 60000 points | most one laid-out notation may add to the note |
+| `minWidth` / `maxWidth` | 1 / 20 px | accepted notation stroke widths |
+| `minDurationMs` / `maxDurationMs` | 250 / 12000 ms | shortest and longest animation loop |
+| `maxSteps` | 24 | highest `step` an animated item may give |
+| `stepPauseMs` / `stepFinalHoldMs` | 250 / 600 ms | pause between steps, and hold before the loop repeats |
+| `maxPlotChildren` | 16 | most children in one plot |
+| `maxPlotMarks` | 8 | most points one mark or intersection labels |
+| `plotTextSize` | 12 px | capital height of tick numbers and marked coordinates |
+| `maxResponseBytes` | 256 KiB | largest retained structured model answer |
+
+### Known limitations
+
+- The key is embedded in the app; see above.
+- With Notation off the assistant sees only selected ink. With Notation on,
+  the explicitly submitted request also sends the current note image. No
+  handwriting recognition runs locally.
+- Answers are rendered as Markdown, with LaTeX formulas typeset
+  (`gpt_markdown`). An image an answer links to is shown as `[image]` and
+  never fetched. Your own messages are shown as typed.
+- Conversations are in memory, for the editor session. Nothing is saved.
+- Notation can only append validated strokes while explicitly enabled. It
+  cannot edit or delete existing strokes.
+- An applied AI notation is one step of undo history; it can also be
+  removed with the normal eraser.
+- While a request has failed, a new message replaces the unanswered one.
+- Between 600 and 639 px wide the panel is narrower than 360 px, so that
+  the page keeps room for the selection's action bar.
+- Opening the panel beside the editor makes the page narrower, so ink near
+  the far edge can be clipped until the panel is closed, as with rotation.
+
+## Changing the application ID
+
+`com.greatnote.app` appears in three places:
+
+- `android/app/build.gradle.kts`: `namespace` and `applicationId`
+- `android/app/src/main/kotlin/com/greatnote/app/MainActivity.kt`: the
+  `package` line, and the directory path, must match `namespace`
+- `ios/Runner.xcodeproj/project.pbxproj`: every `PRODUCT_BUNDLE_IDENTIFIER`
+  (the test target uses the same ID with a `.RunnerTests` suffix)
+
+No signing is configured. Release builds currently fall back to the debug
+key; add your own signing config before distributing, and never commit
+keystores or provisioning profiles.
+
+## Troubleshooting
+
+Start with `fvm flutter doctor -v`.
+
+- **Android licenses not accepted**: run
+  `fvm flutter doctor --android-licenses` and accept each one.
+- **No devices listed**: run `fvm flutter devices` and
+  `fvm flutter emulators`. Start an emulator, or for a physical Android
+  device enable USB debugging and confirm it appears in `adb devices`.
+- **CocoaPods errors (macOS)**: run `pod --version` to confirm the install,
+  then `cd ios && pod repo update && pod install`. If that fails, delete
+  `ios/Pods` and `ios/Podfile.lock` and retry.
+- **Incompatible Java version**: Gradle needs JDK 17 or newer. Check with
+  `java -version`; point Flutter at the right one with
+  `fvm flutter config --jdk-dir <path-to-jdk>`.
+- **Stale build output**: `fvm flutter clean && fvm flutter pub get`.
+
+## Document import and PDF export
+
+Imported files are private note assets under `notes/<note-id>.assets/`, with
+an atomic manifest next to the asset data. A PDF import stores one PDF asset
+and has every imported page refer to it by asset id and zero-based page
+index. Images are stored as normalized PNG or JPEG assets. They retain their
+insertion order below every ink stroke; erasers affect ink only, so Cut is
+the way to remove an image.
+
+PDF-backed pages take their fixed size from the rotated PDF crop box. Adding
+a normal page after one records the same dimensions as `PageSize.custom` plus
+`PageSetup.customSize`; it does not duplicate the PDF source. Screen PDF
+renders are lazy, capped, and held in a three-entry decoded-image LRU. Export
+rasterizes imported PDF paper at 200 dpi, so original PDF text has no text
+cursor or text search; the Select tool can instead copy a lassoed PDF region
+as a bitmap image. Image-heavy imports can make larger exports. Images and
+PDF paper remain raster content, while ink and paper rules are vector paths.
+Pages above the PDF 14,400-point side limit are uniformly reduced.
+
+The export dialog is modal, making the editor read-only while export runs
+from an immutable `NoteContent` snapshot. Cancelling removes any partial
+temporary file. Old exports in the app's temporary export directory are
+removed before a new one is written.
+
+The PDF LRU owns decoded `ui.Image` instances, gives visible page layers
+caller-owned clones, and disposes both on eviction or when the layer leaves
+the viewport. When only a page's displayed size changes, as when the AI
+panel opens or closes beside the page, the layer keeps showing its current
+bitmap, stretched, until the render at the new size arrives; the progress
+indicator shows only for a page with nothing to show yet. The page column
+keeps the same place of the same page in the middle of the area across such
+resizes, rather than keeping a pixel offset that would land on another page
+once every page is rescaled. Placed images request a decode close to their displayed pixel
+size through Flutter's shared image cache. Note duplication copies assets
+before writing referring content; note/folder deletion removes them. Cleanup
+runs only on editor open/close and preserves assets referenced by the in-app
+clipboard. Copy/Cut snapshots image bytes, so a cross-note paste stores a new
+asset in the destination even after the source image was cut.
+
+`DocumentIoConfig` centralizes the limits:
+
+| Value | Default |
+| --- | ---: |
+| `maxImportPdfBytes` | 200 MiB |
+| `maxImportPdfPages` | 500 pages |
+| `maxImageImportBytes` | 50 MiB |
+| `maxStoredImageDimension` | 4096 px |
+| `insertedImageMaxFraction` | 0.6 |
+| `maxPdfRenderDimension` | 4096 px |
+| `pdfRenderCacheSize` | 3 pages |
+| `exportPdfRasterDpi` | 200 dpi |
+| `maxPdfPagePoints` | 14,400 pt |

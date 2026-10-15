@@ -1,0 +1,629 @@
+import 'dart:async';
+import 'dart:convert';
+import 'dart:math' as math;
+
+import 'package:flutter/foundation.dart';
+
+import '../editor/page/page_setup.dart';
+import 'library_models.dart';
+import 'note_content.dart';
+
+enum NoteAssetKind { pdf, image }
+
+@immutable
+class NoteAsset {
+  const NoteAsset({
+    required this.id,
+    required this.kind,
+    required this.extension,
+    this.fileName,
+  });
+
+  final String id;
+  final NoteAssetKind kind;
+  final String extension;
+  final String? fileName;
+}
+
+@immutable
+class NoteAssetData {
+  const NoteAssetData({required this.asset, required this.bytes});
+
+  final NoteAsset asset;
+  final Uint8List bytes;
+}
+
+/// Thrown when a library operation cannot be done as asked: a missing item,
+/// an empty name, or a folder moved into itself.
+class LibraryException implements Exception {
+  const LibraryException(this.message);
+
+  final String message;
+
+  @override
+  String toString() => 'LibraryException: $message';
+}
+
+/// The notes and folders on this device.
+///
+/// Every mutation is one call and notifies listeners once it is done.
+/// Listing reads only the index; a note's pages and ink are read by
+/// [loadNote].
+abstract class NoteRepository extends ChangeNotifier {
+  /// The folders and notes directly in [folderId], or at the top level for
+  /// null, unsorted.
+  Future<FolderListing> list(String? folderId);
+
+  /// Every folder, for choosing where to move something.
+  Future<List<Folder>> allFolders();
+
+  /// How many folders and notes each folder holds directly, by folder id.
+  Future<Map<String, int>> itemCounts();
+
+  /// The folders from the top level down to [folderId], inclusive. Empty
+  /// for the top level.
+  Future<List<Folder>> pathTo(String? folderId);
+
+  /// Notes and folders whose names contain [query], ignoring case, in any
+  /// folder.
+  Future<FolderListing> search(String query);
+
+  Future<NoteEntry> createNote({
+    String title = 'Untitled note',
+    String? folderId,
+    PageSetup setup = const PageSetup(),
+  });
+
+  Future<Folder> createFolder(String name, {String? parentId});
+
+  Future<void> renameNote(String id, String title);
+
+  Future<void> renameFolder(String id, String name);
+
+  Future<void> moveNote(String id, String? folderId);
+
+  /// Rejects moving a folder into itself or below itself.
+  Future<void> moveFolder(String id, String? parentId);
+
+  /// A copy of the note, ink and all, beside it.
+  Future<NoteEntry> duplicateNote(String id);
+
+  Future<void> deleteNote(String id);
+
+  /// What deleting [id] would remove besides the folder itself.
+  Future<FolderTotals> totals(String id);
+
+  /// Deletes the folder and everything below it.
+  Future<void> deleteFolder(String id);
+
+  Future<NoteContent> loadNote(String id);
+
+  /// Stores [content] and updates the entry's modified time and page count.
+  Future<void> saveNote(String id, NoteContent content);
+
+  /// Writes bytes atomically before callers save content referring to them.
+  Future<String> storeAsset(
+    String noteId,
+    Uint8List bytes, {
+    required NoteAssetKind kind,
+    required String extension,
+    String? fileName,
+  });
+
+  Future<NoteAssetData> readAsset(String noteId, String assetId);
+
+  Future<List<NoteAsset>> listAssets(String noteId);
+
+  Future<void> removeAsset(String noteId, String assetId);
+
+  /// Removes assets not reachable from saved pages or the session clipboard.
+  Future<void> cleanupAssets(String noteId, Set<String> referencedAssetIds);
+}
+
+/// A repository that keeps the index in memory and leaves storing it, and
+/// each note's content, to a subclass.
+abstract class IndexedNoteRepository extends NoteRepository {
+  IndexedNoteRepository({
+    DateTime Function()? clock,
+    String Function()? newId,
+    Iterable<Folder> folders = const <Folder>[],
+    Iterable<NoteEntry> notes = const <NoteEntry>[],
+  }) : _clock = clock ?? DateTime.now,
+       _newId = newId ?? _randomId {
+    for (final Folder folder in folders) {
+      _folders[folder.id] = folder;
+    }
+    for (final NoteEntry note in notes) {
+      _notes[note.id] = note;
+    }
+  }
+
+  final DateTime Function() _clock;
+  final String Function() _newId;
+  final Map<String, Folder> _folders = <String, Folder>{};
+  final Map<String, NoteEntry> _notes = <String, NoteEntry>{};
+
+  /// Mutations run one at a time, in order.
+  Future<void> _queue = Future<void>.value();
+
+  static final math.Random _random = math.Random();
+
+  static String _randomId() {
+    final String time = DateTime.now().microsecondsSinceEpoch.toRadixString(36);
+    final String salt = _random.nextInt(1 << 32).toRadixString(36);
+    return '$time$salt';
+  }
+
+  @protected
+  Iterable<Folder> get folderIndex => _folders.values;
+
+  @protected
+  Iterable<NoteEntry> get noteIndex => _notes.values;
+
+  /// Stores the index after a change.
+  @protected
+  Future<void> writeIndex();
+
+  @protected
+  Future<NoteContent> readContent(String id);
+
+  @protected
+  Future<void> writeContent(String id, NoteContent content);
+
+  @protected
+  Future<void> deleteContent(String id);
+
+  @protected
+  Future<void> copyAssets(String fromNoteId, String toNoteId);
+
+  Future<T> _mutate<T>(Future<T> Function() change) {
+    final Completer<T> done = Completer<T>();
+    _queue = _queue.then((_) async {
+      try {
+        final T result = await change();
+        done.complete(result);
+        notifyListeners();
+      } catch (error, stack) {
+        done.completeError(error, stack);
+      }
+    });
+    return done.future;
+  }
+
+  String _id() {
+    String id;
+    do {
+      id = _newId();
+    } while (_folders.containsKey(id) || _notes.containsKey(id));
+    return id;
+  }
+
+  String _name(String name) {
+    final String? clean = cleanName(name);
+    if (clean == null) {
+      throw const LibraryException('A name cannot be empty.');
+    }
+    return clean;
+  }
+
+  NoteEntry _note(String id) {
+    final NoteEntry? note = _notes[id];
+    if (note == null) {
+      throw LibraryException('No note $id.');
+    }
+    return note;
+  }
+
+  Folder _folder(String id) {
+    final Folder? folder = _folders[id];
+    if (folder == null) {
+      throw LibraryException('No folder $id.');
+    }
+    return folder;
+  }
+
+  void _checkFolder(String? id) {
+    if (id != null) {
+      _folder(id);
+    }
+  }
+
+  @override
+  Future<FolderListing> list(String? folderId) async {
+    await _queue;
+    return FolderListing(
+      folders: <Folder>[
+        for (final Folder folder in _folders.values)
+          if (folder.parentId == folderId) folder,
+      ],
+      notes: <NoteEntry>[
+        for (final NoteEntry note in _notes.values)
+          if (note.folderId == folderId) note,
+      ],
+    );
+  }
+
+  @override
+  Future<List<Folder>> allFolders() async {
+    await _queue;
+    return List<Folder>.of(_folders.values);
+  }
+
+  @override
+  Future<Map<String, int>> itemCounts() async {
+    await _queue;
+    final Map<String, int> counts = <String, int>{};
+    for (final Folder folder in _folders.values) {
+      final String? parent = folder.parentId;
+      if (parent != null) {
+        counts[parent] = (counts[parent] ?? 0) + 1;
+      }
+    }
+    for (final NoteEntry note in _notes.values) {
+      final String? folder = note.folderId;
+      if (folder != null) {
+        counts[folder] = (counts[folder] ?? 0) + 1;
+      }
+    }
+    return counts;
+  }
+
+  @override
+  Future<List<Folder>> pathTo(String? folderId) async {
+    await _queue;
+    final List<Folder> path = <Folder>[];
+    String? id = folderId;
+    while (id != null && path.length <= _folders.length) {
+      final Folder? folder = _folders[id];
+      if (folder == null) {
+        break;
+      }
+      path.insert(0, folder);
+      id = folder.parentId;
+    }
+    return path;
+  }
+
+  @override
+  Future<FolderListing> search(String query) async {
+    await _queue;
+    final String needle = query.trim().toLowerCase();
+    if (needle.isEmpty) {
+      return const FolderListing(folders: <Folder>[], notes: <NoteEntry>[]);
+    }
+    return FolderListing(
+      folders: <Folder>[
+        for (final Folder folder in _folders.values)
+          if (folder.name.toLowerCase().contains(needle)) folder,
+      ],
+      notes: <NoteEntry>[
+        for (final NoteEntry note in _notes.values)
+          if (note.title.toLowerCase().contains(needle)) note,
+      ],
+    );
+  }
+
+  @override
+  Future<NoteEntry> createNote({
+    String title = 'Untitled note',
+    String? folderId,
+    PageSetup setup = const PageSetup(),
+  }) {
+    return _mutate(() async {
+      _checkFolder(folderId);
+      final DateTime now = _clock();
+      final NoteEntry note = NoteEntry(
+        id: _id(),
+        title: _name(title),
+        folderId: folderId,
+        created: now,
+        modified: now,
+        pageCount: 1,
+      );
+      await writeContent(note.id, NoteContent.blank(setup));
+      _notes[note.id] = note;
+      await writeIndex();
+      return note;
+    });
+  }
+
+  @override
+  Future<Folder> createFolder(String name, {String? parentId}) {
+    return _mutate(() async {
+      _checkFolder(parentId);
+      final DateTime now = _clock();
+      final Folder folder = Folder(
+        id: _id(),
+        name: _name(name),
+        parentId: parentId,
+        created: now,
+        modified: now,
+      );
+      _folders[folder.id] = folder;
+      await writeIndex();
+      return folder;
+    });
+  }
+
+  @override
+  Future<void> renameNote(String id, String title) {
+    return _mutate(() async {
+      _notes[id] = _note(id).copyWith(title: _name(title), modified: _clock());
+      await writeIndex();
+    });
+  }
+
+  @override
+  Future<void> renameFolder(String id, String name) {
+    return _mutate(() async {
+      _folders[id] = _folder(
+        id,
+      ).copyWith(name: _name(name), modified: _clock());
+      await writeIndex();
+    });
+  }
+
+  @override
+  Future<void> moveNote(String id, String? folderId) {
+    return _mutate(() async {
+      _checkFolder(folderId);
+      _notes[id] = _note(id).copyWith(folderId: () => folderId);
+      await writeIndex();
+    });
+  }
+
+  @override
+  Future<void> moveFolder(String id, String? parentId) {
+    return _mutate(() async {
+      final Folder folder = _folder(id);
+      _checkFolder(parentId);
+      for (String? at = parentId; at != null; at = _folders[at]?.parentId) {
+        if (at == id) {
+          throw const LibraryException('A folder cannot be moved into itself.');
+        }
+      }
+      _folders[id] = folder.copyWith(parentId: () => parentId);
+      await writeIndex();
+    });
+  }
+
+  @override
+  Future<NoteEntry> duplicateNote(String id) {
+    return _mutate(() async {
+      final NoteEntry original = _note(id);
+      final NoteContent content = await readContent(id);
+      final DateTime now = _clock();
+      final NoteEntry copy = NoteEntry(
+        id: _id(),
+        title: cleanName('${original.title} copy') ?? original.title,
+        folderId: original.folderId,
+        created: now,
+        modified: now,
+        pageCount: original.pageCount,
+      );
+      try {
+        // Assets land first, so persisted content never points at files that
+        // have not yet been copied.
+        await copyAssets(id, copy.id);
+        await writeContent(copy.id, content);
+        _notes[copy.id] = copy;
+        await writeIndex();
+        return copy;
+      } on Object {
+        _notes.remove(copy.id);
+        await deleteContent(copy.id);
+        rethrow;
+      }
+    });
+  }
+
+  @override
+  Future<void> deleteNote(String id) {
+    return _mutate(() async {
+      _note(id);
+      _notes.remove(id);
+      await writeIndex();
+      await deleteContent(id);
+    });
+  }
+
+  /// [id] and every folder below it.
+  Set<String> _subtree(String id) {
+    final Set<String> found = <String>{id};
+    bool grew = true;
+    while (grew) {
+      grew = false;
+      for (final Folder folder in _folders.values) {
+        if (folder.parentId != null &&
+            found.contains(folder.parentId) &&
+            found.add(folder.id)) {
+          grew = true;
+        }
+      }
+    }
+    return found;
+  }
+
+  @override
+  Future<FolderTotals> totals(String id) async {
+    await _queue;
+    _folder(id);
+    final Set<String> subtree = _subtree(id);
+    return FolderTotals(
+      folders: subtree.length - 1,
+      notes: _notes.values
+          .where((NoteEntry note) => subtree.contains(note.folderId))
+          .length,
+    );
+  }
+
+  @override
+  Future<void> deleteFolder(String id) {
+    return _mutate(() async {
+      _folder(id);
+      final Set<String> subtree = _subtree(id);
+      final List<String> notes = <String>[
+        for (final NoteEntry note in _notes.values)
+          if (subtree.contains(note.folderId)) note.id,
+      ];
+      subtree.forEach(_folders.remove);
+      notes.forEach(_notes.remove);
+      await writeIndex();
+      for (final String note in notes) {
+        await deleteContent(note);
+      }
+    });
+  }
+
+  @override
+  Future<NoteContent> loadNote(String id) async {
+    await _queue;
+    _note(id);
+    return readContent(id);
+  }
+
+  @override
+  Future<void> saveNote(String id, NoteContent content) {
+    return _mutate(() async {
+      final NoteEntry note = _note(id);
+      await writeContent(id, content);
+      _notes[id] = note.copyWith(
+        modified: _clock(),
+        pageCount: content.pages.length,
+      );
+      await writeIndex();
+    });
+  }
+
+  /// The index as stored.
+  @protected
+  Map<String, Object?> indexToJson() {
+    return <String, Object?>{
+      'schema': storageSchema,
+      'folders': <Object?>[for (final Folder f in _folders.values) f.toJson()],
+      'notes': <Object?>[for (final NoteEntry n in _notes.values) n.toJson()],
+    };
+  }
+}
+
+/// Keeps everything in memory: for tests, previews, and harnesses. Content
+/// is stored as JSON maps, so it goes through the same encoding as files.
+class InMemoryNoteRepository extends IndexedNoteRepository {
+  InMemoryNoteRepository({
+    super.clock,
+    super.newId,
+    super.folders,
+    super.notes,
+  });
+
+  final Map<String, Map<String, Object?>> _content =
+      <String, Map<String, Object?>>{};
+  final Map<String, Map<String, NoteAssetData>> _assets =
+      <String, Map<String, NoteAssetData>>{};
+  int _assetSequence = 0;
+
+  /// How many times the index has been stored.
+  int indexWrites = 0;
+
+  @override
+  Future<void> writeIndex() async {
+    indexWrites++;
+  }
+
+  @override
+  Future<NoteContent> readContent(String id) async {
+    final Map<String, Object?>? json = _content[id];
+    return json == null ? NoteContent.blank() : NoteContent.fromJson(json);
+  }
+
+  @override
+  Future<void> writeContent(String id, NoteContent content) async {
+    // Through text, like a file, so nothing is shared with the caller.
+    _content[id] =
+        jsonDecode(jsonEncode(content.toJson())) as Map<String, Object?>;
+  }
+
+  @override
+  Future<void> deleteContent(String id) async {
+    _content.remove(id);
+    _assets.remove(id);
+  }
+
+  @override
+  Future<void> copyAssets(String fromNoteId, String toNoteId) async {
+    final Map<String, NoteAssetData>? source = _assets[fromNoteId];
+    if (source == null) {
+      return;
+    }
+    _assets[toNoteId] = <String, NoteAssetData>{
+      for (final MapEntry<String, NoteAssetData> entry in source.entries)
+        entry.key: NoteAssetData(
+          asset: entry.value.asset,
+          bytes: Uint8List.fromList(entry.value.bytes),
+        ),
+    };
+  }
+
+  @override
+  Future<String> storeAsset(
+    String noteId,
+    Uint8List bytes, {
+    required NoteAssetKind kind,
+    required String extension,
+    String? fileName,
+  }) async {
+    if (!noteIndex.any((NoteEntry note) => note.id == noteId)) {
+      throw LibraryException('No note $noteId.');
+    }
+    final String id = 'asset-${++_assetSequence}';
+    final NoteAsset asset = NoteAsset(
+      id: id,
+      kind: kind,
+      extension: extension.toLowerCase().replaceAll('.', ''),
+      fileName: fileName,
+    );
+    (_assets[noteId] ??= <String, NoteAssetData>{})[id] = NoteAssetData(
+      asset: asset,
+      bytes: Uint8List.fromList(bytes),
+    );
+    return id;
+  }
+
+  @override
+  Future<NoteAssetData> readAsset(String noteId, String assetId) async {
+    final NoteAssetData? data = _assets[noteId]?[assetId];
+    if (data == null) {
+      throw LibraryException('No asset $assetId.');
+    }
+    return NoteAssetData(
+      asset: data.asset,
+      bytes: Uint8List.fromList(data.bytes),
+    );
+  }
+
+  @override
+  Future<List<NoteAsset>> listAssets(String noteId) async {
+    return List<NoteAsset>.unmodifiable(
+      (_assets[noteId]?.values ?? const <NoteAssetData>[]).map(
+        (NoteAssetData data) => data.asset,
+      ),
+    );
+  }
+
+  @override
+  Future<void> removeAsset(String noteId, String assetId) async {
+    _assets[noteId]?.remove(assetId);
+  }
+
+  @override
+  Future<void> cleanupAssets(
+    String noteId,
+    Set<String> referencedAssetIds,
+  ) async {
+    _assets[noteId]?.removeWhere(
+      (String id, NoteAssetData _) => !referencedAssetIds.contains(id),
+    );
+  }
+
+  bool hasContent(String id) => _content.containsKey(id);
+}

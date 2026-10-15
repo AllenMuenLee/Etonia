@@ -1,0 +1,89 @@
+import 'package:flutter/material.dart';
+
+/// A named ink. It carries one color per theme so that strokes stay legible
+/// when the page switches between light and dark paper.
+@immutable
+class InkColor {
+  const InkColor({
+    required this.id,
+    required this.label,
+    required this.onLightPaper,
+    required this.onDarkPaper,
+  });
+
+  final String id;
+  final String label;
+  final Color onLightPaper;
+  final Color onDarkPaper;
+
+  Color resolve(Brightness brightness) {
+    return brightness == Brightness.dark ? onDarkPaper : onLightPaper;
+  }
+}
+
+/// The curated inks. Every color keeps at least 3:1 contrast against the
+/// writing surface in both themes (enforced by a test).
+abstract final class InkPalette {
+  static const InkColor ink = InkColor(
+    id: 'ink',
+    label: 'Black',
+    onLightPaper: Color(0xFF1F1E1C),
+    onDarkPaper: Color(0xFFECEAE6),
+  );
+
+  static const List<InkColor> colors = <InkColor>[
+    ink,
+    InkColor(
+      id: 'graphite',
+      label: 'Graphite',
+      onLightPaper: Color(0xFF5F6368),
+      onDarkPaper: Color(0xFFA8ADB3),
+    ),
+    InkColor(
+      id: 'blue',
+      label: 'Blue',
+      onLightPaper: Color(0xFF1F5FD1),
+      onDarkPaper: Color(0xFF7FA8FF),
+    ),
+    InkColor(
+      id: 'red',
+      label: 'Red',
+      onLightPaper: Color(0xFFC62F2F),
+      onDarkPaper: Color(0xFFFF8A80),
+    ),
+    InkColor(
+      id: 'green',
+      label: 'Green',
+      onLightPaper: Color(0xFF1E7B46),
+      onDarkPaper: Color(0xFF6FCF97),
+    ),
+    InkColor(
+      id: 'orange',
+      label: 'Orange',
+      onLightPaper: Color(0xFFB85C00),
+      onDarkPaper: Color(0xFFFFB15C),
+    ),
+    InkColor(
+      id: 'purple',
+      label: 'Purple',
+      onLightPaper: Color(0xFF7B3FC4),
+      onDarkPaper: Color(0xFFC3A2FF),
+    ),
+    InkColor(
+      id: 'teal',
+      label: 'Teal',
+      onLightPaper: Color(0xFF0F7C82),
+      onDarkPaper: Color(0xFF5CCFD6),
+    ),
+  ];
+
+  /// Resolves the stable ID used by persisted/domain data and AI notation.
+  static InkColor? byId(String id) {
+    for (final InkColor color in colors) {
+      if (color.id == id) {
+        return color;
+      }
+    }
+    return null;
+  }
+}

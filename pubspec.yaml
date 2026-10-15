@@ -1,0 +1,34 @@
+name: greatnote
+description: "Handwriting-focused tablet notes for Android tablets and iPads."
+publish_to: 'none'
+
+version: 0.1.0+1
+
+environment:
+  sdk: ^3.12.2
+  flutter: 3.44.2
+
+dependencies:
+  flutter:
+    sdk: flutter
+  gpt_markdown: ^1.3.4
+  http: ^1.6.0
+  path_provider: ^2.1.6
+  file_picker: 13.1.0
+  image: 4.12.0
+  pdf: 3.13.1
+  pdfrx: 2.4.8
+  share_plus: 13.3.1
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  integration_test:
+    sdk: flutter
+  # Host side of the profiling harness in test_driver/.
+  flutter_driver:
+    sdk: flutter
+  flutter_lints: ^6.0.0
+
+flutter:
+  uses-material-design: true

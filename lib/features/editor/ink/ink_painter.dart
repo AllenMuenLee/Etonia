@@ -1,0 +1,473 @@
+import 'dart:collection';
+import 'dart:math' as math;
+import 'dart:typed_data';
+
+import 'package:flutter/widgets.dart';
+
+import '../../../app/theme/app_tokens.dart';
+import 'ink_controller.dart';
+import 'ink_sample.dart';
+import 'ink_selection.dart';
+import 'notation_playback.dart';
+import 'selection_config.dart';
+import 'selection_transform.dart';
+import 'stroke.dart';
+
+/// Paints one stroke the way the editor shows it: a filled disc for a dot,
+/// otherwise [path] stroked [width] wide with round caps and joins. Every
+/// ink layer, and the image made of a selection, draws through this.
+void paintInkStroke(
+  Canvas canvas, {
+  required Color color,
+  required double width,
+  required Path path,
+  required InkVector origin,
+  required bool isDot,
+}) {
+  final Paint paint = Paint()
+    ..color = color
+    ..isAntiAlias = true;
+  if (isDot) {
+    canvas.drawCircle(Offset(origin.x, origin.y), width / 2, paint);
+    return;
+  }
+  paint
+    ..style = PaintingStyle.stroke
+    ..strokeWidth = width
+    ..strokeCap = StrokeCap.round
+    ..strokeJoin = StrokeJoin.round;
+  canvas.drawPath(path, paint);
+}
+
+void _paintStroke(
+  Canvas canvas, {
+  required StrokeStyle style,
+  required Path path,
+  required InkVector origin,
+  required bool isDot,
+  required Brightness brightness,
+}) {
+  paintInkStroke(
+    canvas,
+    color: style.ink.resolve(brightness),
+    width: style.width,
+    path: path,
+    origin: origin,
+    isDot: isDot,
+  );
+}
+
+/// Paints finished strokes, except the selected ones, which belong to
+/// [SelectionPainter] for as long as they are selected, and those of an AI
+/// notation still being drawn, which belong to [NotationPlaybackPainter].
+/// Repaints only when the collection, the set of selected strokes, or the
+/// playback's strokes change hands; never for a playback frame.
+class CompletedStrokesPainter extends CustomPainter {
+  CompletedStrokesPainter({required this.controller, required this.brightness})
+    : super(
+        repaint: Listenable.merge(<Listenable>[
+          controller.completedStrokesListenable,
+          controller.notationPlaybackListenable,
+        ]),
+      );
+
+  final InkController controller;
+  final Brightness brightness;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final List<Stroke> strokes = controller.strokes;
+    final List<int> selected = controller.selection?.indices ?? const <int>[];
+    final bool playing = controller.notationPlaybacks.isNotEmpty;
+    int next = 0;
+    for (int i = 0; i < strokes.length; i++) {
+      // Selected indices ascend, so one cursor walks them.
+      if (next < selected.length && selected[next] == i) {
+        next++;
+        continue;
+      }
+      final Stroke stroke = strokes[i];
+      if (playing && controller.isPlayingStroke(stroke)) {
+        continue;
+      }
+      _paintStroke(
+        canvas,
+        style: stroke.style,
+        path: stroke.path,
+        origin: stroke.points.first,
+        isDot: stroke.isDot,
+        brightness: brightness,
+      );
+    }
+  }
+
+  @override
+  bool shouldRepaint(CompletedStrokesPainter oldDelegate) {
+    return oldDelegate.controller != controller ||
+        oldDelegate.brightness != brightness;
+  }
+}
+
+/// Paints the AI notations while they are drawn over time: each stroke as
+/// far as its playback's clock has reached, in document order, above the
+/// finished ink. Selected strokes are left to [SelectionPainter]. Repaints
+/// on every playback frame, which leaves the finished-ink layer alone. A
+/// finished stroke is painted from its own cached path, so the last frame
+/// matches the finished ink exactly; a stroke partway drawn is cut from
+/// that same path.
+class NotationPlaybackPainter extends CustomPainter {
+  NotationPlaybackPainter({required this.controller, required this.brightness})
+    : super(
+        repaint: Listenable.merge(<Listenable>[
+          controller.notationPlaybackListenable,
+          controller.notationFrameListenable,
+          controller.completedStrokesListenable,
+        ]),
+      );
+
+  final InkController controller;
+  final Brightness brightness;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final List<NotationPlayback> playbacks = controller.notationPlaybacks;
+    if (playbacks.isEmpty) {
+      return;
+    }
+    final List<Stroke>? selected = controller.selection?.strokes;
+    final Set<Stroke> skip = HashSet<Stroke>.identity()
+      ..addAll(selected ?? const <Stroke>[]);
+    for (final NotationPlayback playback in playbacks) {
+      _paintPlayback(canvas, playback, skip);
+    }
+  }
+
+  void _paintPlayback(
+    Canvas canvas,
+    NotationPlayback playback,
+    Set<Stroke> skip,
+  ) {
+    final List<Stroke> strokes = playback.strokes;
+    for (int i = 0; i < strokes.length; i++) {
+      final Stroke stroke = strokes[i];
+      if (!playback.owns(stroke) || skip.contains(stroke)) {
+        continue;
+      }
+      // Document coordinates do not scale with the surface. The reveal can
+      // therefore keep running when the assistant closes and gives the note
+      // more room, or when another layout change resizes the canvas.
+      final TraceReveal reveal = playback.revealAt(i);
+      switch (reveal.state) {
+        case TraceRevealState.hidden:
+          continue;
+        case TraceRevealState.complete:
+          playback.releaseMeasure(i);
+          _paintStroke(
+            canvas,
+            style: stroke.style,
+            path: stroke.path,
+            origin: stroke.points.first,
+            isDot: stroke.isDot,
+            brightness: brightness,
+          );
+        case TraceRevealState.partial:
+          final Path? path = stroke.isDot
+              ? null
+              : playback.partialPath(i, reveal);
+          _paintStroke(
+            canvas,
+            style: stroke.style,
+            path: path ?? stroke.path,
+            origin: stroke.points.first,
+            // Touching down, before the pen has moved.
+            isDot: path == null,
+            brightness: brightness,
+          );
+      }
+    }
+  }
+
+  @override
+  bool shouldRepaint(NotationPlaybackPainter oldDelegate) {
+    return oldDelegate.controller != controller ||
+        oldDelegate.brightness != brightness;
+  }
+}
+
+/// Outlines the eraser while an erase pointer is down: the true eraser size
+/// in area mode, the hit radius in stroke mode. Repaints on every eraser
+/// move, which leaves the ink layers alone.
+class EraserIndicatorPainter extends CustomPainter {
+  EraserIndicatorPainter({
+    required this.controller,
+    required this.color,
+    required this.haloColor,
+  }) : super(repaint: controller.eraserListenable);
+
+  static const double _outlineWidth = 1;
+  static const double _haloWidth = 3;
+
+  final InkController controller;
+
+  /// The outline itself.
+  final Color color;
+
+  /// Drawn under the outline so it stays visible over ink of any color.
+  final Color haloColor;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final EraseGesture? erase = controller.activeErase;
+    if (erase == null) {
+      return;
+    }
+    final Offset center = Offset(erase.position.x, erase.position.y);
+    final Paint paint = Paint()
+      ..style = PaintingStyle.stroke
+      ..isAntiAlias = true;
+    canvas
+      ..drawCircle(
+        center,
+        erase.radius,
+        paint
+          ..color = haloColor
+          ..strokeWidth = _haloWidth,
+      )
+      ..drawCircle(
+        center,
+        erase.radius,
+        paint
+          ..color = color
+          ..strokeWidth = _outlineWidth,
+      );
+  }
+
+  @override
+  bool shouldRepaint(EraserIndicatorPainter oldDelegate) {
+    return oldDelegate.controller != controller ||
+        oldDelegate.color != color ||
+        oldDelegate.haloColor != haloColor;
+  }
+}
+
+/// Paints the stroke in progress. Repaints on every accepted sample.
+class ActiveStrokePainter extends CustomPainter {
+  ActiveStrokePainter({required this.controller, required this.brightness})
+    : super(repaint: controller.activeStrokeListenable);
+
+  final InkController controller;
+  final Brightness brightness;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final Stroke? shape = controller.activeShape?.preview;
+    if (shape != null) {
+      _paintStroke(
+        canvas,
+        style: shape.style,
+        path: shape.path,
+        origin: shape.points.first,
+        isDot: shape.isDot,
+        brightness: brightness,
+      );
+      return;
+    }
+    final ActiveStroke? stroke = controller.activeStroke;
+    if (stroke == null) {
+      return;
+    }
+    _paintStroke(
+      canvas,
+      style: stroke.style,
+      path: stroke.path,
+      origin: stroke.origin,
+      isDot: stroke.isDot,
+      brightness: brightness,
+    );
+  }
+
+  @override
+  bool shouldRepaint(ActiveStrokePainter oldDelegate) {
+    return oldDelegate.controller != controller ||
+        oldDelegate.brightness != brightness;
+  }
+}
+
+/// Paints the selection outline while it is dragged, and the selection: its strokes, its
+/// frame, and its handles. During a move, scale, or rotation the strokes are
+/// drawn through the preview transform from their cached paths, so a pointer
+/// move repaints this layer alone and builds no path.
+class SelectionPainter extends CustomPainter {
+  SelectionPainter({
+    required this.controller,
+    required this.brightness,
+    required this.color,
+    required this.handleColor,
+  }) : super(repaint: controller.selectionListenable);
+
+  final InkController controller;
+  final Brightness brightness;
+
+  /// The lasso, the frame, and the handle outlines.
+  final Color color;
+
+  /// Fills the handles so that ink does not show through them.
+  final Color handleColor;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final InkSelection? selection = controller.selection;
+    if (selection != null) {
+      final SelectionTransformGesture? gesture = controller.activeTransform;
+      canvas.save();
+      if (gesture != null) {
+        canvas.transform(_matrix(gesture.transform));
+      }
+      for (final Stroke stroke in selection.strokes) {
+        _paintStroke(
+          canvas,
+          style: stroke.style,
+          path: stroke.path,
+          origin: stroke.points.first,
+          isDot: stroke.isDot,
+          brightness: brightness,
+        );
+      }
+      canvas.restore();
+      _paintFrame(
+        canvas,
+        gesture?.frame ?? selection.frame,
+        handles: !selection.includesPdf,
+      );
+    }
+    final LassoGesture? lasso = controller.activeLasso;
+    if (lasso != null) {
+      _paintLasso(canvas, lasso);
+    }
+  }
+
+  void _paintFrame(
+    Canvas canvas,
+    SelectionFrame frame, {
+    required bool handles,
+  }) {
+    final SelectionConfig config = controller.selectionConfig;
+    final List<Offset> corners = <Offset>[
+      for (final InkVector corner in frame.corners) _offset(corner),
+    ];
+    final Offset handle = _offset(
+      frame.rotationHandle(config.rotationHandleOffset),
+    );
+    final Paint outline = Paint()
+      ..color = color
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = AppSizes.hairline
+      ..isAntiAlias = true;
+    canvas.drawPath(Path()..addPolygon(corners, true), outline);
+    if (!handles) return;
+    canvas.drawLine(_offset(frame.topCenter), handle, outline);
+
+    final Paint fill = Paint()
+      ..color = handleColor
+      ..isAntiAlias = true;
+    outline.strokeWidth = AppSizes.focusRingWidth;
+    for (final Offset center in <Offset>[...corners, handle]) {
+      canvas
+        ..drawCircle(center, config.handleVisualRadius, fill)
+        ..drawCircle(center, config.handleVisualRadius, outline);
+    }
+  }
+
+  /// A dashed outline: the rectangle of a straight drag, or the loop drawn
+  /// so far. The loop is left open; no edge is drawn back to its start.
+  void _paintLasso(Canvas canvas, LassoGesture lasso) {
+    final SelectionConfig config = controller.selectionConfig;
+    final List<Offset> line;
+    switch (lasso.shape) {
+      case LassoShape.rectangle:
+        final List<InkVector> corners = lasso.outline;
+        line = <Offset>[
+          for (final InkVector corner in corners) _offset(corner),
+          _offset(corners.first),
+        ];
+      case LassoShape.freeform:
+        line = <Offset>[
+          for (final InkVector point in lasso.points) _offset(point),
+          _offset(lasso.tip),
+        ];
+    }
+    final Paint paint = Paint()
+      ..color = color
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = AppSizes.focusRingWidth
+      ..isAntiAlias = true;
+    canvas.drawPath(
+      _dashed(line, config.lassoDashLength, config.lassoDashGap),
+      paint,
+    );
+  }
+
+  /// The polyline through [line], cut into dashes that run on across its
+  /// corners.
+  static Path _dashed(List<Offset> line, double dash, double gap) {
+    final Path path = Path();
+    // How far into the current dash-and-gap cycle the line has got.
+    double phase = 0;
+    for (int i = 0; i < line.length - 1; i++) {
+      final Offset from = line[i];
+      final Offset delta = line[i + 1] - from;
+      final double length = delta.distance;
+      if (length <= 0) {
+        continue;
+      }
+      double travelled = 0;
+      while (travelled < length) {
+        final bool drawing = phase < dash;
+        final double step = math.min(
+          (drawing ? dash : dash + gap) - phase,
+          length - travelled,
+        );
+        if (drawing) {
+          path
+            ..moveTo(
+              from.dx + delta.dx * travelled / length,
+              from.dy + delta.dy * travelled / length,
+            )
+            ..lineTo(
+              from.dx + delta.dx * (travelled + step) / length,
+              from.dy + delta.dy * (travelled + step) / length,
+            );
+        }
+        travelled += step;
+        phase += step;
+        if (phase >= dash + gap) {
+          phase = 0;
+        }
+      }
+    }
+    return path;
+  }
+
+  static Offset _offset(InkVector vector) => Offset(vector.x, vector.y);
+
+  /// [transform] as a column-major 4x4 matrix.
+  static Float64List _matrix(InkTransform transform) {
+    return Float64List(16)
+      ..[0] = transform.a
+      ..[1] = transform.b
+      ..[4] = -transform.b
+      ..[5] = transform.a
+      ..[10] = 1
+      ..[12] = transform.tx
+      ..[13] = transform.ty
+      ..[15] = 1;
+  }
+
+  @override
+  bool shouldRepaint(SelectionPainter oldDelegate) {
+    return oldDelegate.controller != controller ||
+        oldDelegate.brightness != brightness ||
+        oldDelegate.color != color ||
+        oldDelegate.handleColor != handleColor;
+  }
+}
