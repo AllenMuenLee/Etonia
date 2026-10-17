@@ -8,6 +8,8 @@ import '../ink/ink_sample.dart';
 import '../ink/ink_selection.dart';
 import '../ink/stroke.dart';
 import '../document_io/document_models.dart';
+import '../sticky/sticky_note.dart';
+import '../sticky/sticky_note_painter.dart';
 import 'ai_config.dart';
 
 /// Where a [SnapshotBitmap]'s bytes came from in the note, so that they can
@@ -68,10 +70,14 @@ class SnapshotStroke {
     required this.width,
     required this.color,
     required this.isDot,
+    this.widths,
   }) : points = List<InkVector>.unmodifiable(points);
 
   final List<InkVector> points;
   final double width;
+
+  /// The width factor at each point, or null for an even stroke.
+  final List<double>? widths;
 
   /// Already resolved for the snapshot's brightness.
   final ui.Color color;
@@ -90,7 +96,8 @@ class SelectionInkSnapshot {
     required this._source,
     required this._sourceImages,
     this.explicitBounds,
-  });
+    List<StickyNoteElement> stickies = const <StickyNoteElement>[],
+  }) : stickies = List<StickyNoteElement>.unmodifiable(stickies);
 
   /// Copies [selection]'s strokes, in document order, with their colors
   /// resolved for [brightness]. [background] is the writing surface's color
@@ -107,8 +114,9 @@ class SelectionInkSnapshot {
           SnapshotStroke(
             points: stroke.points,
             width: stroke.style.width,
-            color: stroke.style.ink.resolve(brightness),
+            color: stroke.style.resolve(brightness),
             isDot: stroke.isDot,
+            widths: stroke.widths,
           ),
       ]),
       bitmaps: List<SnapshotBitmap>.unmodifiable(bitmaps),
@@ -117,6 +125,7 @@ class SelectionInkSnapshot {
       source: selection.strokes,
       sourceImages: selection.images,
       explicitBounds: selection.pdfBounds,
+      stickies: selection.stickies,
     );
   }
 
@@ -141,8 +150,9 @@ class SelectionInkSnapshot {
           SnapshotStroke(
             points: stroke.points,
             width: stroke.style.width,
-            color: stroke.style.ink.resolve(base.brightness),
+            color: stroke.style.resolve(base.brightness),
             isDot: stroke.isDot,
+            widths: stroke.widths,
           ),
       ]),
       bitmaps: base.bitmaps,
@@ -151,6 +161,7 @@ class SelectionInkSnapshot {
       source: List<Stroke>.unmodifiable(<Stroke>[...base._source, ...added]),
       sourceImages: base._sourceImages,
       explicitBounds: base.explicitBounds,
+      stickies: base.stickies,
     );
   }
 
@@ -187,6 +198,7 @@ class SelectionInkSnapshot {
       source: _source,
       sourceImages: _sourceImages,
       explicitBounds: explicitBounds,
+      stickies: stickies,
     );
   }
 
@@ -214,6 +226,11 @@ class SelectionInkSnapshot {
   final List<SnapshotStroke> strokes;
   final List<SnapshotBitmap> bitmaps;
 
+  /// Selected sticky notes, each with its own ink, drawn under [strokes].
+  /// Immutable, so they are shared with the document. Not saved with a
+  /// conversation: a restored snapshot has none.
+  final List<StickyNoteElement> stickies;
+
   /// An area chosen independently of ink or placed images, such as a
   /// lassoed excerpt of immutable PDF paper.
   final ui.Rect? explicitBounds;
@@ -233,6 +250,7 @@ class SelectionInkSnapshot {
   bool isOf(InkSelection selection) {
     if (selection.strokes.length != _source.length ||
         selection.images.length != _sourceImages.length ||
+        selection.stickies.length != stickies.length ||
         selection.pdfBounds != explicitBounds) {
       return false;
     }
@@ -246,8 +264,14 @@ class SelectionInkSnapshot {
         return false;
       }
     }
+    for (int i = 0; i < stickies.length; i++) {
+      if (!identical(selection.stickies[i], stickies[i])) {
+        return false;
+      }
+    }
     return _source.isNotEmpty ||
         _sourceImages.isNotEmpty ||
+        stickies.isNotEmpty ||
         explicitBounds != null;
   }
 
@@ -292,7 +316,10 @@ class SelectionInkSnapshot {
   int get sourceStrokeCount => _source.length;
   int get sourceImageCount => _sourceImages.length;
   int get sourceContentCount =>
-      sourceStrokeCount + sourceImageCount + (explicitBounds == null ? 0 : 1);
+      sourceStrokeCount +
+      sourceImageCount +
+      stickies.length +
+      (explicitBounds == null ? 0 : 1);
 }
 
 /// The selection as a PNG, with the numbers it was made from.
@@ -396,6 +423,7 @@ class SelectionImageRenderer {
   /// [SelectionImageException] for geometry that cannot be drawn.
   SelectionImageLayout layout(SelectionInkSnapshot snapshot) {
     if (snapshot.strokes.isEmpty &&
+        snapshot.stickies.isEmpty &&
         !snapshot.bitmaps.any((bitmap) => bitmap.affectsCrop) &&
         snapshot.explicitBounds == null) {
       throw const SelectionImageException(SelectionImageFailure.empty);
@@ -437,6 +465,18 @@ class SelectionImageRenderer {
         right = math.max(right, point.x + half);
         bottom = math.max(bottom, point.y + half);
       }
+    }
+    for (final StickyNoteElement note in snapshot.stickies) {
+      if (!note.isValid) {
+        throw const SelectionImageException(
+          SelectionImageFailure.invalidGeometry,
+        );
+      }
+      final ui.Rect bounds = note.bounds;
+      left = math.min(left, bounds.left);
+      top = math.min(top, bounds.top);
+      right = math.max(right, bounds.right);
+      bottom = math.max(bottom, bounds.bottom);
     }
     for (final SnapshotBitmap bitmap in snapshot.bitmaps) {
       if (!bitmap.bounds.isFinite ||
@@ -550,6 +590,9 @@ class SelectionImageRenderer {
         );
       canvas.restore();
     }
+    for (final StickyNoteElement note in snapshot.stickies) {
+      paintStickyNote(canvas, note);
+    }
     for (final SnapshotStroke stroke in snapshot.strokes) {
       final InkVector origin = stroke.points.first;
       final ui.Path path = ui.Path()..moveTo(origin.x, origin.y);
@@ -563,6 +606,9 @@ class SelectionImageRenderer {
         path: path,
         origin: origin,
         isDot: stroke.isDot,
+        outline: stroke.widths == null
+            ? null
+            : buildInkOutline(stroke.points, stroke.widths!, stroke.width),
       );
     }
     final ui.Picture picture = recorder.endRecording();

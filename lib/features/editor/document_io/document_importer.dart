@@ -10,11 +10,14 @@ import '../../library/note_content.dart';
 import '../../library/note_repository.dart';
 import '../ink/ink_controller.dart';
 import '../ink/ink_sample.dart';
+import '../ink/stroke.dart';
 import '../page/note_document.dart';
 import '../page/page_setup.dart';
 import 'document_io_config.dart';
 import 'document_models.dart';
 import 'document_platform.dart';
+import 'goodnotes_archive_extractor.dart';
+import 'goodnotes_pdf_recovery.dart';
 
 class DocumentImportException implements Exception {
   const DocumentImportException(this.message);
@@ -49,20 +52,34 @@ class DocumentImporter {
   const DocumentImporter({
     required this.rasterizer,
     this.config = const DocumentIoConfig(),
+    this.goodnotesRecoverer = const GoodnotesPdfRecoverer(),
+    this.goodnotesExtractor = const GoodnotesArchiveExtractor(),
   });
 
   final PdfRasterizer rasterizer;
   final DocumentIoConfig config;
+  final GoodnotesPdfRecoverer goodnotesRecoverer;
+  final GoodnotesArchiveExtractor goodnotesExtractor;
 
   Future<PdfImportPlan> validatePdf(PickedDocument picked) async {
-    if (picked.bytes.lengthInBytes > config.maxImportPdfBytes) {
+    return PdfImportPlan(
+      name: picked.name,
+      bytes: Uint8List.fromList(picked.bytes),
+      pageSizes: await _pdfPageSizes(picked.bytes),
+    );
+  }
+
+  /// The size of each page of [bytes] in page units, once it is known to
+  /// be a PDF that can be imported.
+  Future<List<Size>> _pdfPageSizes(Uint8List bytes) async {
+    if (bytes.lengthInBytes > config.maxImportPdfBytes) {
       throw DocumentImportException(
         'This PDF is larger than ${_megabytes(config.maxImportPdfBytes)} MB',
       );
     }
     late final PdfInspection inspection;
     try {
-      inspection = await rasterizer.inspect(picked.bytes);
+      inspection = await rasterizer.inspect(bytes);
     } on Object {
       throw const DocumentImportException('This PDF could not be opened');
     }
@@ -84,21 +101,52 @@ class DocumentImporter {
       }
       pageUnits.add(points * DocumentUnits.pageUnitsPerPdfPoint);
     }
-    return PdfImportPlan(
-      name: picked.name,
-      bytes: Uint8List.fromList(picked.bytes),
-      pageSizes: List<Size>.unmodifiable(pageUnits),
-    );
+    return List<Size>.unmodifiable(pageUnits);
   }
 
+  /// A new note with one page per page of [picked].
+  ///
+  /// With [recoverGoodnotesInk], the PDF is taken to be a Goodnotes export
+  /// and its handwriting is extracted into editable strokes. When none can
+  /// be found, [onNoInkRecovered] is called. A recognized Goodnotes badge
+  /// can still be removed even when the page has no recoverable handwriting.
+  ///
+  /// A native `.goodnotes` notebook is recognized by its contents and
+  /// imported by [importGoodnotesAsNote].
   Future<NoteEntry> importPdfAsNote({
     required NoteRepository repository,
     required PickedDocument picked,
     String? folderId,
     ImportCancellationToken? cancellation,
+    bool recoverGoodnotesInk = false,
+    void Function()? onNoInkRecovered,
   }) async {
+    if (GoodnotesArchiveExtractor.isGoodnotesArchive(picked.bytes)) {
+      return importGoodnotesAsNote(
+        repository: repository,
+        picked: picked,
+        folderId: folderId,
+        cancellation: cancellation,
+      );
+    }
     final PdfImportPlan plan = await validatePdf(picked);
     cancellation?.throwIfCancelled();
+    final GoodnotesPdfRecovery? recovery = recoverGoodnotesInk
+        ? await goodnotesRecoverer.recover(
+            bytes: plan.bytes,
+            pageSizes: plan.pageSizes,
+            config: config,
+            isCancelled: () => cancellation?.isCancelled ?? false,
+          )
+        : null;
+    cancellation?.throwIfCancelled();
+    if (recoverGoodnotesInk &&
+        (recovery == null ||
+            !recovery.pageStrokes.any(
+              (List<Stroke> page) => page.isNotEmpty,
+            ))) {
+      onNoInkRecovered?.call();
+    }
     final String base = plan.name.replaceFirst(
       RegExp(r'\.pdf$', caseSensitive: false),
       '',
@@ -110,7 +158,7 @@ class DocumentImporter {
       cancellation?.throwIfCancelled();
       final String assetId = await repository.storeAsset(
         note.id,
-        plan.bytes,
+        recovery?.backgroundPdf ?? plan.bytes,
         kind: NoteAssetKind.pdf,
         extension: 'pdf',
         fileName: plan.name,
@@ -126,7 +174,7 @@ class DocumentImporter {
                 customSize: plan.pageSizes[i],
                 background: PageBackground.blank,
               ),
-              strokes: const [],
+              strokes: recovery?.pageStrokes[i] ?? const <Stroke>[],
               pdfSource: PdfPageSource(
                 assetId: assetId,
                 pageIndex: i,
@@ -138,13 +186,91 @@ class DocumentImporter {
       cancellation?.throwIfCancelled();
       return note;
     } on Object {
+      // A half-made note is not something to restore: it goes for good.
       if (note != null) {
         await repository.deleteNote(note.id);
+        await repository.deleteForever(note.id);
       }
       rethrow;
     }
   }
 
+  /// A new note from a native `.goodnotes` notebook: every page at its
+  /// size and in its order, on its PDF paper where it has some, with its
+  /// handwriting, highlighting, and shapes as editable strokes.
+  ///
+  /// [picked] may come from the file picker or straight from memory, as
+  /// from a cloud import.
+  Future<NoteEntry> importGoodnotesAsNote({
+    required NoteRepository repository,
+    required PickedDocument picked,
+    String? folderId,
+    ImportCancellationToken? cancellation,
+  }) async {
+    cancellation?.throwIfCancelled();
+    final GoodnotesArchiveExtraction extraction = await goodnotesExtractor
+        .extract(
+          picked.bytes,
+          fileName: picked.name,
+          config: config,
+          pdfPageSizes: _pdfPageSizes,
+          isCancelled: () => cancellation?.isCancelled ?? false,
+        );
+    cancellation?.throwIfCancelled();
+    final String title = cleanName(extraction.title) ?? 'Imported Goodnotes';
+    NoteEntry? note;
+    try {
+      note = await repository.createNote(title: title, folderId: folderId);
+      final List<String> assetIds = <String>[];
+      for (final Uint8List pdf in extraction.pdfAttachments) {
+        cancellation?.throwIfCancelled();
+        assetIds.add(
+          await repository.storeAsset(
+            note.id,
+            pdf,
+            kind: NoteAssetKind.pdf,
+            extension: 'pdf',
+            fileName: extraction.pdfAttachments.length == 1
+                ? '$title.pdf'
+                : '$title ${assetIds.length + 1}.pdf',
+          ),
+        );
+      }
+      cancellation?.throwIfCancelled();
+      await repository.saveNote(
+        note.id,
+        NoteContent(<StoredPage>[
+          for (int i = 0; i < extraction.pageCount; i++)
+            StoredPage(
+              setup: PageSetup(
+                size: PageSize.custom,
+                customSize: extraction.pageSizes[i],
+                background: PageBackground.blank,
+              ),
+              strokes: extraction.pageStrokes[i],
+              pdfSource: extraction.pdfAttachmentIndices[i] == null
+                  ? null
+                  : PdfPageSource(
+                      assetId: assetIds[extraction.pdfAttachmentIndices[i]!],
+                      pageIndex: extraction.pdfPageIndices[i]!,
+                      pageSize: extraction.pageSizes[i],
+                    ),
+            ),
+        ]),
+      );
+      cancellation?.throwIfCancelled();
+      return note;
+    } on Object {
+      if (note != null) {
+        await repository.deleteNote(note.id);
+        await repository.deleteForever(note.id);
+      }
+      rethrow;
+    }
+  }
+
+  /// Inserts the pages of [picked] after the current page, as they are:
+  /// Goodnotes handwriting is extracted only when importing a new note.
   Future<void> insertPdfPages({
     required NoteRepository repository,
     required String noteId,

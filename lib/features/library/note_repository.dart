@@ -74,11 +74,17 @@ abstract class NoteRepository extends ChangeNotifier {
     PageSetup setup = const PageSetup(),
   });
 
-  Future<Folder> createFolder(String name, {String? parentId});
+  Future<Folder> createFolder(
+    String name, {
+    String? parentId,
+    FolderColor color = FolderColor.accent,
+  });
 
   Future<void> renameNote(String id, String title);
 
   Future<void> renameFolder(String id, String name);
+
+  Future<void> recolorFolder(String id, FolderColor color);
 
   Future<void> moveNote(String id, String? folderId);
 
@@ -88,12 +94,34 @@ abstract class NoteRepository extends ChangeNotifier {
   /// A copy of the note, ink and all, beside it.
   Future<NoteEntry> duplicateNote(String id);
 
+  /// Moves the note to Recently Deleted, where its pages and assets are
+  /// kept until it is restored or deleted for good.
   Future<void> deleteNote(String id);
+
+  /// The notes in Recently Deleted, most recently deleted first.
+  Future<List<NoteEntry>> trash();
+
+  /// Puts a note from Recently Deleted back where it was, or at the top
+  /// level when its folder is gone.
+  Future<void> restoreNote(String id);
+
+  /// Deletes a note in Recently Deleted, with its pages and assets, for
+  /// good.
+  Future<void> deleteForever(String id);
+
+  /// Deletes everything in Recently Deleted for good.
+  Future<void> emptyTrash();
+
+  /// Deletes for good what has been in Recently Deleted longer than
+  /// [age].
+  Future<void> purgeTrash(Duration age);
 
   /// What deleting [id] would remove besides the folder itself.
   Future<FolderTotals> totals(String id);
 
   /// Deletes the folder and everything below it.
+  /// Deletes the folder and the folders inside it; the notes inside move
+  /// to Recently Deleted.
   Future<void> deleteFolder(String id);
 
   Future<NoteContent> loadNote(String id);
@@ -128,6 +156,7 @@ abstract class IndexedNoteRepository extends NoteRepository {
     String Function()? newId,
     Iterable<Folder> folders = const <Folder>[],
     Iterable<NoteEntry> notes = const <NoteEntry>[],
+    Iterable<NoteEntry> trash = const <NoteEntry>[],
   }) : _clock = clock ?? DateTime.now,
        _newId = newId ?? _randomId {
     for (final Folder folder in folders) {
@@ -136,6 +165,9 @@ abstract class IndexedNoteRepository extends NoteRepository {
     for (final NoteEntry note in notes) {
       _notes[note.id] = note;
     }
+    for (final NoteEntry note in trash) {
+      _trash[note.id] = note;
+    }
   }
 
   final DateTime Function() _clock;
@@ -143,8 +175,16 @@ abstract class IndexedNoteRepository extends NoteRepository {
   final Map<String, Folder> _folders = <String, Folder>{};
   final Map<String, NoteEntry> _notes = <String, NoteEntry>{};
 
+  /// Recently Deleted: kept apart, so nothing that lists the library can
+  /// show them by mistake.
+  final Map<String, NoteEntry> _trash = <String, NoteEntry>{};
+
   /// Mutations run one at a time, in order.
   Future<void> _queue = Future<void>.value();
+
+  // Only in-flight reads are retained. A write barrier is part of the key:
+  // a request made after a save must not join an older read.
+  final Map<String, (Future<void>, Future<NoteContent>)> _loads = {};
 
   static final math.Random _random = math.Random();
 
@@ -159,6 +199,9 @@ abstract class IndexedNoteRepository extends NoteRepository {
 
   @protected
   Iterable<NoteEntry> get noteIndex => _notes.values;
+
+  @protected
+  Iterable<NoteEntry> get trashIndex => _trash.values;
 
   /// Stores the index after a change.
   @protected
@@ -194,7 +237,9 @@ abstract class IndexedNoteRepository extends NoteRepository {
     String id;
     do {
       id = _newId();
-    } while (_folders.containsKey(id) || _notes.containsKey(id));
+    } while (_folders.containsKey(id) ||
+        _notes.containsKey(id) ||
+        _trash.containsKey(id));
     return id;
   }
 
@@ -328,7 +373,11 @@ abstract class IndexedNoteRepository extends NoteRepository {
   }
 
   @override
-  Future<Folder> createFolder(String name, {String? parentId}) {
+  Future<Folder> createFolder(
+    String name, {
+    String? parentId,
+    FolderColor color = FolderColor.accent,
+  }) {
     return _mutate(() async {
       _checkFolder(parentId);
       final DateTime now = _clock();
@@ -338,6 +387,7 @@ abstract class IndexedNoteRepository extends NoteRepository {
         parentId: parentId,
         created: now,
         modified: now,
+        color: color,
       );
       _folders[folder.id] = folder;
       await writeIndex();
@@ -359,6 +409,14 @@ abstract class IndexedNoteRepository extends NoteRepository {
       _folders[id] = _folder(
         id,
       ).copyWith(name: _name(name), modified: _clock());
+      await writeIndex();
+    });
+  }
+
+  @override
+  Future<void> recolorFolder(String id, FolderColor color) {
+    return _mutate(() async {
+      _folders[id] = _folder(id).copyWith(color: color, modified: _clock());
       await writeIndex();
     });
   }
@@ -420,10 +478,72 @@ abstract class IndexedNoteRepository extends NoteRepository {
   @override
   Future<void> deleteNote(String id) {
     return _mutate(() async {
-      _note(id);
+      final NoteEntry note = _note(id);
       _notes.remove(id);
+      _trash[id] = note.copyWith(deleted: () => _clock());
+      await writeIndex();
+    });
+  }
+
+  @override
+  Future<List<NoteEntry>> trash() async {
+    await _queue;
+    return List<NoteEntry>.of(_trash.values)
+      ..sort((NoteEntry a, NoteEntry b) => b.deleted!.compareTo(a.deleted!));
+  }
+
+  NoteEntry _trashed(String id) {
+    final NoteEntry? note = _trash[id];
+    if (note == null) {
+      throw LibraryException('No deleted note $id.');
+    }
+    return note;
+  }
+
+  @override
+  Future<void> restoreNote(String id) {
+    return _mutate(() async {
+      final NoteEntry note = _trashed(id);
+      final String? folderId = _folders.containsKey(note.folderId)
+          ? note.folderId
+          : null;
+      _trash.remove(id);
+      _notes[id] = note.copyWith(folderId: () => folderId, deleted: () => null);
+      await writeIndex();
+    });
+  }
+
+  @override
+  Future<void> deleteForever(String id) {
+    return _mutate(() async {
+      _trashed(id);
+      _trash.remove(id);
       await writeIndex();
       await deleteContent(id);
+    });
+  }
+
+  @override
+  Future<void> emptyTrash() => _purgeWhere((NoteEntry _) => true);
+
+  @override
+  Future<void> purgeTrash(Duration age) {
+    final DateTime before = _clock().subtract(age);
+    return _purgeWhere((NoteEntry note) => note.deleted!.isBefore(before));
+  }
+
+  Future<void> _purgeWhere(bool Function(NoteEntry note) test) {
+    return _mutate(() async {
+      final List<String> gone = <String>[
+        for (final NoteEntry note in _trash.values)
+          if (test(note)) note.id,
+      ];
+      if (gone.isEmpty) return;
+      gone.forEach(_trash.remove);
+      await writeIndex();
+      for (final String id in gone) {
+        await deleteContent(id);
+      }
     });
   }
 
@@ -467,18 +587,34 @@ abstract class IndexedNoteRepository extends NoteRepository {
           if (subtree.contains(note.folderId)) note.id,
       ];
       subtree.forEach(_folders.remove);
-      notes.forEach(_notes.remove);
-      await writeIndex();
-      for (final String note in notes) {
-        await deleteContent(note);
+      final DateTime now = _clock();
+      for (final String id in notes) {
+        _trash[id] = _notes.remove(id)!.copyWith(deleted: () => now);
       }
+      await writeIndex();
     });
   }
 
   @override
-  Future<NoteContent> loadNote(String id) async {
-    await _queue;
-    _note(id);
+  Future<NoteContent> loadNote(String id) {
+    final barrier = _queue;
+    final pending = _loads[id];
+    if (pending != null && identical(pending.$1, barrier)) return pending.$2;
+    final loading = _loadNoteAfter(id, barrier);
+    _loads[id] = (barrier, loading);
+    void release() {
+      if (identical(_loads[id]?.$2, loading)) _loads.remove(id);
+    }
+
+    loading.then<void>((_) => release(), onError: (Object _) => release());
+    return loading;
+  }
+
+  Future<NoteContent> _loadNoteAfter(String id, Future<void> barrier) async {
+    await barrier;
+    // A deleted note can still be read, for its picture in Recently
+    // Deleted.
+    if (!_trash.containsKey(id)) _note(id);
     return readContent(id);
   }
 
@@ -502,6 +638,7 @@ abstract class IndexedNoteRepository extends NoteRepository {
       'schema': storageSchema,
       'folders': <Object?>[for (final Folder f in _folders.values) f.toJson()],
       'notes': <Object?>[for (final NoteEntry n in _notes.values) n.toJson()],
+      'trash': <Object?>[for (final NoteEntry n in _trash.values) n.toJson()],
     };
   }
 }
@@ -514,6 +651,7 @@ class InMemoryNoteRepository extends IndexedNoteRepository {
     super.newId,
     super.folders,
     super.notes,
+    super.trash,
   });
 
   final Map<String, Map<String, Object?>> _content =

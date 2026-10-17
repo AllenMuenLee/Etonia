@@ -290,7 +290,10 @@ results independent of event frequency.
   filtered points, its style is retained except for width during scale, its
   `source` is `StrokeSource.derived`, and its `rawSamples` are empty. Raw input
   samples are not transformed or invented because they no longer describe the
-  stored geometry.
+  stored geometry. A stroke of varying width (tapered or pressure-sensitive,
+  prompt 3) keeps its per-point width factors unchanged: they are relative to
+  the stroke's width, which scaling already changes. The clipboard snapshot,
+  and the strokes pasted from it, keep them too.
 - An identity transform is a no-op: keep the original stroke instances and do
   not notify the completed-strokes layer.
 - After commit, keep the transformed strokes selected and update the frame to

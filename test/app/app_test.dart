@@ -20,7 +20,8 @@ void main() {
       'Greatnote',
     );
     expect(find.byType(LibraryScreen), findsOneWidget);
-    expect(find.text('Library'), findsOneWidget);
+    // In the breadcrumb, and at the top of the folder sidebar.
+    expect(find.text('Library'), findsNWidgets(2));
     expect(tester.takeException(), isNull);
   });
 

@@ -296,8 +296,8 @@ void main() {
     expect(pixels.at(120, 100), isSameColorAs(InkPalette.ink.onLightPaper));
     expect(pixels.at(120, 140), isSameColorAs(_ink('blue').onLightPaper));
     // Where the unselected red line crosses, on the ink and between it.
-    expect(pixels.at(150, 120), isSameColorAs(_white));
-    expect(pixels.at(150, 92), isSameColorAs(_white));
+    expect(pixels.at(150, 120), isSameColorAs(AppColors.light.writingSurface));
+    expect(pixels.at(150, 92), isSameColorAs(AppColors.light.writingSurface));
     expect(pixels.at(150, 100), isSameColorAs(InkPalette.ink.onLightPaper));
     // The frame's corners, where the handles sit, its edges, and the
     // rotation handle's stem above it.
@@ -311,7 +311,11 @@ void main() {
       (203, 120),
       (150, 90),
     ]) {
-      expect(pixels.at(x, y), isSameColorAs(_white), reason: '$x, $y');
+      expect(
+        pixels.at(x, y),
+        isSameColorAs(AppColors.light.writingSurface),
+        reason: '$x, $y',
+      );
     }
     // Only paper and the two selected inks, and the blends at their edges:
     // nothing accent-colored, nothing red.

@@ -1,8 +1,12 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/semantics.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:greatnote/app/theme/app_theme.dart';
 import 'package:greatnote/app/theme/app_tokens.dart';
 import 'package:greatnote/features/editor/editor_screen.dart';
+import 'package:greatnote/features/editor/ink/eraser_settings.dart';
+import 'package:greatnote/features/editor/ink/ink_controller.dart';
+import 'package:greatnote/features/editor/page/page_viewport.dart';
 import 'package:greatnote/features/editor/widgets/editor_app_bar.dart';
 import 'package:greatnote/features/editor/widgets/palette_button.dart';
 import 'package:greatnote/features/editor/widgets/tool_palette.dart';
@@ -23,8 +27,50 @@ ToolPalette _palette(WidgetTester tester) {
 }
 
 void main() {
+  group('undo and redo', () {
+    for (final TestViewport viewport in <TestViewport>[
+      TestViewport.tabletLandscape,
+      TestViewport.tabletPortrait,
+      TestViewport.compact,
+    ]) {
+      testWidgets(
+        '${viewport.name}: float top right, as tall as the palette, apart',
+        (WidgetTester tester) async {
+          await pumpApp(tester, viewport: viewport);
+          final Rect palette = _paletteRect(tester);
+          final Rect surface = _surfaceRect(tester);
+          final Rect history = tester.getRect(
+            find.byKey(const ValueKey<String>('history-card')),
+          );
+
+          expect(history.height, palette.height);
+          expect(history.top, palette.top);
+          expect(history.right, lessThanOrEqualTo(surface.right));
+          expect(surface.right - history.right, lessThan(AppSpacing.md));
+          expect(history.overlaps(palette), isFalse);
+          // Not in the top bar any more.
+          expect(
+            find.descendant(
+              of: find.byType(EditorAppBar),
+              matching: find.byTooltip('Undo'),
+            ),
+            findsNothing,
+          );
+          expect(
+            find.descendant(
+              of: find.byKey(const ValueKey<String>('history-card')),
+              matching: find.byTooltip('Undo'),
+            ),
+            findsOneWidget,
+          );
+          expect(tester.takeException(), isNull);
+        },
+      );
+    }
+  });
+
   group('breakpoints', () {
-    testWidgets('expanded: vertical palette over the page, centered title', (
+    testWidgets('expanded: palette centered across the top, centered title', (
       WidgetTester tester,
     ) async {
       await pumpApp(tester);
@@ -32,13 +78,14 @@ void main() {
       final Rect palette = _paletteRect(tester);
       final Rect surface = _surfaceRect(tester);
 
-      expect(_palette(tester).axis, Axis.vertical);
+      expect(_palette(tester).edge, PaletteEdge.top);
+      expect(_palette(tester).axis, Axis.horizontal);
       expect(_palette(tester).dense, isFalse);
       expect(surface.left, 0);
       expect(surface.right, screen.width);
       expect(surface.bottom, screen.height);
-      expect(palette.left, AppSpacing.lg);
-      expect(palette.top, surface.top + AppSpacing.lg);
+      expect(palette.top, surface.top + AppSpacing.xs);
+      expect(palette.center.dx, closeTo(screen.width / 2, 0.5));
       expect(
         tester.getCenter(find.text('Untitled note')).dx,
         closeTo(screen.width / 2, 1),
@@ -46,7 +93,7 @@ void main() {
       expect(tester.takeException(), isNull);
     });
 
-    testWidgets('medium: dense vertical palette and smaller margins', (
+    testWidgets('medium: dense palette and smaller margins', (
       WidgetTester tester,
     ) async {
       await pumpApp(tester, viewport: TestViewport.tabletPortrait);
@@ -54,11 +101,11 @@ void main() {
       final Rect palette = _paletteRect(tester);
       final Rect surface = _surfaceRect(tester);
 
-      expect(_palette(tester).axis, Axis.vertical);
+      expect(_palette(tester).axis, Axis.horizontal);
       expect(_palette(tester).dense, isTrue);
       expect(surface.left, 0);
       expect(surface.right, screen.width);
-      expect(palette.left, AppSpacing.sm);
+      expect(palette.top, surface.top + AppSpacing.xs);
       // The title sits beside the menu button, not in the middle.
       expect(
         tester.getCenter(find.text('Untitled note')).dx,
@@ -67,7 +114,7 @@ void main() {
       expect(tester.takeException(), isNull);
     });
 
-    testWidgets('compact: horizontal palette along the bottom of the page', (
+    testWidgets('compact: palette across the top of the page too', (
       WidgetTester tester,
     ) async {
       await pumpApp(tester, viewport: TestViewport.compact);
@@ -77,8 +124,15 @@ void main() {
 
       expect(_palette(tester).axis, Axis.horizontal);
       expect(surface.bottom, screen.height);
-      expect(palette.bottom, surface.bottom - AppSpacing.xs);
-      expect(palette.center.dx, closeTo(screen.width / 2, 0.5));
+      expect(palette.top, surface.top + AppSpacing.xxs);
+      // Centered, unless that would put it under Undo and Redo: then just
+      // clear of them.
+      final Rect history = tester.getRect(
+        find.byKey(const ValueKey<String>('history-card')),
+      );
+      expect(palette.right, lessThanOrEqualTo(history.left));
+      expect(palette.center.dx, lessThanOrEqualTo(screen.width / 2 + 0.5));
+      expect(palette.left, greaterThanOrEqualTo(surface.left));
       expect(tester.takeException(), isNull);
     });
 
@@ -114,7 +168,7 @@ void main() {
       final Rect surface = _surfaceRect(tester);
       expect(surface.left, 0);
       expect(surface.right, 2200);
-      expect(_paletteRect(tester).left, AppSpacing.lg);
+      expect(_paletteRect(tester).center.dx, closeTo(1100, 0.5));
       expect(tester.takeException(), isNull);
     });
 
@@ -131,7 +185,7 @@ void main() {
       }
     });
 
-    testWidgets('right-to-left mirrors the palette to the leading edge', (
+    testWidgets('right-to-left keeps the palette centered across the top', (
       WidgetTester tester,
     ) async {
       setViewportSize(tester, TestViewport.tabletLandscape.size);
@@ -150,10 +204,266 @@ void main() {
       await tester.pumpAndSettle();
 
       expect(
-        _paletteRect(tester).right,
-        _surfaceRect(tester).right - AppSpacing.lg,
+        _paletteRect(tester).center.dx,
+        closeTo(_surfaceRect(tester).center.dx, 0.5),
       );
+      expect(_palette(tester).edge, PaletteEdge.top);
       expect(tester.takeException(), isNull);
+    });
+  });
+
+  group('dragging the palette', () {
+    testWidgets('delivered moves rebuild neither editor nor viewport', (
+      tester,
+    ) async {
+      await pumpApp(tester);
+      final palette = _palette(tester);
+      final previous = debugOnRebuildDirtyWidget;
+      var shellBuilds = 0;
+      var viewportBuilds = 0;
+      var paletteBuilds = 0;
+      debugOnRebuildDirtyWidget = (element, builtOnce) {
+        if (element.widget is EditorScreen) shellBuilds++;
+        if (element.widget is PageViewport) viewportBuilds++;
+        if (element.widget is ToolPalette) paletteBuilds++;
+        previous?.call(element, builtOnce);
+      };
+      addTearDown(() => debugOnRebuildDirtyWidget = previous);
+      palette.onDragStart!();
+      await tester.pumpAndSettle();
+      final before = _paletteRect(tester);
+      for (var i = 0; i < 30; i++) {
+        _palette(tester).onDragUpdate!(const Offset(1, 1));
+        await tester.pump();
+        expect(
+          _paletteRect(tester).topLeft,
+          before.topLeft + Offset(i + 1, i + 1),
+        );
+      }
+      expect(shellBuilds, 0);
+      expect(viewportBuilds, 0);
+      expect(paletteBuilds, 0);
+      _palette(tester).onDragEnd!();
+      await tester.pumpAndSettle();
+    });
+    testWidgets('drag writes shared placement once at drop', (tester) async {
+      final placement = ValueNotifier<PalettePlacement>(
+        const PalettePlacement(),
+      );
+      addTearDown(placement.dispose);
+      var writes = 0;
+      placement.addListener(() => writes++);
+      await pumpApp(tester, home: EditorScreen(palettePlacement: placement));
+      _palette(tester).onDragStart!();
+      for (var i = 0; i < 20; i++) {
+        _palette(tester).onDragUpdate!(const Offset(-10, 0));
+        await tester.pump();
+      }
+      expect(writes, 0);
+      _palette(tester).onDragEnd!();
+      await tester.pumpAndSettle();
+      expect(writes, 1);
+      final saved = placement.value;
+      await tester.pumpWidget(const SizedBox());
+      await pumpApp(tester, home: EditorScreen(palettePlacement: placement));
+      expect(placement.value, saved);
+      _palette(tester).onMoveTo!(PaletteEdge.right);
+      await tester.pumpAndSettle();
+      expect(placement.value.edge, PaletteEdge.right);
+      expect(writes, 2);
+      await tester.pumpWidget(const SizedBox());
+    });
+    final Finder grip = find.byKey(const ValueKey<String>('palette-surface'));
+
+    /// Holds the palette's bare surface until it lifts.
+    Future<TestGesture> lift(WidgetTester tester) async {
+      final TestGesture drag = await tester.startGesture(
+        tester.getTopLeft(grip) + const Offset(16, 24),
+      );
+      await tester.pump(
+        ToolPalette.liftDelay + const Duration(milliseconds: 50),
+      );
+      return drag;
+    }
+
+    testWidgets('pressed, it lights up; held, it lifts; let go, it settles', (
+      WidgetTester tester,
+    ) async {
+      await pumpApp(tester);
+      double scale() => tester
+          .widget<AnimatedScale>(
+            find.descendant(of: grip, matching: find.byType(AnimatedScale)),
+          )
+          .scale;
+      final TestGesture drag = await tester.startGesture(
+        tester.getTopLeft(grip) + const Offset(16, 24),
+      );
+      await tester.pump(const Duration(milliseconds: 200));
+      expect(scale(), 1);
+      await tester.pump(const Duration(milliseconds: 150));
+      expect(scale(), greaterThan(1));
+      await drag.up();
+      await tester.pumpAndSettle();
+      expect(scale(), 1);
+    });
+
+    testWidgets('a quick drag across the surface does not move it', (
+      WidgetTester tester,
+    ) async {
+      await pumpApp(tester);
+      final Rect before = _paletteRect(tester);
+      final TestGesture drag = await tester.startGesture(
+        tester.getTopLeft(grip) + const Offset(16, 24),
+      );
+      await drag.moveBy(const Offset(0, 300));
+      await drag.up();
+      await tester.pumpAndSettle();
+      expect(_paletteRect(tester), before);
+    });
+
+    for (final (String name, Offset to, PaletteEdge edge)
+        in <(String, Offset, PaletteEdge)>[
+          ('left', const Offset(40, 500), PaletteEdge.left),
+          ('right', const Offset(1150, 400), PaletteEdge.right),
+          ('bottom', const Offset(400, 820), PaletteEdge.bottom),
+        ]) {
+      testWidgets('let go near the $name, it docks there and turns', (
+        WidgetTester tester,
+      ) async {
+        await pumpApp(tester);
+        final TestGesture drag = await lift(tester);
+        await drag.moveBy(const Offset(0, 40));
+        await drag.moveTo(to);
+        await tester.pump();
+        // Already lying along the edge it is nearest while held.
+        expect(_palette(tester).edge, edge);
+        await drag.up();
+        await tester.pumpAndSettle();
+
+        final Rect palette = _paletteRect(tester);
+        final Rect surface = _surfaceRect(tester);
+        expect(_palette(tester).edge, edge);
+        expect(
+          _palette(tester).axis,
+          edge == PaletteEdge.bottom ? Axis.horizontal : Axis.vertical,
+        );
+        switch (edge) {
+          case PaletteEdge.left:
+            expect(palette.left, surface.left + AppSpacing.xs);
+          case PaletteEdge.right:
+            expect(palette.right, surface.right - AppSpacing.xs);
+          case PaletteEdge.bottom:
+            expect(palette.bottom, surface.bottom - AppSpacing.xs);
+          case PaletteEdge.top:
+            break;
+        }
+        expect(surface.intersect(palette), palette);
+        expect(tester.takeException(), isNull);
+      });
+    }
+
+    testWidgets('let go far along an edge, it stays where it was let go', (
+      WidgetTester tester,
+    ) async {
+      await pumpApp(tester);
+      final TestGesture drag = await lift(tester);
+      await drag.moveBy(const Offset(-300, 0));
+      await drag.up();
+      await tester.pumpAndSettle();
+
+      expect(_palette(tester).edge, PaletteEdge.top);
+      expect(
+        _paletteRect(tester).center.dx,
+        closeTo(_surfaceRect(tester).center.dx - 300, 1),
+      );
+    });
+
+    testWidgets('let go near the middle of an edge, it settles there', (
+      WidgetTester tester,
+    ) async {
+      await pumpApp(tester);
+      final TestGesture drag = await lift(tester);
+      await drag.moveBy(const Offset(-300, 0));
+      await tester.pump();
+      // Back to just short of the middle.
+      await drag.moveBy(const Offset(250, 0));
+      await tester.pump();
+      expect(
+        _paletteRect(tester).center.dx,
+        closeTo(_surfaceRect(tester).center.dx - 50, 1),
+      );
+      await drag.up();
+      await tester.pumpAndSettle();
+
+      expect(
+        _paletteRect(tester).center.dx,
+        closeTo(_surfaceRect(tester).center.dx, 0.5),
+      );
+    });
+
+    testWidgets('a tap on a tool still selects it, without lifting', (
+      WidgetTester tester,
+    ) async {
+      await pumpApp(tester);
+      final Rect before = _paletteRect(tester);
+      await tester.tap(find.byTooltip('Eraser'));
+      await tester.pumpAndSettle();
+
+      expect(_palette(tester).tool.value, EditorTool.eraser);
+      expect(_paletteRect(tester), before);
+    });
+
+    testWidgets('held on a tool, the palette lifts too', (
+      WidgetTester tester,
+    ) async {
+      await pumpApp(tester);
+      final TestGesture drag = await tester.startGesture(
+        tester.getCenter(find.byTooltip('Eraser')),
+      );
+      await tester.pump(
+        ToolPalette.liftDelay + const Duration(milliseconds: 50),
+      );
+      await drag.moveTo(const Offset(40, 500));
+      await drag.up();
+      await tester.pumpAndSettle();
+
+      expect(_palette(tester).edge, PaletteEdge.left);
+      expect(_palette(tester).tool.value, EditorTool.pen);
+    });
+
+    testWidgets('dragging does not draw on the page', (
+      WidgetTester tester,
+    ) async {
+      final InkController ink = InkController();
+      addTearDown(ink.dispose);
+      await pumpApp(tester, home: EditorScreen(inkController: ink));
+      final TestGesture drag = await lift(tester);
+      await drag.moveBy(const Offset(0, 200));
+      await drag.moveBy(const Offset(-300, 100));
+      await drag.up();
+      await tester.pumpAndSettle();
+
+      expect(ink.strokes, isEmpty);
+    });
+
+    testWidgets('assistive technology can dock it at each edge', (
+      WidgetTester tester,
+    ) async {
+      final SemanticsHandle semantics = tester.ensureSemantics();
+      await pumpApp(tester);
+      final SemanticsNode node = tester.getSemantics(grip);
+      final SemanticsData data = node.getSemanticsData();
+      expect(data.label, contains('Move tools'));
+      final int action = data.customSemanticsActionIds!.firstWhere(
+        (int id) =>
+            CustomSemanticsAction.getAction(id)!.label ==
+            'Move tools to the right',
+      );
+      node.owner!.performAction(node.id, SemanticsAction.customAction, action);
+      await tester.pumpAndSettle();
+
+      expect(_palette(tester).edge, PaletteEdge.right);
+      semantics.dispose();
     });
   });
 
@@ -171,7 +481,7 @@ void main() {
       expect(tester.takeException(), isNull);
       await tester.pumpAndSettle();
       expect(_palette(tester).dense, isFalse);
-      expect(_palette(tester).axis, Axis.vertical);
+      expect(_palette(tester).axis, Axis.horizontal);
 
       setViewportSize(tester, TestViewport.tabletPortrait.size);
       await tester.pumpAndSettle();
@@ -179,7 +489,7 @@ void main() {
       expect(tester.takeException(), isNull);
     });
 
-    testWidgets('compact rotation moves the palette without overflow', (
+    testWidgets('compact rotation keeps the palette docked, without overflow', (
       WidgetTester tester,
     ) async {
       await pumpApp(tester, viewport: TestViewport.compact);
@@ -191,8 +501,12 @@ void main() {
       expect(tester.takeException(), isNull);
       await tester.pumpAndSettle();
 
-      expect(_palette(tester).axis, Axis.vertical);
+      expect(_palette(tester).edge, PaletteEdge.top);
       expect(_surfaceRect(tester).left, 0);
+      expect(
+        _surfaceRect(tester).intersect(_paletteRect(tester)),
+        _paletteRect(tester),
+      );
       expect(tester.takeException(), isNull);
     });
 
@@ -211,7 +525,17 @@ void main() {
 
       expect(
         tester
-            .widget<AnimatedPositioned>(find.byType(AnimatedPositioned))
+            .widget<AnimatedPositioned>(
+              find.byKey(const ValueKey<String>('tool-palette-position')),
+            )
+            .duration,
+        Duration.zero,
+      );
+      expect(
+        tester
+            .widget<AnimatedPositioned>(
+              find.byKey(const ValueKey<String>('history-position')),
+            )
             .duration,
         Duration.zero,
       );
@@ -220,26 +544,46 @@ void main() {
   });
 
   group('scope', () {
-    testWidgets(
-      'offers a pen, an eraser, and Select; color and width are in the pen',
-      (WidgetTester tester) async {
-        await pumpApp(tester);
+    testWidgets('offers pen, eraser, Select, sticky note, and AI mode', (
+      WidgetTester tester,
+    ) async {
+      await pumpApp(tester);
 
-        expect(find.byType(PaletteButton), findsNWidgets(3));
-        expect(find.byTooltip('Pen'), findsOneWidget);
-        expect(find.byTooltip('Eraser'), findsOneWidget);
-        expect(find.byTooltip('Select'), findsOneWidget);
-        expect(find.byTooltip('Ink color'), findsNothing);
-        expect(find.byTooltip('Stroke width'), findsNothing);
-        for (final String unsupported in <String>[
-          'Highlighter',
-          'Pencil',
-          'Shapes',
-          'Text',
-        ]) {
-          expect(find.byTooltip(unsupported), findsNothing);
-        }
-      },
-    );
+      expect(find.byType(PaletteButton), findsNWidgets(5));
+      expect(find.byTooltip('Sticky note'), findsOneWidget);
+      expect(
+        find.byKey(const ValueKey<String>('palette-surface')),
+        findsOneWidget,
+      );
+      expect(find.byIcon(Icons.drag_handle), findsNothing);
+      expect(find.byTooltip('Pen'), findsOneWidget);
+      expect(find.byTooltip('Eraser'), findsOneWidget);
+      expect(find.byTooltip('Select'), findsOneWidget);
+      // AI mode replaces the old AI-notes eye, and is there before the page
+      // has any AI notes.
+      expect(find.byTooltip('Turn on AI'), findsOneWidget);
+      expect(
+        find.byKey(const ValueKey<String>('ai-notes-visibility-toggle')),
+        findsNothing,
+      );
+      expect(
+        find.descendant(
+          of: find.byKey(const ValueKey<String>('ai-mode-toggle')),
+          matching: find.text('AI'),
+        ),
+        findsOneWidget,
+      );
+      expect(find.byTooltip('Ink color'), findsNothing);
+      expect(find.byTooltip('Stroke width'), findsNothing);
+      // The highlighter is a style of the one writing tool, not a tool.
+      for (final String unsupported in <String>[
+        'Highlighter',
+        'Pencil',
+        'Shapes',
+        'Text',
+      ]) {
+        expect(find.byTooltip(unsupported), findsNothing);
+      }
+    });
   });
 }

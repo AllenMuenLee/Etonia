@@ -221,10 +221,13 @@ void main() {
     expect(selected.bottom, closeTo(70, 1e-6));
 
     await tester.tap(find.byTooltip('Copy'));
-    await tester.runAsync(
-      () => Future<void>.delayed(const Duration(seconds: 1)),
-    );
-    await tester.pumpAndSettle();
+    // PDF renders run one at a time; the copy's may wait on the page's own.
+    for (int i = 0; i < 5 && copied == null; i++) {
+      await tester.runAsync(
+        () => Future<void>.delayed(const Duration(milliseconds: 300)),
+      );
+      await tester.pumpAndSettle();
+    }
     final InkClipboard clipboard = copied!;
     expect(clipboard.images, hasLength(1));
     expect(clipboard.images.single.size.width, closeTo(50, 1e-6));
@@ -363,7 +366,10 @@ void main() {
     );
     final copy = await repository.duplicateNote(note.id);
     expect((await repository.readAsset(copy.id, asset)).bytes, <int>[9, 8, 7]);
+    // Kept while the note is in Recently Deleted; gone once deleted for good.
     await repository.deleteNote(copy.id);
+    expect((await repository.readAsset(copy.id, asset)).bytes, <int>[9, 8, 7]);
+    await repository.deleteForever(copy.id);
     expect(() => repository.readAsset(copy.id, asset), throwsA(anything));
   });
 

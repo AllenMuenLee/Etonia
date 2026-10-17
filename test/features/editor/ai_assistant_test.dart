@@ -1,8 +1,7 @@
-import 'dart:math' as math;
-
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:greatnote/app/theme/app_icons.dart';
 import 'package:greatnote/app/theme/app_theme.dart';
 import 'package:greatnote/app/theme/app_tokens.dart';
 import 'package:greatnote/features/editor/ai/ai_assistant_controller.dart';
@@ -19,6 +18,7 @@ import 'package:greatnote/features/editor/widgets/ai_assistant_panel.dart';
 import 'package:greatnote/features/editor/widgets/editor_settings_sheet.dart';
 import 'package:greatnote/features/editor/widgets/tool_palette.dart';
 import 'package:greatnote/features/editor/widgets/writing_surface_frame.dart';
+import 'package:greatnote/shared/widgets/processing.dart';
 import 'package:gpt_markdown/gpt_markdown.dart';
 
 import '../../helpers/ai_fakes.dart';
@@ -105,7 +105,7 @@ Rect _paletteRect(WidgetTester tester) {
   return tester.getRect(find.byType(ToolPalette));
 }
 
-Finder _sendButton() => find.widgetWithIcon(IconButton, Icons.send);
+Finder _sendButton() => find.widgetWithIcon(IconButton, AppIcons.send);
 
 /// Whether the editor under a sheet is hidden from the keyboard and from
 /// screen readers.
@@ -197,8 +197,8 @@ void main() {
         ),
       );
       // Nearest the frame's top-right corner: the frame's right edge is at
-      // 222, and its handles reach 6 further. Here that would put the bar
-      // under the palette floating over the page, so it sits just clear.
+      // 222, and its handles reach 6 further. The palette floats across
+      // the top, clear of it.
       final Rect canvas = canvasRect(tester);
       final Rect palette = _paletteRect(tester);
       final Rect bar = Rect.fromLTRB(
@@ -207,13 +207,7 @@ void main() {
         ai.right + AppSpacing.xxs,
         ai.bottom,
       );
-      expect(
-        bar.right,
-        math.max(
-          canvas.left + 222 + 6,
-          palette.right + AppSpacing.xs + bar.width,
-        ),
-      );
+      expect(bar.right, canvas.left + 222 + 6);
       expect(bar.overlaps(palette), isFalse);
       expect(ai.bottom, lessThan(canvas.top + 198));
       handle.dispose();
@@ -290,10 +284,11 @@ void main() {
       _assistant(tester).setSide(AiPanelSide.left);
       await tester.pumpAndSettle();
       expect(_panelRect(tester).left, 0);
-      // Right to left, the palette floats at the page's trailing edge.
+      // The palette stays centered across the top of what the panel
+      // leaves.
       expect(
-        _paletteRect(tester).right,
-        _surfaceRect(tester).right - AppSpacing.lg,
+        _paletteRect(tester).center.dx,
+        closeTo(_surfaceRect(tester).center.dx, 0.5),
       );
       expect(_surfaceRect(tester).left, _panelRect(tester).right);
       expect(
@@ -343,7 +338,8 @@ void main() {
       expect(find.text('Panel side'), findsNothing);
       // Nothing was sent, and nothing in the editor moved.
       expect(client.requests, isEmpty);
-      expect(_tool(tester), EditorTool.select);
+      // The palette's AI mode comes on with it.
+      expect(_tool(tester), EditorTool.ai);
       expect(controller.strokes, before);
       expect(controller.selection, same(selection));
       expect(controller.canPaste, isFalse);
@@ -368,7 +364,7 @@ void main() {
       await _pumpOpen(tester);
       final AiAssistantController assistant = _assistant(tester);
 
-      await tester.tap(find.byTooltip('More options'));
+      await tester.tap(find.byTooltip('Settings'));
       await tester.pumpAndSettle();
 
       expect(find.byType(EditorSettingsSheet), findsOneWidget);
@@ -426,7 +422,7 @@ void main() {
           _surfaceRect(tester).intersect(_paletteRect(tester)),
           _paletteRect(tester),
         );
-        expect(_paletteRect(tester).size, ToolPalette.sizeFor(Axis.vertical));
+        expect(_paletteRect(tester).size, ToolPalette.sizeFor(Axis.horizontal));
 
         _assistant(tester).setSide(AiPanelSide.left);
         await tester.pump();
@@ -529,7 +525,8 @@ void main() {
         expect(find.byType(AiAssistantPanel), findsNothing);
         expect(_hasFocus(tester, find.byType(EditorScreen)), isTrue);
         expect(_editorExcluded(tester), isFalse);
-        expect(_tool(tester), EditorTool.select);
+        // Closing the chat leaves AI mode on.
+        expect(_tool(tester), EditorTool.ai);
         expect(controller.selection, isNotNull);
         expect(controller.strokes, hasLength(3));
 
@@ -597,7 +594,7 @@ void main() {
         final AiAssistantController assistant = _assistant(tester);
         expect(find.text('Explain this'), findsOneWidget);
         expect(find.text('Grade this'), findsOneWidget);
-        expect(find.byType(LinearProgressIndicator), findsNothing);
+        expect(find.byType(ShimmerTrack), findsNothing);
 
         await tester.tap(_quickAction('Explain this'));
         await tester.pump();
@@ -611,7 +608,7 @@ void main() {
         // nothing more can be sent meanwhile.
         expect(find.text('Explain this'), findsNWidgets(2));
         expect(find.text('You'), findsOneWidget);
-        expect(find.byType(LinearProgressIndicator), findsOneWidget);
+        expect(find.byType(ShimmerTrack), findsOneWidget);
         expect(find.text(AiAssistantPanel.emptyState), findsNothing);
         for (final String label in <String>['Explain this', 'Grade this']) {
           expect(
@@ -626,7 +623,7 @@ void main() {
         client.answer('It shows two parallel lines.');
         await tester.pumpAndSettle();
 
-        expect(find.byType(LinearProgressIndicator), findsNothing);
+        expect(find.byType(ShimmerTrack), findsNothing);
         expect(find.text('Assistant'), findsOneWidget);
         expect(
           find.descendant(
@@ -770,7 +767,7 @@ void main() {
         ),
         findsWidgets,
       );
-      expect(find.byType(LinearProgressIndicator), findsOneWidget);
+      expect(find.byType(ShimmerTrack), findsOneWidget);
       expect(find.textContaining('Drawing'), findsNothing);
 
       // The words are all in; the drawing is still coming.
@@ -784,7 +781,7 @@ void main() {
 
       expect(live, findsNothing);
       expect(find.textContaining('Drawing'), findsNothing);
-      expect(find.byType(LinearProgressIndicator), findsNothing);
+      expect(find.byType(ShimmerTrack), findsNothing);
       expect(find.text('Assistant'), findsOneWidget);
       expect(tester.takeException(), isNull);
     });
@@ -853,13 +850,13 @@ void main() {
         find.text('The AI service took too long to respond.'),
         findsOneWidget,
       );
-      expect(find.byType(LinearProgressIndicator), findsNothing);
+      expect(find.byType(ShimmerTrack), findsNothing);
       // What was already said is still there, and so is the ink.
       expect(find.text('Looks right.'), findsOneWidget);
       expect(find.text('Are you sure?'), findsOneWidget);
       expect(controller.strokes, before);
       expect(controller.selection!.indices, <int>[0, 1]);
-      expect(_tool(tester), EditorTool.select);
+      expect(_tool(tester), EditorTool.ai);
       // Nothing was retried on its own.
       expect(client.requests, hasLength(2));
 
@@ -872,7 +869,7 @@ void main() {
         find.text('The AI service took too long to respond.'),
         findsNothing,
       );
-      expect(find.byType(LinearProgressIndicator), findsOneWidget);
+      expect(find.byType(ShimmerTrack), findsOneWidget);
       expect(find.text('Are you sure?'), findsOneWidget);
       client.answer('Yes.');
       await tester.pumpAndSettle();
@@ -981,7 +978,7 @@ void main() {
       expect(assistant.context!.snapshot.isOf(controller.selection!), isTrue);
       expect(assistant.messages, isEmpty);
       expect(find.text(AiAssistantPanel.emptyState), findsOneWidget);
-      expect(find.byType(LinearProgressIndicator), findsNothing);
+      expect(find.byType(ShimmerTrack), findsNothing);
       client.answer('Late answer', index: 1);
       await tester.pumpAndSettle();
       expect(find.text('Late answer'), findsNothing);

@@ -80,6 +80,9 @@ Future<void> _closePanel(WidgetTester tester) async {
 }
 
 void main() {
+  _pullTests();
+  _appendTests();
+
   group('PageGeometry', () {
     const Size viewport = Size(1000, 700);
 
@@ -122,6 +125,18 @@ void main() {
         const Size(1600, 700),
       );
     });
+  });
+
+  testWidgets('the editor opens the canvas at 50% zoom', (
+    WidgetTester tester,
+  ) async {
+    await _pumpDocument(tester);
+
+    final PageViewportState viewport = tester.state<PageViewportState>(
+      find.byType(PageViewport),
+    );
+    expect(viewport.zoom, 0.5);
+    expect(_scale(tester), 0.5);
   });
 
   group('grownPageExtent', () {
@@ -235,7 +250,13 @@ void main() {
       origin + const Offset(300, 100),
     );
 
-    await tester.tap(find.byTooltip('Add page'));
+    await tester.tap(find.byTooltip('Add'));
+
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.text('Add new page'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Add blank page'));
     await tester.pumpAndSettle();
     expect(find.text('2 / 2'), findsOneWidget);
     expect(document.current.ink.strokes, isEmpty);
@@ -279,10 +300,51 @@ void main() {
     expect(first.selection, isNotNull);
     expect(first.copySelection(), isTrue);
 
-    await tester.tap(find.byTooltip('Add page'));
+    await tester.tap(find.byTooltip('Add'));
+
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.text('Add new page'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Add blank page'));
     await tester.pumpAndSettle();
     expect(first.selection, isNull);
     expect(document.current.ink.canPaste, isTrue);
+  });
+
+  testWidgets('a fast two-finger flick keeps coasting after release', (
+    WidgetTester tester,
+  ) async {
+    final NoteDocument document = await _pumpDocument(
+      tester,
+      setup: const PageSetup(size: PageSize.a4Portrait),
+    );
+    final Offset middle = tester.getCenter(find.byType(PageViewport));
+    final TestGesture first = await tester.startGesture(
+      middle + const Offset(-40, 40),
+      kind: PointerDeviceKind.touch,
+    );
+    final TestGesture second = await tester.startGesture(
+      middle + const Offset(40, 40),
+      kind: PointerDeviceKind.touch,
+    );
+
+    await first.moveBy(const Offset(0, -150), timeStamp: _sampleInterval);
+    await second.moveBy(const Offset(0, -150), timeStamp: _sampleInterval * 2);
+    await tester.pump();
+    final PageViewportState viewport = tester.state<PageViewportState>(
+      find.byType(PageViewport),
+    );
+    final double releasedAt = viewport.scrollOffset.dy;
+    expect(releasedAt, greaterThan(0));
+
+    await first.up(timeStamp: _sampleInterval * 3);
+    await second.up(timeStamp: _sampleInterval * 3);
+    await tester.pump(const Duration(milliseconds: 16));
+    await tester.pump(const Duration(milliseconds: 120));
+
+    expect(viewport.scrollOffset.dy, greaterThan(releasedAt));
+    expect(document.currentIndex, greaterThanOrEqualTo(0));
   });
 
   testWidgets('the page panel sets the size and background', (
@@ -354,8 +416,9 @@ void main() {
     await b.down(middle + const Offset(60, 0));
     await tester.pump();
     for (int i = 1; i <= 4; i++) {
-      await a.moveBy(const Offset(0, -50));
-      await b.moveBy(const Offset(0, -50));
+      final Duration time = Duration(milliseconds: 200 * i);
+      await a.moveBy(const Offset(0, -50), timeStamp: time);
+      await b.moveBy(const Offset(0, -50), timeStamp: time);
       await tester.pump();
     }
     await a.up();
@@ -486,7 +549,11 @@ void main() {
     WidgetTester tester,
   ) async {
     final NoteDocument document = await _pumpDocument(tester);
-    await tester.tap(find.byTooltip('Add page'));
+    await tester.tap(find.byTooltip('Add'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Add new page'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Add blank page'));
     await tester.pumpAndSettle();
     // The new page is scrolled into view, below the first.
     final Offset origin = tester.getRect(find.byType(InkCanvas).at(1)).topLeft;
@@ -631,7 +698,7 @@ void main() {
     WidgetTester tester,
   ) async {
     final NoteDocument document = await _pumpDocument(tester);
-    await tester.tap(find.byTooltip('More options'));
+    await tester.tap(find.byTooltip('Settings'));
     await tester.pumpAndSettle();
     await tester.tap(find.text('Only write with stylus'));
     await tester.pumpAndSettle();
@@ -667,7 +734,7 @@ void main() {
   });
 
   Future<void> onlyStylusWrites(WidgetTester tester) async {
-    await tester.tap(find.byTooltip('More options'));
+    await tester.tap(find.byTooltip('Settings'));
     await tester.pumpAndSettle();
     await tester.tap(find.text('Only write with stylus'));
     await tester.pumpAndSettle();
@@ -743,5 +810,158 @@ void main() {
     await tester.pumpAndSettle();
     expect(document.pageCount, 2);
     expect(find.text('Page 2 of 2'), findsOneWidget);
+  });
+}
+
+/// Two fingers moving up together by [distance], in steps, then let go.
+Future<void> _pullUp(WidgetTester tester, Offset at, double distance) async {
+  final TestGesture a = await tester.createGesture(
+    kind: PointerDeviceKind.touch,
+  );
+  final TestGesture b = await tester.createGesture(
+    kind: PointerDeviceKind.touch,
+  );
+  await a.down(at);
+  await b.down(at + const Offset(80, 0));
+  for (int i = 0; i < 10; i++) {
+    await a.moveBy(Offset(0, -distance / 10));
+    await b.moveBy(Offset(0, -distance / 10));
+    await tester.pump();
+  }
+  await a.up();
+  await b.up();
+  await tester.pumpAndSettle();
+}
+
+void _pullTests() {
+  testWidgets('pulled up past the last page, a page is added after it', (
+    WidgetTester tester,
+  ) async {
+    final NoteDocument document = await _pumpDocument(tester);
+    final Offset middle = tester.getCenter(find.byType(PageViewport));
+    await _pullUp(tester, middle, 200);
+
+    expect(document.pageCount, 2);
+    // The new page waits below; the view stays on the page it was on.
+    expect(document.currentIndex, 0);
+    expect(document.pages.first.ink.strokes, isEmpty);
+    expect(
+      find.byKey(const ValueKey<String>('pull-to-add-page')),
+      findsNothing,
+    );
+  });
+
+  testWidgets('a short pull adds nothing', (WidgetTester tester) async {
+    final NoteDocument document = await _pumpDocument(tester);
+    final Offset middle = tester.getCenter(find.byType(PageViewport));
+    await _pullUp(tester, middle, 60);
+
+    expect(document.pageCount, 1);
+  });
+
+  testWidgets('a tall page scrolls to its end before the pull begins', (
+    WidgetTester tester,
+  ) async {
+    final NoteDocument document = await _pumpDocument(
+      tester,
+      setup: const PageSetup(size: PageSize.a4Portrait),
+    );
+    final Offset middle = tester.getCenter(find.byType(PageViewport));
+    await _pullUp(tester, middle + const Offset(0, 200), 150);
+    expect(document.pageCount, 1);
+
+    await _pullUp(tester, middle + const Offset(0, 200), 2000);
+    expect(document.pageCount, 2);
+  });
+}
+
+void _appendTests() {
+  Rect firstPage(WidgetTester tester) =>
+      tester.getRect(find.byType(InkCanvas).first);
+
+  testWidgets('writing low on the last page adds one below, staying put', (
+    WidgetTester tester,
+  ) async {
+    final NoteDocument document = await _pumpDocument(tester);
+    final Rect before = firstPage(tester);
+    final double y = before.top + before.height * 0.85;
+    await _drawLine(
+      tester,
+      Offset(before.left + 100, y),
+      Offset(before.left + 300, y),
+    );
+    await tester.pumpAndSettle();
+
+    expect(document.pageCount, 2);
+    expect(document.currentIndex, 0);
+    expect(document.pages.last.ink.strokes, isEmpty);
+    // The page written on has not moved.
+    expect(firstPage(tester), before);
+
+    // Writing low again adds nothing more: the last page is the new one.
+    await _drawLine(
+      tester,
+      Offset(before.left + 100, y - 20),
+      Offset(before.left + 300, y - 20),
+    );
+    await tester.pumpAndSettle();
+    expect(document.pageCount, 2);
+  });
+
+  testWidgets('writing above three quarters adds nothing', (
+    WidgetTester tester,
+  ) async {
+    final NoteDocument document = await _pumpDocument(tester);
+    final Rect page = firstPage(tester);
+    final double y = page.top + page.height * 0.6;
+    await _drawLine(
+      tester,
+      Offset(page.left + 100, y),
+      Offset(page.left + 300, y),
+    );
+    await tester.pumpAndSettle();
+    expect(document.pageCount, 1);
+  });
+
+  testWidgets('a short, centered page does not move when one is added', (
+    WidgetTester tester,
+  ) async {
+    final NoteDocument document = await _pumpDocument(
+      tester,
+      viewport: TestViewport.tabletPortrait,
+      setup: const PageSetup(size: PageSize.a4Landscape),
+    );
+    final Rect before = firstPage(tester);
+    final Rect area = tester.getRect(find.byType(PageViewport));
+    // Centered: shorter than the area, with room above it.
+    expect(before.top, greaterThan(area.top + 50));
+    final double y = before.top + before.height * 0.9;
+    await _drawLine(
+      tester,
+      Offset(before.left + 100, y),
+      Offset(before.left + 300, y),
+    );
+    await tester.pumpAndSettle();
+
+    expect(document.pageCount, 2);
+    expect(firstPage(tester), before);
+  });
+
+  testWidgets('an infinite page grows instead of adding a page', (
+    WidgetTester tester,
+  ) async {
+    final NoteDocument document = await _pumpDocument(
+      tester,
+      setup: const PageSetup(size: PageSize.infinite),
+    );
+    final Rect page = firstPage(tester);
+    final double y = page.top + page.height * 0.9;
+    await _drawLine(
+      tester,
+      Offset(page.left + 100, y),
+      Offset(page.left + 300, y),
+    );
+    await tester.pumpAndSettle();
+    expect(document.pageCount, 1);
   });
 }

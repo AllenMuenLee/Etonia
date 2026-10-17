@@ -1,12 +1,21 @@
 import 'dart:convert';
+import 'dart:developer';
 import 'dart:io';
-import 'dart:typed_data';
 
+import 'package:flutter/foundation.dart';
 import 'package:path_provider/path_provider.dart';
 
 import 'library_models.dart';
 import 'note_content.dart';
 import 'note_repository.dart';
+
+Map<String, Object?> _decodeNoteJson(String encoded) {
+  final Object? decoded = jsonDecode(encoded);
+  if (decoded is! Map<String, Object?>) {
+    throw const StorageFormatException('Not a note.');
+  }
+  return decoded;
+}
 
 /// Stores the library under one directory: `library.json`, the index of
 /// folders and notes, and `notes/<id>.json`, one file of pages and ink per
@@ -23,6 +32,7 @@ class FileNoteRepository extends IndexedNoteRepository {
     super.newId,
     super.folders,
     super.notes,
+    super.trash,
   });
 
   /// Reads the library in [directory], creating it if needed.
@@ -35,6 +45,7 @@ class FileNoteRepository extends IndexedNoteRepository {
     final File index = File('${directory.path}/$_indexName');
     List<Folder> folders = const <Folder>[];
     List<NoteEntry> notes = const <NoteEntry>[];
+    List<NoteEntry> trash = const <NoteEntry>[];
     if (await index.exists()) {
       final Map<String, Object?> json =
           jsonDecode(await index.readAsString()) as Map<String, Object?>;
@@ -47,6 +58,10 @@ class FileNoteRepository extends IndexedNoteRepository {
         for (final Object? note in (json['notes'] as List?) ?? <Object?>[])
           NoteEntry.fromJson(note! as Map<String, Object?>),
       ];
+      trash = <NoteEntry>[
+        for (final Object? note in (json['trash'] as List?) ?? <Object?>[])
+          NoteEntry.fromJson(note! as Map<String, Object?>),
+      ];
     }
     return FileNoteRepository._(
       directory,
@@ -54,6 +69,7 @@ class FileNoteRepository extends IndexedNoteRepository {
       newId: newId,
       folders: folders,
       notes: notes,
+      trash: trash,
     );
   }
 
@@ -88,11 +104,30 @@ class FileNoteRepository extends IndexedNoteRepository {
       return NoteContent.blank();
     }
     try {
-      final Object? json = jsonDecode(await file.readAsString());
-      if (json is! Map<String, Object?>) {
-        throw const StorageFormatException('Not a note.');
+      final String encoded = await file.readAsString();
+      // Small notes avoid isolate startup cost. Large notes transfer only
+      // JSON values, never ui.Path / NoteDocument / controllers.
+      if (encoded.length >= 512 * 1024) {
+        final task = TimelineTask()..start('note.hydrateLarge');
+        try {
+          final json = await compute(
+            _decodeNoteJson,
+            encoded,
+            debugLabel: 'note.jsonDecode',
+          );
+          return await NoteContent.fromJsonIncrementally(json);
+        } finally {
+          task.finish();
+        }
       }
-      return NoteContent.fromJson(json);
+      final json = Timeline.timeSync(
+        'note.jsonDecode',
+        () => _decodeNoteJson(encoded),
+      );
+      return Timeline.timeSync(
+        'note.materialize',
+        () => NoteContent.fromJson(json),
+      );
     } on StorageFormatException {
       rethrow;
     } on Object catch (error) {

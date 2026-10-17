@@ -3,6 +3,7 @@ import 'dart:math' as math;
 import 'package:flutter/material.dart';
 
 import '../../../app/theme/app_tokens.dart';
+import '../../../shared/widgets/app_controls.dart';
 import '../ink/eraser_settings.dart';
 
 /// The eraser's mode switch and, for area mode, a size slider with a live
@@ -32,7 +33,6 @@ class EraserOptions extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final TextTheme text = Theme.of(context).textTheme;
     final AppColors colors = AppColors.of(context);
     final bool sizeApplies = settings.mode == EraserMode.area;
 
@@ -40,22 +40,17 @@ class EraserOptions extends StatelessWidget {
       mainAxisSize: MainAxisSize.min,
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: <Widget>[
-        Text('Eraser', style: text.labelMedium),
-        const SizedBox(height: AppSpacing.xs),
-        Row(
-          children: <Widget>[
-            for (final EraserMode mode in EraserMode.values)
-              Expanded(
-                child: _ModeOption(
-                  key: ValueKey<String>('eraser-mode-${mode.name}'),
-                  mode: mode,
-                  selected: mode == settings.mode,
-                  onTap: () => onChanged(settings.copyWith(mode: mode)),
-                ),
-              ),
-          ],
+        const SectionLabel('Eraser'),
+        SegmentedChoice<EraserMode>(
+          options: EraserMode.values,
+          selected: settings.mode,
+          labelOf: (EraserMode mode) => mode.label,
+          keyOf: (EraserMode mode) =>
+              ValueKey<String>('eraser-mode-${mode.name}'),
+          onSelected: (EraserMode mode) =>
+              onChanged(settings.copyWith(mode: mode)),
         ),
-        const SizedBox(height: AppSpacing.sm),
+        const SizedBox(height: AppSpacing.md),
         // The size is kept, but has no effect, in stroke mode.
         Opacity(
           opacity: sizeApplies ? 1 : 0.38,
@@ -63,21 +58,21 @@ class EraserOptions extends StatelessWidget {
             mainAxisSize: MainAxisSize.min,
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: <Widget>[
-              Row(
-                mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                children: <Widget>[
-                  Text('Size', style: text.labelMedium),
-                  Text(describeSize(settings.size), style: text.labelLarge),
-                ],
+              SectionLabel(
+                'Size',
+                trailing: ValuePill(
+                  describeSize(settings.size),
+                  muted: !sizeApplies,
+                ),
               ),
-              const SizedBox(height: AppSpacing.xs),
               ExcludeSemantics(
                 child: SizedBox(
                   height: config.maxSize + AppSpacing.xs,
                   child: CustomPaint(
                     key: const ValueKey<String>('eraser-size-preview'),
                     painter: EraserPreviewPainter(
-                      color: colors.textPrimary,
+                      color: colors.textSecondary,
+                      fill: colors.surfaceMuted,
                       size: settings.size,
                     ),
                   ),
@@ -86,8 +81,7 @@ class EraserOptions extends StatelessWidget {
             ],
           ),
         ),
-        const SizedBox(height: AppSpacing.xxs),
-        Slider(
+        AppSlider(
           value: settings.size.clamp(config.minSize, config.maxSize),
           min: config.minSize,
           max: config.maxSize,
@@ -102,92 +96,29 @@ class EraserOptions extends StatelessWidget {
   }
 }
 
-/// One of the two mode choices. The current one carries a checkmark and a
-/// fill, not a color change alone.
-class _ModeOption extends StatelessWidget {
-  const _ModeOption({
-    super.key,
-    required this.mode,
-    required this.selected,
-    required this.onTap,
+/// Draws the eraser at its true size, centered: a light disc, outlined.
+class EraserPreviewPainter extends CustomPainter {
+  const EraserPreviewPainter({
+    required this.color,
+    required this.size,
+    this.fill,
   });
 
-  final EraserMode mode;
-  final bool selected;
-  final VoidCallback onTap;
-
-  @override
-  Widget build(BuildContext context) {
-    final AppColors colors = AppColors.of(context);
-    final BorderRadius radius = BorderRadius.circular(AppRadii.medium);
-    final Color foreground = selected ? colors.accent : colors.textPrimary;
-
-    return Semantics(
-      container: true,
-      button: true,
-      inMutuallyExclusiveGroup: true,
-      selected: selected,
-      label: mode.label,
-      child: InkWell(
-        onTap: onTap,
-        borderRadius: radius,
-        child: SizedBox(
-          height: AppSizes.minTouchTarget,
-          child: Center(
-            child: AnimatedContainer(
-              duration: AppMotion.resolve(context, AppMotion.fast),
-              curve: AppMotion.standard,
-              height: AppSizes.paletteButtonVisual,
-              margin: const EdgeInsets.symmetric(
-                horizontal: AppSpacing.xxs / 2,
-              ),
-              alignment: Alignment.center,
-              decoration: BoxDecoration(
-                color: selected
-                    ? colors.selected
-                    : colors.selected.withValues(alpha: 0),
-                borderRadius: radius,
-                border: Border.all(
-                  color: selected ? colors.accent : colors.divider,
-                  width: AppSizes.hairline,
-                ),
-              ),
-              child: ExcludeSemantics(
-                child: Row(
-                  mainAxisSize: MainAxisSize.min,
-                  children: <Widget>[
-                    if (selected) ...<Widget>[
-                      Icon(Icons.check, size: 18, color: foreground),
-                      const SizedBox(width: AppSpacing.xxs),
-                    ],
-                    Text(
-                      mode.label,
-                      style: Theme.of(
-                        context,
-                      ).textTheme.labelLarge?.copyWith(color: foreground),
-                    ),
-                  ],
-                ),
-              ),
-            ),
-          ),
-        ),
-      ),
-    );
-  }
-}
-
-/// Draws the eraser outline at its true size, centered.
-class EraserPreviewPainter extends CustomPainter {
-  const EraserPreviewPainter({required this.color, required this.size});
-
   final Color color;
+  final Color? fill;
 
   /// Eraser diameter in logical pixels.
   final double size;
 
   @override
   void paint(Canvas canvas, Size canvasSize) {
+    if (fill != null) {
+      canvas.drawCircle(
+        canvasSize.center(Offset.zero),
+        size / 2,
+        Paint()..color = fill!,
+      );
+    }
     canvas.drawCircle(
       canvasSize.center(Offset.zero),
       size / 2,
@@ -201,7 +132,9 @@ class EraserPreviewPainter extends CustomPainter {
 
   @override
   bool shouldRepaint(EraserPreviewPainter oldDelegate) {
-    return oldDelegate.color != color || oldDelegate.size != size;
+    return oldDelegate.color != color ||
+        oldDelegate.fill != fill ||
+        oldDelegate.size != size;
   }
 }
 

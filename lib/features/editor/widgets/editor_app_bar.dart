@@ -1,9 +1,14 @@
+import 'dart:math' as math;
+
 import 'package:flutter/material.dart';
 
 import '../../../app/theme/app_tokens.dart';
+import '../../../app/theme/app_icons.dart';
 
-/// The slim top bar: navigation, document title, undo and redo, page
-/// controls, and overflow. It spans the whole width, as the page does.
+/// The slim top bar: navigation, the document title or the open notes'
+/// tabs, page controls, and settings. It spans the whole width, as the
+/// page does. Undo and redo float over the page instead, unless
+/// [historyControls] is given.
 ///
 /// Callbacks are placeholders until navigation and renaming exist; a null
 /// callback disables its control.
@@ -15,10 +20,14 @@ class EditorAppBar extends StatelessWidget implements PreferredSizeWidget {
     this.onMenuPressed,
     this.leadingIsBack = false,
     this.onTitlePressed,
-    this.onMorePressed,
+    this.onSettingsPressed,
     this.historyControls,
     this.pageControls,
+    this.tabs,
   });
+
+  /// The open notes, shown in place of the title when there are any.
+  final Widget? tabs;
 
   final String title;
   final bool centerTitle;
@@ -28,12 +37,12 @@ class EditorAppBar extends StatelessWidget implements PreferredSizeWidget {
   /// a menu.
   final bool leadingIsBack;
   final VoidCallback? onTitlePressed;
-  final VoidCallback? onMorePressed;
+  final VoidCallback? onSettingsPressed;
 
   /// Sits before the page controls, after the title in focus order.
   final Widget? historyControls;
 
-  /// Sits before the overflow control, after the history controls in focus
+  /// Sits before the settings control, after the history controls in focus
   /// order.
   final Widget? pageControls;
 
@@ -43,9 +52,12 @@ class EditorAppBar extends StatelessWidget implements PreferredSizeWidget {
   @override
   Widget build(BuildContext context) {
     final AppColors colors = AppColors.of(context);
+    // The bar spans the window, less its padding.
+    final double barWidth =
+        MediaQuery.sizeOf(context).width - 2 * AppSpacing.xxs;
 
     return Material(
-      color: colors.background,
+      color: AppGlass.surface(colors),
       child: SafeArea(
         bottom: false,
         child: SizedBox(
@@ -55,7 +67,7 @@ class EditorAppBar extends StatelessWidget implements PreferredSizeWidget {
             child: FocusTraversalGroup(
               policy: OrderedTraversalPolicy(),
               child: NavigationToolbar(
-                centerMiddle: centerTitle,
+                centerMiddle: centerTitle && tabs == null,
                 middleSpacing: AppSpacing.xxs,
                 leading: FocusTraversalOrder(
                   order: const NumericFocusOrder(1),
@@ -64,35 +76,52 @@ class EditorAppBar extends StatelessWidget implements PreferredSizeWidget {
                         ? 'Back to library'
                         : 'Open navigation menu',
                     onPressed: onMenuPressed,
-                    icon: Icon(leadingIsBack ? Icons.arrow_back : Icons.menu),
+                    icon: Icon(
+                      leadingIsBack ? AppIcons.back : AppIcons.sidebar,
+                    ),
                   ),
                 ),
                 middle: FocusTraversalOrder(
                   order: const NumericFocusOrder(2),
-                  child: _TitleButton(title: title, onPressed: onTitlePressed),
+                  child:
+                      tabs ??
+                      _TitleButton(title: title, onPressed: onTitlePressed),
                 ),
-                trailing: Row(
-                  mainAxisSize: MainAxisSize.min,
-                  children: <Widget>[
-                    if (historyControls != null)
-                      FocusTraversalOrder(
-                        order: const NumericFocusOrder(3),
-                        child: FocusTraversalGroup(child: historyControls!),
-                      ),
-                    if (pageControls != null)
-                      FocusTraversalOrder(
-                        order: const NumericFocusOrder(4),
-                        child: FocusTraversalGroup(child: pageControls!),
-                      ),
-                    FocusTraversalOrder(
-                      order: const NumericFocusOrder(5),
-                      child: IconButton(
-                        tooltip: 'More options',
-                        onPressed: onMorePressed,
-                        icon: const Icon(Icons.more_horiz),
-                      ),
+                // Shrinks, rather than overflows, in the tiniest windows,
+                // leaving room for the navigation control and the title.
+                trailing: ConstrainedBox(
+                  constraints: BoxConstraints(
+                    maxWidth: math.max(
+                      0,
+                      barWidth - 2 * AppSizes.minTouchTarget,
                     ),
-                  ],
+                  ),
+                  child: FittedBox(
+                    fit: BoxFit.scaleDown,
+                    child: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: <Widget>[
+                        if (historyControls != null)
+                          FocusTraversalOrder(
+                            order: const NumericFocusOrder(3),
+                            child: FocusTraversalGroup(child: historyControls!),
+                          ),
+                        if (pageControls != null)
+                          FocusTraversalOrder(
+                            order: const NumericFocusOrder(4),
+                            child: FocusTraversalGroup(child: pageControls!),
+                          ),
+                        FocusTraversalOrder(
+                          order: const NumericFocusOrder(5),
+                          child: IconButton(
+                            tooltip: 'Settings',
+                            onPressed: onSettingsPressed,
+                            icon: const Icon(AppIcons.settings),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
                 ),
               ),
             ),

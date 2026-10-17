@@ -33,6 +33,16 @@ NoteContent _sample() {
           InkVector(100.123456789, 0.1),
         ]),
         _stroke(InkPalette.colors[2], 12, const <InkVector>[InkVector(40, 40)]),
+        // Drawn with a tapered tip and pressure: a width factor per point.
+        Stroke.fromPoints(
+          style: const StrokeStyle(ink: InkPalette.ink, width: 4),
+          points: const <InkVector>[
+            InkVector(10, 10),
+            InkVector(20, 12),
+            InkVector(30, 15),
+          ],
+          widths: const <double>[0.25, 1.375, 0.5],
+        ),
       ],
     ),
     StoredPage(
@@ -69,12 +79,26 @@ void _expectSameContent(NoteContent actual, NoteContent expected) {
       expect(a.strokes[s].style.ink, same(e.strokes[s].style.ink));
       expect(a.strokes[s].style.width, e.strokes[s].style.width);
       expect(a.strokes[s].points, e.strokes[s].points);
+      expect(a.strokes[s].widths, e.strokes[s].widths);
       expect(a.strokes[s].source, StrokeSource.derived);
     }
   }
 }
 
 void main() {
+  test(
+    'incremental hydration preserves the same storage representation',
+    () async {
+      final expected = _sample();
+      final json = expected.toJson();
+      final actual = await NoteContent.fromJsonIncrementally(json);
+      expect(actual.toJson(), NoteContent.fromJson(json).toJson());
+      await expectLater(
+        NoteContent.fromJsonIncrementally({'schema': storageSchema + 1}),
+        throwsA(isA<StorageFormatException>()),
+      );
+    },
+  );
   group('NoteContent', () {
     test('round-trips through JSON text exactly', () {
       final NoteContent content = _sample();
@@ -95,6 +119,19 @@ void main() {
         'futureField': <String, Object?>{'a': 1},
       };
       _expectSameContent(NoteContent.fromJson(extra), _sample());
+    });
+
+    test('a stroke whose widths do not fit its points is drawn even', () {
+      final Map<String, Object?> json = _sample().toJson();
+      final List<Object?> pages = json['pages']! as List<Object?>;
+      final Map<String, Object?> page = pages.first! as Map<String, Object?>;
+      final List<Object?> strokes = page['strokes']! as List<Object?>;
+      (strokes.last! as Map<String, Object?>)['widths'] = <double>[1, 2];
+      final NoteContent back = NoteContent.fromJson(
+        jsonDecode(jsonEncode(json)) as Map<String, Object?>,
+      );
+      expect(back.pages.first.strokes.last.widths, isNull);
+      expect(back.pages.first.strokes.last.points, hasLength(3));
     });
 
     test('becomes a document and back', () {
@@ -149,6 +186,25 @@ void main() {
           () => repository.renameNote(inner.id, '   '),
           throwsA(isA<LibraryException>()),
         );
+      });
+
+      test('folders keep their color, and can be recolored', () async {
+        final Folder plain = await repository.createFolder('Plain');
+        expect(plain.color, FolderColor.accent);
+        final Folder green = await repository.createFolder(
+          'Green',
+          parentId: plain.id,
+          color: FolderColor.green,
+        );
+        expect(green.color, FolderColor.green);
+
+        await repository.recolorFolder(plain.id, FolderColor.pink);
+        final Map<String, Folder> folders = <String, Folder>{
+          for (final Folder f in await repository.allFolders()) f.id: f,
+        };
+        expect(folders[plain.id]!.color, FolderColor.pink);
+        expect(folders[green.id]!.color, FolderColor.green);
+        expect(folders[green.id]!.parentId, plain.id);
       });
 
       test('moves notes and folders, never into themselves', () async {
@@ -213,16 +269,96 @@ void main() {
           6,
           8,
         ]);
+        // Deleted, the note keeps its assets until it is deleted for good.
         await repository.deleteNote(copy.id);
+        expect((await repository.readAsset(copy.id, assetId)).bytes, <int>[
+          2,
+          4,
+          6,
+          8,
+        ]);
+        await repository.deleteForever(copy.id);
         await expectLater(
           repository.readAsset(copy.id, assetId),
           throwsA(anything),
         );
         await repository.deleteFolder(folder.id);
+        await repository.emptyTrash();
         await expectLater(
           repository.readAsset(note.id, assetId),
           throwsA(anything),
         );
+      });
+
+      test('deleted notes wait in Recently Deleted until restored', () async {
+        final Folder folder = await repository.createFolder('Kept');
+        final NoteEntry note = await repository.createNote(
+          title: 'Draft',
+          folderId: folder.id,
+        );
+        await repository.saveNote(note.id, _sample());
+        await repository.deleteNote(note.id);
+
+        expect((await repository.list(folder.id)).notes, isEmpty);
+        expect((await repository.search('draft')).notes, isEmpty);
+        expect(await repository.itemCounts(), isNot(contains(folder.id)));
+        final NoteEntry trashed = (await repository.trash()).single;
+        expect(trashed.id, note.id);
+        expect(trashed.deleted, isNotNull);
+        // Its pages are still there.
+        expect(
+          (await repository.loadNote(note.id)).toJson(),
+          _sample().toJson(),
+        );
+
+        await repository.restoreNote(note.id);
+        expect(await repository.trash(), isEmpty);
+        final NoteEntry back = (await repository.list(folder.id)).notes.single;
+        expect(back.id, note.id);
+        expect(back.deleted, isNull);
+      });
+
+      test(
+        'a note whose folder is gone is restored to the top level',
+        () async {
+          final Folder folder = await repository.createFolder('Gone');
+          final NoteEntry note = await repository.createNote(
+            title: 'Orphan',
+            folderId: folder.id,
+          );
+          await repository.deleteFolder(folder.id);
+          expect((await repository.trash()).single.id, note.id);
+
+          await repository.restoreNote(note.id);
+          expect(
+            (await repository.list(null)).notes.map((NoteEntry n) => n.id),
+            <String>[note.id],
+          );
+        },
+      );
+
+      test('deleting for good, emptying, and purging old notes', () async {
+        final NoteEntry a = await repository.createNote(title: 'a');
+        final NoteEntry b = await repository.createNote(title: 'b');
+        final NoteEntry c = await repository.createNote(title: 'c');
+        for (final NoteEntry note in <NoteEntry>[a, b, c]) {
+          await repository.deleteNote(note.id);
+        }
+        await repository.deleteForever(a.id);
+        expect(
+          (await repository.trash()).map((NoteEntry n) => n.id),
+          unorderedEquals(<String>[b.id, c.id]),
+        );
+        await expectLater(
+          repository.loadNote(a.id),
+          throwsA(isA<LibraryException>()),
+        );
+        // Nothing is old enough yet.
+        await repository.purgeTrash(const Duration(days: 30));
+        expect(await repository.trash(), hasLength(2));
+        await repository.purgeTrash(Duration.zero);
+        expect(await repository.trash(), isEmpty);
+        await repository.emptyTrash();
       });
 
       test('deleting a folder removes everything below it', () async {
@@ -244,6 +380,9 @@ void main() {
           (await repository.list(null)).notes.map((NoteEntry n) => n.id),
           <String>[kept.id],
         );
+        // The notes inside went to Recently Deleted, then go for good.
+        expect(await repository.trash(), hasLength(2));
+        await repository.emptyTrash();
         await expectLater(
           repository.loadNote(deep.id),
           throwsA(isA<LibraryException>()),
@@ -282,6 +421,32 @@ void main() {
     });
   }
 
+  test('a folder stored before colors existed reads as the accent', () {
+    final Folder folder = Folder.fromJson(<String, Object?>{
+      'id': 'f',
+      'name': 'Old',
+      'parentId': null,
+      'created': 0,
+      'modified': 0,
+    });
+    expect(folder.color, FolderColor.accent);
+    expect(Folder.fromJson(folder.toJson()).color, FolderColor.accent);
+    expect(
+      Folder.fromJson(<String, Object?>{
+        ...folder.toJson(),
+        'color': 'teal',
+      }).color,
+      FolderColor.teal,
+    );
+    expect(
+      Folder.fromJson(<String, Object?>{
+        ...folder.toJson(),
+        'color': 'ultraviolet',
+      }).color,
+      FolderColor.accent,
+    );
+  });
+
   group('file repository', () {
     late Directory directory;
 
@@ -292,7 +457,10 @@ void main() {
 
     test('reopens from disk with identical content', () async {
       final FileNoteRepository first = await FileNoteRepository.open(directory);
-      final Folder folder = await first.createFolder('Kept');
+      final Folder folder = await first.createFolder(
+        'Kept',
+        color: FolderColor.orange,
+      );
       final NoteEntry note = await first.createNote(
         title: 'Saved',
         folderId: folder.id,
@@ -306,6 +474,7 @@ void main() {
       addTearDown(second.dispose);
       final FolderListing listing = await second.list(folder.id);
       expect(listing.notes.single.title, 'Saved');
+      expect((await second.allFolders()).single.color, FolderColor.orange);
       _expectSameContent(await second.loadNote(note.id), _sample());
       // Every write went through a temporary file that is gone now.
       final List<String> leftovers = <String>[
@@ -315,6 +484,25 @@ void main() {
           if (entity.path.endsWith('.tmp')) entity.path,
       ];
       expect(leftovers, isEmpty);
+    });
+
+    test('Recently Deleted survives reopening, pages and all', () async {
+      final FileNoteRepository first = await FileNoteRepository.open(directory);
+      final NoteEntry note = await first.createNote(title: 'Binned');
+      await first.saveNote(note.id, _sample());
+      await first.deleteNote(note.id);
+      first.dispose();
+
+      final FileNoteRepository second = await FileNoteRepository.open(
+        directory,
+      );
+      addTearDown(second.dispose);
+      expect((await second.list(null)).notes, isEmpty);
+      final NoteEntry trashed = (await second.trash()).single;
+      expect(trashed.title, 'Binned');
+      expect(trashed.deleted, isNotNull);
+      await second.restoreNote(note.id);
+      _expectSameContent(await second.loadNote(note.id), _sample());
     });
 
     test('a corrupt note fails alone', () async {

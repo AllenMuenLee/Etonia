@@ -2,8 +2,10 @@ import 'dart:math' as math;
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/semantics.dart';
 
 import '../../../app/theme/app_tokens.dart';
+import '../../../app/theme/app_icons.dart';
 import '../ink/ink_controller.dart';
 import '../ink/ink_sample.dart';
 import '../ink/ink_selection.dart';
@@ -59,7 +61,14 @@ class SelectionActionBar extends StatefulWidget {
     final int itemCount =
         selection.count +
         selection.imageCount +
+        selection.stickyCount +
         (selection.includesPdf ? 1 : 0);
+    if (selection.stickyCount > 0) {
+      if (itemCount == 1) {
+        return '${selection.stickies.single.label} selected';
+      }
+      return '$itemCount items selected';
+    }
     if (selection.includesPdf && itemCount == 1) {
       return 'PDF excerpt selected';
     }
@@ -146,13 +155,41 @@ class _SelectionActionBarState extends State<SelectionActionBar> {
             PaletteButton(
               tooltip: 'Copy',
               onPressed: widget.onCopy ?? widget.controller.copySelection,
-              child: const Icon(Icons.content_copy),
+              child: const Icon(AppIcons.copy),
             ),
             PaletteButton(
               tooltip: 'Cut',
               onPressed: widget.onCut ?? widget.controller.cutSelection,
-              child: const Icon(Icons.content_cut),
+              child: const Icon(AppIcons.cut),
             ),
+            // A sticky note is removed as a whole only from here: the
+            // eraser never takes its paper.
+            if (selection.stickyCount > 0) ...<Widget>[
+              PaletteButton(
+                tooltip: 'Duplicate',
+                onPressed: widget.controller.duplicateSelection,
+                child: const Icon(AppIcons.duplicate),
+              ),
+              PaletteButton(
+                tooltip: 'Delete',
+                onPressed: () {
+                  final String description =
+                      SelectionActionBar.describeSelection(
+                        selection,
+                      ).replaceFirst(' selected', '');
+                  if (widget.controller.deleteSelection(
+                    expectedSelection: selection,
+                  )) {
+                    SemanticsService.sendAnnouncement(
+                      View.of(context),
+                      '$description deleted',
+                      Directionality.of(context),
+                    );
+                  }
+                },
+                child: const Icon(AppIcons.delete),
+              ),
+            ],
             if (widget.onAiPressed != null)
               PaletteButton(
                 tooltip: 'AI assistant',
@@ -160,8 +197,9 @@ class _SelectionActionBarState extends State<SelectionActionBar> {
                 child: Text(
                   'AI',
                   style: Theme.of(context).textTheme.labelLarge?.copyWith(
-                    color: colors.textPrimary,
+                    color: colors.accent,
                     fontWeight: FontWeight.w700,
+                    letterSpacing: 0.4,
                   ),
                 ),
               ),
@@ -241,7 +279,7 @@ class PastePrompt extends StatelessWidget {
               PaletteButton(
                 tooltip: 'Paste',
                 onPressed: () => onPaste(position),
-                child: const Icon(Icons.content_paste),
+                child: const Icon(AppIcons.paste),
               ),
             ],
           ),
@@ -263,13 +301,9 @@ class _FloatingBar extends StatelessWidget {
     // Opaque, so a press between the buttons stops here too.
     return Listener(
       behavior: HitTestBehavior.opaque,
-      child: DecoratedBox(
-        decoration: BoxDecoration(
-          color: colors.surface,
-          borderRadius: BorderRadius.circular(AppRadii.large),
-          border: Border.all(color: colors.divider, width: AppSizes.hairline),
-          boxShadow: AppShadows.floating(colors),
-        ),
+      child: GlassSurface(
+        borderRadius: BorderRadius.circular(AppRadii.large),
+        boxShadow: AppShadows.floating(colors),
         child: Material(
           type: MaterialType.transparency,
           child: Padding(

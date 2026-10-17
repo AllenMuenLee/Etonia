@@ -1586,13 +1586,9 @@ void main() {
       final Rect canvas = canvasRect(tester);
 
       final Rect palette = tester.getRect(find.byType(ToolPalette));
-      // Ending level with the outside of the frame's right-hand handles,
-      // unless that would put it under the palette floating over the page:
-      // then just clear of it.
-      double expectedRight(Rect bar) => math.max(
-        canvas.left + 222 + 6,
-        palette.right + AppSpacing.xs + bar.width,
-      );
+      // Ending level with the outside of the frame's right-hand handles;
+      // the palette floats across the top, clear of it.
+      double expectedRight(Rect bar) => canvas.left + 222 + 6;
 
       // Above the rotation handle.
       Rect bar = _actionBarRect(tester);

@@ -43,8 +43,10 @@ Future<InkController> pumpEditor(
   return controller;
 }
 
-/// The canvas bounds in global logical pixels.
-Rect canvasRect(WidgetTester tester) => tester.getRect(find.byType(InkCanvas));
+/// The first page's canvas bounds in global logical pixels. Writing low
+/// on the last page adds another canvas below it.
+Rect canvasRect(WidgetTester tester) =>
+    tester.getRect(find.byType(InkCanvas).first);
 
 /// A snapshot of the whole screen. At the test pixel ratio of 1, pixel
 /// coordinates equal global logical coordinates.

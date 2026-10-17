@@ -153,4 +153,18 @@ void main() {
       matchesGoldenFile('goldens/pen_options_tablet_landscape_light.png'),
     );
   });
+
+  testWidgets('pen advanced: tablet_landscape_light', (
+    WidgetTester tester,
+  ) async {
+    await _pump(tester, const PageSetup());
+    await tester.tap(find.byTooltip('Pen'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const ValueKey<String>('pen-advanced-toggle')));
+    await tester.pumpAndSettle();
+    await expectLater(
+      find.byType(GreatnoteApp),
+      matchesGoldenFile('goldens/pen_advanced_tablet_landscape_light.png'),
+    );
+  });
 }

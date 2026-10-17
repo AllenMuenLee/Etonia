@@ -3,7 +3,9 @@ import 'dart:typed_data';
 import 'dart:ui';
 
 import 'package:flutter_test/flutter_test.dart';
+import 'package:greatnote/features/editor/ai/ai_canvas_input.dart';
 import 'package:greatnote/features/editor/ai/ai_client.dart';
+import 'package:greatnote/features/editor/ai/canvas_text_recognizer.dart';
 import 'package:greatnote/features/editor/ai/ai_notation.dart';
 import 'package:greatnote/features/editor/ai/note_image_renderer.dart';
 import 'package:greatnote/features/editor/ai/selection_image_renderer.dart';
@@ -138,5 +140,47 @@ Future<void> settleAi(WidgetTester tester) async {
       () => Future<void>.delayed(const Duration(milliseconds: 20)),
     );
     await tester.pump();
+  }
+}
+
+/// Draws no native image: a handwriting batch with a few marker bytes, so
+/// widget tests need no real time to render it.
+class FakeHandwritingImageRenderer extends HandwritingImageRenderer {
+  FakeHandwritingImageRenderer();
+
+  /// Every batch of strokes it was asked to draw.
+  final List<List<AiCanvasStroke>> batches = <List<AiCanvasStroke>>[];
+
+  @override
+  Future<HandwritingBatch> render(List<AiCanvasStroke> strokes) async {
+    batches.add(strokes);
+    Rect bounds = strokes.first.bounds;
+    for (final AiCanvasStroke stroke in strokes.skip(1)) {
+      bounds = bounds.expandToInclude(stroke.bounds);
+    }
+    return HandwritingBatch(
+      strokes: strokes,
+      png: Uint8List.fromList(<int>[0x89, 0x50, 0x4E, 0x47, batches.length]),
+      pixelSize: bounds.size,
+      logicalBounds: bounds,
+    );
+  }
+}
+
+/// Reads every batch as [text], with no platform channel, and records what
+/// it was shown.
+class FakeCanvasTextRecognizer implements CanvasTextRecognizer {
+  FakeCanvasTextRecognizer({this.text = 'recognized words'});
+
+  /// What the next batches are read as.
+  String text;
+
+  /// Every batch it was asked to read, in order.
+  final List<HandwritingBatch> batches = <HandwritingBatch>[];
+
+  @override
+  Future<String> recognize(HandwritingBatch batch) async {
+    batches.add(batch);
+    return text;
   }
 }

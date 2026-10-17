@@ -1,10 +1,18 @@
 import 'dart:math' as math;
 
+import 'dart:async' show unawaited;
+
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:gpt_markdown/gpt_markdown.dart';
+import 'package:speech_to_text/speech_recognition_error.dart';
+import 'package:speech_to_text/speech_recognition_result.dart';
+import 'package:speech_to_text/speech_to_text.dart';
 
+import '../../../shared/widgets/processing.dart';
 import '../../../app/theme/app_tokens.dart';
+import '../../../app/theme/app_icons.dart';
+import '../../../shared/widgets/app_controls.dart';
 import '../ai/ai_assistant_controller.dart';
 import '../ai/ai_client.dart';
 import '../ai/ai_config.dart';
@@ -32,6 +40,12 @@ class AiAssistantPanel extends StatefulWidget {
   static const String emptyState =
       'Choose a quick action or ask a question about the selected ink.';
   static const String composerHint = 'Ask about the selected ink';
+
+  /// Shown in place of the selection when AI mode is on with nothing chosen
+  /// yet.
+  static const String noContextPrompt =
+      'Circle a spot on the note to ask about it, or write your question '
+      'on the page.';
   static const String notConfigured =
       'AI is not set up. Start the app with '
       '--dart-define=${AiApiConfig.environmentKey}=<your key> to send '
@@ -60,9 +74,12 @@ class _AiAssistantPanelState extends State<AiAssistantPanel> {
   );
   final FocusNode _composerFocus = FocusNode(debugLabel: 'AI composer');
   final ScrollController _scroll = ScrollController();
+  final SpeechToText _speech = SpeechToText();
   int _shownMessages = 0;
   String? _shownPartial;
   AiRequestState _shownState = AiRequestState.idle;
+  bool _listening = false;
+  String _voicePrefix = '';
 
   /// Whether the composer had the keyboard when the panel was lifted out of
   /// the tree to be put somewhere else in it.
@@ -111,6 +128,7 @@ class _AiAssistantPanelState extends State<AiAssistantPanel> {
   @override
   void dispose() {
     widget.controller.removeListener(_onControllerChanged);
+    unawaited(_speech.cancel());
     _text.dispose();
     _composerFocus.dispose();
     _scroll.dispose();
@@ -129,6 +147,13 @@ class _AiAssistantPanelState extends State<AiAssistantPanel> {
 
   void _onControllerChanged() {
     final AiAssistantController controller = widget.controller;
+    // Words written on the page arrive in the draft; the caret follows them.
+    if (controller.draft != _text.text) {
+      _text.value = TextEditingValue(
+        text: controller.draft,
+        selection: TextSelection.collapsed(offset: controller.draft.length),
+      );
+    }
     if (controller.messages.length != _shownMessages ||
         controller.requestState != _shownState) {
       _shownMessages = controller.messages.length;
@@ -164,6 +189,69 @@ class _AiAssistantPanelState extends State<AiAssistantPanel> {
     }
   }
 
+  Future<void> _toggleVoiceInput() async {
+    if (_listening) {
+      await _speech.stop();
+      if (mounted) setState(() => _listening = false);
+      return;
+    }
+
+    final bool available = await _speech.initialize(
+      onStatus: _onSpeechStatus,
+      onError: _onSpeechError,
+    );
+    if (!mounted) return;
+    if (!available) {
+      ScaffoldMessenger.maybeOf(context)?.showSnackBar(
+        const SnackBar(
+          content: Text('Voice input is unavailable. Check microphone access.'),
+        ),
+      );
+      return;
+    }
+
+    _voicePrefix = _text.text.trimRight();
+    setState(() => _listening = true);
+    await _speech.listen(
+      onResult: _onSpeechResult,
+      listenOptions: SpeechListenOptions(
+        partialResults: true,
+        cancelOnError: true,
+        listenMode: ListenMode.dictation,
+      ),
+    );
+  }
+
+  void _onSpeechResult(SpeechRecognitionResult result) {
+    if (!mounted) return;
+    final String words = result.recognizedWords.trim();
+    final String separator = _voicePrefix.isEmpty || words.isEmpty ? '' : ' ';
+    final String value = '$_voicePrefix$separator$words';
+    _text.value = TextEditingValue(
+      text: value,
+      selection: TextSelection.collapsed(offset: value.length),
+    );
+    if (result.finalResult) _composerFocus.requestFocus();
+  }
+
+  void _onSpeechStatus(String status) {
+    if (mounted && status != 'listening' && _listening) {
+      setState(() => _listening = false);
+    }
+  }
+
+  void _onSpeechError(SpeechRecognitionError error) {
+    if (!mounted) return;
+    setState(() => _listening = false);
+    if (error.permanent) {
+      ScaffoldMessenger.maybeOf(context)?.showSnackBar(
+        const SnackBar(
+          content: Text('Voice input needs microphone and speech access.'),
+        ),
+      );
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     final AppColors colors = AppColors.of(context);
@@ -175,7 +263,7 @@ class _AiAssistantPanelState extends State<AiAssistantPanel> {
         const SingleActivator(LogicalKeyboardKey.escape): widget.onClose,
       },
       child: Material(
-        color: colors.surface,
+        color: AppGlass.surface(colors),
         // Each part of the panel is its own node for a screen reader.
         child: Semantics(
           container: true,
@@ -218,28 +306,25 @@ class _AiAssistantPanelState extends State<AiAssistantPanel> {
                 Padding(
                   padding: const EdgeInsets.fromLTRB(
                     AppSpacing.md,
-                    AppSpacing.xs,
+                    AppSpacing.sm,
                     AppSpacing.md,
                     0,
                   ),
                   child: Wrap(
                     spacing: AppSpacing.xs,
+                    runSpacing: AppSpacing.xs,
                     children: <Widget>[
                       for (final AiQuickAction action in AiQuickAction.values)
                         OutlinedButton(
                           style: OutlinedButton.styleFrom(
                             foregroundColor: colors.textPrimary,
-                            side: BorderSide(
-                              color: colors.divider,
-                              width: AppSizes.hairline,
-                            ),
-                            shape: RoundedRectangleBorder(
-                              borderRadius: BorderRadius.circular(
-                                AppRadii.medium,
-                              ),
-                            ),
+                            backgroundColor: AppGlass.muted(colors),
+                            side: BorderSide.none,
+                            minimumSize: const Size(0, 36),
+                            shape: const StadiumBorder(),
+                            textStyle: Theme.of(context).textTheme.labelLarge,
                             padding: const EdgeInsets.symmetric(
-                              horizontal: AppSpacing.sm,
+                              horizontal: AppSpacing.md - 2,
                             ),
                           ),
                           onPressed: canSend
@@ -254,6 +339,10 @@ class _AiAssistantPanelState extends State<AiAssistantPanel> {
                   text: _text,
                   focusNode: _composerFocus,
                   maxLines: widget.config.composerMaxLines,
+                  listening: _listening,
+                  processing:
+                      widget.controller.requestState == AiRequestState.sending,
+                  onVoiceInput: canSend ? _toggleVoiceInput : null,
                   onSend: canSend && _text.text.trim().isNotEmpty
                       ? _send
                       : null,
@@ -278,13 +367,19 @@ class _AiAssistantPanelState extends State<AiAssistantPanel> {
           selection: selection,
           maxHeight: widget.config.previewMaxHeight,
         ),
+      if (selection == null)
+        Text(
+          AiAssistantPanel.noContextPrompt,
+          key: const ValueKey<String>('ai-no-context-prompt'),
+          style: text.bodyMedium?.copyWith(color: colors.textSecondary),
+        ),
       const SizedBox(height: AppSpacing.xs),
       if (!controller.isConfigured) ...<Widget>[
         gap,
         const _Notice(message: AiAssistantPanel.notConfigured),
       ],
       gap,
-      if (controller.messages.isEmpty)
+      if (selection != null && controller.messages.isEmpty)
         Text(
           AiAssistantPanel.emptyState,
           style: text.bodyMedium?.copyWith(color: colors.textSecondary),
@@ -307,14 +402,9 @@ class _AiAssistantPanelState extends State<AiAssistantPanel> {
             ),
           ),
       if (controller.requestState == AiRequestState.sending) ...<Widget>[
-        Padding(
-          padding: const EdgeInsets.symmetric(vertical: AppSpacing.xs),
-          child: LinearProgressIndicator(
-            semanticsLabel: 'Waiting for the AI service',
-            color: colors.accent,
-            backgroundColor: colors.divider,
-            borderRadius: BorderRadius.circular(AppRadii.small),
-          ),
+        const Padding(
+          padding: EdgeInsets.symmetric(vertical: AppSpacing.xs),
+          child: ShimmerTrack(semanticsLabel: 'Waiting for the AI service'),
         ),
       ],
       if (controller.failure case final AiFailure failure)
@@ -343,17 +433,18 @@ class _Header extends StatelessWidget {
     return Padding(
       padding: const EdgeInsetsDirectional.only(
         start: AppSpacing.md,
-        end: AppSpacing.xxs,
-        top: AppSpacing.xxs,
-        bottom: AppSpacing.xxs,
+        end: AppSpacing.xs,
+        top: AppSpacing.xs,
+        bottom: AppSpacing.xs,
       ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
+      child: Row(
         children: <Widget>[
-          Row(
-            children: <Widget>[
-              Expanded(
-                child: Semantics(
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisSize: MainAxisSize.min,
+              children: <Widget>[
+                Semantics(
                   header: true,
                   child: Text(
                     AiAssistantPanel.title,
@@ -362,22 +453,20 @@ class _Header extends StatelessWidget {
                     overflow: TextOverflow.ellipsis,
                   ),
                 ),
-              ),
-              IconButton(
-                tooltip: 'Close AI assistant',
-                onPressed: onClose,
-                icon: const Icon(Icons.close),
-              ),
-            ],
-          ),
-          Padding(
-            padding: const EdgeInsetsDirectional.only(end: AppSpacing.sm),
-            child: Text(
-              modelLabel,
-              style: text.labelMedium,
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
+                const SizedBox(height: 2),
+                Text(
+                  modelLabel,
+                  style: text.labelMedium,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                ),
+              ],
             ),
+          ),
+          CompactIconButton(
+            tooltip: 'Close AI assistant',
+            onPressed: onClose,
+            icon: AppIcons.close,
           ),
         ],
       ),
@@ -400,7 +489,7 @@ class _Preview extends StatelessWidget {
     final AppColors colors = AppColors.of(context);
     final TextTheme text = Theme.of(context).textTheme;
     final SelectionImage? image = selection.image;
-    final BorderRadius radius = BorderRadius.circular(AppRadii.medium);
+    final BorderRadius radius = BorderRadius.circular(AppRadii.large);
 
     return LayoutBuilder(
       builder: (BuildContext context, BoxConstraints constraints) {
@@ -476,13 +565,9 @@ class _SelectionChoice extends StatelessWidget {
       container: true,
       explicitChildNodes: true,
       liveRegion: true,
-      child: DecoratedBox(
-        decoration: BoxDecoration(
-          color: colors.surface,
-          borderRadius: BorderRadius.circular(AppRadii.medium),
-          border: Border.all(color: colors.divider, width: AppSizes.hairline),
-          boxShadow: AppShadows.floating(colors),
-        ),
+      child: GlassSurface(
+        borderRadius: BorderRadius.circular(AppRadii.large),
+        boxShadow: AppShadows.floating(colors),
         child: Padding(
           padding: const EdgeInsetsDirectional.only(
             start: AppSpacing.sm,
@@ -551,10 +636,17 @@ class _Notice extends StatelessWidget {
       liveRegion: true,
       child: DecoratedBox(
         decoration: BoxDecoration(
-          color: colors.background,
-          borderRadius: BorderRadius.circular(AppRadii.medium),
+          color: isError
+              ? Color.alphaBlend(
+                  colors.danger.withValues(alpha: 0.08),
+                  colors.surface,
+                )
+              : colors.surfaceMuted,
+          borderRadius: BorderRadius.circular(AppRadii.large),
           border: Border.all(
-            color: isError ? theme.colorScheme.error : colors.divider,
+            color: isError
+                ? colors.danger.withValues(alpha: 0.35)
+                : Colors.transparent,
             width: AppSizes.hairline,
           ),
         ),
@@ -632,23 +724,27 @@ class _MessageBubble extends StatelessWidget {
           const SizedBox(height: AppSpacing.xxs),
           Padding(
             padding: EdgeInsetsDirectional.only(
-              start: fromUser ? AppSpacing.lg : 0,
-              end: fromUser ? 0 : AppSpacing.lg,
+              start: fromUser ? AppSpacing.xl : 0,
             ),
+            // The user's words on a tinted bubble; the assistant's set
+            // straight on the panel, like a page.
             child: DecoratedBox(
               decoration: BoxDecoration(
-                color: fromUser ? colors.selected : colors.surface,
-                borderRadius: BorderRadius.circular(AppRadii.medium),
-                border: Border.all(
-                  color: fromUser ? colors.selected : colors.divider,
-                  width: AppSizes.hairline,
-                ),
+                color: fromUser ? colors.selected : null,
+                borderRadius: const BorderRadiusDirectional.only(
+                  topStart: Radius.circular(AppRadii.large),
+                  topEnd: Radius.circular(AppRadii.small),
+                  bottomStart: Radius.circular(AppRadii.large),
+                  bottomEnd: Radius.circular(AppRadii.large),
+                ).resolve(Directionality.of(context)),
               ),
               child: Padding(
-                padding: const EdgeInsets.symmetric(
-                  horizontal: AppSpacing.sm,
-                  vertical: AppSpacing.xs,
-                ),
+                padding: fromUser
+                    ? const EdgeInsets.symmetric(
+                        horizontal: AppSpacing.sm + 2,
+                        vertical: AppSpacing.xs,
+                      )
+                    : EdgeInsets.zero,
                 child: fromUser
                     ? Text(message.displayText, style: text.bodyMedium)
                     : SelectionArea(
@@ -677,12 +773,22 @@ class _Composer extends StatelessWidget {
     required this.text,
     required this.focusNode,
     required this.maxLines,
+    required this.listening,
+    required this.processing,
+    required this.onVoiceInput,
     required this.onSend,
   });
 
   final TextEditingController text;
   final FocusNode focusNode;
   final int maxLines;
+  final bool listening;
+
+  /// Whether an answer is on its way; the field breathes a soft glow.
+  final bool processing;
+
+  /// Starts or stops dictation into the message field.
+  final VoidCallback? onVoiceInput;
 
   /// Null while there is nothing to send, or nothing can be sent.
   final VoidCallback? onSend;
@@ -693,7 +799,7 @@ class _Composer extends StatelessWidget {
     final TextTheme textTheme = Theme.of(context).textTheme;
     OutlineInputBorder border(Color color, double width) {
       return OutlineInputBorder(
-        borderRadius: BorderRadius.circular(AppRadii.medium),
+        borderRadius: BorderRadius.circular(AppRadii.large + 6),
         borderSide: BorderSide(color: color, width: width),
       );
     }
@@ -702,52 +808,80 @@ class _Composer extends StatelessWidget {
     return Padding(
       padding: const EdgeInsetsDirectional.only(
         start: AppSpacing.md,
-        end: AppSpacing.xxs,
-        top: AppSpacing.xs,
-        bottom: AppSpacing.xs,
+        end: AppSpacing.xs,
+        top: AppSpacing.sm,
+        bottom: AppSpacing.sm,
       ),
       child: Row(
         crossAxisAlignment: CrossAxisAlignment.end,
         children: <Widget>[
           Expanded(
-            child: CallbackShortcuts(
-              bindings: <ShortcutActivator, VoidCallback>{
-                const SingleActivator(LogicalKeyboardKey.enter, control: true):
-                    send,
-                const SingleActivator(LogicalKeyboardKey.enter, meta: true):
-                    send,
-              },
-              child: TextField(
-                controller: text,
-                focusNode: focusNode,
-                minLines: 1,
-                maxLines: maxLines,
-                keyboardType: TextInputType.multiline,
-                textInputAction: TextInputAction.newline,
-                textCapitalization: TextCapitalization.sentences,
-                style: textTheme.bodyMedium,
-                cursorColor: colors.accent,
-                decoration: InputDecoration(
-                  hintText: AiAssistantPanel.composerHint,
-                  hintMaxLines: 1,
-                  hintStyle: textTheme.bodyMedium?.copyWith(
-                    color: colors.textSecondary,
+            child: AmbientGlow(
+              active: processing,
+              borderRadius: BorderRadius.circular(AppRadii.large + 6),
+              child: CallbackShortcuts(
+                bindings: <ShortcutActivator, VoidCallback>{
+                  const SingleActivator(
+                    LogicalKeyboardKey.enter,
+                    control: true,
+                  ): send,
+                  const SingleActivator(LogicalKeyboardKey.enter, meta: true):
+                      send,
+                },
+                child: TextField(
+                  controller: text,
+                  focusNode: focusNode,
+                  minLines: 1,
+                  maxLines: maxLines,
+                  keyboardType: TextInputType.multiline,
+                  textInputAction: TextInputAction.newline,
+                  textCapitalization: TextCapitalization.sentences,
+                  style: textTheme.bodyMedium,
+                  cursorColor: colors.accent,
+                  decoration: InputDecoration(
+                    hintText: AiAssistantPanel.composerHint,
+                    hintMaxLines: 1,
+                    hintStyle: textTheme.bodyMedium?.copyWith(
+                      color: colors.textSecondary,
+                    ),
+                    isDense: true,
+                    constraints: const BoxConstraints(
+                      minHeight: AppSizes.minTouchTarget,
+                    ),
+                    contentPadding: const EdgeInsets.symmetric(
+                      horizontal: AppSpacing.md,
+                      vertical: AppSpacing.sm,
+                    ),
+                    border: border(Colors.transparent, AppSizes.hairline),
+                    enabledBorder: border(
+                      Colors.transparent,
+                      AppSizes.hairline,
+                    ),
+                    focusedBorder: border(
+                      colors.focus,
+                      AppSizes.focusRingWidth,
+                    ),
                   ),
-                  isDense: true,
-                  constraints: const BoxConstraints(
-                    minHeight: AppSizes.minTouchTarget,
-                  ),
-                  contentPadding: const EdgeInsets.all(AppSpacing.sm),
-                  enabledBorder: border(colors.divider, AppSizes.hairline),
-                  focusedBorder: border(colors.focus, AppSizes.focusRingWidth),
                 ),
               ),
             ),
           ),
-          IconButton(
+          CompactIconButton(
+            tooltip: listening ? 'Stop voice input' : 'Start voice input',
+            onPressed: onVoiceInput,
+            icon: listening ? AppIcons.microphoneActive : AppIcons.microphone,
+            background: listening ? colors.danger : AppGlass.muted(colors),
+            foreground: listening ? colors.onAccent : colors.textPrimary,
+            size: 40,
+          ),
+          const SizedBox(width: AppSpacing.xxs),
+          CompactIconButton(
             tooltip: 'Send',
             onPressed: onSend,
-            icon: const Icon(Icons.send),
+            icon: AppIcons.send,
+            background: colors.accent,
+            foreground: colors.onAccent,
+            size: 40,
           ),
         ],
       ),

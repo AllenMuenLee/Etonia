@@ -7,6 +7,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:greatnote/features/editor/document_io/document_models.dart';
 import 'package:greatnote/features/editor/document_io/document_platform.dart';
 import 'package:greatnote/features/editor/document_io/pdf_page_layer.dart';
+import 'package:greatnote/shared/widgets/processing.dart';
 
 /// Renders a small PNG, and holds every render after the first until
 /// [release] is called.
@@ -42,6 +43,40 @@ class _GatedRasterizer implements PdfRasterizer {
   }
 }
 
+class _DirectImageRasterizer implements PdfRasterizer, PdfImageRasterizer {
+  int byteRenders = 0;
+  int imageRenders = 0;
+
+  @override
+  Future<PdfInspection> inspect(Uint8List bytes) async {
+    return const PdfInspection(pageSizes: <Size>[Size(612, 792)]);
+  }
+
+  @override
+  Future<RasterizedPdfPage> render(
+    Uint8List bytes,
+    int pageIndex, {
+    required int pixelWidth,
+    required int pixelHeight,
+  }) async {
+    byteRenders++;
+    throw StateError('The encoded path should not be used for display.');
+  }
+
+  @override
+  Future<ui.Image> renderImage(
+    Uint8List bytes,
+    int pageIndex, {
+    required int pixelWidth,
+    required int pixelHeight,
+  }) async {
+    imageRenders++;
+    final ui.PictureRecorder recorder = ui.PictureRecorder();
+    Canvas(recorder).drawColor(const Color(0xFF336699), BlendMode.src);
+    return recorder.endRecording().toImage(pixelWidth, pixelHeight);
+  }
+}
+
 Future<Uint8List> _png() async {
   final ui.PictureRecorder recorder = ui.PictureRecorder();
   Canvas(recorder).drawRect(
@@ -57,6 +92,42 @@ Future<Uint8List> _png() async {
 }
 
 void main() {
+  testWidgets('PDF display uses direct images instead of a PNG round trip', (
+    WidgetTester tester,
+  ) async {
+    final _DirectImageRasterizer rasterizer = _DirectImageRasterizer();
+    final PdfPageRenderCache cache = PdfPageRenderCache(
+      readAsset: (String _) async => Uint8List(1),
+      rasterizer: rasterizer,
+    );
+    addTearDown(cache.clear);
+
+    await tester.pumpWidget(
+      Directionality(
+        textDirection: TextDirection.ltr,
+        child: SizedBox(
+          width: 20,
+          height: 20,
+          child: PdfPageLayer(
+            source: const PdfPageSource(
+              assetId: 'pdf',
+              pageIndex: 0,
+              pageSize: Size(20, 20),
+            ),
+            displayedSize: const Size(20, 20),
+            cache: cache,
+          ),
+        ),
+      ),
+    );
+    await tester.runAsync(() => Future<void>.delayed(Duration.zero));
+    await tester.pump();
+
+    expect(find.byType(RawImage), findsOneWidget);
+    expect(rasterizer.imageRenders, 1);
+    expect(rasterizer.byteRenders, 0);
+  });
+
   testWidgets('a resized PDF page keeps showing its paper while the sharper '
       'render loads', (WidgetTester tester) async {
     final Uint8List png = (await tester.runAsync(_png))!;
@@ -103,7 +174,7 @@ void main() {
     await tester.pump();
     expect(rasterizer.renders, 2);
     expect(find.byType(RawImage), findsOneWidget);
-    expect(find.byType(CircularProgressIndicator), findsNothing);
+    expect(find.byType(ShimmerPlaceholder), findsNothing);
 
     rasterizer.release();
     await tester.runAsync(

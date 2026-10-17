@@ -84,10 +84,13 @@ A note is a sequence of one or more pages. Each page has its own page setup, mad
 
 - Use width-based breakpoints defined in one place; do not branch based on device model or operating system.
 - The writing surface always fills the whole area below the app bar at every breakpoint; the palette floats above it, inset from the surface's edge by a small margin, and never shrinks it.
-- At expanded widths (`>= 840` logical pixels), float the tool palette vertically near the top of the writing surface's leading edge (24 px inset) and keep the title centered in the app bar.
-- At medium widths (`600-839`), use a compact vertical palette with a smaller inset (8 px).
-- Below `600`, use a horizontal palette floating centered along the bottom of the writing surface (4 px inset) as a functional fallback.
-- Pointer input on the palette goes to the palette, never to the page below it. Anything else that floats over the page (later: selection actions, Paste) moves clear of the palette rather than sitting under it.
+- The tool palette is a floating, draggable bar. By default it is docked centered across the top of the writing surface, at every breakpoint.
+- The palette has a grip at its start (a drag handle, labelled "Move tools, docked at the …" for screen readers). Dragging the grip moves the palette with the pointer; while it is held, it lies along the surface edge nearest to it, and when let go it docks against that edge (top, bottom, left, or right), keeping its position along the edge. It never leaves the surface.
+- Its orientation follows the edge it is docked at: a horizontal row along the top and bottom, a vertical column down the left and right sides. Its popovers open toward the page: below a top palette, above a bottom one, and beside a side one.
+- Assistive technology can dock the palette at each other edge through custom semantic actions ("Move tools to the left", …) instead of dragging.
+- The placement is kept for the session and shared from note to note; it uses physical edges, so right-to-left layouts do not mirror it.
+- The inset from the docked edge depends on the width: 24 px at expanded widths (`>= 840` logical pixels, where the title is also centered in the app bar), 8 px with a dense palette at medium widths (`600-839`), and 4 px below `600`.
+- Pointer input on the palette goes to the palette, never to the page below it; dragging the palette never draws. Anything else that floats over the page (later: selection actions, Paste) moves clear of the palette rather than sitting under it.
 - Respect safe areas, display cutouts, keyboard insets, and system navigation areas.
 - Support portrait and landscape transitions without losing UI state or producing overflow.
 - Do not cap the width of the writing surface or the app bar on very wide windows; both span the window.
@@ -96,7 +99,7 @@ A note is a sequence of one or more pages. Each page has its own page setup, mad
 
 - All interactive controls must have visible hover, focus, pressed, selected, and disabled states where applicable.
 - Use tooltips for icon-only controls.
-- Use short, subtle animations for palette relocation, selection, and popover appearance. Honor the platform's reduced-motion/accessibility setting.
+- Use short, subtle animations for palette relocation (the palette glides to its dock when let go, and follows the pointer without delay while dragged), selection, and popover appearance. Honor the platform's reduced-motion/accessibility setting.
 - Do not use animation on the future ink-rendering path.
 - Keep every touch target at least 48 by 48 logical pixels, even when the visible icon is smaller.
 - Make keyboard traversal logical and expose semantic labels for screen readers.
@@ -112,7 +115,7 @@ Use placeholder callbacks and view state so the controls are interactive enough 
 - Add widget tests at `390 x 844`, `800 x 1280`, and `1194 x 834` logical pixels.
 - Test both light and dark themes at a representative tablet size.
 - Verify that no overflow occurs after rotating between portrait and landscape.
-- Verify palette orientation and placement at each breakpoint, that the writing surface spans the full width and the full height below the app bar at every breakpoint and on a very wide window, and that the palette lies inside the surface.
+- Verify palette orientation and placement at each breakpoint (docked centered across the top by default), that dragging it to each edge docks it there with the matching orientation, that it stays where it was let go along its edge, that dragging never draws, that the semantic move actions work, that the writing surface spans the full width and the full height below the app bar at every breakpoint and on a very wide window, and that the palette lies inside the surface.
 - Verify semantics labels, tooltips, minimum tap-target dimensions, keyboard focus order, and selected state.
 - Add or update stable golden tests for the primary screen in:
   - tablet portrait, light theme;

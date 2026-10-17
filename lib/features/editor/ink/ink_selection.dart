@@ -6,6 +6,7 @@ import 'selection_geometry.dart';
 import 'selection_transform.dart';
 import 'stroke.dart';
 import '../document_io/document_models.dart';
+import '../sticky/sticky_note.dart';
 
 /// The strokes picked by a lasso, and how many got past the bounds check.
 class StrokeSelectionResult {
@@ -85,11 +86,43 @@ SelectionFrame frameAround(Iterable<Stroke> strokes) {
   return SelectionFrame.fromBounds(left, top, right, bottom);
 }
 
+/// Sticky-note indices whose rotated paper overlaps [region], in paint
+/// order.
+List<int> selectStickyNotes(List<StickyNoteElement> notes, LassoRegion region) {
+  return <int>[
+    for (int i = 0; i < notes.length; i++)
+      if (region.overlapsBounds(
+            notes[i].bounds.left,
+            notes[i].bounds.top,
+            notes[i].bounds.right,
+            notes[i].bounds.bottom,
+          ) &&
+          region.overlapsPolygon(notes[i].corners))
+        i,
+  ];
+}
+
+/// The frame around [strokes], [images], [stickies], and [pdfBounds]. One
+/// sticky note on its own gets a frame that turns with it, so its handles
+/// sit on its corners.
 SelectionFrame frameAroundContent(
   Iterable<Stroke> strokes,
   Iterable<NoteImageElement> images, {
   Rect? pdfBounds,
+  Iterable<StickyNoteElement> stickies = const <StickyNoteElement>[],
 }) {
+  if (strokes.isEmpty &&
+      images.isEmpty &&
+      pdfBounds == null &&
+      stickies.length == 1) {
+    final StickyNoteElement note = stickies.first;
+    return SelectionFrame(
+      center: note.center,
+      halfWidth: note.size.width / 2,
+      halfHeight: note.size.height / 2,
+      angle: note.rotation,
+    );
+  }
   double left = double.infinity;
   double top = double.infinity;
   double right = double.negativeInfinity;
@@ -105,6 +138,13 @@ SelectionFrame frameAroundContent(
     top = math.min(top, image.bounds.top);
     right = math.max(right, image.bounds.right);
     bottom = math.max(bottom, image.bounds.bottom);
+  }
+  for (final StickyNoteElement note in stickies) {
+    final Rect bounds = note.bounds;
+    left = math.min(left, bounds.left);
+    top = math.min(top, bounds.top);
+    right = math.max(right, bounds.right);
+    bottom = math.max(bottom, bounds.bottom);
   }
   if (pdfBounds != null) {
     left = math.min(left, pdfBounds.left);
@@ -123,17 +163,25 @@ class InkSelection {
     required List<Stroke> strokes,
     List<int> imageIndices = const <int>[],
     List<NoteImageElement> images = const <NoteImageElement>[],
+    List<int> stickyIndices = const <int>[],
+    List<StickyNoteElement> stickies = const <StickyNoteElement>[],
     this.pdfBounds,
     required this.frame,
   }) : assert(indices.length == strokes.length),
        assert(imageIndices.length == images.length),
+       assert(stickyIndices.length == stickies.length),
        assert(
-         indices.isNotEmpty || imageIndices.isNotEmpty || pdfBounds != null,
+         indices.isNotEmpty ||
+             imageIndices.isNotEmpty ||
+             stickyIndices.isNotEmpty ||
+             pdfBounds != null,
        ),
        indices = List<int>.unmodifiable(indices),
        strokes = List<Stroke>.unmodifiable(strokes),
        imageIndices = List<int>.unmodifiable(imageIndices),
-       images = List<NoteImageElement>.unmodifiable(images);
+       images = List<NoteImageElement>.unmodifiable(images),
+       stickyIndices = List<int>.unmodifiable(stickyIndices),
+       stickies = List<StickyNoteElement>.unmodifiable(stickies);
 
   /// Where the selected strokes are in the document, ascending. Selection
   /// goes by position, never by comparing geometry.
@@ -144,6 +192,11 @@ class InkSelection {
   final List<Stroke> strokes;
   final List<int> imageIndices;
   final List<NoteImageElement> images;
+
+  /// Where the selected sticky notes are on the page, ascending, and the
+  /// notes themselves, each with its own ink.
+  final List<int> stickyIndices;
+  final List<StickyNoteElement> stickies;
 
   /// The page-local rectangle of PDF paper enclosed by the lasso. The PDF
   /// remains immutable; Copy or Cut rasterizes this rectangle and puts the
@@ -156,29 +209,39 @@ class InkSelection {
 
   int get count => indices.length;
   int get imageCount => imageIndices.length;
+  int get stickyCount => stickyIndices.length;
   bool get includesPdf => pdfBounds != null;
 }
 
 /// One stroke on the clipboard: its look and its points, and nothing that
 /// belongs to the document.
 class ClipboardStroke {
-  ClipboardStroke._(this.style, this.points);
+  ClipboardStroke._(this.style, this.points, this.widths);
 
   factory ClipboardStroke.of(Stroke stroke) {
     return ClipboardStroke._(
-      StrokeStyle(ink: stroke.style.ink, width: stroke.style.width),
+      stroke.style,
       List<InkVector>.unmodifiable(stroke.points),
+      stroke.widths,
     );
   }
 
   final StrokeStyle style;
   final List<InkVector> points;
+
+  /// The width factor at each point, or null for an even stroke.
+  final List<double>? widths;
 }
 
 /// Ink copied or cut in this editor session. It is a snapshot in Greatnote's
 /// own stroke model, kept in memory and never offered to other applications.
 class InkClipboard {
-  InkClipboard._(this.strokes, this.images, this.frame);
+  InkClipboard._(
+    this.strokes,
+    this.images,
+    this.frame, [
+    this.stickies = const <StickyNoteElement>[],
+  ]);
 
   /// Snapshots [selection] as it is now.
   factory InkClipboard.of(
@@ -194,6 +257,7 @@ class InkClipboard {
         ...selection.images,
       ]),
       selection.frame,
+      List<StickyNoteElement>.unmodifiable(selection.stickies),
     );
   }
 
@@ -203,6 +267,9 @@ class InkClipboard {
 
   /// The copied selection's frame.
   final SelectionFrame frame;
+
+  /// The copied sticky notes, with their ink; pasted with fresh ids.
+  final List<StickyNoteElement> stickies;
 
   /// Rebuilds this clipboard for another note, replacing source asset ids
   /// with ids of assets copied into that note. An image whose bytes could
@@ -216,8 +283,9 @@ class InkClipboard {
             image.copyWith(assetId: assetId),
       ]),
       frame,
+      stickies,
     );
   }
 
-  bool get isEmpty => strokes.isEmpty && images.isEmpty;
+  bool get isEmpty => strokes.isEmpty && images.isEmpty && stickies.isEmpty;
 }

@@ -38,7 +38,7 @@ void main() {
     final Offset center = tester.getCenter(find.byType(InkCanvas));
     final TestGesture gesture = await tester.startGesture(
       center - const Offset(60, 0),
-      kind: PointerDeviceKind.touch,
+      kind: PointerDeviceKind.stylus,
     );
     for (int i = 1; i <= 12; i++) {
       await gesture.moveBy(
@@ -68,7 +68,7 @@ void main() {
     Future<void> drag(List<Offset> path) async {
       final TestGesture gesture = await tester.startGesture(
         path.first,
-        kind: PointerDeviceKind.touch,
+        kind: PointerDeviceKind.stylus,
       );
       int sample = 0;
       for (int leg = 1; leg < path.length; leg++) {
@@ -242,6 +242,9 @@ void main() {
     await tester.pump(const Duration(milliseconds: 300));
     await tester.pump(const Duration(milliseconds: 1300));
     expect(find.byType(AiAssistantPanel), findsNothing);
+    // Closing the chat leaves AI mode on, and its notation shown.
+    expect(find.byTooltip('Turn off AI'), findsOneWidget);
+    expect(controller.isStrokeHidden(controller.strokes.last), isFalse);
     expect(controller.notationPlayback, same(playback));
     expect(controller.notationPlayback!.clockElapsed, greaterThan(beforeClose));
 

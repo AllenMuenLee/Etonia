@@ -138,4 +138,25 @@ void main() {
       matchesGoldenFile('goldens/library_list_tablet_portrait_light.png'),
     );
   });
+
+  testWidgets('note tabs: tablet_landscape_light', (WidgetTester tester) async {
+    await _pump(
+      tester,
+      await _library(),
+      TestViewport.tabletLandscape,
+      ThemeMode.light,
+    );
+    for (final String title in <String>['Lecture 4: waves', 'Sketches']) {
+      await tester.tap(find.text(title));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byTooltip('Open another note'));
+      await tester.pumpAndSettle();
+    }
+    await tester.tap(find.text('Graph practice'));
+    await tester.pumpAndSettle();
+    await expectLater(
+      find.byType(GreatnoteApp),
+      matchesGoldenFile('goldens/note_tabs_tablet_landscape_light.png'),
+    );
+  });
 }

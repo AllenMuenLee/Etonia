@@ -1,14 +1,15 @@
 import 'package:flutter/material.dart';
 
 import '../../../app/theme/app_tokens.dart';
+import 'tool_palette.dart';
 
-/// Anchors a small panel to a palette control. The panel opens beside a
-/// vertical palette and above or below a horizontal one, and is kept on
-/// screen by [MenuAnchor].
+/// Anchors a small panel to a palette control. The panel opens toward the
+/// page: below a palette docked at the top, above one at the bottom, and
+/// beside one on either side. [MenuAnchor] keeps it on screen.
 class PalettePopover extends StatelessWidget {
   const PalettePopover({
     super.key,
-    required this.paletteAxis,
+    required this.paletteEdge,
     required this.anchorBuilder,
     required this.panelBuilder,
     this.controller,
@@ -16,7 +17,8 @@ class PalettePopover extends StatelessWidget {
 
   final MenuController? controller;
 
-  final Axis paletteAxis;
+  /// The edge the palette is docked against.
+  final PaletteEdge paletteEdge;
 
   /// Builds the control; call `toggle` to open or close the panel.
   final Widget Function(BuildContext context, VoidCallback toggle)
@@ -27,19 +29,28 @@ class PalettePopover extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final bool beside = paletteAxis == Axis.vertical;
+    // Physical edges: the palette was placed on screen, not in reading
+    // order.
+    final (Alignment alignment, Offset offset) = switch (paletteEdge) {
+      PaletteEdge.top => (Alignment.bottomLeft, const Offset(0, AppSpacing.xs)),
+      // Above the control; MenuAnchor flips a panel that would leave the
+      // screen at the bottom to above its anchor.
+      PaletteEdge.bottom => (
+        Alignment.bottomLeft,
+        const Offset(0, AppSpacing.xs),
+      ),
+      PaletteEdge.left => (Alignment.topRight, const Offset(AppSpacing.xs, 0)),
+      PaletteEdge.right => (
+        Alignment.topLeft,
+        const Offset(-(AppSizes.popoverWidth + AppSpacing.xs), 0),
+      ),
+    };
     return MenuAnchor(
       controller: controller,
       animated: !MediaQuery.disableAnimationsOf(context),
       consumeOutsideTap: true,
-      style: MenuStyle(
-        alignment: beside
-            ? AlignmentDirectional.topEnd
-            : AlignmentDirectional.bottomStart,
-      ),
-      alignmentOffset: beside
-          ? const Offset(AppSpacing.xs, 0)
-          : const Offset(0, AppSpacing.xs),
+      style: MenuStyle(alignment: alignment),
+      alignmentOffset: offset,
       builder:
           (BuildContext context, MenuController controller, Widget? child) {
             return anchorBuilder(context, () {

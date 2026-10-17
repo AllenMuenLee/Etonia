@@ -13,6 +13,13 @@ Future<void> main() {
       if (data == null) {
         return;
       }
+      final Object? loadingMetrics = data['loading_palette_metrics'];
+      if (loadingMetrics != null) {
+        await Directory('build').create(recursive: true);
+        await File('build/loading_palette_metrics.json').writeAsString(
+          const JsonEncoder.withIndent('  ').convert(loadingMetrics),
+        );
+      }
       final Object? notationMetrics = data['ai_notation_metrics'];
       if (notationMetrics != null) {
         await Directory('build').create(recursive: true);

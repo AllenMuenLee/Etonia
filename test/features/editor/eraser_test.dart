@@ -1,6 +1,7 @@
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:greatnote/app/theme/app_icons.dart';
 import 'package:greatnote/app/theme/app_tokens.dart';
 import 'package:greatnote/features/editor/ink/eraser_settings.dart';
 import 'package:greatnote/features/editor/ink/ink_controller.dart';
@@ -142,7 +143,7 @@ void main() {
         Finder check(EraserMode mode) {
           return find.descendant(
             of: find.byKey(ValueKey<String>('eraser-mode-${mode.name}')),
-            matching: find.byIcon(Icons.check),
+            matching: find.byIcon(AppIcons.check),
           );
         }
 

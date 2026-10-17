@@ -6,13 +6,16 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 
 import '../../app/theme/app_tokens.dart';
+import '../../shared/feedback/app_haptics.dart';
 import '../../shared/layout/breakpoints.dart';
 import '../library/note_content.dart';
 import '../library/note_repository.dart';
 import 'ai/ai_assistant_controller.dart';
+import 'ai/ai_canvas_input.dart';
 import 'ai/ai_client.dart';
 import 'ai/ai_config.dart';
 import 'ai/ai_notation.dart';
+import 'ai/canvas_text_recognizer.dart';
 import 'ai/gemini_ai_client.dart';
 import 'ai/ink_attachment.dart';
 import 'ai/note_image_renderer.dart';
@@ -21,6 +24,7 @@ import 'ai/selection_image_renderer.dart';
 import 'ink/eraser_settings.dart';
 import 'ink/ink_canvas.dart';
 import 'ink/ink_controller.dart';
+import 'ink/input_defaults.dart';
 import 'ink/ink_notation.dart';
 import 'ink/ink_sample.dart';
 import 'ink/ink_selection.dart';
@@ -30,6 +34,7 @@ import 'ink/selection_config.dart';
 import 'ink/shape_config.dart';
 import 'ink/stroke.dart';
 import 'page/note_document.dart';
+import 'sticky/sticky_note.dart';
 import 'page/page_background.dart';
 import 'page/page_setup.dart';
 import 'page/page_viewport.dart';
@@ -39,6 +44,7 @@ import 'document_io/document_importer.dart';
 import 'document_io/document_models.dart';
 import 'document_io/document_platform.dart';
 import 'document_io/pdf_page_layer.dart';
+import 'document_io/page_image_cache.dart';
 import 'document_io/pdf_selection_image.dart';
 import 'document_io/pdf_exporter.dart';
 import 'widgets/ai_assistant_panel.dart';
@@ -81,6 +87,7 @@ class EditorScreen extends StatefulWidget {
     this.pageConfig = const PageConfig(),
     this.shapeConfig = const ShapeConfig(),
     this.assetReader,
+    this.onPageShown,
     this.pdfRasterizer = const PdfrxRasterizer(),
     this.documentIoConfig = const DocumentIoConfig(),
     this.repository,
@@ -89,8 +96,32 @@ class EditorScreen extends StatefulWidget {
     this.exportSink = const SystemExportSink(),
     this.onClipboardChanged,
     this.stylusOnly,
+    this.penSettings,
+    this.palettePlacement,
     this.initialNotationEnabled = true,
+    this.tabs,
+    this.aiCanvasConfig = const AiCanvasConfig(),
+    this.textRecognizer = const PlatformCanvasTextRecognizer(),
+    this.handwritingRenderer = const HandwritingImageRenderer(),
+    this.initialAiActive = false,
   });
+
+  /// How writing on the page in AI mode is told apart and read.
+  final AiCanvasConfig aiCanvasConfig;
+
+  /// Reads handwriting written on the page in AI mode into the chat, on the
+  /// device. Tests supply a fake.
+  final CanvasTextRecognizer textRecognizer;
+
+  /// Draws that handwriting for [textRecognizer].
+  final HandwritingImageRenderer handwritingRenderer;
+
+  /// Whether AI mode is on when the editor opens. Off unless asked: the
+  /// assistant's notes stay hidden until it is turned on.
+  final bool initialAiActive;
+
+  /// The open notes' tabs, shown in the top bar in place of the title.
+  final Widget? tabs;
 
   /// The note's pages, supplied from outside; otherwise the screen owns a
   /// document of one page, around [inkController] when given.
@@ -133,6 +164,14 @@ class EditorScreen extends StatefulWidget {
   final PageConfig pageConfig;
   final ShapeConfig shapeConfig;
   final NoteAssetReader? assetReader;
+
+  /// Called once, when the page first shown has its paper on screen: after
+  /// the first frame, or for PDF paper, once it has rendered.
+  final VoidCallback? onPageShown;
+
+  /// How far the pages are zoomed when a note opens: the column of pages
+  /// sits narrower than the writing area, centered in it.
+  static const double openingZoom = 0.7;
   final PdfRasterizer pdfRasterizer;
   final DocumentIoConfig documentIoConfig;
   final NoteRepository? repository;
@@ -143,32 +182,152 @@ class EditorScreen extends StatefulWidget {
 
   /// Whether only a stylus writes, shared from outside so the choice
   /// follows the user from note to note; otherwise the screen owns one,
-  /// off.
+  /// starting at [InputDefaults.stylusOnly] (on).
   final ValueNotifier<bool>? stylusOnly;
+
+  /// The pen, shared from outside so its settings follow the user from
+  /// note to note; otherwise the screen owns one with the defaults.
+  final ValueNotifier<PenSettings>? penSettings;
+
+  /// Where the tool palette floats, shared from outside so it stays where
+  /// the user dragged it; otherwise the screen owns one, across the top.
+  final ValueNotifier<PalettePlacement>? palettePlacement;
 
   /// Whether the assistant may draw on the note when the editor opens. On,
   /// unless turned off in the editor's settings.
   final bool initialNotationEnabled;
 
   @override
-  State<EditorScreen> createState() => _EditorScreenState();
+  State<EditorScreen> createState() => EditorScreenState();
 }
 
-class _EditorScreenState extends State<EditorScreen> {
+class EditorScreenState extends State<EditorScreen> {
+  /// These session details do not round-trip through note storage. Keep the
+  /// editor alive rather than silently dropping history, selection, or work.
+  bool get requiresRetention =>
+      _documentIoPending != 0 ||
+      _ai.placement.value.isOpen ||
+      _ai.hasPendingWork ||
+      _ai.draft.isNotEmpty ||
+      !_aiInput.isEmpty ||
+      _document.pages.any(
+        (page) =>
+            page.ink.isBusy ||
+            page.ink.canUndo ||
+            page.ink.canRedo ||
+            page.ink.selection != null ||
+            page.ink.clipboard != null,
+      );
+
+  int _documentIoPending = 0;
   final ValueNotifier<EditorTool> _tool = ValueNotifier<EditorTool>(
     EditorTool.pen,
   );
-  late final ValueNotifier<PenSettings> _penSettings =
-      ValueNotifier<PenSettings>(PenSettings.defaults(widget.penConfig));
+  ValueNotifier<PenSettings>? _ownedPenSettings;
+
+  /// Whether AI mode is on: the palette's AI button. While it is on, the
+  /// assistant's notes are shown; the chat may be open or closed.
+  late final ValueNotifier<bool> _aiActive = ValueNotifier<bool>(
+    widget.initialAiActive,
+  );
+
+  /// The tool AI mode hands the page back to when it is turned off.
+  EditorTool _writingTool = EditorTool.pen;
+
+  /// The tool seen last, to tell when the AI tool was left.
+  EditorTool _shownTool = EditorTool.pen;
+
+  /// What is written on the page with the AI tool, which is never ink.
+  late final AiCanvasInputController _aiInput = AiCanvasInputController(
+    config: widget.aiCanvasConfig,
+    onCircle: _onAiCircle,
+    onHandwriting: _onAiHandwriting,
+  );
+
+  /// Goes up each time AI mode is turned off, so handwriting still being
+  /// read then never reaches the chat.
+  int _aiGeneration = 0;
+
+  ValueNotifier<PenSettings> get _penSettings =>
+      widget.penSettings ??
+      (_ownedPenSettings ??= ValueNotifier<PenSettings>(
+        PenSettings.defaults(widget.penConfig),
+      ));
+
+  ValueNotifier<PalettePlacement>? _ownedPalettePlacement;
+
+  ValueNotifier<PalettePlacement> get _palettePlacement =>
+      widget.palettePlacement ??
+      (_ownedPalettePlacement ??= ValueNotifier<PalettePlacement>(
+        const PalettePlacement(),
+      ));
+
+  /// Where the palette's center is held while it is dragged, in the
+  /// body's coordinates; null when it is docked.
+  final ValueNotifier<Offset?> _paletteDragCenter = ValueNotifier<Offset?>(
+    null,
+  );
+
+  /// The region the palette was last laid out in, which a drag snaps to.
+  Rect _paletteRegion = Rect.zero;
   late final ValueNotifier<EraserSettings> _eraserSettings =
       ValueNotifier<EraserSettings>(
         EraserSettings.defaults(widget.eraserConfig),
       );
   final ToolPaletteController _paletteController = ToolPaletteController();
+
+  /// The look of the next sticky note: yellow and lined until the user
+  /// chooses otherwise, then remembered for the session.
+  final ValueNotifier<StickyNoteSettings> _stickySettings =
+      ValueNotifier<StickyNoteSettings>(const StickyNoteSettings());
+
+  /// A choice in the sticky note options: it sets the look of the next
+  /// note, and restyles the note open for writing, as one step of history.
+  void _onStickySettingsChanged(StickyNoteSettings next) {
+    final StickyNoteSettings previous = _stickySettings.value;
+    _stickySettings.value = next;
+    final StickyNoteElement? target = _inkController.editingSticky;
+    if (target != null) {
+      _inkController.setStickyAppearance(
+        target.id,
+        color: next.color.id == previous.color.id ? null : next.color,
+        paper: next.paper == previous.paper ? null : next.paper,
+      );
+    }
+  }
+
+  /// Whether a press on the page is dropped. A press that dismisses a
+  /// popover leaves no mark, except for the Sticky note tool's options,
+  /// which stay out of the way of placing a note: they close and the press
+  /// places it.
+  bool _isPageInputBlocked() {
+    if (_scrolling || _anyPageBusy()) {
+      return true;
+    }
+    final ToolPaletteController palette = _paletteController;
+    if (_tool.value == EditorTool.sticky &&
+        palette.stickyMenu.isOpen &&
+        !palette.penMenu.isOpen &&
+        !palette.eraserMenu.isOpen &&
+        !palette.selectMenu.isOpen) {
+      palette.stickyMenu.close();
+      return false;
+    }
+    return palette.hasOpenPopover;
+  }
+
+  /// A sticky note was placed: the writing tool comes back, in the style
+  /// it had, for writing on it straight away.
+  void _onStickyPlaced() {
+    _paletteController.stickyMenu.close();
+    _tool.value = EditorTool.pen;
+  }
+
   ValueNotifier<bool>? _ownedStylusOnly;
 
   ValueNotifier<bool> get _stylusOnly =>
-      widget.stylusOnly ?? (_ownedStylusOnly ??= ValueNotifier<bool>(false));
+      widget.stylusOnly ??
+      (_ownedStylusOnly ??= ValueNotifier<bool>(InputDefaults.stylusOnly));
 
   /// Where on the page Paste is being offered after a hold, if anywhere.
   final ValueNotifier<Offset?> _pastePrompt = ValueNotifier<Offset?>(null);
@@ -204,6 +363,15 @@ class _EditorScreenState extends State<EditorScreen> {
   /// when it moves between sides and between the two layouts.
   final GlobalKey _aiPanelKey = GlobalKey(debugLabel: 'AI assistant panel');
   PdfPageRenderCache? _pdfCache;
+  PageImageCache? _imageCache;
+  bool _reportedPageShown = false;
+
+  void _pageShown() {
+    if (_reportedPageShown) return;
+    _reportedPageShown = true;
+    widget.onPageShown?.call();
+  }
+
   int _pdfClipboardGeneration = 0;
 
   PdfPageRenderCache? get _pageRenderCache {
@@ -217,9 +385,10 @@ class _EditorScreenState extends State<EditorScreen> {
           ));
   }
 
-  /// Starts rendering the PDF paper of the pages around the current one,
-  /// nearest first, so paging through a PDF does not wait on each page.
-  void _preloadPdfPages(
+  /// Has the PDF paper of the current page and the pages around it rendered
+  /// nearest first: the current page and those next to it sharp, further
+  /// ones in preview, so paging through a PDF does not wait on each page.
+  void _focusPdfPages(
     List<NotePage> pages,
     List<PageGeometry> geometries,
     double devicePixelRatio,
@@ -229,16 +398,19 @@ class _EditorScreenState extends State<EditorScreen> {
       return;
     }
     final int current = _document.currentIndex;
-    final int distance = widget.documentIoConfig.pdfPreloadDistance;
-    for (int step = 1; step <= distance; step++) {
-      for (final int index in <int>[current + step, current - step]) {
+    final DocumentIoConfig config = widget.documentIoConfig;
+    final List<PdfFocusPage> focus = <PdfFocusPage>[];
+    int sharpPages = 0;
+    for (int step = 0; step <= config.pdfPreloadDistance; step++) {
+      for (final int index in <int>{current + step, current - step}) {
         if (index < 0 || index >= pages.length) continue;
         final PdfPageSource? pdf = pages[index].pdfSource;
-        if (pdf != null) {
-          cache.preload(pdf, geometries[index].displaySize, devicePixelRatio);
-        }
+        if (pdf == null) continue;
+        focus.add((source: pdf, displayedSize: geometries[index].displaySize));
+        if (step <= config.pdfSharpPreloadDistance) sharpPages++;
       }
     }
+    cache.focus(focus, devicePixelRatio, sharpPages: sharpPages);
   }
 
   /// The shown page's ink.
@@ -263,6 +435,8 @@ class _EditorScreenState extends State<EditorScreen> {
     ink.selectionListenable.addListener(_onSelectionChanged);
     ink.activeStrokeListenable.addListener(_onActiveInkChanged);
     ink.completedStrokesListenable.addListener(_growToInk);
+    ink.completedStrokesListenable.addListener(_appendPageNearEnd);
+    ink.addStrokeReplacementListener(_ai.followReplacedStrokes);
     _listenedInk = ink;
   }
 
@@ -270,6 +444,8 @@ class _EditorScreenState extends State<EditorScreen> {
     ink.selectionListenable.removeListener(_onSelectionChanged);
     ink.activeStrokeListenable.removeListener(_onActiveInkChanged);
     ink.completedStrokesListenable.removeListener(_growToInk);
+    ink.completedStrokesListenable.removeListener(_appendPageNearEnd);
+    ink.removeStrokeReplacementListener(_ai.followReplacedStrokes);
   }
 
   /// A page was added, removed, or shown, or its setup changed. Leaving a
@@ -287,6 +463,7 @@ class _EditorScreenState extends State<EditorScreen> {
         if (stillThere) {
           previous.finalizeActiveGesture();
           previous.clearSelection();
+          previous.exitStickyEditing();
         }
         next.takeClipboardFrom(previous);
       }
@@ -325,6 +502,9 @@ class _EditorScreenState extends State<EditorScreen> {
     for (final Stroke stroke in _inkController.strokes) {
       reach = reach?.expandToInclude(stroke.bounds) ?? stroke.bounds;
     }
+    for (final StickyNoteElement note in _inkController.stickyNotes) {
+      reach = reach?.expandToInclude(note.bounds) ?? note.bounds;
+    }
     if (reach != null) {
       _growPage(reach);
     }
@@ -350,6 +530,9 @@ class _EditorScreenState extends State<EditorScreen> {
   /// writing, erasing, or selecting.
   void _onScrollStart(Set<int> pointers) {
     _scrolling = true;
+    for (final int pointer in pointers) {
+      _aiInput.cancel(pointer);
+    }
     for (final NotePage page in _document.pages) {
       for (final int pointer in pointers) {
         page.ink
@@ -381,6 +564,46 @@ class _EditorScreenState extends State<EditorScreen> {
 
   void _onScrollEnd() {
     _scrolling = false;
+  }
+
+  /// The column was pulled up past its last page: a new page goes after
+  /// it, below, and the view stays where it is.
+  void _addPageAtEnd() {
+    if (_anyPageBusy()) {
+      return;
+    }
+    _document.appendPage();
+  }
+
+  /// Writing down into the last page past [PageConfig.appendPageAt] of its
+  /// height adds an empty page after it. The view does not move: scrolling
+  /// on finds the new page waiting, with no pull to make. An infinite page
+  /// grows instead.
+  void _appendPageNearEnd() {
+    if (_document.currentIndex != _document.pageCount - 1 ||
+        _viewportSize.isEmpty) {
+      return;
+    }
+    final NotePage page = _document.current;
+    if (page.setup.size == PageSize.infinite) {
+      return;
+    }
+    final double height = PageGeometry.of(
+      page.setup,
+      page.extent,
+      _viewportSize,
+      pdfPageSize: page.pdfSource?.pageSize,
+    ).pageSize.height;
+    double lowest = double.negativeInfinity;
+    for (final Stroke stroke in page.ink.strokes) {
+      lowest = math.max(lowest, stroke.bounds.bottom);
+    }
+    for (final StickyNoteElement note in page.ink.stickyNotes) {
+      lowest = math.max(lowest, note.bounds.bottom);
+    }
+    if (lowest >= height * widget.pageConfig.appendPageAt) {
+      _document.appendPage();
+    }
   }
 
   Future<void> _openPagePanel() {
@@ -451,6 +674,7 @@ class _EditorScreenState extends State<EditorScreen> {
         background: background,
         focusBounds: focusBounds,
         bitmaps: bitmaps,
+        stickies: controller.stickyNotes,
       ),
     );
   }
@@ -501,9 +725,18 @@ class _EditorScreenState extends State<EditorScreen> {
           ? null
           : Duration(milliseconds: timeline.durationMs),
     );
-    // A notation is appended whole, one stroke per trace.
-    List<Stroke> added() =>
-        controller.strokes.sublist(controller.strokes.length - traces.length);
+    // A notation is appended whole, one stroke per trace. With AI mode
+    // off, it arrives hidden, as the rest of the assistant's notes are.
+    List<Stroke> added() {
+      final List<Stroke> strokes = controller.strokes.sublist(
+        controller.strokes.length - traces.length,
+      );
+      if (!_aiActive.value) {
+        controller.setStrokesHidden(strokes, true);
+      }
+      return strokes;
+    }
+
     return switch (result) {
       AddNotationResult.added => AiNotationApplication(
         AiNotationStatus.applied,
@@ -684,6 +917,7 @@ class _EditorScreenState extends State<EditorScreen> {
 
   void _showPdfCopyError() {
     if (!mounted) return;
+    AppHaptics.error();
     ScaffoldMessenger.of(context).showSnackBar(
       const SnackBar(
         content: Text('This PDF selection could not be copied.'),
@@ -692,8 +926,140 @@ class _EditorScreenState extends State<EditorScreen> {
     );
   }
 
-  /// Opens the assistant on the current selection. Nothing is sent.
-  void _openAi() => unawaited(_captureForAi(open: true));
+  /// Opens the assistant on the current selection, from the selection's AI
+  /// button, and turns AI mode on with it. Nothing is sent.
+  void _openAi() {
+    final bool hadSelection = _stableSelection() != null;
+    _setAiActive(true, openChat: !hadSelection);
+    if (hadSelection) {
+      // The chat opens on the selection once it is captured, and opens
+      // anyway if the capture comes to nothing.
+      unawaited(
+        _captureForAi(open: true).whenComplete(() {
+          if (mounted && _aiActive.value) _ai.show();
+        }),
+      );
+    }
+  }
+
+  /// The palette's AI button: turns AI mode on, opening the chat on the
+  /// current selection if there is one; or off.
+  void _toggleAiMode() {
+    if (_aiActive.value) {
+      _setAiActive(false);
+    } else {
+      _openAi();
+    }
+  }
+
+  /// Turns AI mode on or off. On, the assistant's notes show, the page is
+  /// written on for the assistant, and the chat opens when [openChat]
+  /// says; off, the notes hide, the chat closes, and whatever was written
+  /// for the assistant is dropped, unread.
+  void _setAiActive(bool active, {bool openChat = true}) {
+    if (active) {
+      _aiActive.value = true;
+      _setAiNotesHidden(false);
+      if (_tool.value != EditorTool.ai) {
+        _tool.value = EditorTool.ai;
+      }
+      if (openChat) {
+        _ai.show();
+      }
+      return;
+    }
+    if (!_aiActive.value) {
+      return;
+    }
+    _aiGeneration++;
+    _aiInput.clear();
+    _aiActive.value = false;
+    _setAiNotesHidden(true);
+    if (_ai.isOpen) {
+      _closeAi();
+    }
+    if (_tool.value == EditorTool.ai) {
+      _tool.value = _writingTool;
+    }
+  }
+
+  /// Keeps track of the tool AI mode gives back, and reads what was
+  /// written for the assistant as soon as another tool is chosen.
+  void _onToolChanged() {
+    final EditorTool tool = _tool.value;
+    if (_shownTool == EditorTool.ai && tool != EditorTool.ai) {
+      _aiInput.flush();
+    }
+    if (tool != EditorTool.ai) {
+      _writingTool = tool;
+    }
+    _shownTool = tool;
+  }
+
+  /// Shows or hides every AI-generated stroke, on every page.
+  void _setAiNotesHidden(bool hidden) {
+    for (final NotePage page in _document.pages) {
+      final List<Stroke> notes = _ai
+          .notationStrokesIn(page.ink.strokes)
+          .toList(growable: false);
+      if (notes.isNotEmpty) {
+        page.ink.setStrokesHidden(notes, hidden);
+      }
+    }
+  }
+
+  /// A loop drawn in AI mode around something on the page: what it
+  /// encloses is selected and becomes what the assistant is asked about.
+  bool _onAiCircle(List<InkVector> outline, InkController page) {
+    if (!mounted || !identical(page, _inkController)) {
+      return false;
+    }
+    final PdfPageSource? pdf = _document.current.pdfSource;
+    final bool selected = page.selectEnclosed(
+      outline,
+      selectablePdfBounds: pdf == null ? null : Offset.zero & pdf.pageSize,
+    );
+    if (!selected) {
+      return false;
+    }
+    unawaited(_captureForAi(open: true));
+    return true;
+  }
+
+  /// Handwriting written in AI mode: read on the device, and its words
+  /// added to the chat's composer, opening the chat when [openPanel] says.
+  void _onAiHandwriting(
+    List<AiCanvasStroke> strokes,
+    InkController page, {
+    required bool openPanel,
+  }) {
+    unawaited(_readHandwriting(strokes, openPanel: openPanel));
+  }
+
+  Future<void> _readHandwriting(
+    List<AiCanvasStroke> strokes, {
+    required bool openPanel,
+  }) async {
+    final int generation = _aiGeneration;
+    final String words;
+    try {
+      final HandwritingBatch batch = await widget.handwritingRenderer.render(
+        strokes,
+      );
+      if (!mounted || generation != _aiGeneration) return;
+      words = await widget.textRecognizer.recognize(batch);
+    } on Object {
+      // Nothing read is nothing added.
+      return;
+    }
+    if (!mounted || generation != _aiGeneration || words.trim().isEmpty) {
+      return;
+    }
+    _ai.appendToDraft(words);
+    if (openPanel) {
+      _ai.show();
+    }
+  }
 
   /// Switches to the current selection, resuming a matching conversation.
   void _useCurrentSelection() => unawaited(_captureForAi(open: false));
@@ -786,33 +1152,22 @@ class _EditorScreenState extends State<EditorScreen> {
     return bitmaps;
   }
 
+  /// Closes the chat only: AI mode stays on, and its notes stay shown.
+  /// Handwriting still waiting is read into the composer for later.
   void _closeAi() {
+    _aiInput.flush(openPanel: false);
     _ai.close();
     // The panel takes its text field with it.
     _editorFocus.requestFocus();
   }
 
   Future<void> _openSettings() {
-    return showModalBottomSheet<void>(
-      context: context,
-      showDragHandle: true,
-      isScrollControlled: true,
+    return showEditorSettings(
+      context,
       builder: (BuildContext context) {
         return EditorSettingsSheet(
           controller: _ai,
           stylusOnly: _stylusOnly,
-          onInsertPdf: _canUseDocumentIo
-              ? () {
-                  Navigator.of(context).pop();
-                  _insertPdf();
-                }
-              : null,
-          onInsertImage: _canUseDocumentIo
-              ? () {
-                  Navigator.of(context).pop();
-                  _insertImage();
-                }
-              : null,
           onExportPdf: _canUseDocumentIo
               ? () {
                   Navigator.of(context).pop();
@@ -834,6 +1189,7 @@ class _EditorScreenState extends State<EditorScreen> {
 
   void _showIoError(Object error) {
     if (!mounted) return;
+    AppHaptics.error();
     final String message = error is DocumentImportException
         ? error.message
         : 'The document operation could not be completed.';
@@ -843,40 +1199,49 @@ class _EditorScreenState extends State<EditorScreen> {
   }
 
   Future<void> _insertPdf() async {
-    final PickedDocument? picked = await widget.documentPicker.pickPdf();
-    if (picked == null || !mounted) return;
-    final ImportCancellationToken cancellation = ImportCancellationToken();
-    final DocumentIoProgressResult result = await showDocumentIoProgress(
-      context,
-      title: 'Importing PDF',
-      onCancel: cancellation.cancel,
-      operation: (_) => _importer.insertPdfPages(
-        repository: widget.repository!,
-        noteId: widget.noteId!,
-        document: _document,
-        picked: picked,
-        cancellation: cancellation,
-      ),
-    );
-    if (result.error != null && !result.cancelled) {
-      _showIoError(result.error!);
+    _documentIoPending++;
+    try {
+      final PickedDocument? picked = await widget.documentPicker.pickPdf();
+      if (picked == null || !mounted) return;
+      final ImportCancellationToken cancellation = ImportCancellationToken();
+      final DocumentIoProgressResult result = await showDocumentIoProgress(
+        context,
+        title: 'Importing PDF',
+        onCancel: cancellation.cancel,
+        operation: (_) => _importer.insertPdfPages(
+          repository: widget.repository!,
+          noteId: widget.noteId!,
+          document: _document,
+          picked: picked,
+          cancellation: cancellation,
+        ),
+      );
+      _onIoFinished(result);
+    } finally {
+      _documentIoPending--;
     }
   }
 
   Future<void> _insertImage() async {
-    final PickedDocument? picked = await widget.documentPicker.pickImage();
-    if (picked == null || !mounted) return;
+    _documentIoPending++;
     try {
-      await _importer.insertImage(
-        repository: widget.repository!,
-        noteId: widget.noteId!,
-        controller: _inkController,
-        picked: picked,
-        visiblePage: Offset.zero & _surfaceSize,
-      );
-      _tool.value = EditorTool.select;
-    } on Object catch (error) {
-      _showIoError(error);
+      final PickedDocument? picked = await widget.documentPicker.pickImage();
+      if (picked == null || !mounted) return;
+      try {
+        await _importer.insertImage(
+          repository: widget.repository!,
+          noteId: widget.noteId!,
+          controller: _inkController,
+          picked: picked,
+          visiblePage: Offset.zero & _surfaceSize,
+        );
+        _tool.value = EditorTool.select;
+        AppHaptics.success();
+      } on Object catch (error) {
+        _showIoError(error);
+      }
+    } finally {
+      _documentIoPending--;
     }
   }
 
@@ -911,8 +1276,15 @@ class _EditorScreenState extends State<EditorScreen> {
             onProgress: report,
           ),
     );
-    if (result.error != null && !result.cancelled) {
-      _showIoError(result.error!);
+    _onIoFinished(result);
+  }
+
+  void _onIoFinished(DocumentIoProgressResult result) {
+    if (result.cancelled) return;
+    if (result.error case final Object error) {
+      _showIoError(error);
+    } else {
+      AppHaptics.success();
     }
   }
 
@@ -988,25 +1360,100 @@ class _EditorScreenState extends State<EditorScreen> {
     if (!_ai.animationEnabled) {
       _inkController.finishNotationPlayback();
     }
+    final AiRequestState state = _ai.requestState;
+    if (_aiRequestState == AiRequestState.sending &&
+        state != AiRequestState.sending) {
+      if (state == AiRequestState.failed) {
+        AppHaptics.error();
+      } else if (_ai.messages.lastOrNull?.role == AiRole.model) {
+        AppHaptics.success();
+      }
+    }
+    _aiRequestState = state;
   }
+
+  /// The request state last seen, to feel when an answer lands or fails.
+  AiRequestState _aiRequestState = AiRequestState.idle;
 
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      // PDF paper reports itself once rendered.
+      if (mounted &&
+          (_document.current.pdfSource == null || _pageRenderCache == null)) {
+        _pageShown();
+      }
+    });
     _attachInk(_inkController);
     _document.addListener(_onDocumentChanged);
     _ai.addListener(_onAiChanged);
+    _palettePlacement.addListener(_onPalettePlacementChanged);
+    _tool.addListener(AppHaptics.toolSwitch);
+    _tool.addListener(_onToolChanged);
     _adoptAiSession();
+    if (_aiActive.value) {
+      _tool.value = EditorTool.ai;
+    } else {
+      _setAiNotesHidden(true);
+    }
+  }
+
+  void _onPalettePlacementChanged() => setState(() {});
+
+  void _onPaletteDragStart(Offset center) {
+    _paletteController.closeAll();
+    _paletteDragCenter.value = center;
+  }
+
+  void _onPaletteDragUpdate(Offset delta) {
+    final Offset? center = _paletteDragCenter.value;
+    if (center != null) {
+      _paletteDragCenter.value = center + delta;
+    }
+  }
+
+  /// Docks the palette against the edge nearest where it was let go:
+  /// there along it, or at its middle when let go near that.
+  void _onPaletteDragEnd() {
+    final Offset? center = _paletteDragCenter.value;
+    if (center == null) {
+      return;
+    }
+    final double margin = _EditorLayout.marginFor(
+      WindowSizeClass.fromWidth(MediaQuery.sizeOf(context).width),
+    );
+    _palettePlacement.value = PalettePlacement.nearest(
+      _paletteRegion,
+      center,
+      margin,
+    );
+    // Commit the dock while the drag position still owns the visual origin.
+    // Releasing it afterwards lets AnimatedPositioned ease from the exact
+    // drop point to the committed edge without an intermediate jump.
+    _paletteDragCenter.value = null;
+  }
+
+  void _movePaletteTo(PaletteEdge edge) {
+    _palettePlacement.value = PalettePlacement(edge: edge);
   }
 
   @override
   void didUpdateWidget(EditorScreen oldWidget) {
     super.didUpdateWidget(oldWidget);
+    if (oldWidget.palettePlacement != widget.palettePlacement) {
+      (oldWidget.palettePlacement ?? _ownedPalettePlacement)?.removeListener(
+        _onPalettePlacementChanged,
+      );
+      _palettePlacement.addListener(_onPalettePlacementChanged);
+    }
     if (oldWidget.assetReader != widget.assetReader ||
         oldWidget.pdfRasterizer != widget.pdfRasterizer ||
         oldWidget.documentIoConfig != widget.documentIoConfig) {
       _pdfCache?.clear();
       _pdfCache = null;
+      _imageCache?.clear();
+      _imageCache = null;
     }
     if (oldWidget.document != widget.document ||
         oldWidget.inkController != widget.inkController) {
@@ -1017,6 +1464,8 @@ class _EditorScreenState extends State<EditorScreen> {
       _document = _createDocument();
       _document.addListener(_onDocumentChanged);
       _adoptAiSession();
+      _aiInput.clear();
+      _setAiNotesHidden(!_aiActive.value);
       _onDocumentChanged();
       owned?.dispose();
     }
@@ -1031,16 +1480,26 @@ class _EditorScreenState extends State<EditorScreen> {
     _releaseAiSession();
     _document.removeListener(_onDocumentChanged);
     _ai.removeListener(_onAiChanged);
+    _palettePlacement.removeListener(_onPalettePlacementChanged);
     _ai.dispose();
     _ownedAiClient?.close();
     _editorFocus.dispose();
     _ownedDocument?.dispose();
-    _tool.dispose();
-    _penSettings.dispose();
+    _tool
+      ..removeListener(AppHaptics.toolSwitch)
+      ..removeListener(_onToolChanged)
+      ..dispose();
+    _aiInput.dispose();
+    _aiActive.dispose();
+    _ownedPenSettings?.dispose();
+    _ownedPalettePlacement?.dispose();
+    _paletteDragCenter.dispose();
     _eraserSettings.dispose();
+    _stickySettings.dispose();
     _pastePrompt.dispose();
     _ownedStylusOnly?.dispose();
     _pdfCache?.clear();
+    _imageCache?.clear();
     super.dispose();
   }
 
@@ -1111,6 +1570,7 @@ class _EditorScreenState extends State<EditorScreen> {
     final Size screen = MediaQuery.sizeOf(context);
     final double width = widget.aiLayoutConfig.sheetWidth(screen.width);
     final Duration duration = AppMotion.resolve(context, AppMotion.medium);
+    final Duration entrance = AppMotion.resolve(context, AppMotion.gentle);
     return <Widget>[
       Positioned.fill(
         child: Semantics(
@@ -1122,7 +1582,17 @@ class _EditorScreenState extends State<EditorScreen> {
             behavior: HitTestBehavior.opaque,
             excludeFromSemantics: true,
             onTap: _closeAi,
-            child: ColoredBox(color: colors.shadow.withValues(alpha: 0.32)),
+            // Dims the editor gradually rather than all at once.
+            child: TweenAnimationBuilder<double>(
+              tween: Tween<double>(begin: 0, end: 0.32),
+              duration: entrance,
+              curve: Curves.easeOut,
+              builder: (BuildContext context, double alpha, Widget? _) {
+                return ColoredBox(
+                  color: colors.shadow.withValues(alpha: alpha),
+                );
+              },
+            ),
           ),
         ),
       ),
@@ -1134,25 +1604,25 @@ class _EditorScreenState extends State<EditorScreen> {
         bottom: 0,
         left: side == AiPanelSide.left ? 0 : screen.width - width,
         width: width,
-        // Slides in from its edge when it opens.
+        // Glides in from its edge when it opens, fading up as it comes.
         child: TweenAnimationBuilder<double>(
           tween: Tween<double>(begin: 1, end: 0),
-          duration: duration,
-          curve: AppMotion.standard,
+          duration: entrance,
+          curve: AppMotion.gentleCurve,
           builder: (BuildContext context, double hidden, Widget? child) {
             return FractionalTranslation(
               translation: Offset(
                 side == AiPanelSide.left ? -hidden : hidden,
                 0,
               ),
-              child: child,
+              child: Opacity(
+                opacity: (1 - hidden * 1.5).clamp(0.0, 1.0),
+                child: child,
+              ),
             );
           },
-          child: DecoratedBox(
-            decoration: BoxDecoration(
-              color: colors.surface,
-              boxShadow: AppShadows.floating(colors),
-            ),
+          child: GlassSurface(
+            boxShadow: AppShadows.floating(colors),
             child: Padding(
               // Keeps the composer above the on-screen keyboard.
               padding: EdgeInsets.only(
@@ -1183,16 +1653,14 @@ class _EditorScreenState extends State<EditorScreen> {
         onMenuPressed: widget.onBack ?? () {},
         leadingIsBack: widget.onBack != null,
         onTitlePressed: widget.onTitlePressed ?? () {},
-        onMorePressed: _openSettings,
-        historyControls: HistoryControls(
-          controller: _inkController,
-          onUndo: _undo,
-          onRedo: _redo,
-        ),
+        onSettingsPressed: _openSettings,
+        tabs: widget.tabs,
         pageControls: PageControls(
           document: _document,
           showNavigation: sizeClass != WindowSizeClass.compact,
           onOpenPanel: _openPagePanel,
+          onInsertImage: _canUseDocumentIo ? _insertImage : null,
+          onInsertPdf: _canUseDocumentIo ? _insertPdf : null,
         ),
       ),
       body: SafeArea(
@@ -1210,10 +1678,11 @@ class _EditorScreenState extends State<EditorScreen> {
               size.width - panelWidth,
               size.height,
             );
+            _paletteRegion = region;
             final _EditorLayout layout = _EditorLayout.compute(
               sizeClass,
               region,
-              Directionality.of(context),
+              _palettePlacement.value,
             );
             final List<NotePage> pages = _document.pages;
             final List<PageGeometry> geometries = <PageGeometry>[
@@ -1230,7 +1699,7 @@ class _EditorScreenState extends State<EditorScreen> {
             final double pixelRatio = MediaQuery.devicePixelRatioOf(context);
             // After the frame, so the shown page's paper is asked for first.
             WidgetsBinding.instance.addPostFrameCallback((_) {
-              if (mounted) _preloadPdfPages(pages, geometries, pixelRatio);
+              if (mounted) _focusPdfPages(pages, geometries, pixelRatio);
             });
             final NotePage currentPage = _document.current;
             if (currentPage.setup.size == PageSize.fit &&
@@ -1254,104 +1723,140 @@ class _EditorScreenState extends State<EditorScreen> {
               children: <Widget>[
                 Positioned.fromRect(
                   rect: layout.surface,
-                  child: WritingSurfaceFrame(
-                    child: PageViewport(
-                      key: const ValueKey<String>('page-viewport'),
-                      pages: geometries,
-                      pageKeys: <Key>[
-                        for (final NotePage page in pages) ObjectKey(page),
-                      ],
-                      currentPage: _document.currentIndex,
-                      onPageTouched: _showPage,
-                      onVisiblePageChanged: _showPage,
-                      onScrollStart: _onScrollStart,
-                      onScrollEnd: _onScrollEnd,
-                      fingersNavigate: _stylusOnly,
-                      pageBuilder:
-                          (
-                            BuildContext context,
-                            int index,
-                            ValueListenable<Rect> visible,
-                          ) {
-                            final NotePage page = pages[index];
-                            return Stack(
-                              fit: StackFit.expand,
-                              children: <Widget>[
-                                PageBackgroundLayer(
-                                  background: page.setup.background,
-                                  visible: visible,
-                                  config: widget.pageConfig,
-                                ),
-                                if (page.pdfSource != null &&
-                                    _pageRenderCache != null)
-                                  PdfPageLayer(
-                                    source: page.pdfSource!,
-                                    displayedSize:
-                                        geometries[index].displaySize,
-                                    cache: _pageRenderCache!,
+                  child: RepaintBoundary(
+                    child: WritingSurfaceFrame(
+                      child: PageViewport(
+                        key: const ValueKey<String>('page-viewport'),
+                        pages: geometries,
+                        pageKeys: <Key>[
+                          for (final NotePage page in pages) ObjectKey(page),
+                        ],
+                        currentPage: _document.currentIndex,
+                        initialZoom: EditorScreen.openingZoom,
+                        onPageTouched: _showPage,
+                        onVisiblePageChanged: _showPage,
+                        onScrollStart: _onScrollStart,
+                        onScrollEnd: _onScrollEnd,
+                        fingersNavigate: _stylusOnly,
+                        onPullToAddPage: _addPageAtEnd,
+                        pageBuilder:
+                            (
+                              BuildContext context,
+                              int index,
+                              ValueListenable<Rect> visible,
+                            ) {
+                              final NotePage page = pages[index];
+                              return Stack(
+                                fit: StackFit.expand,
+                                children: <Widget>[
+                                  PageBackgroundLayer(
+                                    background: page.setup.background,
+                                    visible: visible,
+                                    config: widget.pageConfig,
                                   ),
-                                if (widget.assetReader != null)
-                                  PageImageLayer(
+                                  if (page.pdfSource != null &&
+                                      _pageRenderCache != null)
+                                    PdfPageLayer(
+                                      source: page.pdfSource!,
+                                      displayedSize:
+                                          geometries[index].displaySize,
+                                      cache: _pageRenderCache!,
+                                      onShown: index == _document.currentIndex
+                                          ? _pageShown
+                                          : null,
+                                    ),
+                                  if (widget.assetReader != null)
+                                    PageImageLayer(
+                                      cache: _imageCache ??= PageImageCache(
+                                        readAsset: widget.assetReader!,
+                                      ),
+                                      controller: page.ink,
+                                      readAsset: widget.assetReader!,
+                                      maxDecodeDimension: widget
+                                          .documentIoConfig
+                                          .maxStoredImageDimension,
+                                    ),
+                                  InkCanvas(
                                     controller: page.ink,
-                                    readAsset: widget.assetReader!,
-                                    maxDecodeDimension: widget
-                                        .documentIoConfig
-                                        .maxStoredImageDimension,
+                                    tool: _tool,
+                                    penSettings: _penSettings,
+                                    eraserSettings: _eraserSettings,
+                                    penConfig: widget.penConfig,
+                                    eraserConfig: widget.eraserConfig,
+                                    shapeConfig: widget.shapeConfig,
+                                    isInputBlocked: _isPageInputBlocked,
+                                    pastePrompt: _pastePrompt,
+                                    stylusOnly: _stylusOnly,
+                                    selectablePdfBounds: page.pdfSource == null
+                                        ? null
+                                        : Offset.zero &
+                                              page.pdfSource!.pageSize,
+                                    stickySettings: _stickySettings,
+                                    onStickyPlaced: _onStickyPlaced,
+                                    pageGrows:
+                                        page.setup.size == PageSize.infinite,
+                                    aiInput: _aiInput,
                                   ),
-                                InkCanvas(
-                                  controller: page.ink,
-                                  tool: _tool,
-                                  penSettings: _penSettings,
-                                  eraserSettings: _eraserSettings,
-                                  eraserConfig: widget.eraserConfig,
-                                  shapeConfig: widget.shapeConfig,
-                                  isInputBlocked: () =>
-                                      _paletteController.hasOpenPopover ||
-                                      _scrolling ||
-                                      _anyPageBusy(),
-                                  pastePrompt: _pastePrompt,
-                                  stylusOnly: _stylusOnly,
-                                  selectablePdfBounds: page.pdfSource == null
-                                      ? null
-                                      : Offset.zero & page.pdfSource!.pageSize,
-                                ),
-                              ],
-                            );
-                          },
-                      // Above the current page, so their presses stay off
-                      // it, and never scaled with it.
-                      overlayBuilder:
-                          (BuildContext context, PageTransform transform) {
-                            return Stack(
-                              fit: StackFit.expand,
-                              children: <Widget>[
-                                SelectionActionBar(
-                                  controller: _inkController,
-                                  onAiPressed: _openAi,
-                                  onCopy: _copy,
-                                  onCut: _cut,
-                                  transform: transform,
-                                  obstruction: paletteOnPage,
-                                ),
-                                PastePrompt(
-                                  anchor: _pastePrompt,
-                                  onPaste: _pasteAt,
-                                  transform: transform,
-                                  obstruction: paletteOnPage,
-                                ),
-                              ],
-                            );
-                          },
+                                ],
+                              );
+                            },
+                        // Above the current page, so their presses stay off
+                        // it, and never scaled with it.
+                        overlayBuilder:
+                            (BuildContext context, PageTransform transform) {
+                              return Stack(
+                                fit: StackFit.expand,
+                                children: <Widget>[
+                                  SelectionActionBar(
+                                    controller: _inkController,
+                                    onAiPressed: _openAi,
+                                    onCopy: _copy,
+                                    onCut: _cut,
+                                    transform: transform,
+                                    obstruction: paletteOnPage,
+                                  ),
+                                  PastePrompt(
+                                    anchor: _pastePrompt,
+                                    onPaste: _pasteAt,
+                                    transform: transform,
+                                    obstruction: paletteOnPage,
+                                  ),
+                                ],
+                              );
+                            },
+                      ),
                     ),
                   ),
                 ),
                 AnimatedPositioned(
+                  key: const ValueKey<String>('history-position'),
                   duration: AppMotion.resolve(context, AppMotion.medium),
                   curve: AppMotion.standard,
-                  left: layout.paletteOrigin.dx,
-                  top: layout.paletteOrigin.dy,
-                  child: ToolPalette(
-                    axis: layout.paletteAxis,
+                  left: layout.history.left,
+                  top: layout.history.top,
+                  child: FloatingHistoryControls(
+                    controller: _inkController,
+                    onUndo: _undo,
+                    onRedo: _redo,
+                    height: layout.history.height,
+                  ),
+                ),
+                _PalettePositioner(
+                  center: _paletteDragCenter,
+                  sizeClass: sizeClass,
+                  region: region,
+                  placement: _palettePlacement.value,
+                  builder: (PaletteEdge edge) => ToolPalette(
+                    edge: edge,
+                    onDragStart: () => _onPaletteDragStart(
+                      layout.paletteOrigin +
+                          ToolPalette.sizeFor(
+                            layout.paletteAxis,
+                          ).center(Offset.zero),
+                    ),
+                    onDragUpdate: _onPaletteDragUpdate,
+                    onDragEnd: _onPaletteDragEnd,
+                    onMoveTo: _movePaletteTo,
                     dense: sizeClass == WindowSizeClass.medium,
                     tool: _tool,
                     penSettings: _penSettings,
@@ -1359,9 +1864,15 @@ class _EditorScreenState extends State<EditorScreen> {
                     clipboardListenable: _inkController.selectionListenable,
                     canPaste: () => _inkController.canPaste,
                     onPaste: _paste,
+                    aiActive: _aiActive,
+                    onToggleAi: _toggleAiMode,
                     penConfig: widget.penConfig,
                     eraserConfig: widget.eraserConfig,
                     controller: _paletteController,
+                    stickySettings: _stickySettings,
+                    onStickySettingsChanged: _onStickySettingsChanged,
+                    stickyTargetLabel: () =>
+                        _inkController.editingSticky?.label,
                   ),
                 ),
                 if (panelSide != null)
@@ -1388,7 +1899,33 @@ class _EditorScreenState extends State<EditorScreen> {
                               : BorderSide.none,
                         ),
                       ),
-                      child: _buildPanel(),
+                      // Eases in from its edge when it opens, instead of
+                      // appearing all at once.
+                      child: TweenAnimationBuilder<double>(
+                        tween: Tween<double>(begin: 1, end: 0),
+                        duration: AppMotion.resolve(context, AppMotion.gentle),
+                        curve: AppMotion.gentleCurve,
+                        builder:
+                            (
+                              BuildContext context,
+                              double hidden,
+                              Widget? child,
+                            ) {
+                              return FractionalTranslation(
+                                translation: Offset(
+                                  (panelSide == AiPanelSide.left ? -1 : 1) *
+                                      hidden *
+                                      0.12,
+                                  0,
+                                ),
+                                child: Opacity(
+                                  opacity: 1 - hidden,
+                                  child: child,
+                                ),
+                              );
+                            },
+                        child: _buildPanel(),
+                      ),
                     ),
                   ),
               ],
@@ -1416,76 +1953,176 @@ class _PlaybackPresentation implements AiNotationPresentation {
   void finish() => _controller.finishNotationPlayback(_playback);
 }
 
-/// Where the page and palette sit for a given size class, inside the region
-/// the AI panel leaves them. The page fills the whole region, edge to edge;
-/// the palette floats above it, near the leading edge on tablets and along
-/// the bottom on compact widths.
+/// Where the page and palette sit inside the region the AI panel leaves
+/// them. The page fills the whole region, edge to edge; the palette floats
+/// above it, docked against the edge its [PalettePlacement] names, or,
+/// while it is dragged, centered where it is held and lying along the
+/// edge nearest to it.
+class _PalettePositioner extends StatefulWidget {
+  const _PalettePositioner({
+    required this.center,
+    required this.sizeClass,
+    required this.region,
+    required this.placement,
+    required this.builder,
+  });
+  final ValueListenable<Offset?> center;
+  final WindowSizeClass sizeClass;
+  final Rect region;
+  final PalettePlacement placement;
+  final Widget Function(PaletteEdge) builder;
+
+  @override
+  State<_PalettePositioner> createState() => _PalettePositionerState();
+}
+
+class _PalettePositionerState extends State<_PalettePositioner> {
+  PaletteEdge? _edge;
+  Widget? _palette;
+
+  @override
+  void didUpdateWidget(_PalettePositioner oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    _palette = null;
+  }
+
+  @override
+  Widget build(BuildContext context) => ValueListenableBuilder<Offset?>(
+    valueListenable: widget.center,
+    builder: (context, center, _) {
+      final layout = _EditorLayout.compute(
+        widget.sizeClass,
+        widget.region,
+        widget.placement,
+        dragCenter: center,
+      );
+      // Reuse the entire control subtree until the edge or editor inputs
+      // change. Each move updates only Stack parent data and compositing.
+      if (_palette == null || _edge != layout.paletteEdge) {
+        _edge = layout.paletteEdge;
+        _palette = RepaintBoundary(child: widget.builder(_edge!));
+      }
+      return AnimatedPositioned(
+        key: const ValueKey<String>('tool-palette-position'),
+        duration: center == null
+            ? AppMotion.resolve(context, AppMotion.dock)
+            : Duration.zero,
+        curve: AppMotion.standard,
+        left: layout.paletteOrigin.dx,
+        top: layout.paletteOrigin.dy,
+        child: _palette!,
+      );
+    },
+  );
+}
+
 class _EditorLayout {
   const _EditorLayout({
     required this.surface,
     required this.paletteOrigin,
-    required this.paletteAxis,
+    required this.paletteEdge,
+    required this.history,
   });
 
   final Rect surface;
   final Offset paletteOrigin;
-  final Axis paletteAxis;
+  final PaletteEdge paletteEdge;
+
+  /// Where Undo and Redo float: in the top right corner, as tall as the
+  /// palette lying across the top, and beside the palette rather than
+  /// under it when it is docked there.
+  final Rect history;
+
+  static Rect _historyRect(
+    Rect region,
+    double margin,
+    PalettePlacement placement,
+  ) {
+    final double height = ToolPalette.sizeFor(Axis.horizontal).height;
+    final Size size = Size(FloatingHistoryControls.widthFor(height), height);
+    Rect rect =
+        Offset(region.right - margin - size.width, region.top + margin) & size;
+    // Measured against where the palette docks, so it does not jump about
+    // while the palette is dragged.
+    final Rect palette =
+        _dockedOrigin(region, margin, placement) &
+        ToolPalette.sizeFor(placement.edge.axis);
+    if (rect.overlaps(palette)) {
+      rect = rect.shift(Offset(palette.left - margin - rect.right, 0));
+    }
+    return rect;
+  }
+
+  /// Where the docked palette sits: as its placement says, unless it would
+  /// lie under Undo and Redo in the top right corner, on a narrow screen;
+  /// then it moves left just far enough to clear them, if it can.
+  static Offset _dockedOrigin(
+    Rect region,
+    double margin,
+    PalettePlacement placement,
+  ) {
+    final Offset origin = placement.originIn(region, margin);
+    if (placement.edge != PaletteEdge.top) {
+      return origin;
+    }
+    final Size size = ToolPalette.sizeFor(Axis.horizontal);
+    final double historyLeft =
+        region.right -
+        margin -
+        FloatingHistoryControls.widthFor(size.height) -
+        margin;
+    final double overlap = origin.dx + size.width - historyLeft;
+    if (overlap <= 0) {
+      return origin;
+    }
+    final double left = math.max(region.left + margin, origin.dx - overlap);
+    return Offset(left, origin.dy);
+  }
+
+  Axis get paletteAxis => paletteEdge.axis;
+
+  /// How far the docked palette keeps from its edge.
+  static double marginFor(WindowSizeClass sizeClass) {
+    return switch (sizeClass) {
+      WindowSizeClass.expanded => AppSpacing.xs,
+      WindowSizeClass.medium => AppSpacing.xs,
+      WindowSizeClass.compact => AppSpacing.xxs,
+    };
+  }
 
   static _EditorLayout compute(
     WindowSizeClass sizeClass,
     Rect region,
-    TextDirection direction,
-  ) {
-    final Size size = region.size;
-    _EditorLayout layout = _computeLtr(sizeClass, size);
-    if (direction == TextDirection.rtl) {
-      final Size palette = ToolPalette.sizeFor(layout.paletteAxis);
-      layout = _EditorLayout(
-        paletteAxis: layout.paletteAxis,
-        paletteOrigin: Offset(
-          size.width - layout.paletteOrigin.dx - palette.width,
-          layout.paletteOrigin.dy,
-        ),
-        surface: Rect.fromLTRB(
-          size.width - layout.surface.right,
-          layout.surface.top,
-          size.width - layout.surface.left,
-          layout.surface.bottom,
-        ),
-      );
-    }
-    return _EditorLayout(
-      paletteAxis: layout.paletteAxis,
-      paletteOrigin: layout.paletteOrigin + region.topLeft,
-      surface: layout.surface.shift(region.topLeft),
-    );
-  }
-
-  static _EditorLayout _computeLtr(WindowSizeClass sizeClass, Size size) {
-    final double margin = switch (sizeClass) {
-      WindowSizeClass.expanded => AppSpacing.lg,
-      WindowSizeClass.medium => AppSpacing.sm,
-      WindowSizeClass.compact => AppSpacing.xs,
-    };
-    final Rect surface = Offset.zero & size;
-
-    if (sizeClass == WindowSizeClass.compact) {
-      final Size palette = ToolPalette.sizeFor(Axis.horizontal);
+    PalettePlacement placement, {
+    Offset? dragCenter,
+  }) {
+    final double margin = marginFor(sizeClass);
+    final Rect history = _historyRect(region, margin, placement);
+    if (dragCenter != null) {
+      final PaletteEdge edge = PalettePlacement.nearestEdge(region, dragCenter);
+      final Size size = ToolPalette.sizeFor(edge.axis);
+      final Offset origin = dragCenter - size.center(Offset.zero);
       return _EditorLayout(
-        paletteAxis: Axis.horizontal,
+        surface: region,
+        history: history,
+        paletteEdge: edge,
         paletteOrigin: Offset(
-          (size.width - palette.width) / 2,
-          // Never above the top, even on windows too small for the chrome.
-          math.max(0, size.height - margin - palette.height),
+          origin.dx.clamp(
+            region.left,
+            math.max(region.left, region.right - size.width),
+          ),
+          origin.dy.clamp(
+            region.top,
+            math.max(region.top, region.bottom - size.height),
+          ),
         ),
-        surface: surface,
       );
     }
-
     return _EditorLayout(
-      paletteAxis: Axis.vertical,
-      paletteOrigin: Offset(margin, margin),
-      surface: surface,
+      surface: region,
+      history: history,
+      paletteEdge: placement.edge,
+      paletteOrigin: _dockedOrigin(region, margin, placement),
     );
   }
 }

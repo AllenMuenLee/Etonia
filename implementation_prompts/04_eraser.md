@@ -21,7 +21,7 @@ Implement only:
 - an on-canvas eraser indicator while erasing;
 - in-memory results for the current editor session.
 
-Do not add undo/redo, clear-page, lasso or selection, a highlighter, pressure-controlled eraser size, zoom/pan, persistence, or export. Undo is expected later, so keep each erase gesture (pointer-down to pointer-up) identifiable as one unit of change in the controller, but do not build the history itself.
+Do not add undo/redo, clear-page, lasso or selection, a highlighter, pressure-controlled eraser size, persistence, or export. Undo is expected later, so keep each erase gesture (pointer-down to pointer-up) identifiable as one unit of change in the controller, but do not build the history itself.
 
 ## Existing code to build on
 
@@ -41,7 +41,8 @@ Several existing tests assert that the pen is the only tool and that it is alway
 - Introduce an explicit active tool (pen or eraser) and an immutable eraser settings value holding the mode and the size, with a config object for the size limits, mirroring `PenSettings` and `PenConfig`.
 - Own this state in the same place as `PenSettings` so it survives orientation and breakpoint changes for the session.
 - The pen is the default tool on launch. Area is the default eraser mode.
-- Eraser size is a diameter in logical canvas pixels. Default range 8 to 80, default value 24. Keep these in the config object, not as magic numbers.
+- Eraser size is a diameter in logical **screen** pixels. Default range 8 to 80, default value 24. Keep these in the config object, not as magic numbers.
+- The eraser keeps the same size on screen however the page is shown: when a page is scaled to fit or zoomed in, the eraser does not grow with it. At pointer-down, measure how many screen pixels one canvas pixel covers (through the page's fit scale and any zoom, from the canvas's own transform to the screen) and divide the eraser's radius by it, in both area mode and stroke mode's hit radius. The radius is fixed for the rest of the gesture. The indicator, drawn in canvas coordinates at that radius, therefore also appears at the set size on screen, matching the options preview.
 - Changing tool, mode, or size affects the next gesture only. If the tool changes while a stroke or erase gesture is in progress, end that gesture first.
 - Pen color and width are untouched by anything the eraser does.
 
@@ -145,6 +146,8 @@ Add deterministic tests with synthetic geometry.
 - the tap that dismisses the popover erases nothing;
 - an inverted-stylus pointer erases while the pen is selected, and the pen stays selected;
 - the indicator appears only while erasing and matches the configured size;
+- on a page shown scaled up, the eraser's reach on the page is its screen size divided by the scale, so it covers the same screen area at every zoom;
+- erasing through a stroke of varying width (a tapered or pressure-sensitive pen stroke) keeps each piece's widths along it;
 - tool, mode, and size survive a layout/orientation rebuild;
 - semantic labels announce the tool, the mode, and the size;
 - existing golden tests are updated for the new palette and pass.

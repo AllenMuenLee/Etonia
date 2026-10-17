@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:greatnote/app/theme/app_icons.dart';
 import 'package:greatnote/features/editor/ink/ink_controller.dart';
 import 'package:greatnote/features/editor/ink/ink_palette.dart';
 import 'package:greatnote/features/editor/ink/pen_settings.dart';
@@ -70,11 +71,17 @@ void main() {
         expect(
           find.descendant(
             of: _swatch('ink'),
-            matching: find.byIcon(Icons.check),
+            matching: find.byIcon(AppIcons.check),
           ),
           findsOneWidget,
         );
-        expect(find.byIcon(Icons.check), findsOneWidget);
+        expect(
+          find.descendant(
+            of: find.byType(InkColorPicker),
+            matching: find.byIcon(AppIcons.check),
+          ),
+          findsOneWidget,
+        );
         expect(
           tester.getSemantics(find.bySemanticsLabel('Black')),
           isSemantics(label: 'Black', isButton: true, isSelected: true),
@@ -159,7 +166,8 @@ void main() {
     final InkController controller = await pumpEditor(tester);
     await _openPen(tester);
 
-    await tester.tapAt(canvasRect(tester).center);
+    // Clear of the panel, which opens below the palette across the top.
+    await tester.tapAt(canvasRect(tester).bottomRight - const Offset(40, 40));
     await tester.pumpAndSettle();
 
     expect(find.byType(InkColorPicker), findsNothing);

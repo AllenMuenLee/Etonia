@@ -6,6 +6,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/semantics.dart';
 
 import '../../../app/theme/app_tokens.dart';
+import '../ai/ai_canvas_input.dart';
 import 'eraser_settings.dart';
 import 'ink_controller.dart';
 import 'ink_painter.dart';
@@ -14,7 +15,10 @@ import 'notation_playback_layer.dart';
 import 'pen_settings.dart';
 import 'shape_config.dart';
 import 'shape_recognizer.dart';
+import 'ink_selection.dart';
 import 'stroke.dart';
+import 'stroke_follower.dart';
+import '../sticky/sticky_note.dart';
 
 /// The drawable area. Captures raw pointer events, feeds them to
 /// [controller], and paints the result clipped to its own bounds.
@@ -34,13 +38,33 @@ class InkCanvas extends StatefulWidget {
     required this.tool,
     required this.penSettings,
     required this.eraserSettings,
+    this.penConfig = const PenConfig(),
     this.eraserConfig = const EraserConfig(),
     this.shapeConfig = const ShapeConfig(),
     this.isInputBlocked,
     this.pastePrompt,
     this.stylusOnly,
     this.selectablePdfBounds,
+    this.stickySettings,
+    this.onStickyPlaced,
+    this.pageGrows = false,
+    this.aiInput,
   });
+
+  /// Where writing goes with [EditorTool.ai]: a glowing stroke for the
+  /// assistant, never ink. Without it the AI tool writes nothing.
+  final AiCanvasInputController? aiInput;
+
+  /// The look the Sticky note tool gives a new note.
+  final ValueListenable<StickyNoteSettings>? stickySettings;
+
+  /// Called once a sticky note has been placed, so the writing tool can
+  /// come back for writing on it.
+  final VoidCallback? onStickyPlaced;
+
+  /// Whether the page grows to the right and down, as an infinite page
+  /// does, so a sticky note placed near those edges is not pushed back.
+  final bool pageGrows;
 
   final InkController controller;
 
@@ -49,6 +73,9 @@ class InkCanvas extends StatefulWidget {
 
   final ValueListenable<PenSettings> penSettings;
   final ValueListenable<EraserSettings> eraserSettings;
+
+  /// Supplies the highlighter's opacity.
+  final PenConfig penConfig;
   final EraserConfig eraserConfig;
   final ShapeConfig shapeConfig;
 
@@ -91,6 +118,14 @@ class _InkCanvasState extends State<InkCanvas> with WidgetsBindingObserver {
   int? _shapePointer;
   Offset _shapeAnchor = Offset.zero;
 
+  /// The last tap that left a dot on a sticky note: a second tap there
+  /// soon after opens the note for writing.
+  _StickyTap? _lastStickyTap;
+
+  /// A pointer whose press opened a sticky note, so the rest of its
+  /// gesture is not ink.
+  int? _consumedPointer;
+
   @override
   void initState() {
     super.initState();
@@ -126,6 +161,7 @@ class _InkCanvasState extends State<InkCanvas> with WidgetsBindingObserver {
   void _endGesture() {
     _cancelHold();
     _cancelShapeHold();
+    widget.aiInput?.cancelActive();
     widget.controller.finalizeActiveGesture();
   }
 
@@ -215,12 +251,35 @@ class _InkCanvasState extends State<InkCanvas> with WidgetsBindingObserver {
 
   /// A gesture never switches tools halfway, and a selection is only shown
   /// while the Select tool can act on it.
+  ///
+  /// A sticky note open for writing stays open for the pen and the eraser,
+  /// and for the Sticky note tool, whose options then restyle it; Select
+  /// closes it. Choosing the Sticky note tool with one note selected opens
+  /// that note, so its options act on it.
   void _onToolChanged() {
     _endGesture();
+    _lastStickyTap = null;
     widget.pastePrompt?.value = null;
-    if (widget.tool.value != EditorTool.select) {
-      widget.controller.clearSelection();
+    final EditorTool tool = widget.tool.value;
+    final InkController controller = widget.controller;
+    if (tool == EditorTool.select) {
+      controller.exitStickyEditing();
+      return;
     }
+    if (tool == EditorTool.ai) {
+      // What is selected stays: it is what the assistant was asked about.
+      controller.exitStickyEditing();
+      return;
+    }
+    final InkSelection? selection = controller.selection;
+    if (tool == EditorTool.sticky &&
+        selection != null &&
+        selection.stickyCount == 1 &&
+        selection.count == 0 &&
+        selection.imageCount == 0) {
+      controller.enterStickyEditing(selection.stickies.single.id);
+    }
+    controller.clearSelection();
   }
 
   void _onPointerDown(PointerDownEvent event) {
@@ -235,13 +294,45 @@ class _InkCanvasState extends State<InkCanvas> with WidgetsBindingObserver {
       return;
     }
     widget.pastePrompt?.value = null;
+    final InkController controller = widget.controller;
+    final InkVector position = _position(event);
+    final StickyNoteElement? editing = controller.editingSticky;
+    final bool onEditing =
+        editing != null &&
+        editing.contains(
+          position,
+          tolerance: controller.stickyConfig.hitSlop,
+          cornerRadius: controller.stickyConfig.cornerRadius,
+        );
     if (kind == InkDeviceKind.invertedStylus ||
         widget.tool.value == EditorTool.eraser) {
-      widget.controller.startErase(
+      // Begun on the note open for writing, the eraser erases its ink
+      // only; anywhere else, the page's.
+      controller.startErase(
         pointer: event.pointer,
-        position: _position(event),
+        position: position,
         settings: widget.eraserSettings.value,
         config: widget.eraserConfig,
+        screenScale: _screenScale(),
+        inSticky: onEditing ? editing : null,
+      );
+      return;
+    }
+    if (widget.tool.value == EditorTool.ai) {
+      if (!controller.isBusy) {
+        widget.aiInput?.begin(event.pointer, controller, _sample(event, kind));
+      }
+      return;
+    }
+    if (widget.tool.value == EditorTool.sticky) {
+      final RenderObject? box = context.findRenderObject();
+      final Size size = box is RenderBox && box.hasSize ? box.size : Size.zero;
+      controller.beginStickyPlacement(
+        pointer: event.pointer,
+        position: position,
+        pageBounds: Offset.zero & size,
+        settings: widget.stickySettings?.value ?? const StickyNoteSettings(),
+        growsDown: widget.pageGrows,
       );
       return;
     }
@@ -255,20 +346,102 @@ class _InkCanvasState extends State<InkCanvas> with WidgetsBindingObserver {
       }
       return;
     }
+    if (editing != null && !onEditing && !controller.isBusy) {
+      // Writing elsewhere closes the note; the stroke is page ink.
+      controller.exitStickyEditing();
+    }
+    if (!onEditing && _isSecondStickyTap(event, position)) {
+      return;
+    }
     final PenSettings pen = widget.penSettings.value;
-    final bool began = widget.controller.startStroke(
+    // Pen and Highlighter share the capture and smoothing; the highlighter
+    // is even along its length, and never follows ink or becomes a shape.
+    final bool began = controller.startStroke(
       pointer: event.pointer,
       sample: _sample(event, kind),
-      style: StrokeStyle(ink: pen.ink, width: pen.width),
+      style: pen.strokeStyle(widget.penConfig),
+      dynamics: pen.dynamics,
+      smoothingConfig: pen.smoothing(controller.smoothing),
+      follower: pen.followsStrokes && !onEditing ? _follower() : null,
+      intoSticky: onEditing ? editing : null,
     );
-    if (began) {
+    if (began && pen.armsHoldToShape && !onEditing) {
       _cancelShapeHold();
       _shapePointer = event.pointer;
       _shapeAnchor = event.localPosition;
     }
   }
 
+  /// Whether [event] is the second of two quick taps on the same sticky
+  /// note: then the dot the first left is taken back and the note opens for
+  /// writing.
+  bool _isSecondStickyTap(PointerDownEvent event, InkVector position) {
+    final _StickyTap? last = _lastStickyTap;
+    _lastStickyTap = null;
+    if (last == null) {
+      return false;
+    }
+    final InkController controller = widget.controller;
+    final StickyNoteElement? sticky = controller.stickyAt(position);
+    if (sticky == null ||
+        sticky.id != last.stickyId ||
+        event.timeStamp - last.time >
+            controller.stickyConfig.doubleTapTimeout ||
+        (position - last.position).length >
+            controller.stickyConfig.doubleTapSlop) {
+      return false;
+    }
+    if (!controller.enterStickyEditing(sticky.id, removingTap: last.dot)) {
+      return false;
+    }
+    _consumedPointer = event.pointer;
+    _announce('Writing on ${sticky.label}');
+    return true;
+  }
+
+  /// Remembers a tap that left a dot on a sticky note, for a double tap.
+  void _recordStickyTap(PointerUpEvent event) {
+    final InkController controller = widget.controller;
+    final Stroke? dot = controller.lastStroke;
+    if (dot == null || !dot.isDot) {
+      _lastStickyTap = null;
+      return;
+    }
+    final InkVector at = dot.points.first;
+    final StickyNoteElement? sticky = controller.stickyAt(at);
+    _lastStickyTap = sticky == null
+        ? null
+        : _StickyTap(
+            stickyId: sticky.id,
+            position: at,
+            time: event.timeStamp,
+            dot: dot,
+          );
+  }
+
+  void _announce(String message) {
+    if (!mounted) {
+      return;
+    }
+    SemanticsService.sendAnnouncement(
+      View.of(context),
+      message,
+      Directionality.of(context),
+    );
+  }
+
   void _onPointerMove(PointerMoveEvent event) {
+    if (event.pointer == _consumedPointer) {
+      return;
+    }
+    if (_isWritingForAi(event)) {
+      widget.aiInput!.add(event.pointer, _samples(event));
+      return;
+    }
+    if (_isPlacing(event)) {
+      widget.controller.updateStickyPlacement(event.pointer, _position(event));
+      return;
+    }
     if (_isAdjustingShape(event)) {
       widget.controller.adjustShape(event.pointer, _position(event));
     } else if (_isErasing(event)) {
@@ -287,11 +460,30 @@ class _InkCanvasState extends State<InkCanvas> with WidgetsBindingObserver {
   }
 
   void _onPointerUp(PointerUpEvent event) {
+    if (event.pointer == _consumedPointer) {
+      _consumedPointer = null;
+      return;
+    }
     if (event.pointer == _holdPointer) {
       _cancelHold();
     }
     if (event.pointer == _shapePointer) {
       _cancelShapeHold();
+    }
+    if (_isWritingForAi(event)) {
+      widget.aiInput!.end(event.pointer, _samples(event));
+      return;
+    }
+    if (_isPlacing(event)) {
+      final StickyNoteElement? placed = widget.controller.endStickyPlacement(
+        event.pointer,
+        _position(event),
+      );
+      if (placed != null) {
+        _announce('${placed.label} added');
+        widget.onStickyPlaced?.call();
+      }
+      return;
     }
     if (_isAdjustingShape(event)) {
       widget.controller.endShapeAdjust(event.pointer, _position(event));
@@ -304,11 +496,23 @@ class _InkCanvasState extends State<InkCanvas> with WidgetsBindingObserver {
         widget.selectablePdfBounds,
       );
     } else {
+      final bool onPage =
+          widget.controller.activePointer == event.pointer &&
+          widget.controller.activeStrokeSticky == null;
       widget.controller.endStroke(event.pointer, _samples(event));
+      if (onPage) {
+        _recordStickyTap(event);
+      }
     }
   }
 
   void _onPointerCancel(PointerCancelEvent event) {
+    if (event.pointer == _consumedPointer) {
+      _consumedPointer = null;
+    }
+    // A placement not lifted into place inserts nothing.
+    widget.controller.cancelStickyPlacement(event.pointer);
+    widget.aiInput?.cancel(event.pointer);
     if (event.pointer == _holdPointer) {
       _cancelHold();
     }
@@ -323,6 +527,17 @@ class _InkCanvasState extends State<InkCanvas> with WidgetsBindingObserver {
       ..cancelStroke(event.pointer)
       ..cancelErase(event.pointer)
       ..cancelSelectionGesture(event.pointer);
+  }
+
+  bool _isWritingForAi(PointerEvent event) {
+    final AiCanvasInputController? input = widget.aiInput;
+    return input != null &&
+        input.activePointer == event.pointer &&
+        identical(input.page, widget.controller);
+  }
+
+  bool _isPlacing(PointerEvent event) {
+    return widget.controller.activePlacement?.pointer == event.pointer;
   }
 
   bool _isAdjustingShape(PointerEvent event) {
@@ -355,7 +570,49 @@ class _InkCanvasState extends State<InkCanvas> with WidgetsBindingObserver {
       position: _position(event),
       timestamp: event.timeStamp,
       deviceKind: kind,
+      pressure: _pressure(event, kind),
     );
+  }
+
+  /// The pen's pressure from 0 to 1, or null where there is none to read:
+  /// fingers and mice report a constant, and so does a stylus without a
+  /// pressure sensor, whose range is then empty.
+  double? _pressure(PointerEvent event, InkDeviceKind kind) {
+    if (kind != InkDeviceKind.stylus && kind != InkDeviceKind.invertedStylus) {
+      return null;
+    }
+    final double range = event.pressureMax - event.pressureMin;
+    if (!(range > 0) || !event.pressure.isFinite) {
+      return null;
+    }
+    return ((event.pressure - event.pressureMin) / range).clamp(0.0, 1.0);
+  }
+
+  /// How many screen pixels one canvas pixel covers here, through the
+  /// page's fit and any zoom.
+  /// How close on screen the pen comes to ink to follow it, and how far
+  /// it moves away to be let go, whatever the zoom.
+  static const double _followCapture = 10;
+  static const double _followRelease = 26;
+
+  StrokeFollower _follower() {
+    final double scale = _screenScale();
+    return StrokeFollower(
+      <List<InkVector>>[
+        for (final Stroke stroke in widget.controller.strokes) stroke.points,
+      ],
+      captureRadius: _followCapture / scale,
+      releaseRadius: _followRelease / scale,
+    );
+  }
+
+  double _screenScale() {
+    final RenderObject? box = context.findRenderObject();
+    if (box is! RenderBox || !box.attached) {
+      return 1;
+    }
+    final Offset origin = box.localToGlobal(Offset.zero);
+    return (box.localToGlobal(const Offset(1, 0)) - origin).distance;
   }
 
   InkVector _position(PointerEvent event) {
@@ -396,6 +653,30 @@ class _InkCanvasState extends State<InkCanvas> with WidgetsBindingObserver {
         child: Stack(
           fit: StackFit.expand,
           children: <Widget>[
+            // Sticky notes lie above images and below the page's ink.
+            RepaintBoundary(
+              child: CustomPaint(
+                key: const ValueKey<String>('sticky-notes-layer'),
+                painter: StickyNotesPainter(
+                  controller: widget.controller,
+                  accent: colors.accent,
+                  config: widget.controller.stickyConfig,
+                ),
+              ),
+            ),
+            _StickySemantics(
+              controller: widget.controller,
+              onEdit: (StickyNoteElement note) {
+                if (widget.controller.enterStickyEditing(note.id)) {
+                  _announce('Writing on ${note.label}');
+                }
+              },
+              onDelete: (StickyNoteElement note) {
+                if (widget.controller.deleteStickyNote(note.id)) {
+                  _announce('${note.label} deleted');
+                }
+              },
+            ),
             RepaintBoundary(
               child: CustomPaint(
                 painter: CompletedStrokesPainter(
@@ -430,6 +711,27 @@ class _InkCanvasState extends State<InkCanvas> with WidgetsBindingObserver {
                 ),
               ),
             ),
+            // What is written for the assistant glows above everything
+            // else, and repaints alone as it is written.
+            if (widget.aiInput != null)
+              ExcludeSemantics(
+                child: RepaintBoundary(
+                  child: CustomPaint(
+                    key: const ValueKey<String>('ai-canvas-stroke-layer'),
+                    painter: AiCanvasStrokePainter(
+                      input: widget.aiInput!,
+                      page: widget.controller,
+                      color: colors.accent,
+                      core: Color.lerp(
+                        colors.accent,
+                        const Color(0xFFFFFFFF),
+                        0.7,
+                      )!,
+                      width: widget.aiInput!.config.glowWidth,
+                    ),
+                  ),
+                ),
+              ),
             ExcludeSemantics(
               child: RepaintBoundary(
                 child: CustomPaint(
@@ -444,6 +746,149 @@ class _InkCanvasState extends State<InkCanvas> with WidgetsBindingObserver {
             ),
           ],
         ),
+      ),
+    );
+  }
+}
+
+/// A tap that left a dot on a sticky note.
+class _StickyTap {
+  const _StickyTap({
+    required this.stickyId,
+    required this.position,
+    required this.time,
+    required this.dot,
+  });
+
+  final String stickyId;
+  final InkVector position;
+  final Duration time;
+  final Stroke dot;
+}
+
+/// One node per sticky note for assistive technology, over its paper:
+/// its label ("Yellow lined sticky note"), whether it is open for writing,
+/// and actions to write on it and to delete it. Rebuilt only when a note or
+/// the note open for writing changes, never for page ink or a pointer
+/// move, and never in the way of a pointer.
+class _StickySemantics extends StatefulWidget {
+  const _StickySemantics({
+    required this.controller,
+    required this.onEdit,
+    required this.onDelete,
+  });
+
+  final InkController controller;
+  final ValueChanged<StickyNoteElement> onEdit;
+  final ValueChanged<StickyNoteElement> onDelete;
+
+  @override
+  State<_StickySemantics> createState() => _StickySemanticsState();
+}
+
+class _StickySemanticsState extends State<_StickySemantics> {
+  List<StickyNoteElement> _notes = const <StickyNoteElement>[];
+  String? _editing;
+
+  late Listenable _listenable = _merged(widget.controller);
+
+  static Listenable _merged(InkController controller) {
+    return Listenable.merge(<Listenable>[
+      controller.completedStrokesListenable,
+      controller.stickyEditingListenable,
+    ]);
+  }
+
+  @override
+  void initState() {
+    super.initState();
+    _take();
+    _listenable.addListener(_onChanged);
+  }
+
+  @override
+  void didUpdateWidget(_StickySemantics oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.controller != widget.controller) {
+      _listenable.removeListener(_onChanged);
+      _listenable = _merged(widget.controller);
+      _listenable.addListener(_onChanged);
+      _take();
+    }
+  }
+
+  @override
+  void dispose() {
+    _listenable.removeListener(_onChanged);
+    super.dispose();
+  }
+
+  bool _take() {
+    final List<StickyNoteElement> notes = List<StickyNoteElement>.of(
+      widget.controller.stickyNotes,
+    );
+    final String? editing = widget.controller.editingSticky?.id;
+    // Notes are immutable, so an unchanged list holds the same objects.
+    final bool changed =
+        editing != _editing ||
+        notes.length != _notes.length ||
+        <int>[
+          for (int i = 0; i < notes.length; i++)
+            if (!identical(notes[i], _notes[i])) i,
+        ].isNotEmpty;
+    _notes = notes;
+    _editing = editing;
+    return changed;
+  }
+
+  void _onChanged() {
+    if (_take()) {
+      setState(() {});
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    // No pointer stops here: the canvas's own listener, above, sees every
+    // press, and these boxes have nothing to hit.
+    return ExcludeFocus(
+      child: Builder(
+        builder: (BuildContext context) {
+          final List<StickyNoteElement> notes = _notes;
+          if (notes.isEmpty) {
+            return const SizedBox.shrink();
+          }
+          final String? editing = _editing;
+          final ValueChanged<StickyNoteElement> onEdit = widget.onEdit;
+          final ValueChanged<StickyNoteElement> onDelete = widget.onDelete;
+          return Stack(
+            children: <Widget>[
+              for (final StickyNoteElement note in notes)
+                Positioned.fromRect(
+                  key: ValueKey<String>('sticky-semantics-${note.id}'),
+                  rect: note.bounds,
+                  child: Semantics(
+                    container: true,
+                    label: note.id == editing
+                        ? '${note.label}, open for writing'
+                        : note.label,
+                    customSemanticsActions:
+                        <CustomSemanticsAction, VoidCallback>{
+                          const CustomSemanticsAction(
+                            label: 'Write on note',
+                          ): () =>
+                              onEdit(note),
+                          const CustomSemanticsAction(
+                            label: 'Delete note',
+                          ): () =>
+                              onDelete(note),
+                        },
+                    child: const SizedBox.expand(),
+                  ),
+                ),
+            ],
+          );
+        },
       ),
     );
   }

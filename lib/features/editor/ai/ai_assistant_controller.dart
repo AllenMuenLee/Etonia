@@ -118,6 +118,14 @@ class AiAssistantController extends ChangeNotifier {
   final ValueNotifier<AiPanelPlacement> _placement;
 
   final List<_AiConversation> _conversations = <_AiConversation>[];
+
+  /// Inactive conversations may still be receiving an answer or rendering.
+  bool get hasPendingWork => _conversations.any(
+    (conversation) =>
+        conversation.requestState == AiRequestState.sending ||
+        (conversation.context._renderStarted &&
+            conversation.context.isRendering),
+  );
   _AiConversation? _conversation;
   int _conversationClock = 0;
   bool _selectionChanged = false;
@@ -293,6 +301,27 @@ class AiAssistantController extends ChangeNotifier {
     notifyListeners();
   }
 
+  /// Shows the panel on whatever conversation it was showing, or on none
+  /// yet, without choosing new ink. Sends nothing.
+  void show() {
+    if (_disposed || isOpen) {
+      return;
+    }
+    _placement.value = AiPanelPlacement(isOpen: true, side: side);
+  }
+
+  /// Adds [words] to the end of [draft], a single space apart from what is
+  /// there, for the composer to show. Blank words change nothing.
+  void appendToDraft(String words) {
+    final String text = words.trim();
+    if (_disposed || text.isEmpty) {
+      return;
+    }
+    final String before = draft.trimRight();
+    draft = before.isEmpty ? text : '$before $text';
+    notifyListeners();
+  }
+
   /// Hides the panel. The conversation, and a request in flight, carry on.
   void close() {
     if (_disposed) {
@@ -325,6 +354,47 @@ class AiAssistantController extends ChangeNotifier {
       _selectionChanged = changed;
       _selectionHasChat = hasChat;
       notifyListeners();
+    }
+  }
+
+  /// The strokes drawn by the answers of the remembered conversation that
+  /// [selection] belongs to, as [useSelection] would find it; empty when it
+  /// belongs to none. They may be on any page, or have left the note.
+  Iterable<Stroke> notationStrokesFor(InkSelection selection) {
+    return _bestMatch(selection)?.notationStrokes ?? const <Stroke>[];
+  }
+
+  /// The AI notation that still belongs to [strokes], in the order it is in
+  /// the note. Unlike [notationStrokesFor], this is independent of the
+  /// current selection, so page-level controls can find every AI mark.
+  Iterable<Stroke> notationStrokesIn(Iterable<Stroke> strokes) {
+    final Set<Stroke> notation = Set<Stroke>.identity();
+    for (final _AiConversation conversation in _conversations) {
+      notation.addAll(conversation.notationStrokes);
+    }
+    return <Stroke>[
+      for (final Stroke stroke in strokes)
+        if (notation.contains(stroke)) stroke,
+    ];
+  }
+
+  /// Follows strokes the editor replaced, such as ink moved with the
+  /// selection: a replacement drawn by a conversation's answer is still that
+  /// conversation's. The stroke it replaced is kept for an undo to restore.
+  void followReplacedStrokes(Map<Stroke, Stroke> replaced) {
+    if (_disposed) {
+      return;
+    }
+    bool changed = false;
+    for (final _AiConversation conversation in _conversations) {
+      for (final MapEntry<Stroke, Stroke> entry in replaced.entries) {
+        if (conversation.notationStrokes.contains(entry.key)) {
+          changed = conversation.notationStrokes.add(entry.value) || changed;
+        }
+      }
+    }
+    if (changed) {
+      _session.notify();
     }
   }
 

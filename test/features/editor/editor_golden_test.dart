@@ -3,11 +3,13 @@ library;
 
 import 'dart:math' as math;
 
+import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:greatnote/app/greatnote_app.dart';
 import 'package:greatnote/features/editor/ai/ai_assistant_controller.dart';
 import 'package:greatnote/features/editor/ai/ai_client.dart';
+import 'package:greatnote/features/editor/ink/ink_canvas.dart';
 import 'package:greatnote/features/editor/ink/ink_controller.dart';
 import 'package:greatnote/features/editor/ink/ink_palette.dart';
 import 'package:greatnote/features/editor/ink/ink_sample.dart';
@@ -355,6 +357,48 @@ void main() {
     );
   });
 
+  for (final (String name, ThemeMode themeMode) in <(String, ThemeMode)>[
+    ('tablet_landscape_light', ThemeMode.light),
+    ('tablet_landscape_dark', ThemeMode.dark),
+  ]) {
+    // AI mode on from the palette, with nothing chosen yet, and a glowing
+    // stroke being written on the page for the assistant.
+    testWidgets('AI mode, writing: $name', (WidgetTester tester) async {
+      await pumpEditor(
+        tester,
+        themeMode: themeMode,
+        strokes: _page(),
+        aiClient: FakeAiClient(),
+      );
+      await tester.tap(find.byTooltip('Turn on AI'));
+      await tester.pumpAndSettle();
+      final RenderBox canvas = tester.renderObject<RenderBox>(
+        find.byType(InkCanvas).first,
+      );
+      final TestGesture gesture = await tester.createGesture(
+        kind: PointerDeviceKind.stylus,
+      );
+      await gesture.down(
+        canvas.localToGlobal(const Offset(120, 420)),
+        timeStamp: Duration.zero,
+      );
+      for (int i = 1; i <= 40; i++) {
+        await gesture.moveTo(
+          canvas.localToGlobal(Offset(120 + i * 6, 420 + 24 * math.sin(i / 5))),
+          timeStamp: Duration(milliseconds: 8 * i),
+        );
+      }
+      await tester.pump();
+
+      await expectLater(
+        find.byType(GreatnoteApp),
+        matchesGoldenFile('goldens/ai_mode_writing_$name.png'),
+      );
+      await gesture.cancel();
+      await tester.pump();
+    });
+  }
+
   testWidgets('editor settings: tablet_landscape_light', (
     WidgetTester tester,
   ) async {
@@ -367,7 +411,7 @@ void main() {
     await tester.tap(find.byTooltip('AI assistant'));
     await tester.pumpAndSettle();
     await settleAi(tester);
-    await tester.tap(find.byTooltip('More options'));
+    await tester.tap(find.byTooltip('Settings'));
     await tester.pumpAndSettle();
     await tester.tap(find.text('Enable notation'));
     await tester.pumpAndSettle();

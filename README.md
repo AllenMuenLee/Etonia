@@ -179,11 +179,16 @@ rather than literals.
 Breakpoints are width-based and defined once in
 `lib/shared/layout/breakpoints.dart`:
 
-| Class | Width | Palette |
+| Class | Width | Palette inset |
 | --- | --- | --- |
-| compact | below 600 | horizontal strip floating along the page's bottom |
-| medium | 600-839 | dense vertical strip floating near the leading edge |
-| expanded | 840 and up | vertical strip floating near the leading edge, centered title |
+| compact | below 600 | 4 px |
+| medium | 600-839 | 8 px, dense buttons |
+| expanded | 840 and up | 24 px, centered title |
+
+The tool palette floats centered across the top of the page by default.
+Drag it by its grip to any edge: it docks against the nearest one when let
+go, lying across the top and bottom and down the sides, and its panels open
+toward the page. Where it sits carries from note to note for the session.
 
 The page spans the whole area below the top bar, edge to edge, and the top
 bar spans the whole width; only the AI panel, when open beside the editor,
@@ -217,6 +222,22 @@ Pointer events flow through these steps:
    each behind a repaint boundary, draw the active stroke and the completed
    strokes; a pointer move repaints only the active layer and rebuilds no
    widgets.
+
+### Pen settings
+
+The pen panel shows the ink color and width; **Advanced** folds out the
+rest, all on by default:
+
+| Setting | Effect |
+| --- | --- |
+| Tip sharpness | how sharply both ends of a stroke taper |
+| Pressure sensitivity | how much stylus pressure widens or narrows the line |
+| Stroke stabilization | how strongly the smoother below evens the line; 50% is its configured tuning |
+| Draw and hold for shapes | whether holding still at the end of a stroke makes it a shape |
+
+A tapered or pressure-sensitive stroke keeps a width factor per point
+(`Stroke.widths`) and is painted as one filled outline; erasing, moving,
+copying, saving, and PDF export all keep its widths.
 
 ### Smoothing
 
@@ -256,7 +277,8 @@ should still be validated on physical hardware.
   the framework.
 - There is no platform palm rejection. A palm that lands before the pen
   becomes the writing pointer.
-- Pressure and tilt are ignored. Stroke width is constant.
+- Tilt is ignored. Pressure is read only from a stylus that reports a
+  pressure range; fingers and mice draw at neutral pressure.
 - Rotating the device mid-stroke ends that stroke. Existing ink keeps its
   page coordinates and is clipped if the page becomes smaller.
 
@@ -344,9 +366,13 @@ scroll drops the stroke the first finger began. Spacings and growth are in
 
 The app opens to the library: folders first, then notes, sorted by last
 modified, date created, or title, as a grid of cards with first-page
-thumbnails or as a list. Folders nest, with a breadcrumb trail. Each item's
-menu (also on long press) renames, moves, duplicates (notes), and deletes,
-with confirmation. Search matches titles in every folder.
+thumbnails or as a list. A sidebar (a drawer on phones) shows the folder
+tree: folders nest to any depth, each in its own color, and fold open under
+their parents; a breadcrumb trail leads back up. New note first asks for the
+note's template, its page size and paper. Each item's menu (also on long
+press) renames, moves, duplicates (notes), and deletes, with confirmation;
+a folder's also makes a subfolder and changes its color. Search matches
+titles in every folder.
 
 Notes are stored under the app's documents directory by `FileNoteRepository`
 (`lib/features/library/`): `greatnote/library.json` indexes folders and notes,
@@ -366,14 +392,72 @@ library, and its title renames the note.
   pause.
 - Thumbnails are painted from each note's content and cached for the session
   only.
-- There is no trash, sync, import, or export.
+- There is no live sync: a Google Drive backup runs only when asked (see
+  below).
+
+## Google Drive
+
+The cloud button in the library bar (tooltip **Google Drive**) opens a sheet
+to connect a Google account, back the library up, restore it, and import the
+user's GoodNotes folder. Everything lives in `lib/features/library/cloud/`;
+sign-in and Drive REST v3 calls sit behind `GoogleDriveClient`, so tests use
+`FakeGoogleDriveClient` (`test/helpers/google_drive_fakes.dart`) and never
+touch the network.
+
+**Backup** (`GoogleDriveBackupService`) writes to `My Drive/Greatnote Backup`:
+`manifest.json` (schema, `exportedAt`, folder and note counts, every folder
+and note entry, and the SHA-256 and Drive file of each note's content and
+assets) and a `notes/` folder of content-addressed files. Files already in
+Drive with the same hash are not uploaded again; the manifest is replaced
+last, so an interrupted backup leaves the previous one whole, and files no
+manifest refers to are moved to the Drive trash. **Restore** downloads and
+hash-checks everything before it changes the library. *Add to library*
+reuses folders with the same name and place and skips notes whose title is
+already in their folder; *Replace library* moves the current library to
+Recently Deleted.
+
+**Goodnotes import** (`GoodnotesDriveReplicator`) looks for non-trashed
+folders named GoodNotes in any case, asks which one to use when there are
+several, rebuilds its folder tree breadth first under a top-level folder of
+the same name, and imports each `.goodnotes` notebook and PDF (with Goodnotes
+ink recovery) into its folder. Other files are listed as skipped. Running it
+again reuses the folders and skips files that have not changed since;
+which Drive file became which note is kept in `greatnote/cloud_state.json`.
+
+### Setting up Google sign-in
+
+Sign-in uses `google_sign_in` with the scopes `drive.readonly` (to find the
+GoodNotes folder) and `drive.file` (to write the backup). In a Google Cloud
+project with the Google Drive API enabled, configure the OAuth consent screen
+and create OAuth clients:
+
+- **Web application**: its client ID goes in `GOOGLE_OAUTH_SERVER_CLIENT_ID`.
+  Android needs it.
+- **Android**: package `com.greatnote.app` and the SHA-1 of your signing key
+  (`cd android && ./gradlew signingReport`). Nothing to copy into the app.
+- **iOS**: bundle ID of the Runner target. Its client ID goes in
+  `GOOGLE_OAUTH_CLIENT_ID`, and its *reversed* client ID
+  (`com.googleusercontent.apps.…`) must be added to `ios/Runner/Info.plist`
+  as a URL scheme under `CFBundleURLTypes`.
+
+Then put both IDs in `dart_defines.json` and run with
+`--dart-define-from-file=dart_defines.json` (as `tool/run.sh` does):
+
+```json
+{
+  "GOOGLE_OAUTH_CLIENT_ID": "<ios client id>.apps.googleusercontent.com",
+  "GOOGLE_OAUTH_SERVER_CLIENT_ID": "<web client id>.apps.googleusercontent.com"
+}
+```
+
+While the consent screen is in testing, only listed test users can sign in.
 
 ## Eraser
 
 The palette has one eraser beside the pen. Pressing it selects it; pressing
 it again opens its options: the mode, and the size used in area mode. An
 inverted stylus erases with the current eraser settings whichever tool is
-selected.
+selected. The size is on screen: zooming in does not make the eraser bigger.
 
 | Mode | Effect |
 | --- | --- |
@@ -801,6 +885,13 @@ are in `.gitignore`):
 fvm flutter run -d <device-id> --dart-define-from-file=dart_defines.json
 ```
 
+`tool/run.ps1` (Windows) and `tool/run.sh` (macOS, Linux) do the same,
+passing any other arguments on to `flutter run`:
+
+```sh
+./tool/run.sh -d <device-id>
+```
+
 ```json
 {
   "GEMINI_API_KEY": "<your key>",
@@ -965,6 +1056,26 @@ cursor or text search; the Select tool can instead copy a lassoed PDF region
 as a bitmap image. Image-heavy imports can make larger exports. Images and
 PDF paper remain raster content, while ink and paper rules are vector paths.
 Pages above the PDF 14,400-point side limit are uniformly reduced.
+
+The Goodnotes import option recovers editable ink from supported Android
+exports. It keeps raster rows aligned with the page, smooths traced pixel
+staircases while retaining endpoints and closed loops, and removes the
+separate recognized “Made with Goodnotes” badge. This applies when importing
+the file again; previously imported strokes are not reprocessed. Dense image
+regions and connected multicolored artwork remain in the PDF background.
+The flattened overlay has no text labels: handwriting and monochrome line
+drawings still become ink, without OCR or reliable text-versus-drawing
+classification.
+
+Recovered ink also carries a width profile sampled along the trace, so
+pressure-sensitive strokes retain thin ends and thick middles after saving
+and exporting. A separate width control removes isolated spikes and limits
+thickness changes to 0.35 pixels per pixel along the trace, in both directions
+and across closed-loop seams. Pencil recovery repairs small grain holes and edge notches
+within each connected mark before tracing, prunes short spurs, and estimates
+average opacity. It approximates the pencil with smooth editable ink; it does
+not reproduce the original brush texture or reconstruct missing pressure
+samples. Ambiguous networks remain in the PDF background.
 
 The export dialog is modal, making the editor read-only while export runs
 from an immutable `NoteContent` snapshot. Cancelling removes any partial

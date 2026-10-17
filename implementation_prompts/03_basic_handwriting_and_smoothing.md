@@ -1,16 +1,16 @@
-# Implementation Prompt 3: Implement Basic Handwriting and Direction-Aware Smoothing
+# Implementation Prompt 3: Implement Basic Handwriting, Highlighter, and Direction-Aware Smoothing
 
 You are adding the first real writing capability to **Greatnote**, a Flutter tablet application for Android and iPadOS. A modern responsive editor shell already exists. Preserve its design system, testing setup, and responsive behavior.
 
 ## Goal
 
-Implement a low-latency writing canvas with exactly one pen tool, selectable ink color, adjustable stroke width, and a deterministic direction-aware smoothing algorithm. The feature must work with a stylus, finger, and mouse for development, while prioritizing stylus behavior on physical tablets.
+Implement a low-latency writing canvas with one writing tool offering **Pen** and **Highlighter** styles, selectable color, adjustable stroke width, and a deterministic direction-aware smoothing algorithm. The feature must work with a stylus, finger, and mouse for development, while prioritizing stylus behavior on physical tablets.
 
 ## Scope
 
 Implement only:
 
-- one pen tool;
+- one writing tool with Pen and Highlighter style choices;
 - ink color selection;
 - stroke-width adjustment;
 - freehand stroke capture and rendering;
@@ -18,19 +18,51 @@ Implement only:
 - hold-to-shape: holding the pen still at the end of a stroke replaces it with a beautified geometric shape (specified below);
 - in-memory stroke state for the current editor session.
 
-Do not add an eraser, highlighter, pencil variants, a separate shape tool or shape menu, selection/lasso, handwriting recognition, pressure-controlled width, zoom, persistence, synchronization, or export. If an existing placeholder suggests any of those features, leave it disabled or remove it from the active UI. Hold-to-shape is part of the single pen, not a new tool.
+Do not add an eraser, pencil variants, a separate highlighter toolbar tool, a separate shape tool or shape menu, selection/lasso, handwriting recognition, zoom, persistence, synchronization, or export. If an existing placeholder suggests any of those features, leave it disabled or remove it from the active UI. Hold-to-shape is part of the Pen style, not a new tool.
 
-## Pen controls
+## Writing controls
 
-- Keep the pen selected at all times. It may be represented by one selected pen button, but there must be no pen-type menu.
-- Put the ink color and the stroke width together in one pen subpanel, opened by pressing the pen button while the pen is selected (pressing it again closes it). There are no separate color or width buttons in the palette. When another tool is selected, the first press on the pen selects it; the next opens the subpanel.
+- Keep the writing tool selected at all times. Represent it with one selected writing/pen button; do not add a second top-level highlighter button.
+- Put a two-choice **Pen / Highlighter** style selector at the top of the writing subpanel. Open the subpanel by pressing the writing button while it is selected (pressing it again closes it). When another tool is selected, the first press selects the writing tool using its last style; the next opens the subpanel.
+- Put the ink color and stroke width below the style selector in that same subpanel. There are no separate color or width buttons in the palette.
 - The subpanel has a curated, accessible set of at least six colors plus a custom color input only if it can be implemented without a large dependency. Choosing a color keeps the subpanel open so the width can be changed too.
 - Indicate the current color with both color and a non-color cue such as a checkmark and semantic label.
 - Below the colors, provide stroke-width adjustment with a slider and a live line preview in the current ink.
-- The pen button shows the current ink as a small dot and announces the ink and width (for example "Pen, Blue, 10 px").
+- The writing button shows the current style and color with a small visual sample and announces the style, color, and width (for example "Highlighter, Yellow, 12 px").
 - Use a practical configurable range, defaulting to 1-20 logical pixels and 3 logical pixels respectively. Store width in logical canvas units so it behaves consistently across device pixel ratios.
 - Changing color or width affects the next stroke and must not mutate strokes already drawn.
 - Preserve the selected color and width during orientation changes for the current app session.
+
+### Highlighter style
+
+- Highlighter is a writing style inside the existing writing tool, not an independent editor tool. Switching between Pen and Highlighter must not interrupt the active tool, create a second palette button, or change how the palette is docked.
+- Remember color and width independently for Pen and Highlighter during the session. Pen keeps its existing defaults. Highlighter defaults to a translucent yellow and **12 logical pixels**, with a configurable width range of **4-40 logical pixels**.
+- Store the writing style in `StrokeStyle` (or an equivalent immutable value captured at pointer-down), alongside color and width. Existing or legacy strokes with no style field are Pen strokes. Changing style, color, width, or opacity affects only later strokes.
+- Render a highlighter with a fixed configurable opacity, default **0.35**, using ordinary source-over compositing. One mark remains translucent and overlapping marks become visibly darker. Apply opacity exactly once: active-stroke rendering, completed-stroke rendering, snapshots, thumbnails, selection previews, and later export code must agree. Do not pre-blend the color against the current paper, because the mark must remain correct over different paper colors and imported content.
+- Use round caps and joins and the same low-latency point capture and stabilization pipeline as Pen. A highlighter tap produces a translucent round dot.
+- Highlighter width is even along the stroke: it does not taper or react to pressure. **Draw and hold for shapes** is unavailable for Highlighter, and holding a highlighter stroke never converts it. Keep the advanced controls visible only for Pen, or show them disabled with a concise explanation and correct disabled semantics.
+- The color UI must preview the effective translucent result over both light and dark sample backgrounds. Keep a curated set of useful highlighter colors; the selected swatch still needs a checkmark and semantic label rather than relying on color alone.
+- Preserve document order. Highlighter strokes do not jump behind existing pen strokes after completion; later marks paint later. Erasing and later selection features must treat a highlighter stroke as one normal stroke whose style happens to be translucent.
+- Keep compositing deterministic and isolated to each page. Do not use a `saveLayer` covering the entire writing surface on every frame; if a layer is required for a specific blend operation, bound it to the dirty stroke region and justify it with profiling.
+
+### Basic and advanced Pen settings
+
+- The subpanel shows the basic settings, ink color and width, at all times. Below them, behind a divider, an **Advanced** row with a chevron folds out the advanced settings; it starts folded each time the panel opens, and exposes its expanded state to screen readers.
+- The advanced settings are:
+  - **Tip sharpness** (slider, 0-100%): how sharply both ends of a stroke taper. 0 draws round, full-width ends.
+  - **Pressure sensitivity** (switch, with a sensitivity slider that is disabled while the switch is off): how much stylus pressure changes the width.
+  - **Stroke stabilization** (switch, with a strength slider that is disabled while the switch is off): how strongly the line is smoothed.
+  - **Draw and hold for shapes** (switch): whether hold-to-shape (below) is armed.
+- Every advanced setting is **on** by default, at a middle strength (50%). The pen's settings, basic and advanced, carry from note to note for the session.
+- Like color and width, these are captured at pointer-down and affect only later Pen strokes.
+
+### Stroke width along a stroke
+
+- A stroke may vary in width. Store this as an optional width factor per filtered point, a multiple of the stroke's width; a stroke without factors is drawn at an even width exactly as before. Render a varying stroke as one filled outline (a disc at each end and at each sharp turn, joined by a quadrilateral per segment, all wound the same way so the union fills under the nonzero rule), built once per finished stroke.
+- **Taper**: over a length that grows with sharpness (from one to eight stroke widths), the start of a stroke narrows toward a tip of `1 - 0.85 × sharpness` of the width, with an ease-out curve. While drawing, only the start is tapered; when the stroke finishes, both ends are, each over at most 40% of the stroke so short strokes still reach full width.
+- **Pressure**: read pressure only from a stylus (or its eraser end) whose reported pressure range is not empty, normalized to 0-1; fingers, mice, and styluses without a pressure sensor report none. Smooth the reading (exponential, 0.3 of each new reading) so a noisy sensor does not ripple the edge. The width factor is `1 + sensitivity × 0.75 × (2p - 1)`: neutral pressure (0.5), and a device that reports none, leaves the width as set.
+- A stroke's bounds use its widest factor (never less than 1), so hit-testing and repaint regions stay conservative.
+- Stabilization maps onto the smoother below: at the default (50%) the smoother uses exactly its configured tuning; stronger stabilization lowers the minimum cutoff (smoother, more lag), weaker raises it, and turning stabilization off raises it far enough that the pen is followed without visible smoothing.
 
 ## Input capture
 
@@ -38,7 +70,7 @@ Do not add an eraser, highlighter, pencil variants, a separate shape tool or sha
 - Accept stylus, inverted stylus, touch, and mouse input, but process only one active writing pointer at a time for this first version.
 - Ignore additional pointers while a stroke is active so that a palm or second finger does not corrupt the stroke. Document that full platform palm rejection remains future work.
 - Convert all samples into writing-surface-local logical coordinates before smoothing or storage.
-- Each sample must contain position and a monotonic timestamp. Preserve device kind for diagnostics, but do not use pressure to change width in this version.
+- Each sample must contain position and a monotonic timestamp, and pressure when the device reports it (see the pen's advanced settings). Preserve device kind for diagnostics.
 - Start a stroke on pointer down, append samples on pointer move, and finalize it on pointer up or cancel. A tap must render a round dot.
 - Clip ink to the writing surface.
 - Prefer any coalesced/historical pointer samples exposed by the supported Flutter/platform APIs. The implementation must still work when only the latest event is available.
@@ -104,7 +136,7 @@ Use a default `aPerp` of **3 logical px/s²**. The original product requirement 
 
 ## Hold to convert to shape
 
-After drawing a stroke, the user can keep the pen on the page and hold it still. After a short hold the stroke is replaced, in place, by a clean version of the shape it was meant to be. Lifting the pen without holding keeps the freehand stroke exactly as before.
+After drawing a stroke, the user can keep the pen on the page and hold it still. This is the pen's **Draw and hold for shapes** setting, on by default; with it off, holding still does nothing and the stroke stays freehand. After a short hold the stroke is replaced, in place, by a clean version of the shape it was meant to be. Lifting the pen without holding keeps the freehand stroke exactly as before.
 
 ### Trigger
 
@@ -200,11 +232,17 @@ Add deterministic tests with synthetic positions and timestamps.
 - verify one active pointer and ignored secondary-pointer behavior;
 - verify clipping to the writing surface;
 - verify color and width changes affect only later strokes;
-- verify the pen subpanel, with its colors and width slider, opens from the selected pen and is on screen in the tablet and compact layouts, and that there are no separate color or width buttons;
-- verify selected values survive a layout/orientation rebuild;
+- verify the writing subpanel opens from the selected writing button in tablet and compact layouts, exposes Pen and Highlighter styles plus the applicable colors and width slider, and has no separate highlighter, color, or width palette buttons;
+- verify Pen and Highlighter remember independent color and width values, survive a layout/orientation rebuild, and capture their full style at pointer-down so existing strokes never change;
+- verify one highlighter mark uses the configured opacity exactly once, overlapping marks darken in document order, and active and completed strokes render equivalently over light, dark, and imported backgrounds;
+- verify a highlighter tap is a translucent round dot, its width stays even regardless of pressure, and holding it never invokes shape conversion;
+- verify Highlighter hides or correctly disables Pen-only advanced settings and exposes useful labels, disabled semantics, and previews over light and dark samples;
+- verify the advanced settings start folded, unfold from the Advanced row, are all on by default, and that each one reaches the pen (a disabled switch also disables its slider);
+- verify tapering narrows both ends and leaves the middle at full width, that sharper tips narrow further, that harder pressure draws wider and lighter narrower, that a device without pressure leaves the width as set, and that turning Draw and hold off keeps a held stroke freehand;
+- verify default stabilization gives the smoother its configured tuning unchanged;
 - verify a tap produces a dot;
 - verify cancelling a pointer leaves valid state;
-- verify there is exactly one pen option and no unsupported writing tools;
+- verify there is exactly one top-level writing tool, with Pen and Highlighter only, and no unsupported writing styles;
 - drawing a rough circle and holding still converts it into a circle with the same style, shown as a preview until the pen lifts and committed then;
 - after the snap, moving the pen away from a circle's center scales it, and swinging a snapped line's end turns and stretches it about its start; small wobble changes nothing; cancel keeps the shape;
 - lifting without holding, holding at the start of a stroke, and holding a scribble all leave the freehand stroke unchanged;
@@ -220,7 +258,9 @@ Add deterministic tests with synthetic positions and timestamps.
 ## Acceptance criteria
 
 - The user can draw immediately with a stylus or finger and see ink during the stroke.
-- The UI offers exactly one pen tool, color selection, and width adjustment.
+- The UI offers one top-level writing tool with Pen and Highlighter style selection, accessible color selection, and width adjustment.
+- Highlighter defaults to translucent yellow at 12 logical pixels and 0.35 opacity, uses the same responsive capture/smoothing path as Pen, and never applies taper, pressure width, or hold-to-shape.
+- Pen and Highlighter settings are remembered independently, and every stroke retains the style, color, width, and opacity behavior captured when it began.
 - Straight fast strokes retain their intended direction while perpendicular jitter is visibly reduced.
 - The implementation uses the specified fastest-velocity direction and acceleration-limited perpendicular filter with default `aPerp = 3 logical px/s²`.
 - Existing strokes retain the color and width with which they were created.
@@ -230,4 +270,4 @@ Add deterministic tests with synthetic positions and timestamps.
 
 ## Completion report
 
-At the end, describe the data flow from pointer input to painting, list every smoothing and shape configuration value and its default, list the recognized shape kinds and how each is beautified, report automated and physical-device verification separately, and call out any platform limitation such as unavailable coalesced events or incomplete palm rejection. Include a short tuning note explaining that `aPerp = 3 logical px/s²` is intentionally configurable and may feel extremely restrictive at tablet scale.
+At the end, describe the data flow from pointer input to painting, explain how writing style and opacity are captured and applied exactly once, list the independent Pen and Highlighter defaults, list every smoothing and shape configuration value and its default, list the recognized shape kinds and how each is beautified, report automated and physical-device verification separately, and call out any platform limitation such as unavailable coalesced events or incomplete palm rejection. Include a short tuning note explaining that `aPerp = 3 logical px/s²` is intentionally configurable and may feel extremely restrictive at tablet scale.

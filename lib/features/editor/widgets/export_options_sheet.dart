@@ -1,6 +1,8 @@
 import 'package:flutter/material.dart';
 
 import '../../../app/theme/app_tokens.dart';
+import '../../../app/theme/app_icons.dart';
+import '../../../shared/widgets/app_controls.dart';
 import '../document_io/pdf_exporter.dart';
 
 Future<PdfExportOptions?> showExportOptions(
@@ -30,62 +32,74 @@ class _ExportOptionsSheetState extends State<_ExportOptionsSheet> {
 
   @override
   Widget build(BuildContext context) {
+    final AppColors colors = AppColors.of(context);
     return SafeArea(
-      child: ListView(
-        shrinkWrap: true,
-        padding: const EdgeInsets.fromLTRB(
-          AppSpacing.md,
-          0,
-          AppSpacing.md,
-          AppSpacing.lg,
-        ),
-        children: <Widget>[
-          Semantics(
-            header: true,
-            child: Text(
-              'Export as PDF',
-              style: Theme.of(context).textTheme.titleLarge,
+      child: Center(
+        heightFactor: 1,
+        child: ConstrainedBox(
+          constraints: const BoxConstraints(maxWidth: 480),
+          child: ListView(
+            shrinkWrap: true,
+            padding: const EdgeInsets.fromLTRB(
+              AppSpacing.lg,
+              0,
+              AppSpacing.lg,
+              AppSpacing.lg,
             ),
-          ),
-          RadioGroup<ExportPageRange>(
-            groupValue: _range,
-            onChanged: (ExportPageRange? value) {
-              if (value != null) setState(() => _range = value);
-            },
-            child: Column(
-              children: <Widget>[
-                const RadioListTile<ExportPageRange>(
-                  contentPadding: EdgeInsets.zero,
-                  title: Text('All pages'),
-                  value: ExportPageRange.all,
-                ),
-                if (widget.allowCurrentPage)
-                  const RadioListTile<ExportPageRange>(
-                    contentPadding: EdgeInsets.zero,
-                    title: Text('Current page'),
-                    value: ExportPageRange.current,
+            children: <Widget>[
+              Row(
+                children: <Widget>[
+                  Icon(AppIcons.share, size: 20, color: colors.textSecondary),
+                  const SizedBox(width: AppSpacing.sm),
+                  Semantics(
+                    header: true,
+                    child: Text(
+                      'Export as PDF',
+                      style: Theme.of(context).textTheme.titleLarge,
+                    ),
                   ),
-              ],
-            ),
-          ),
-          SwitchListTile.adaptive(
-            contentPadding: EdgeInsets.zero,
-            title: const Text('Include background rules'),
-            value: _rules,
-            onChanged: (bool value) => setState(() => _rules = value),
-          ),
-          const SizedBox(height: AppSpacing.sm),
-          Align(
-            alignment: AlignmentDirectional.centerEnd,
-            child: FilledButton.icon(
-              onPressed: () => Navigator.of(context).pop(
-                PdfExportOptions(range: _range, includeBackgroundRules: _rules),
+                ],
               ),
-              icon: const Icon(Icons.ios_share_outlined),
-              label: const Text('Export'),
-            ),
+              const SizedBox(height: AppSpacing.lg),
+              if (widget.allowCurrentPage) ...<Widget>[
+                const SectionLabel('Pages'),
+                SegmentedChoice<ExportPageRange>(
+                  options: const <ExportPageRange>[
+                    ExportPageRange.all,
+                    ExportPageRange.current,
+                  ],
+                  selected: _range,
+                  labelOf: (ExportPageRange range) =>
+                      range == ExportPageRange.all
+                      ? 'All pages'
+                      : 'Current page',
+                  onSelected: (ExportPageRange range) =>
+                      setState(() => _range = range),
+                ),
+                const SizedBox(height: AppSpacing.sm),
+              ],
+              ToggleSetting(
+                label: 'Include background rules',
+                hint: 'Print the lines, grid, or dots under the ink.',
+                value: _rules,
+                onChanged: (bool value) => setState(() => _rules = value),
+              ),
+              const SizedBox(height: AppSpacing.lg),
+              FilledButton(
+                style: FilledButton.styleFrom(
+                  minimumSize: const Size.fromHeight(AppSizes.minTouchTarget),
+                ),
+                onPressed: () => Navigator.of(context).pop(
+                  PdfExportOptions(
+                    range: _range,
+                    includeBackgroundRules: _rules,
+                  ),
+                ),
+                child: const Text('Export'),
+              ),
+            ],
           ),
-        ],
+        ),
       ),
     );
   }

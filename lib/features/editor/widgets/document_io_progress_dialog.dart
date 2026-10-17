@@ -1,5 +1,8 @@
 import 'package:flutter/material.dart';
 
+import '../../../shared/widgets/processing.dart';
+import '../../../app/theme/app_tokens.dart';
+
 class DocumentIoProgressResult {
   const DocumentIoProgressResult({this.error, this.cancelled = false});
   final Object? error;
@@ -95,14 +98,25 @@ class _DocumentIoProgressDialogState extends State<_DocumentIoProgressDialog> {
       content: Semantics(
         liveRegion: true,
         label: '${widget.title}, $status',
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: <Widget>[
-            LinearProgressIndicator(value: value),
-            const SizedBox(height: 12),
-            Text(status),
-          ],
+        child: SizedBox(
+          width: 320,
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: <Widget>[
+              const SizedBox(height: AppSpacing.xs),
+              ShimmerTrack(value: value),
+              const SizedBox(height: AppSpacing.sm),
+              Text(
+                status,
+                style: Theme.of(context).textTheme.bodySmall!.copyWith(
+                  fontFeatures: const <FontFeature>[
+                    FontFeature.tabularFigures(),
+                  ],
+                ),
+              ),
+            ],
+          ),
         ),
       ),
       actions: <Widget>[

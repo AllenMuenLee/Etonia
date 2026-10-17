@@ -1,6 +1,6 @@
 import 'dart:io';
 import 'dart:typed_data';
-import 'dart:ui';
+import 'dart:ui' as ui;
 
 import 'package:file_picker/file_picker.dart';
 import 'package:image/image.dart' as image;
@@ -16,6 +16,9 @@ class PickedDocument {
 
 abstract interface class DocumentPicker {
   Future<PickedDocument?> pickPdf();
+
+  /// A PDF exported from Goodnotes or a native `.goodnotes` notebook.
+  Future<PickedDocument?> pickGoodnotes();
   Future<PickedDocument?> pickImage();
 }
 
@@ -26,6 +29,11 @@ class SystemDocumentPicker implements DocumentPicker {
   Future<PickedDocument?> pickPdf() =>
       _pick(FileType.custom, const <String>['pdf']);
 
+  /// Any file: `.goodnotes` is not a type every platform's picker can
+  /// filter by, so what is picked is told apart by its contents.
+  @override
+  Future<PickedDocument?> pickGoodnotes() => _pick(FileType.any, null);
+
   @override
   Future<PickedDocument?> pickImage() => _pick(FileType.image, null);
 
@@ -34,16 +42,28 @@ class SystemDocumentPicker implements DocumentPicker {
       type: type,
       allowedExtensions: extensions,
     );
-    return file == null
-        ? null
-        : PickedDocument(name: file.name, bytes: await file.readAsBytes());
+    if (file == null) {
+      return null;
+    }
+    final PickedDocument picked = PickedDocument(
+      name: file.name,
+      bytes: await file.readAsBytes(),
+    );
+    // The picker copies each file it is given into the app's cache; once
+    // read, that copy is only taking space.
+    try {
+      await FilePicker.clearTemporaryFiles();
+    } on Object {
+      // Left for the system to clear.
+    }
+    return picked;
   }
 }
 
 @pragma('vm:immutable')
 class PdfInspection {
   const PdfInspection({required this.pageSizes, this.isEncrypted = false});
-  final List<Size> pageSizes;
+  final List<ui.Size> pageSizes;
   final bool isEncrypted;
 }
 
@@ -69,9 +89,54 @@ abstract interface class PdfRasterizer {
   });
 }
 
-/// PDFium-backed implementation. Every operation owns and closes its PDF.
-class PdfrxRasterizer implements PdfRasterizer {
+/// Optional fast path for consumers that display a rasterized page directly.
+///
+/// [PdfRasterizer.render] returns PNG bytes because exports and clipboard
+/// operations need an encoded image. Screen rendering does not: turning the
+/// PDF's raw pixels into PNG and decoding them again is avoidable work.
+abstract interface class PdfImageRasterizer {
+  Future<ui.Image> renderImage(
+    Uint8List bytes,
+    int pageIndex, {
+    required int pixelWidth,
+    required int pixelHeight,
+  });
+}
+
+/// Optional fast path for paging through one PDF: it is parsed once and
+/// then rendered page by page, instead of parsed again for every page.
+abstract interface class PdfDocumentRasterizer {
+  Future<OpenPdf> open(Uint8List bytes);
+}
+
+/// A PDF kept open by a [PdfDocumentRasterizer]. Its owner disposes it, and
+/// never while one of its renders is still in progress.
+abstract interface class OpenPdf {
+  Future<ui.Image> renderImage(
+    int pageIndex, {
+    required int pixelWidth,
+    required int pixelHeight,
+  });
+
+  Future<void> dispose();
+}
+
+/// PDFium-backed implementation. Every one-off operation owns and closes
+/// its PDF; [open] hands the PDF to its caller.
+class PdfrxRasterizer
+    implements PdfRasterizer, PdfImageRasterizer, PdfDocumentRasterizer {
   const PdfrxRasterizer();
+
+  @override
+  Future<OpenPdf> open(Uint8List bytes) async {
+    return _PdfrxOpenPdf(
+      await pdfrx.PdfDocument.openData(
+        bytes,
+        sourceName: 'greatnote-view-${bytes.length}-${identityHashCode(bytes)}',
+        passwordProvider: () => null,
+      ),
+    );
+  }
 
   @override
   Future<PdfInspection> inspect(Uint8List bytes) async {
@@ -84,13 +149,13 @@ class PdfrxRasterizer implements PdfRasterizer {
       );
       return PdfInspection(
         isEncrypted: document.isEncrypted,
-        pageSizes: <Size>[
+        pageSizes: <ui.Size>[
           for (final pdfrx.PdfPage page in document.pages)
-            Size(page.width, page.height),
+            ui.Size(page.width, page.height),
         ],
       );
     } on pdfrx.PdfPasswordException {
-      return const PdfInspection(pageSizes: <Size>[], isEncrypted: true);
+      return const PdfInspection(pageSizes: <ui.Size>[], isEncrypted: true);
     } finally {
       await document?.dispose();
     }
@@ -140,17 +205,83 @@ class PdfrxRasterizer implements PdfRasterizer {
       await document.dispose();
     }
   }
+
+  @override
+  Future<ui.Image> renderImage(
+    Uint8List bytes,
+    int pageIndex, {
+    required int pixelWidth,
+    required int pixelHeight,
+  }) async {
+    final pdfrx.PdfDocument document = await pdfrx.PdfDocument.openData(
+      bytes,
+      sourceName: 'greatnote-display-${bytes.length}-$pageIndex',
+      passwordProvider: () => null,
+    );
+    try {
+      return await _renderPdfrxImage(
+        document,
+        pageIndex,
+        pixelWidth,
+        pixelHeight,
+      );
+    } finally {
+      await document.dispose();
+    }
+  }
+}
+
+class _PdfrxOpenPdf implements OpenPdf {
+  _PdfrxOpenPdf(this._document);
+
+  final pdfrx.PdfDocument _document;
+
+  @override
+  Future<ui.Image> renderImage(
+    int pageIndex, {
+    required int pixelWidth,
+    required int pixelHeight,
+  }) => _renderPdfrxImage(_document, pageIndex, pixelWidth, pixelHeight);
+
+  @override
+  Future<void> dispose() => _document.dispose();
+}
+
+Future<ui.Image> _renderPdfrxImage(
+  pdfrx.PdfDocument document,
+  int pageIndex,
+  int pixelWidth,
+  int pixelHeight,
+) async {
+  if (pageIndex < 0 || pageIndex >= document.pages.length) {
+    throw RangeError.index(pageIndex, document.pages, 'pageIndex');
+  }
+  final pdfrx.PdfImage? rendered = await document.pages[pageIndex].render(
+    fullWidth: pixelWidth.toDouble(),
+    fullHeight: pixelHeight.toDouble(),
+    width: pixelWidth,
+    height: pixelHeight,
+    annotationRenderingMode: pdfrx.PdfAnnotationRenderingMode.none,
+  );
+  if (rendered == null) {
+    throw StateError('The PDF page could not be rendered.');
+  }
+  try {
+    return await rendered.createImage();
+  } finally {
+    rendered.dispose();
+  }
 }
 
 abstract interface class ExportSink {
-  Future<void> share(File file, {Rect? sharePositionOrigin});
+  Future<void> share(File file, {ui.Rect? sharePositionOrigin});
 }
 
 class SystemExportSink implements ExportSink {
   const SystemExportSink();
 
   @override
-  Future<void> share(File file, {Rect? sharePositionOrigin}) async {
+  Future<void> share(File file, {ui.Rect? sharePositionOrigin}) async {
     await SharePlus.instance.share(
       ShareParams(
         files: <XFile>[XFile(file.path, mimeType: 'application/pdf')],

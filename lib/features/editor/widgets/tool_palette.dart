@@ -1,15 +1,28 @@
+import 'dart:async';
+import 'dart:math' as math;
+
+import 'package:flutter/foundation.dart';
+import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/semantics.dart';
 
 import '../../../app/theme/app_tokens.dart';
+import '../../../app/theme/app_icons.dart';
+import '../../../shared/feedback/app_haptics.dart';
+import '../../../shared/widgets/app_controls.dart';
 import '../ink/eraser_settings.dart';
 import '../ink/ink_palette.dart';
 import '../ink/pen_settings.dart';
+import '../ink/stroke.dart';
 import 'eraser_options.dart';
 import 'ink_color_picker.dart';
 import 'palette_button.dart';
 import 'palette_popover.dart';
+import 'pen_advanced_panel.dart';
 import 'select_options.dart';
+import 'sticky_options.dart';
 import 'stroke_width_picker.dart';
+import '../sticky/sticky_note.dart';
 
 /// Handles to the palette's popovers, for code outside the palette that
 /// needs to know whether one is open.
@@ -17,38 +30,191 @@ class ToolPaletteController {
   final MenuController penMenu = MenuController();
   final MenuController eraserMenu = MenuController();
   final MenuController selectMenu = MenuController();
+  final MenuController stickyMenu = MenuController();
 
   bool get hasOpenPopover {
-    return penMenu.isOpen || eraserMenu.isOpen || selectMenu.isOpen;
+    return penMenu.isOpen ||
+        eraserMenu.isOpen ||
+        selectMenu.isOpen ||
+        stickyMenu.isOpen;
+  }
+
+  void closeAll() {
+    penMenu.close();
+    eraserMenu.close();
+    selectMenu.close();
+    stickyMenu.close();
   }
 }
 
-/// The floating tool palette: the pen, the eraser, and Select. Each one,
+/// The edge of the page the palette is docked against. It lies along the
+/// edge: across the top and bottom, and down the sides.
+enum PaletteEdge {
+  top('top'),
+  bottom('bottom'),
+  left('left'),
+  right('right');
+
+  const PaletteEdge(this.label);
+
+  final String label;
+
+  Axis get axis =>
+      this == top || this == bottom ? Axis.horizontal : Axis.vertical;
+}
+
+/// Where the palette floats: the edge it is docked against and how far
+/// along that edge, from 0 (its top or left end) to 1 (its bottom or right
+/// end). It starts centered across the top.
+@immutable
+class PalettePlacement {
+  const PalettePlacement({this.edge = PaletteEdge.top, this.along = 0.5})
+    : assert(along >= 0 && along <= 1);
+
+  final PaletteEdge edge;
+  final double along;
+
+  /// The palette's top-left corner when docked in [region], [margin] from
+  /// its edge.
+  Offset originIn(Rect region, double margin) {
+    final Size size = ToolPalette.sizeFor(edge.axis);
+    final double freeX = math.max(0, region.width - 2 * margin - size.width);
+    final double freeY = math.max(0, region.height - 2 * margin - size.height);
+    final double alongX = region.left + margin + freeX * along;
+    final double alongY = region.top + margin + freeY * along;
+    return switch (edge) {
+      PaletteEdge.top => Offset(alongX, region.top + margin),
+      PaletteEdge.bottom => Offset(
+        alongX,
+        math.max(region.top, region.bottom - margin - size.height),
+      ),
+      PaletteEdge.left => Offset(region.left + margin, alongY),
+      PaletteEdge.right => Offset(
+        math.max(region.left, region.right - margin - size.width),
+        alongY,
+      ),
+    };
+  }
+
+  /// The edge of [region] nearest [point].
+  static PaletteEdge nearestEdge(Rect region, Offset point) {
+    final Map<PaletteEdge, double> distances = <PaletteEdge, double>{
+      PaletteEdge.top: point.dy - region.top,
+      PaletteEdge.bottom: region.bottom - point.dy,
+      PaletteEdge.left: point.dx - region.left,
+      PaletteEdge.right: region.right - point.dx,
+    };
+    return distances.entries
+        .reduce(
+          (MapEntry<PaletteEdge, double> a, MapEntry<PaletteEdge, double> b) =>
+              b.value < a.value ? b : a,
+        )
+        .key;
+  }
+
+  /// How near, in logical pixels, to the middle of its edge a palette is
+  /// let go to settle exactly there.
+  static const double centerSnap = 72;
+
+  /// The placement nearest a palette let go centered on [center] in
+  /// [region]: against the nearest edge, where it was along it, or at the
+  /// edge's middle when let go within [centerSnap] of it.
+  factory PalettePlacement.nearest(Rect region, Offset center, double margin) {
+    final PaletteEdge edge = nearestEdge(region, center);
+    final Size size = ToolPalette.sizeFor(edge.axis);
+    final bool across = edge.axis == Axis.horizontal;
+    final double offMiddle = across
+        ? center.dx - region.center.dx
+        : center.dy - region.center.dy;
+    if (offMiddle.abs() <= centerSnap) {
+      return PalettePlacement(edge: edge);
+    }
+    final double free = across
+        ? region.width - 2 * margin - size.width
+        : region.height - 2 * margin - size.height;
+    final double start = across
+        ? center.dx - size.width / 2 - region.left
+        : center.dy - size.height / 2 - region.top;
+    final double along = free <= 0
+        ? 0.5
+        : ((start - margin) / free).clamp(0.0, 1.0);
+    return PalettePlacement(edge: edge, along: along);
+  }
+
+  @override
+  bool operator ==(Object other) {
+    return other is PalettePlacement &&
+        other.edge == edge &&
+        other.along == along;
+  }
+
+  @override
+  int get hashCode => Object.hash(edge, along);
+}
+
+/// The floating tool palette: the pen, eraser, Select, Sticky note, and
+/// AI mode. Each tool,
 /// pressed while selected, opens its options: the pen's ink color and
-/// width, the eraser's mode and size, and Select's Paste.
+/// width (and, folded away, its advanced settings), the eraser's mode and
+/// size, and Select's Paste.
+///
+/// Holding it anywhere, on its tools too, moves it: held a moment, the
+/// palette lights up in the accent color; held for [liftDelay], it lifts
+/// off the page with a deeper shadow and follows the finger until let go.
+/// A tap on a tool is just a tap.
+///
+/// It lies along the [edge] it is docked against, so it turns between a
+/// row and a column as it is dragged from edge to edge, and its panels
+/// open toward the page.
 ///
 /// It listens to [tool], [penSettings], and [eraserSettings] itself, so
 /// changing any of them rebuilds only the palette.
 class ToolPalette extends StatelessWidget {
   const ToolPalette({
     super.key,
-    required this.axis,
+    this.edge = PaletteEdge.top,
     required this.tool,
     required this.penSettings,
     required this.eraserSettings,
     required this.clipboardListenable,
     required this.canPaste,
     required this.onPaste,
+    required this.aiActive,
+    required this.onToggleAi,
     this.penConfig = const PenConfig(),
     this.eraserConfig = const EraserConfig(),
     this.dense = false,
     this.controller,
+    this.onDragStart,
+    this.onDragUpdate,
+    this.onDragEnd,
+    this.onMoveTo,
+    this.stickySettings,
+    this.onStickySettingsChanged,
+    this.stickyTargetLabel,
   });
 
   static const double _padding = AppSpacing.xxs;
-  static const int _buttonCount = 3;
+  static const int _buttonCount = 5;
 
-  final Axis axis;
+  /// The look of the next sticky note. Without it there is no Sticky note
+  /// tool.
+  final ValueListenable<StickyNoteSettings>? stickySettings;
+
+  /// Called with each choice in the sticky note options.
+  final ValueChanged<StickyNoteSettings>? onStickySettingsChanged;
+
+  /// The sticky note those choices also restyle, as announced, if any.
+  final ValueGetter<String?>? stickyTargetLabel;
+
+  /// How long the surface is held before the palette lifts to be dragged.
+  static const Duration liftDelay = Duration(milliseconds: 300);
+
+  final PaletteEdge edge;
+
+  /// A row along the top and bottom, a column down the sides.
+  Axis get axis => edge.axis;
+
   final ValueNotifier<EditorTool> tool;
   final ValueNotifier<PenSettings> penSettings;
   final ValueNotifier<EraserSettings> eraserSettings;
@@ -60,10 +226,27 @@ class ToolPalette extends StatelessWidget {
   final ValueGetter<bool> canPaste;
 
   final VoidCallback onPaste;
+
+  /// Whether AI mode is on: the assistant's notes are shown, and writing on
+  /// the page with the AI tool is for the assistant.
+  final ValueListenable<bool> aiActive;
+
+  /// Turns AI mode on, or off when it is on.
+  final VoidCallback onToggleAi;
   final PenConfig penConfig;
   final EraserConfig eraserConfig;
   final bool dense;
   final ToolPaletteController? controller;
+
+  /// Called as the lifted palette is dragged, with how far it moved each
+  /// time; without them the palette stays put.
+  final VoidCallback? onDragStart;
+  final ValueChanged<Offset>? onDragUpdate;
+  final VoidCallback? onDragEnd;
+
+  /// Docks the palette against an edge; offered to assistive technology in
+  /// place of dragging.
+  final ValueChanged<PaletteEdge>? onMoveTo;
 
   /// The palette's outer size; fixed so the screen can lay out around it.
   static Size sizeFor(Axis axis) {
@@ -76,42 +259,48 @@ class ToolPalette extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final AppColors colors = AppColors.of(context);
-
-    return DecoratedBox(
-      decoration: BoxDecoration(
-        color: colors.surface,
-        borderRadius: BorderRadius.circular(AppRadii.large),
-        border: Border.all(color: colors.divider, width: AppSizes.hairline),
-        boxShadow: AppShadows.floating(colors),
-      ),
-      child: Material(
-        type: MaterialType.transparency,
-        child: Padding(
-          padding: const EdgeInsets.all(_padding),
-          child: Semantics(
-            container: true,
-            explicitChildNodes: true,
-            label: 'Tools',
-            child: FocusTraversalGroup(
-              child: ListenableBuilder(
-                listenable: Listenable.merge(<Listenable>[
-                  tool,
-                  penSettings,
-                  eraserSettings,
-                ]),
-                builder: (BuildContext context, Widget? _) {
-                  return Flex(
-                    direction: axis,
-                    mainAxisSize: MainAxisSize.min,
-                    children: <Widget>[
-                      _penControl(),
-                      _eraserControl(),
-                      _selectControl(),
-                    ],
-                  );
-                },
-              ),
+    return _LiftableSurface(
+      semanticLabel: 'Move tools, docked at the ${edge.label}',
+      moveActions: <CustomSemanticsAction, VoidCallback>{
+        if (onMoveTo != null)
+          for (final PaletteEdge other in PaletteEdge.values)
+            if (other != edge)
+              CustomSemanticsAction(
+                label: 'Move tools to the ${other.label}',
+              ): () =>
+                  onMoveTo!(other),
+      },
+      onLift: onDragStart,
+      onMove: onDragUpdate,
+      onDrop: onDragEnd,
+      child: Padding(
+        padding: const EdgeInsets.all(_padding),
+        child: Semantics(
+          container: true,
+          explicitChildNodes: true,
+          label: 'Tools',
+          child: FocusTraversalGroup(
+            child: ListenableBuilder(
+              listenable: Listenable.merge(<Listenable>[
+                tool,
+                penSettings,
+                eraserSettings,
+                aiActive,
+                ?stickySettings,
+              ]),
+              builder: (BuildContext context, Widget? _) {
+                return Flex(
+                  direction: axis,
+                  mainAxisSize: MainAxisSize.min,
+                  children: <Widget>[
+                    _penControl(),
+                    _eraserControl(),
+                    _selectControl(),
+                    if (stickySettings != null) _stickyControl(),
+                    _aiControl(),
+                  ],
+                );
+              },
             ),
           ),
         ),
@@ -122,18 +311,22 @@ class ToolPalette extends StatelessWidget {
   /// Selects the pen; pressed again, opens its ink color and width.
   Widget _penControl() {
     return PalettePopover(
-      paletteAxis: axis,
+      paletteEdge: edge,
       controller: controller?.penMenu,
       anchorBuilder: (BuildContext context, VoidCallback toggle) {
         final bool selected = tool.value == EditorTool.pen;
         final PenSettings pen = penSettings.value;
         return PaletteButton(
-          tooltip: 'Pen',
-          semanticLabel: 'Pen, ${PenOptions.describe(pen)}',
+          tooltip: pen.style.label,
+          semanticLabel: PenOptions.describe(pen),
           selected: selected,
           dense: dense,
           onPressed: selected ? toggle : () => tool.value = EditorTool.pen,
-          child: _PenIcon(ink: pen.ink),
+          child: _PenIcon(
+            ink: pen.activeInk,
+            highlighter: pen.isHighlighter,
+            opacity: penConfig.highlighterOpacity,
+          ),
         );
       },
       panelBuilder: (BuildContext context, VoidCallback close) {
@@ -144,6 +337,16 @@ class ToolPalette extends StatelessWidget {
               settings: current,
               config: penConfig,
               onChanged: (PenSettings next) => penSettings.value = next,
+              onOpenAdvanced: () {
+                // The popover's context goes with it; the navigator stays.
+                final NavigatorState navigator = Navigator.of(context);
+                close();
+                showPenAdvancedPanel(
+                  navigator.context,
+                  settings: penSettings,
+                  config: penConfig,
+                );
+              },
             );
           },
         );
@@ -154,7 +357,7 @@ class ToolPalette extends StatelessWidget {
   /// Selects the eraser; pressed again, opens its options.
   Widget _eraserControl() {
     return PalettePopover(
-      paletteAxis: axis,
+      paletteEdge: edge,
       controller: controller?.eraserMenu,
       anchorBuilder: (BuildContext context, VoidCallback toggle) {
         final bool selected = tool.value == EditorTool.eraser;
@@ -186,7 +389,7 @@ class ToolPalette extends StatelessWidget {
   /// Selects the Select tool; pressed again, opens its options.
   Widget _selectControl() {
     return PalettePopover(
-      paletteAxis: axis,
+      paletteEdge: edge,
       controller: controller?.selectMenu,
       anchorBuilder: (BuildContext context, VoidCallback toggle) {
         final bool selected = tool.value == EditorTool.select;
@@ -195,7 +398,7 @@ class ToolPalette extends StatelessWidget {
           selected: selected,
           dense: dense,
           onPressed: selected ? toggle : () => tool.value = EditorTool.select,
-          child: const Icon(Icons.highlight_alt),
+          child: const Icon(AppIcons.lasso),
         );
       },
       panelBuilder: (BuildContext context, VoidCallback close) {
@@ -215,37 +418,350 @@ class ToolPalette extends StatelessWidget {
       },
     );
   }
+
+  /// Selects the Sticky note tool and opens its options at once: a tap on
+  /// the page then places a note with them. Pressed again, it toggles the
+  /// options.
+  Widget _stickyControl() {
+    final ValueListenable<StickyNoteSettings> settings = stickySettings!;
+    return PalettePopover(
+      paletteEdge: edge,
+      controller: controller?.stickyMenu,
+      anchorBuilder: (BuildContext context, VoidCallback toggle) {
+        final bool selected = tool.value == EditorTool.sticky;
+        return PaletteButton(
+          key: const ValueKey<String>('sticky-note-tool'),
+          tooltip: 'Sticky note',
+          semanticLabel:
+              'Sticky note, ${StickyOptions.describe(settings.value)}',
+          selected: selected,
+          dense: dense,
+          onPressed: selected
+              ? toggle
+              : () {
+                  tool.value = EditorTool.sticky;
+                  toggle();
+                },
+          child: _StickyIcon(color: settings.value.color),
+        );
+      },
+      panelBuilder: (BuildContext context, VoidCallback close) {
+        return ValueListenableBuilder<StickyNoteSettings>(
+          valueListenable: settings,
+          builder: (BuildContext context, StickyNoteSettings current, _) {
+            return StickyOptions(
+              settings: current,
+              targetLabel: stickyTargetLabel?.call(),
+              onChanged: (StickyNoteSettings next) =>
+                  onStickySettingsChanged?.call(next),
+            );
+          },
+        );
+      },
+    );
+  }
+
+  /// Turns AI mode on and off. On, it shows the assistant's notes, opens
+  /// the chat, and makes writing on the page glow for the assistant rather
+  /// than leave ink; off, it hides the notes and closes the chat.
+  Widget _aiControl() {
+    final bool on = aiActive.value;
+    return PaletteButton(
+      key: const ValueKey<String>('ai-mode-toggle'),
+      tooltip: on ? 'Turn off AI' : 'Turn on AI',
+      semanticLabel: 'AI mode',
+      selected: on,
+      toggled: on,
+      dense: dense,
+      onPressed: onToggleAi,
+      child: const _AiGlyph(),
+    );
+  }
 }
 
-/// The pen glyph with a dot of the current ink at its corner.
-class _PenIcon extends StatelessWidget {
-  const _PenIcon({required this.ink});
+/// The letters "AI", drawn in the icon's color and size.
+class _AiGlyph extends StatelessWidget {
+  const _AiGlyph();
 
-  static const double _dot = 9;
+  @override
+  Widget build(BuildContext context) {
+    final IconThemeData icon = IconTheme.of(context);
+    return SizedBox.square(
+      dimension: AppSizes.icon + 2,
+      child: Center(
+        child: Text(
+          'AI',
+          key: const ValueKey<String>('ai-mode-label'),
+          maxLines: 1,
+          textScaler: TextScaler.noScaling,
+          style: Theme.of(context).textTheme.labelLarge?.copyWith(
+            color: icon.color,
+            fontSize: (icon.size ?? AppSizes.icon) * 0.66,
+            height: 1,
+            fontWeight: FontWeight.w800,
+            letterSpacing: 0.4,
+          ),
+        ),
+      ),
+    );
+  }
+}
 
-  final InkColor ink;
+/// The palette's card. Held anywhere, on [child]'s tools too, it lights up
+/// in the accent color after a moment, so a quick tap never flashes it,
+/// and after [ToolPalette.liftDelay] it lifts, scaled up a touch over a
+/// deeper shadow, to be dragged.
+class _LiftableSurface extends StatefulWidget {
+  const _LiftableSurface({
+    required this.semanticLabel,
+    required this.moveActions,
+    required this.onLift,
+    required this.onMove,
+    required this.onDrop,
+    required this.child,
+  });
+
+  /// How long a press is held before the palette lights up.
+  static const Duration highlightDelay = Duration(milliseconds: 100);
+
+  final String semanticLabel;
+  final Map<CustomSemanticsAction, VoidCallback> moveActions;
+  final VoidCallback? onLift;
+  final ValueChanged<Offset>? onMove;
+  final VoidCallback? onDrop;
+  final Widget child;
+
+  @override
+  State<_LiftableSurface> createState() => _LiftableSurfaceState();
+}
+
+class _LiftableSurfaceState extends State<_LiftableSurface> {
+  bool _pressed = false;
+  bool _lifted = false;
+  Offset _moved = Offset.zero;
+  Timer? _highlight;
+
+  bool get _movable => widget.onLift != null;
+
+  @override
+  void dispose() {
+    _highlight?.cancel();
+    super.dispose();
+  }
+
+  void _onDown(LongPressDownDetails details) {
+    _highlight?.cancel();
+    _highlight = Timer(_LiftableSurface.highlightDelay, () {
+      if (mounted) setState(() => _pressed = true);
+    });
+  }
+
+  void _onCancel() {
+    _highlight?.cancel();
+    setState(() => _pressed = false);
+  }
+
+  void _onStart(LongPressStartDetails details) {
+    _highlight?.cancel();
+    AppHaptics.lift();
+    _moved = Offset.zero;
+    setState(() {
+      _pressed = true;
+      _lifted = true;
+    });
+    widget.onLift?.call();
+  }
+
+  void _onMove(LongPressMoveUpdateDetails details) {
+    final Offset delta = details.offsetFromOrigin - _moved;
+    _moved = details.offsetFromOrigin;
+    if (delta != Offset.zero) {
+      widget.onMove?.call(delta);
+    }
+  }
+
+  void _onEnd(LongPressEndDetails details) {
+    _highlight?.cancel();
+    setState(() {
+      _pressed = false;
+      _lifted = false;
+    });
+    widget.onDrop?.call();
+  }
 
   @override
   Widget build(BuildContext context) {
     final AppColors colors = AppColors.of(context);
+    final bool lit = _pressed || _lifted;
+    final BorderRadius radius = BorderRadius.circular(AppRadii.large);
+    final Duration duration = AppMotion.resolve(context, AppMotion.medium);
+    // Around the whole card, so a hold on a tool lifts it too; a tap on a
+    // tool still reaches the tool.
+    return RawGestureDetector(
+      key: const ValueKey<String>('palette-surface'),
+      behavior: HitTestBehavior.opaque,
+      gestures: <Type, GestureRecognizerFactory>{
+        if (_movable)
+          LongPressGestureRecognizer:
+              GestureRecognizerFactoryWithHandlers<LongPressGestureRecognizer>(
+                () => LongPressGestureRecognizer(
+                  duration: ToolPalette.liftDelay,
+                  debugOwner: this,
+                ),
+                (LongPressGestureRecognizer recognizer) {
+                  recognizer
+                    ..onLongPressDown = _onDown
+                    ..onLongPressCancel = _onCancel
+                    ..onLongPressStart = _onStart
+                    ..onLongPressMoveUpdate = _onMove
+                    ..onLongPressEnd = _onEnd;
+                },
+              ),
+      },
+      child: AnimatedScale(
+        scale: _lifted ? 1.06 : 1,
+        duration: duration,
+        curve: AppMotion.standard,
+        child: TweenAnimationBuilder<double>(
+          tween: Tween<double>(end: _lifted ? 1 : 0),
+          duration: duration,
+          curve: AppMotion.standard,
+          builder: (BuildContext context, double lift, Widget? child) {
+            final Color glass = AppGlass.surface(colors);
+            final Widget frosted = ClipRRect(
+              borderRadius: radius,
+              child: BackdropFilter(
+                // While moving, sample no backdrop: the palette can composite
+                // independently of the ink/PDF underneath it.
+                enabled: !_lifted,
+                filter: AppGlass.filter,
+                child: DecoratedBox(
+                  decoration: BoxDecoration(
+                    color: lit
+                        ? Color.alphaBlend(
+                            colors.accent.withValues(alpha: 0.14),
+                            glass,
+                          )
+                        : glass,
+                    borderRadius: radius,
+                    border: lit
+                        ? Border.all(
+                            color: colors.accent,
+                            width: AppSizes.hairline,
+                          )
+                        : Border.fromBorderSide(AppGlass.border(colors)),
+                  ),
+                  child: child,
+                ),
+              ),
+            );
+            return DecoratedBox(
+              decoration: BoxDecoration(
+                borderRadius: radius,
+                // The floating shadow, deepened as the palette lifts.
+                boxShadow: <BoxShadow>[
+                  for (final BoxShadow shadow in AppShadows.floating(colors))
+                    shadow.copyWith(
+                      color: shadow.color.withValues(
+                        alpha: math.min(1, shadow.color.a * (1 + 1.4 * lift)),
+                      ),
+                      blurRadius: shadow.blurRadius * (1 + lift),
+                      offset: shadow.offset * (1 + 1.2 * lift),
+                    ),
+                ],
+              ),
+              child: frosted,
+            );
+          },
+          child: Material(
+            type: MaterialType.transparency,
+            child: Stack(
+              children: <Widget>[
+                Positioned.fill(
+                  child: Semantics(
+                    label: widget.semanticLabel,
+                    customSemanticsActions: widget.moveActions,
+                    child: MouseRegion(
+                      cursor: !_movable
+                          ? MouseCursor.defer
+                          : _lifted
+                          ? SystemMouseCursors.grabbing
+                          : SystemMouseCursors.grab,
+                      child: const SizedBox.expand(),
+                    ),
+                  ),
+                ),
+                widget.child,
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// A small square of the next sticky note's paper, folded at a corner.
+class _StickyIcon extends StatelessWidget {
+  const _StickyIcon({required this.color});
+
+  final StickyPaperColor color;
+
+  @override
+  Widget build(BuildContext context) {
+    final Color outline = IconTheme.of(context).color ?? color.pattern;
+    return SizedBox.square(
+      dimension: AppSizes.icon,
+      child: DecoratedBox(
+        key: const ValueKey<String>('sticky-tool-paper'),
+        decoration: BoxDecoration(
+          color: color.paper,
+          borderRadius: BorderRadius.circular(3),
+          border: Border.all(color: outline, width: 1.4),
+        ),
+      ),
+    );
+  }
+}
+
+/// The writing tool's glyph with a sample of the current ink at its
+/// corner: a dot for the pen, a translucent bar for the highlighter.
+class _PenIcon extends StatelessWidget {
+  const _PenIcon({
+    required this.ink,
+    required this.highlighter,
+    required this.opacity,
+  });
+
+  static const double _dot = 9;
+
+  final InkColor ink;
+  final bool highlighter;
+  final double opacity;
+
+  @override
+  Widget build(BuildContext context) {
+    final AppColors colors = AppColors.of(context);
+    final Color color = ink.resolve(Theme.of(context).brightness);
     return SizedBox.square(
       dimension: AppSizes.icon + AppSpacing.xxs,
       child: Stack(
         children: <Widget>[
-          const Align(
+          Align(
             alignment: Alignment.topLeft,
-            child: Icon(Icons.draw_outlined),
+            child: Icon(highlighter ? AppIcons.highlighter : AppIcons.pen),
           ),
           Positioned(
             right: 0,
             bottom: 0,
             child: Container(
               key: const ValueKey<String>('pen-ink-dot'),
-              width: _dot,
+              width: highlighter ? _dot * 1.6 : _dot,
               height: _dot,
               decoration: BoxDecoration(
-                color: ink.resolve(Theme.of(context).brightness),
-                shape: BoxShape.circle,
+                color: highlighter ? color.withValues(alpha: opacity) : color,
+                shape: highlighter ? BoxShape.rectangle : BoxShape.circle,
+                borderRadius: highlighter ? BorderRadius.circular(2) : null,
                 border: Border.all(color: colors.surface, width: 1.5),
               ),
             ),
@@ -256,22 +772,29 @@ class _PenIcon extends StatelessWidget {
   }
 }
 
-/// The pen's options: its ink color and its width, in one panel.
+/// The pen's options: its ink color and width, and a way into the advanced
+/// settings, which open in their own panel.
 class PenOptions extends StatelessWidget {
   const PenOptions({
     super.key,
     required this.settings,
     required this.onChanged,
     this.config = const PenConfig(),
+    this.onOpenAdvanced,
   });
 
   final PenSettings settings;
   final ValueChanged<PenSettings> onChanged;
   final PenConfig config;
 
-  /// The ink and the width, as screen readers announce them.
+  /// Opens the advanced settings; with none there is no way in.
+  final VoidCallback? onOpenAdvanced;
+
+  /// The style, the ink, and the width, as screen readers announce them:
+  /// "Highlighter, Yellow, 12 px".
   static String describe(PenSettings settings) {
-    return '${settings.ink.label}, ${StrokeWidthPicker.describe(settings.width)}';
+    return '${settings.style.label}, ${settings.activeInk.label}, '
+        '${StrokeWidthPicker.describe(settings.activeWidth)}';
   }
 
   @override
@@ -280,18 +803,77 @@ class PenOptions extends StatelessWidget {
       mainAxisSize: MainAxisSize.min,
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: <Widget>[
+        SegmentedChoice<WritingStyle>(
+          options: WritingStyle.values,
+          selected: settings.style,
+          labelOf: (WritingStyle style) => style.label,
+          keyOf: (WritingStyle style) =>
+              ValueKey<String>('writing-style-${style.name}'),
+          onSelected: (WritingStyle style) =>
+              onChanged(settings.copyWith(style: style)),
+        ),
+        const SizedBox(height: AppSpacing.md),
         InkColorPicker(
-          selected: settings.ink,
-          onSelected: (InkColor ink) => onChanged(settings.copyWith(ink: ink)),
+          selected: settings.activeInk,
+          colors: settings.isHighlighter
+              ? InkPalette.highlighterColors
+              : InkPalette.colors,
+          onSelected: (InkColor ink) => onChanged(settings.withActiveInk(ink)),
         ),
         const SizedBox(height: AppSpacing.md),
         StrokeWidthPicker(
           settings: settings,
           config: config,
           onChanged: (double width) =>
-              onChanged(settings.copyWith(width: width)),
+              onChanged(settings.withActiveWidth(width)),
         ),
+        // Taper, pressure, stabilization, and shapes belong to the pen.
+        if (onOpenAdvanced != null && !settings.isHighlighter) ...<Widget>[
+          const SizedBox(height: AppSpacing.xs),
+          const Divider(height: 1),
+          const SizedBox(height: AppSpacing.xxs),
+          _AdvancedButton(onPressed: onOpenAdvanced!),
+        ],
       ],
+    );
+  }
+}
+
+/// Opens the advanced pen settings panel.
+class _AdvancedButton extends StatelessWidget {
+  const _AdvancedButton({required this.onPressed});
+
+  final VoidCallback onPressed;
+
+  @override
+  Widget build(BuildContext context) {
+    final AppColors colors = AppColors.of(context);
+    return Semantics(
+      button: true,
+      label: 'Advanced pen settings',
+      onTap: onPressed,
+      excludeSemantics: true,
+      child: InkWell(
+        key: const ValueKey<String>('pen-advanced-toggle'),
+        onTap: onPressed,
+        borderRadius: BorderRadius.circular(AppRadii.medium),
+        child: SizedBox(
+          height: AppSizes.minTouchTarget,
+          child: Row(
+            children: <Widget>[
+              Icon(AppIcons.tune, size: 18, color: colors.textSecondary),
+              const SizedBox(width: AppSpacing.sm),
+              Expanded(
+                child: Text(
+                  'Advanced',
+                  style: Theme.of(context).textTheme.labelLarge,
+                ),
+              ),
+              Icon(AppIcons.disclosure, size: 20, color: colors.textSecondary),
+            ],
+          ),
+        ),
+      ),
     );
   }
 }

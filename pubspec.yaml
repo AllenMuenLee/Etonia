@@ -19,6 +19,10 @@ dependencies:
   pdf: 3.13.1
   pdfrx: 2.4.8
   share_plus: 13.3.1
+  speech_to_text: ^7.5.0
+  cupertino_icons: ^2.0.0
+  google_sign_in: ^7.2.0
+  crypto: ^3.0.7
 
 dev_dependencies:
   flutter_test:
@@ -29,6 +33,8 @@ dev_dependencies:
   flutter_driver:
     sdk: flutter
   flutter_lints: ^6.0.0
+  # Drives timers in unit tests; the version is the one the SDK pins.
+  fake_async: any
 
 flutter:
   uses-material-design: true

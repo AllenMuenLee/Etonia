@@ -6,10 +6,14 @@ import 'package:greatnote/features/editor/document_io/document_platform.dart';
 
 class FakeDocumentPicker implements DocumentPicker {
   PickedDocument? pdf;
+  PickedDocument? goodnotes;
   PickedDocument? image;
 
   @override
   Future<PickedDocument?> pickPdf() async => pdf;
+
+  @override
+  Future<PickedDocument?> pickGoodnotes() async => goodnotes ?? pdf;
 
   @override
   Future<PickedDocument?> pickImage() async => image;

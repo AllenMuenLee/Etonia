@@ -119,18 +119,32 @@ class NoteDocument extends ChangeNotifier {
   /// Inserts an empty page after the current one, with the current page's
   /// setup, and shows it.
   NotePage addPage() {
-    final NotePage currentPage = current;
-    final PageSetup setup = currentPage.pdfSource == null
-        ? currentPage.setup
-        : PageSetup(
-            size: PageSize.custom,
-            customSize: currentPage.pdfSource!.pageSize,
-          );
-    final NotePage page = NotePage(ink: _createInk(), setup: setup);
+    final NotePage page = _pageLike(current);
     _pages.insert(_current + 1, page);
     _current++;
     _changed();
     return page;
+  }
+
+  /// Adds an empty page after the last one, with its setup, and stays on
+  /// the page shown: the new one waits below to be scrolled to.
+  NotePage appendPage() {
+    final NotePage page = _pageLike(_pages.last);
+    _pages.add(page);
+    _changed();
+    return page;
+  }
+
+  /// An empty page the size of [model]; after an imported PDF page, a
+  /// blank page as big as its paper.
+  NotePage _pageLike(NotePage model) {
+    final PageSetup setup = model.pdfSource == null
+        ? model.setup
+        : PageSetup(
+            size: PageSize.custom,
+            customSize: model.pdfSource!.pageSize,
+          );
+    return NotePage(ink: _createInk(), setup: setup);
   }
 
   /// Inserts already validated pages after the current page as one document

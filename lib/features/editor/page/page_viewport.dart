@@ -3,8 +3,10 @@ import 'dart:math' as math;
 import 'package:flutter/foundation.dart';
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/scheduler.dart';
 
 import '../../../app/theme/app_tokens.dart';
+import '../../../app/theme/app_icons.dart';
 import 'page_setup.dart';
 
 /// Maps page coordinates to the viewport: `page * scale + origin`.
@@ -63,12 +65,29 @@ class PageViewport extends StatefulWidget {
     this.onScrollStart,
     this.onScrollEnd,
     this.fingersNavigate,
+    this.onPullToAddPage,
+    this.pullToAddDistance = 96,
     this.pageGap = AppSpacing.md,
     this.minZoom = 0.5,
     this.maxZoom = 4,
+    this.initialZoom = 1,
   }) : assert(pages.length == pageKeys.length),
        assert(pageGap >= 0),
-       assert(minZoom > 0 && minZoom <= 1 && maxZoom >= 1);
+       assert(pullToAddDistance > 0),
+       assert(minZoom > 0 && minZoom <= initialZoom && initialZoom <= maxZoom);
+
+  /// Called when the column, scrolled to its end, is pulled up a further
+  /// [pullToAddDistance] and let go: two fingers or a trackpad, or one
+  /// finger while [fingersNavigate]. Without it there is no pull.
+  ///
+  /// On a column too short to scroll, two fingers are taken for a pull only
+  /// once they move up together, so a resting palm still leaves the pen
+  /// alone.
+  final VoidCallback? onPullToAddPage;
+
+  /// How far, in viewport pixels, the column is pulled past its end before
+  /// letting go adds a page.
+  final double pullToAddDistance;
 
   /// While true, fingers never write, so one finger pans the column and
   /// two pan and pinch-zoom it, without [onScrollStart]: there is no stroke
@@ -79,6 +98,9 @@ class PageViewport extends StatefulWidget {
   /// How far a pinch can zoom the column out and in.
   final double minZoom;
   final double maxZoom;
+
+  /// The zoom used when this viewport is first opened.
+  final double initialZoom;
 
   final List<PageGeometry> pages;
 
@@ -115,19 +137,25 @@ class PageViewport extends StatefulWidget {
   State<PageViewport> createState() => PageViewportState();
 }
 
-class PageViewportState extends State<PageViewport> {
+class PageViewportState extends State<PageViewport>
+    with SingleTickerProviderStateMixin {
   final Map<Key, ValueNotifier<Rect>> _visible = <Key, ValueNotifier<Rect>>{};
   final Map<int, Offset> _touches = <int, Offset>{};
   Offset _offset = Offset.zero;
   Offset _maxScroll = Offset.zero;
   bool _scrolling = false;
 
+  late final Ticker _inertiaTicker;
+  Duration? _lastInertiaTick;
+  Duration? _lastDragUpdate;
+  Offset _dragVelocity = Offset.zero;
+
   /// Fingers moving the column in [PageViewport.fingersNavigate] mode.
   bool _navigating = false;
   final Set<int> _styluses = <int>{};
 
   /// The pinch zoom, on top of each page's own scale.
-  double _zoom = 1;
+  late double _zoom;
   double _panZoomScale = 1;
 
   /// The page last reported, or scrolled to; a different [currentPage]
@@ -136,6 +164,22 @@ class PageViewportState extends State<PageViewport> {
   bool _jumpPending = false;
 
   _ColumnLayout? _layout;
+
+  /// Space kept above the first page, in viewport pixels, so that pages
+  /// added below a short, centered column do not move the one on screen.
+  double _lead = 0;
+
+  /// How far the column has been pulled past its end, in viewport pixels.
+  final ValueNotifier<double> _pull = ValueNotifier<double>(0);
+
+  /// Two fingers down on a column that cannot scroll, not yet moving up
+  /// together; and where their middle started.
+  bool _pullCandidate = false;
+  Offset _pullStart = Offset.zero;
+
+  /// How far two fingers on a column that cannot scroll move up together
+  /// before they are taken for a pull.
+  static const double _pullSlop = 24;
 
   /// How far the column is scrolled, in viewport pixels.
   Offset get scrollOffset => _offset;
@@ -153,7 +197,9 @@ class PageViewportState extends State<PageViewport> {
   @override
   void initState() {
     super.initState();
+    _zoom = widget.initialZoom;
     _shownPage = widget.currentPage;
+    _inertiaTicker = createTicker(_tickInertia);
   }
 
   @override
@@ -167,9 +213,11 @@ class PageViewportState extends State<PageViewport> {
 
   @override
   void dispose() {
+    _inertiaTicker.dispose();
     for (final ValueNotifier<Rect> visible in _visible.values) {
       visible.dispose();
     }
+    _pull.dispose();
     super.dispose();
   }
 
@@ -209,6 +257,7 @@ class PageViewportState extends State<PageViewport> {
   }
 
   void _onPointerDown(PointerDownEvent event) {
+    _stopInertia();
     final _ColumnLayout? layout = _layout;
     if (layout != null) {
       final Offset content =
@@ -230,11 +279,18 @@ class PageViewportState extends State<PageViewport> {
     _touches[event.pointer] = event.localPosition;
     if (_fingersNavigate) {
       _navigating = true;
+      _beginDrag(event.timeStamp);
       return;
     }
-    if (!_scrolling && _touches.length >= 2 && (_canScroll || _zoom != 1)) {
-      _scrolling = true;
-      widget.onScrollStart?.call(Set<int>.of(_touches.keys));
+    if (!_scrolling && _touches.length >= 2) {
+      if (_canScroll || _zoom != 1) {
+        _scrolling = true;
+        _beginDrag(event.timeStamp);
+        widget.onScrollStart?.call(Set<int>.of(_touches.keys));
+      } else if (widget.onPullToAddPage != null && !_pullCandidate) {
+        _pullCandidate = true;
+        _pullStart = _centroid;
+      }
     }
   }
 
@@ -249,9 +305,23 @@ class PageViewportState extends State<PageViewport> {
       // A palm under the writing hand.
       return;
     }
+    if (_pullCandidate && !_scrolling) {
+      final Offset moved = _centroid - _pullStart;
+      if (-moved.dy > _pullSlop && -moved.dy > moved.dx.abs()) {
+        _pullCandidate = false;
+        _scrolling = true;
+        _beginDrag(event.timeStamp);
+        widget.onScrollStart?.call(Set<int>.of(_touches.keys));
+        _trackPull(-moved.dy);
+        return;
+      }
+    }
     if (_scrolling || _navigating) {
       final Offset after = _centroid;
-      scrollBy(before - after);
+      final Offset delta = before - after;
+      scrollBy(delta);
+      _trackPull(delta.dy);
+      _recordDragVelocity(delta, event.timeStamp);
       if (_touches.length >= 2 && spreadBefore > 0) {
         _zoomAround(after, _spread(after) / spreadBefore);
       }
@@ -263,12 +333,44 @@ class PageViewportState extends State<PageViewport> {
     if (_touches.remove(event.pointer) == null) {
       return;
     }
+    if (_touches.length < 2) {
+      _pullCandidate = false;
+    }
     if (_navigating && _touches.isEmpty) {
       _navigating = false;
+      final bool pulled = _pull.value > 0;
+      _releasePull();
+      if (!pulled) _startInertia();
     }
     if (_scrolling && _touches.length < 2) {
       _scrolling = false;
+      final bool pulled = _pull.value > 0;
+      _releasePull();
+      if (!pulled) _startInertia();
       widget.onScrollEnd?.call();
+    }
+  }
+
+  /// Counts a scroll of [dy] toward the column's end, made while already
+  /// there, as pulling it further; a scroll back eases the pull off.
+  void _trackPull(double dy) {
+    if (widget.onPullToAddPage == null || dy == 0) {
+      return;
+    }
+    final bool atEnd = _offset.dy >= _maxScroll.dy - 0.5;
+    if (dy > 0 && atEnd) {
+      _pull.value += dy;
+    } else if (dy < 0 && _pull.value > 0) {
+      _pull.value = math.max(0, _pull.value + dy);
+    }
+  }
+
+  /// Let go: a pull far enough adds a page.
+  void _releasePull() {
+    final bool far = _pull.value >= widget.pullToAddDistance;
+    _pull.value = 0;
+    if (far) {
+      widget.onPullToAddPage?.call();
     }
   }
 
@@ -310,15 +412,81 @@ class PageViewportState extends State<PageViewport> {
   }
 
   void _onPanZoomStart(PointerPanZoomStartEvent event) {
+    _stopInertia();
     _panZoomScale = 1;
+    _beginDrag(event.timeStamp);
+  }
+
+  void _onPanZoomEnd(PointerPanZoomEndEvent event) {
+    final bool pulled = _pull.value > 0;
+    _releasePull();
+    if (!pulled) _startInertia();
   }
 
   void _onPanZoomUpdate(PointerPanZoomUpdateEvent event) {
-    scrollBy(-event.localPanDelta);
+    final Offset delta = -event.localPanDelta;
+    scrollBy(delta);
+    _trackPull(delta.dy);
+    _recordDragVelocity(delta, event.timeStamp);
     if (event.scale > 0 && event.scale != _panZoomScale) {
       _zoomAround(event.localPosition, event.scale / _panZoomScale);
       _panZoomScale = event.scale;
     }
+  }
+
+  /// Starts a fresh velocity sample for a finger or trackpad drag.
+  void _beginDrag(Duration timeStamp) {
+    _dragVelocity = Offset.zero;
+    _lastDragUpdate = timeStamp;
+  }
+
+  /// Blends recent samples so a lifted hand continues in the direction and
+  /// speed it was travelling, without a single noisy event causing a jump.
+  void _recordDragVelocity(Offset delta, Duration timeStamp) {
+    final Duration? previous = _lastDragUpdate;
+    _lastDragUpdate = timeStamp;
+    if (previous == null) return;
+    final double seconds = (timeStamp - previous).inMicroseconds / 1000000;
+    if (seconds <= 0) return;
+    final Offset sample = delta / seconds;
+    _dragVelocity = Offset.lerp(_dragVelocity, sample, 0.38)!;
+  }
+
+  void _startInertia() {
+    // A normal two-finger reposition ends exactly where it was released;
+    // only a genuine flick earns a coast.
+    if (_dragVelocity.distance < 800 || _maxScroll == Offset.zero) {
+      return;
+    }
+    _lastInertiaTick = null;
+    _inertiaTicker.start();
+  }
+
+  void _stopInertia() {
+    if (_inertiaTicker.isActive) _inertiaTicker.stop();
+    _lastInertiaTick = null;
+    _dragVelocity = Offset.zero;
+  }
+
+  /// Applies exponentially decaying velocity on every frame. The custom
+  /// viewport needs this explicitly because it is driven by raw gestures,
+  /// rather than Flutter's [Scrollable] physics.
+  void _tickInertia(Duration elapsed) {
+    final Duration? previous = _lastInertiaTick;
+    _lastInertiaTick = elapsed;
+    if (previous == null) return;
+    final double seconds = (elapsed - previous).inMicroseconds / 1000000;
+    if (seconds <= 0) return;
+
+    final Offset before = _offset;
+    scrollBy(_dragVelocity * seconds);
+    if (_offset.dx == before.dx) _dragVelocity = Offset(0, _dragVelocity.dy);
+    if (_offset.dy == before.dy) _dragVelocity = Offset(_dragVelocity.dx, 0);
+
+    // A 4.8 / s decay gives a short, natural coast without carrying past
+    // the next few pages. It also remains stable on a delayed frame.
+    _dragVelocity *= math.exp(-4.8 * seconds);
+    if (_dragVelocity.distance < 18) _stopInertia();
   }
 
   ValueNotifier<Rect> _visibleFor(Key key) {
@@ -330,23 +498,54 @@ class PageViewportState extends State<PageViewport> {
     return LayoutBuilder(
       builder: (BuildContext context, BoxConstraints constraints) {
         final Size viewport = constraints.biggest;
-        final _ColumnLayout layout = _ColumnLayout(
+        final _ColumnLayout? previous = _layout;
+        if (_jumpPending ||
+            (previous != null && previous.viewport != viewport)) {
+          _lead = 0;
+        }
+        _ColumnLayout layout = _ColumnLayout(
           widget.pages,
           viewport,
           widget.pageGap,
           _zoom,
+          lead: _lead,
         );
-        final _ColumnLayout? previous = _layout;
         if (previous != null &&
             previous.viewport != viewport &&
             previous.rects.length == layout.rects.length &&
             !_jumpPending) {
           _offset = _anchoredOffset(previous, layout);
         }
+        // Pages added below the one shown leave it exactly where it was on
+        // screen; nothing jumps.
+        final int shown = widget.currentPage;
+        if (previous != null &&
+            previous.viewport == viewport &&
+            layout.rects.length > previous.rects.length &&
+            shown < previous.rects.length &&
+            !_jumpPending) {
+          final double onScreen =
+              previous.rects[shown].top + previous.top - _offset.dy;
+          // Where the column's top must be, scrolled to its start, for
+          // the page to stay put.
+          final double neededTop = onScreen - layout.rects[shown].top;
+          if (neededTop > layout.top) {
+            _lead = neededTop;
+            layout = _ColumnLayout(
+              widget.pages,
+              viewport,
+              widget.pageGap,
+              _zoom,
+              lead: _lead,
+            );
+          }
+          final double offset = layout.top - neededTop;
+          _offset = Offset(_offset.dx, offset);
+        }
         _layout = layout;
         _maxScroll = Offset(
           math.max(0, layout.size.width - viewport.width),
-          math.max(0, layout.size.height - viewport.height),
+          math.max(0, layout.size.height + layout.top - viewport.height),
         );
         if (_jumpPending && widget.currentPage < widget.pages.length) {
           _jumpPending = false;
@@ -449,6 +648,7 @@ class PageViewportState extends State<PageViewport> {
           onPointerSignal: _onPointerSignal,
           onPointerPanZoomStart: _onPanZoomStart,
           onPointerPanZoomUpdate: _onPanZoomUpdate,
+          onPointerPanZoomEnd: _onPanZoomEnd,
           child: ClipRect(
             child: Stack(
               fit: StackFit.expand,
@@ -472,6 +672,13 @@ class PageViewportState extends State<PageViewport> {
                         maxScroll: _maxScroll,
                         color: colors.textSecondary.withValues(alpha: 0.45),
                       ),
+                    ),
+                  ),
+                if (widget.onPullToAddPage != null)
+                  IgnorePointer(
+                    child: _PullToAddIndicator(
+                      pull: _pull,
+                      distance: widget.pullToAddDistance,
                     ),
                   ),
               ],
@@ -516,6 +723,79 @@ class PageViewportState extends State<PageViewport> {
   }
 }
 
+/// Rises from the bottom of the area as the column is pulled past its end:
+/// "Pull up to add a page", then, pulled far enough, "Release to add a
+/// page".
+class _PullToAddIndicator extends StatelessWidget {
+  const _PullToAddIndicator({required this.pull, required this.distance});
+
+  final ValueListenable<double> pull;
+  final double distance;
+
+  @override
+  Widget build(BuildContext context) {
+    final AppColors colors = AppColors.of(context);
+    return ValueListenableBuilder<double>(
+      valueListenable: pull,
+      builder: (BuildContext context, double pulled, Widget? _) {
+        if (pulled <= 0) {
+          return const SizedBox.shrink();
+        }
+        final double progress = (pulled / distance).clamp(0.0, 1.0);
+        final bool ready = progress >= 1;
+        return Align(
+          alignment: Alignment.bottomCenter,
+          child: Padding(
+            padding: EdgeInsets.only(
+              bottom: AppSpacing.md + AppSpacing.xl * progress,
+            ),
+            child: Opacity(
+              opacity: 0.4 + 0.6 * progress,
+              child: DecoratedBox(
+                key: const ValueKey<String>('pull-to-add-page'),
+                decoration: BoxDecoration(
+                  color: ready ? colors.accent : colors.surface,
+                  borderRadius: BorderRadius.circular(AppRadii.large),
+                  border: Border.all(
+                    color: ready ? colors.accent : colors.divider,
+                    width: AppSizes.hairline,
+                  ),
+                  boxShadow: AppShadows.floating(colors),
+                ),
+                child: Padding(
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: AppSpacing.md,
+                    vertical: AppSpacing.xs,
+                  ),
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: <Widget>[
+                      Icon(
+                        ready ? AppIcons.newNote : AppIcons.up,
+                        size: AppSizes.icon,
+                        color: ready ? colors.onAccent : colors.textSecondary,
+                      ),
+                      const SizedBox(width: AppSpacing.xs),
+                      Text(
+                        ready
+                            ? 'Release to add a page'
+                            : 'Pull up to add a page',
+                        style: Theme.of(context).textTheme.labelLarge?.copyWith(
+                          color: ready ? colors.onAccent : colors.textPrimary,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            ),
+          ),
+        );
+      },
+    );
+  }
+}
+
 /// Where each page sits in the column, in viewport pixels with the column's
 /// top at zero, before scrolling.
 class _ColumnLayout {
@@ -523,8 +803,9 @@ class _ColumnLayout {
     List<PageGeometry> pages,
     this.viewport,
     double gap,
-    double zoom,
-  ) {
+    double zoom, {
+    double lead = 0,
+  }) {
     double y = 0;
     double right = viewport.width;
     for (final PageGeometry page in pages) {
@@ -538,14 +819,15 @@ class _ColumnLayout {
       right = math.max(right, x + display.width);
     }
     size = Size(right, y);
-    top = y < viewport.height ? (viewport.height - y) / 2 : 0;
+    top = math.max(y < viewport.height ? (viewport.height - y) / 2 : 0, lead);
   }
 
   final Size viewport;
   final List<Rect> rects = <Rect>[];
   late final Size size;
 
-  /// How far a column shorter than the area is moved down to center it.
+  /// How far a column shorter than the area is moved down to center it,
+  /// or the lead kept above the first page, whichever is more.
   late final double top;
 
   /// The page at height [y] in the column, clamped to the first and last.

@@ -3,28 +3,36 @@ import 'dart:math' as math;
 import 'package:flutter/material.dart';
 
 import '../../../app/theme/app_tokens.dart';
+import '../../../app/theme/app_icons.dart';
 import '../document_io/document_models.dart';
 import '../page/note_document.dart';
 import '../page/page_background.dart';
 import '../page/page_setup.dart';
 
-/// The page indicator, `current / count`, which opens the page panel, and
-/// on wider layouts previous, next, and add-page buttons beside it.
+/// The page indicator, `current / count`, which opens the page panel, on
+/// wider layouts previous and next beside it, and the round Add button,
+/// whose menu adds a page or inserts an image or a PDF.
 class PageControls extends StatelessWidget {
   const PageControls({
     super.key,
     required this.document,
     required this.showNavigation,
     required this.onOpenPanel,
+    this.onInsertImage,
+    this.onInsertPdf,
   });
 
   final NoteDocument document;
 
-  /// Whether previous, next, and add-page sit in the bar. Without them they
-  /// are only in the panel.
+  /// Whether previous and next sit in the bar. Without them they are only
+  /// in the panel.
   final bool showNavigation;
 
   final VoidCallback onOpenPanel;
+
+  /// Offered in the Add menu; left out when null.
+  final VoidCallback? onInsertImage;
+  final VoidCallback? onInsertPdf;
 
   static String describe(int index, int count) {
     return 'Page ${index + 1} of $count';
@@ -45,7 +53,7 @@ class PageControls extends StatelessWidget {
               IconButton(
                 tooltip: 'Previous page',
                 onPressed: document.canGoBack ? document.previousPage : null,
-                icon: const Icon(Icons.chevron_left),
+                icon: const Icon(AppIcons.previous),
               ),
             Tooltip(
               message: 'Page setup',
@@ -68,27 +76,165 @@ class PageControls extends StatelessWidget {
                 child: Text(
                   '${index + 1} / $count',
                   semanticsLabel: describe(index, count),
-                  style: Theme.of(context).textTheme.labelLarge,
+                  style: Theme.of(context).textTheme.labelLarge!.copyWith(
+                    fontFeatures: const <FontFeature>[
+                      FontFeature.tabularFigures(),
+                    ],
+                  ),
                 ),
               ),
             ),
-            if (showNavigation) ...<Widget>[
+            if (showNavigation)
               IconButton(
                 tooltip: 'Next page',
                 onPressed: document.canGoForward ? document.nextPage : null,
-                icon: const Icon(Icons.chevron_right),
+                icon: const Icon(AppIcons.disclosure),
               ),
-              IconButton(
-                tooltip: 'Add page',
-                onPressed: document.addPage,
-                icon: const Icon(Icons.add),
-              ),
-            ],
+            AddMenuButton(
+              onAddPage: document.addPage,
+              onInsertImage: onInsertImage,
+              onInsertPdf: onInsertPdf,
+            ),
           ],
         );
       },
     );
   }
+}
+
+/// A round, accent-tinted button whose menu adds a new page, or inserts an
+/// image or a PDF's pages. Tinted rather than filled, so the bar stays
+/// quiet around the page.
+class AddMenuButton extends StatelessWidget {
+  const AddMenuButton({
+    super.key,
+    required this.onAddPage,
+    this.onInsertImage,
+    this.onInsertPdf,
+  });
+
+  static const double _diameter = 36;
+
+  final VoidCallback onAddPage;
+  final VoidCallback? onInsertImage;
+  final VoidCallback? onInsertPdf;
+
+  @override
+  Widget build(BuildContext context) {
+    final AppColors colors = AppColors.of(context);
+    return MenuAnchor(
+      alignmentOffset: const Offset(0, AppSpacing.xxs),
+      menuChildren: <Widget>[
+        MenuItemButton(
+          leadingIcon: const Icon(AppIcons.insertImage),
+          onPressed: onInsertImage,
+          child: const Text('Insert image'),
+        ),
+        MenuItemButton(
+          leadingIcon: const Icon(AppIcons.pdf),
+          onPressed: onInsertPdf,
+          child: const Text('Insert PDF'),
+        ),
+        MenuItemButton(
+          leadingIcon: const Icon(AppIcons.newNote),
+          onPressed: () => _showAddPageDialog(
+            context,
+            onAddPage: onAddPage,
+            onInsertImage: onInsertImage,
+            onInsertPdf: onInsertPdf,
+          ),
+          child: const Text('Add new page'),
+        ),
+      ],
+      builder: (BuildContext context, MenuController menu, Widget? child) {
+        // A full touch target around the smaller round button it shows.
+        return IconButton(
+          key: const ValueKey<String>('add-menu-button'),
+          tooltip: 'Add',
+          padding: const EdgeInsets.all(
+            (AppSizes.minTouchTarget - _diameter) / 2,
+          ),
+          onPressed: () => menu.isOpen ? menu.close() : menu.open(),
+          icon: Container(
+            width: _diameter,
+            height: _diameter,
+            decoration: BoxDecoration(
+              color: colors.selected,
+              shape: BoxShape.circle,
+            ),
+            child: Icon(
+              AppIcons.add,
+              size: AppSizes.icon,
+              color: colors.accent,
+            ),
+          ),
+        );
+      },
+    );
+  }
+}
+
+/// Lets a new page start as a blank sheet or come directly from the device's
+/// file browser. The dialog keeps the immediate blank-page route close to
+/// imports without making the main Add menu overly busy.
+Future<void> _showAddPageDialog(
+  BuildContext context, {
+  required VoidCallback onAddPage,
+  VoidCallback? onInsertImage,
+  VoidCallback? onInsertPdf,
+}) {
+  void closeThen(BuildContext dialogContext, VoidCallback action) {
+    Navigator.of(dialogContext).pop();
+    action();
+  }
+
+  return showDialog<void>(
+    context: context,
+    builder: (BuildContext dialogContext) => AlertDialog(
+      title: const Text('Add page'),
+      content: ConstrainedBox(
+        constraints: const BoxConstraints(maxWidth: 360),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: <Widget>[
+            Text(
+              'Start with a blank page or add a file from your device.',
+              style: Theme.of(dialogContext).textTheme.bodyMedium,
+            ),
+            const SizedBox(height: AppSpacing.md),
+            FilledButton.icon(
+              onPressed: () => closeThen(dialogContext, onAddPage),
+              icon: const Icon(AppIcons.add),
+              label: const Text('Add blank page'),
+            ),
+            const SizedBox(height: AppSpacing.xs),
+            OutlinedButton.icon(
+              onPressed: onInsertPdf == null
+                  ? null
+                  : () => closeThen(dialogContext, onInsertPdf),
+              icon: const Icon(AppIcons.pdf),
+              label: const Text('Browse files for a PDF'),
+            ),
+            const SizedBox(height: AppSpacing.xs),
+            OutlinedButton.icon(
+              onPressed: onInsertImage == null
+                  ? null
+                  : () => closeThen(dialogContext, onInsertImage),
+              icon: const Icon(AppIcons.insertImage),
+              label: const Text('Browse files for an image'),
+            ),
+          ],
+        ),
+      ),
+      actions: <Widget>[
+        TextButton(
+          onPressed: () => Navigator.of(dialogContext).pop(),
+          child: const Text('Cancel'),
+        ),
+      ],
+    ),
+  );
 }
 
 /// Opens the page panel as a card under the top bar's trailing corner,
@@ -208,7 +354,11 @@ class PagePanel extends StatelessWidget {
                 onPressed: () => Navigator.of(context).pop(false),
                 child: const Text('Cancel'),
               ),
-              TextButton(
+              FilledButton(
+                style: FilledButton.styleFrom(
+                  backgroundColor: AppColors.of(context).danger,
+                  foregroundColor: AppColors.of(context).onAccent,
+                ),
                 onPressed: () => Navigator.of(context).pop(true),
                 child: const Text('Delete'),
               ),
@@ -228,18 +378,11 @@ class PagePanel extends StatelessWidget {
     final TextTheme text = Theme.of(context).textTheme;
     final AppColors colors = AppColors.of(context);
     final BorderRadius radius = BorderRadius.circular(AppRadii.large);
-    return DecoratedBox(
-      decoration: BoxDecoration(
-        borderRadius: radius,
-        boxShadow: AppShadows.floating(colors),
-      ),
+    return GlassSurface(
+      borderRadius: radius,
+      boxShadow: AppShadows.floating(colors),
       child: Material(
-        color: colors.surface,
-        shape: RoundedRectangleBorder(
-          borderRadius: radius,
-          side: BorderSide(color: colors.divider, width: AppSizes.hairline),
-        ),
-        clipBehavior: Clip.antiAlias,
+        type: MaterialType.transparency,
         child: ListenableBuilder(
           listenable: document,
           builder: (BuildContext context, Widget? child) {
@@ -259,7 +402,11 @@ class PagePanel extends StatelessWidget {
                             document.currentIndex,
                             document.pageCount,
                           ),
-                          style: text.titleMedium,
+                          style: text.titleMedium!.copyWith(
+                            fontFeatures: const <FontFeature>[
+                              FontFeature.tabularFigures(),
+                            ],
+                          ),
                         ),
                       ),
                     ),
@@ -268,14 +415,14 @@ class PagePanel extends StatelessWidget {
                       onPressed: document.canGoBack
                           ? document.previousPage
                           : null,
-                      icon: const Icon(Icons.chevron_left),
+                      icon: const Icon(AppIcons.previous),
                     ),
                     IconButton(
                       tooltip: 'Next page',
                       onPressed: document.canGoForward
                           ? document.nextPage
                           : null,
-                      icon: const Icon(Icons.chevron_right),
+                      icon: const Icon(AppIcons.disclosure),
                     ),
                   ],
                 ),
@@ -285,12 +432,14 @@ class PagePanel extends StatelessWidget {
                     Expanded(
                       child: FilledButton.tonalIcon(
                         style: FilledButton.styleFrom(
+                          backgroundColor: colors.selected,
+                          foregroundColor: colors.accent,
                           padding: const EdgeInsets.symmetric(
                             horizontal: AppSpacing.sm,
                           ),
                         ),
                         onPressed: document.addPage,
-                        icon: const Icon(Icons.add),
+                        icon: const Icon(AppIcons.add, size: 18),
                         label: const Text('Add page'),
                       ),
                     ),
@@ -298,6 +447,7 @@ class PagePanel extends StatelessWidget {
                     Expanded(
                       child: OutlinedButton.icon(
                         style: OutlinedButton.styleFrom(
+                          foregroundColor: colors.danger,
                           padding: const EdgeInsets.symmetric(
                             horizontal: AppSpacing.sm,
                           ),
@@ -305,23 +455,33 @@ class PagePanel extends StatelessWidget {
                         onPressed: document.pageCount > 1
                             ? () => _delete(context)
                             : null,
-                        icon: const Icon(Icons.delete_outline),
+                        icon: const Icon(AppIcons.delete, size: 18),
                         label: const Text('Delete page'),
                       ),
                     ),
                   ],
                 ),
                 const SizedBox(height: AppSpacing.md),
-                Center(
-                  child: PagePreview(
-                    key: const ValueKey<String>('page-preview'),
-                    paper: _paperFor(setup.size, setup),
-                    background: setup.background,
-                    config: config,
-                    infinite: !pdf && setup.size == PageSize.infinite,
-                    maxSize: const Size(
-                      PagePanel.width - 2 * AppSpacing.md,
-                      160,
+                // The page sits in a quiet well, as it does on the desk.
+                DecoratedBox(
+                  decoration: BoxDecoration(
+                    color: colors.background,
+                    borderRadius: BorderRadius.circular(AppRadii.medium),
+                  ),
+                  child: Padding(
+                    padding: const EdgeInsets.all(AppSpacing.md),
+                    child: Center(
+                      child: PagePreview(
+                        key: const ValueKey<String>('page-preview'),
+                        paper: _paperFor(setup.size, setup),
+                        background: setup.background,
+                        config: config,
+                        infinite: !pdf && setup.size == PageSize.infinite,
+                        maxSize: const Size(
+                          PagePanel.width - 4 * AppSpacing.md,
+                          136,
+                        ),
+                      ),
                     ),
                   ),
                 ),
@@ -348,13 +508,13 @@ class PagePanel extends StatelessWidget {
                   thumbnailOf: (PageSize size) => _SizeThumbnail(
                     paper: _paperFor(size, setup),
                     icon: switch (size) {
-                      PageSize.fit => Icons.fit_screen_outlined,
-                      PageSize.infinite => Icons.all_inclusive,
+                      PageSize.fit => AppIcons.fitToScreen,
+                      PageSize.infinite => AppIcons.infinite,
                       _ => null,
                     },
                   ),
                 ),
-                const SizedBox(height: AppSpacing.sm),
+                const SizedBox(height: AppSpacing.md),
                 _PanelDropdown<PageBackground>(
                   key: const ValueKey<String>('page-background-dropdown'),
                   label: 'Background',
@@ -423,24 +583,15 @@ class _PanelDropdown<T> extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final AppColors colors = AppColors.of(context);
-    return InputDecorator(
+    final TextTheme text = Theme.of(context).textTheme;
+    // The label sits above the field, as section labels do across the
+    // app, so the field itself only shows the choice.
+    final Widget field = InputDecorator(
       decoration: InputDecoration(
-        labelText: label,
         helperText: helper,
         helperMaxLines: 2,
         enabled: onChanged != null,
-        isDense: true,
-        contentPadding: const EdgeInsets.symmetric(
-          horizontal: AppSpacing.sm,
-          vertical: AppSpacing.xs,
-        ),
-        border: OutlineInputBorder(
-          borderRadius: BorderRadius.circular(AppRadii.medium),
-        ),
-        enabledBorder: OutlineInputBorder(
-          borderRadius: BorderRadius.circular(AppRadii.medium),
-          borderSide: BorderSide(color: colors.divider),
-        ),
+        contentPadding: const EdgeInsets.all(AppSpacing.xs),
       ),
       child: DropdownButtonHideUnderline(
         child: DropdownButton<T>(
@@ -448,7 +599,9 @@ class _PanelDropdown<T> extends StatelessWidget {
           isExpanded: true,
           isDense: true,
           itemHeight: null,
-          borderRadius: BorderRadius.circular(AppRadii.medium),
+          style: text.bodyMedium,
+          icon: Icon(AppIcons.expand, size: 20, color: colors.textSecondary),
+          borderRadius: BorderRadius.circular(AppRadii.large),
           dropdownColor: colors.surface,
           onChanged: onChanged == null
               ? null
@@ -463,6 +616,20 @@ class _PanelDropdown<T> extends StatelessWidget {
           ],
         ),
       ),
+    );
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      mainAxisSize: MainAxisSize.min,
+      children: <Widget>[
+        Padding(
+          padding: const EdgeInsetsDirectional.only(
+            start: AppSpacing.xxs,
+            bottom: AppSpacing.xs,
+          ),
+          child: ExcludeSemantics(child: Text(label, style: text.labelMedium)),
+        ),
+        Semantics(label: label, child: field),
+      ],
     );
   }
 }
@@ -490,7 +657,7 @@ class _SizeThumbnail extends StatelessWidget {
         decoration: BoxDecoration(
           color: colors.writingSurface,
           borderRadius: BorderRadius.circular(2),
-          border: Border.all(color: colors.textSecondary, width: 1.5),
+          border: Border.all(color: colors.textSecondary, width: 1.25),
         ),
       ),
     );
@@ -565,7 +732,7 @@ class PagePreview extends StatelessWidget {
                     child: Padding(
                       padding: const EdgeInsets.all(AppSpacing.xxs),
                       child: Icon(
-                        Icons.open_in_full,
+                        AppIcons.grows,
                         size: 16,
                         color: colors.textSecondary,
                       ),

@@ -1,6 +1,8 @@
 import 'package:flutter/material.dart';
 
 import '../../../app/theme/app_tokens.dart';
+import '../../../app/theme/app_icons.dart';
+import '../../../shared/widgets/app_controls.dart';
 import '../ink/ink_palette.dart';
 
 /// A grid of the curated inks. The current one is marked with a checkmark
@@ -21,12 +23,12 @@ class InkColorPicker extends StatelessWidget {
   Widget build(BuildContext context) {
     return Column(
       mainAxisSize: MainAxisSize.min,
-      crossAxisAlignment: CrossAxisAlignment.start,
+      crossAxisAlignment: CrossAxisAlignment.stretch,
       children: <Widget>[
-        Text('Ink color', style: Theme.of(context).textTheme.labelMedium),
-        const SizedBox(height: AppSpacing.xs),
+        const SectionLabel('Ink color'),
+        // Spread across the panel's width, so each row ends flush with it.
         Wrap(
-          spacing: AppSpacing.xxs,
+          alignment: WrapAlignment.spaceBetween,
           runSpacing: AppSpacing.xxs,
           children: <Widget>[
             for (final InkColor ink in colors)
@@ -82,8 +84,8 @@ class _InkSwatch extends StatelessWidget {
               child: AnimatedContainer(
                 duration: AppMotion.resolve(context, AppMotion.fast),
                 curve: AppMotion.standard,
-                width: AppSizes.colorSwatch + AppSpacing.xs,
-                height: AppSizes.colorSwatch + AppSpacing.xs,
+                width: AppSizes.colorSwatch + AppSpacing.xs + 2,
+                height: AppSizes.colorSwatch + AppSpacing.xs + 2,
                 alignment: Alignment.center,
                 decoration: BoxDecoration(
                   shape: BoxShape.circle,
@@ -100,10 +102,15 @@ class _InkSwatch extends StatelessWidget {
                   decoration: BoxDecoration(
                     color: color,
                     shape: BoxShape.circle,
+                    // Keeps an ink as dark as the panel distinct from it.
+                    border: Border.all(
+                      color: colors.textPrimary.withValues(alpha: 0.08),
+                      width: AppSizes.hairline,
+                    ),
                   ),
                   child: selected
                       ? ExcludeSemantics(
-                          child: Icon(Icons.check, size: 18, color: onColor),
+                          child: Icon(AppIcons.check, size: 16, color: onColor),
                         )
                       : null,
                 ),

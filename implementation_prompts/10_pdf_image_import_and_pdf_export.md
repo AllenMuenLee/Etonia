@@ -125,7 +125,7 @@ Page units stay logical pixels at 96 per inch, which already makes A4 `794 x 112
 ### Content
 
 - Export the paper appearance, independent of the app theme: the light paper color, light-theme ink colors, and background rules as thin vector lines matching the screen spacing.
-- Ink is vector. Each stroke becomes the same geometry the screen paints: round caps and joins, the stroke's width, dots as filled circles. Do not rasterize ink, and do not resample or smooth points again.
+- Ink is vector. Each stroke becomes the same geometry the screen paints: round caps and joins, the stroke's width, dots as filled circles. A stroke of varying width (prompt 3) is drawn segment by segment, each at the mean of its ends' widths with round caps closing the joins. Do not rasterize ink, and do not resample or smooth points again.
 - Images are embedded once per asset at their stored resolution, placed with their rotation, below the ink. JPEG assets are embedded without re-encoding where the PDF library allows it.
 - Imported PDF pages: keep the original page as vector content if the chosen libraries can do so reliably on both platforms. Otherwise rasterize it at a configurable resolution (default 200 dpi) and embed it as the page's bottom layer. Say which path was taken and what it means for file size and for text in the original.
 - Set document metadata: title, creator `Greatnote`, and creation date.

@@ -98,7 +98,9 @@ class PageConfig {
     this.growthFraction = 0.5,
     this.minGrowthStep = 256,
     this.maxExtent = 20000,
+    this.appendPageAt = 0.75,
   }) : assert(lineSpacing > 0),
+       assert(appendPageAt > 0 && appendPageAt <= 1),
        assert(gridSpacing > 0),
        assert(dotSpacing > 0),
        assert(edgeMargin >= 0),
@@ -124,6 +126,10 @@ class PageConfig {
 
   /// An infinite page never grows past this in either direction.
   final double maxExtent;
+
+  /// Once ink on the last page of a fixed size reaches this fraction of
+  /// its height, an empty page is added after it, ready to scroll onto.
+  final double appendPageAt;
 }
 
 /// Where a page sits in the writing area: its size in page units, and the

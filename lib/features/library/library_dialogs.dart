@@ -1,7 +1,14 @@
 import 'package:flutter/material.dart';
 
 import '../../app/theme/app_tokens.dart';
+import '../../app/theme/app_icons.dart';
+import '../../shared/widgets/app_controls.dart';
+import '../editor/page/page_background.dart';
+import '../editor/page/page_setup.dart';
 import 'library_models.dart';
+
+/// How wide a dialog that asks for a name is.
+const double _fieldDialogWidth = 360;
 
 /// Asks for a name, with [initial] selected. Returns the cleaned name, or
 /// null when cancelled or left empty.
@@ -58,13 +65,16 @@ class _NameDialogState extends State<_NameDialog> {
   Widget build(BuildContext context) {
     return AlertDialog(
       title: Text(widget.title),
-      content: TextField(
-        controller: _text,
-        autofocus: true,
-        maxLength: maxNameLength,
-        textInputAction: TextInputAction.done,
-        decoration: const InputDecoration(labelText: 'Name', counterText: ''),
-        onSubmitted: (_) => _submit(),
+      content: SizedBox(
+        width: _fieldDialogWidth,
+        child: TextField(
+          controller: _text,
+          autofocus: true,
+          maxLength: maxNameLength,
+          textInputAction: TextInputAction.done,
+          decoration: const InputDecoration(hintText: 'Name', counterText: ''),
+          onSubmitted: (_) => _submit(),
+        ),
       ),
       actions: <Widget>[
         TextButton(
@@ -74,7 +84,7 @@ class _NameDialogState extends State<_NameDialog> {
         ValueListenableBuilder<TextEditingValue>(
           valueListenable: _text,
           builder: (BuildContext context, TextEditingValue value, Widget? _) {
-            return TextButton(
+            return FilledButton(
               onPressed: cleanName(value.text) == null ? null : _submit,
               child: Text(widget.action),
             );
@@ -95,15 +105,23 @@ Future<bool> confirmAction(
   final bool? confirmed = await showDialog<bool>(
     context: context,
     builder: (BuildContext context) {
+      final AppColors colors = AppColors.of(context);
       return AlertDialog(
         title: Text(title),
-        content: Text(message),
+        content: ConstrainedBox(
+          constraints: const BoxConstraints(maxWidth: _fieldDialogWidth),
+          child: Text(message),
+        ),
         actions: <Widget>[
           TextButton(
             onPressed: () => Navigator.of(context).pop(false),
             child: const Text('Cancel'),
           ),
-          TextButton(
+          FilledButton(
+            style: FilledButton.styleFrom(
+              backgroundColor: colors.danger,
+              foregroundColor: colors.onAccent,
+            ),
             onPressed: () => Navigator.of(context).pop(true),
             child: Text(action),
           ),
@@ -153,16 +171,34 @@ Future<FolderChoice?> pickFolder(
     builder: (BuildContext context) {
       return SimpleDialog(
         title: Text(title),
+        titlePadding: const EdgeInsets.fromLTRB(
+          AppSpacing.lg,
+          AppSpacing.lg,
+          AppSpacing.lg,
+          AppSpacing.sm,
+        ),
+        contentPadding: const EdgeInsets.fromLTRB(
+          AppSpacing.xs,
+          0,
+          AppSpacing.xs,
+          AppSpacing.sm,
+        ),
         children: <Widget>[
-          SimpleDialogOption(
-            onPressed: () =>
-                Navigator.of(context).pop(const FolderChoice(null)),
-            child: const _FolderRow(name: 'Library', depth: 0, root: true),
+          SizedBox(
+            width: _fieldDialogWidth,
+            child: _FolderRow(
+              name: 'Library',
+              depth: 0,
+              root: true,
+              onTap: () => Navigator.of(context).pop(const FolderChoice(null)),
+            ),
           ),
           for (final (Folder folder, int depth) in rows)
-            SimpleDialogOption(
-              onPressed: () => Navigator.of(context).pop(FolderChoice(folder)),
-              child: _FolderRow(name: folder.name, depth: depth + 1),
+            _FolderRow(
+              name: folder.name,
+              depth: depth + 1,
+              color: folder.color,
+              onTap: () => Navigator.of(context).pop(FolderChoice(folder)),
             ),
         ],
       );
@@ -174,30 +210,544 @@ class _FolderRow extends StatelessWidget {
   const _FolderRow({
     required this.name,
     required this.depth,
+    required this.onTap,
     this.root = false,
+    this.color = FolderColor.accent,
   });
 
   final String name;
   final int depth;
   final bool root;
+  final FolderColor color;
+  final VoidCallback onTap;
 
   @override
   Widget build(BuildContext context) {
-    return ConstrainedBox(
-      constraints: const BoxConstraints(minHeight: AppSizes.minTouchTarget),
-      child: Padding(
-        padding: EdgeInsetsDirectional.only(start: AppSpacing.md * depth),
-        child: Row(
-          children: <Widget>[
-            Icon(
-              root ? Icons.library_books_outlined : Icons.folder_outlined,
-              size: AppSizes.icon,
+    final AppColors colors = AppColors.of(context);
+    return InkWell(
+      onTap: onTap,
+      borderRadius: BorderRadius.circular(AppRadii.medium),
+      child: ConstrainedBox(
+        constraints: const BoxConstraints(minHeight: AppSizes.minTouchTarget),
+        child: Padding(
+          padding: EdgeInsetsDirectional.only(
+            start: AppSpacing.md + AppSpacing.lg * depth,
+            end: AppSpacing.md,
+          ),
+          child: Row(
+            children: <Widget>[
+              Icon(
+                root ? AppIcons.library : AppIcons.folder,
+                size: 20,
+                color: root
+                    ? colors.textSecondary
+                    : resolveFolderColor(context, color),
+              ),
+              const SizedBox(width: AppSpacing.sm),
+              Expanded(
+                child: Text(
+                  name,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: Theme.of(
+                    context,
+                  ).textTheme.bodyMedium!.copyWith(fontWeight: FontWeight.w500),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// [color] as shown in the current theme.
+Color resolveFolderColor(BuildContext context, FolderColor color) {
+  final bool dark = Theme.of(context).brightness == Brightness.dark;
+  final int? value = dark ? color.dark : color.light;
+  return value == null ? AppColors.of(context).accent : Color(value);
+}
+
+/// A folder's name and color, as entered.
+class FolderDraft {
+  const FolderDraft(this.name, this.color);
+
+  final String name;
+  final FolderColor color;
+}
+
+/// Asks for a folder's name and color. Returns null when cancelled.
+Future<FolderDraft?> askForFolder(
+  BuildContext context, {
+  required String title,
+  required String action,
+  String initialName = '',
+  FolderColor initialColor = FolderColor.accent,
+}) async {
+  final FolderDraft? result = await showDialog<FolderDraft>(
+    context: context,
+    builder: (BuildContext context) => _FolderDialog(
+      title: title,
+      action: action,
+      initialName: initialName,
+      initialColor: initialColor,
+    ),
+  );
+  if (result == null) {
+    return null;
+  }
+  final String? name = cleanName(result.name);
+  return name == null ? null : FolderDraft(name, result.color);
+}
+
+class _FolderDialog extends StatefulWidget {
+  const _FolderDialog({
+    required this.title,
+    required this.action,
+    required this.initialName,
+    required this.initialColor,
+  });
+
+  final String title;
+  final String action;
+  final String initialName;
+  final FolderColor initialColor;
+
+  @override
+  State<_FolderDialog> createState() => _FolderDialogState();
+}
+
+class _FolderDialogState extends State<_FolderDialog> {
+  late final TextEditingController _text =
+      TextEditingController(text: widget.initialName)
+        ..selection = TextSelection(
+          baseOffset: 0,
+          extentOffset: widget.initialName.length,
+        );
+  late FolderColor _color = widget.initialColor;
+
+  @override
+  void dispose() {
+    _text.dispose();
+    super.dispose();
+  }
+
+  void _submit() {
+    if (cleanName(_text.text) != null) {
+      Navigator.of(context).pop(FolderDraft(_text.text, _color));
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AlertDialog(
+      title: Text(widget.title),
+      content: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: <Widget>[
+          SizedBox(
+            width: _fieldDialogWidth,
+            child: TextField(
+              controller: _text,
+              autofocus: true,
+              maxLength: maxNameLength,
+              textInputAction: TextInputAction.done,
+              decoration: const InputDecoration(
+                hintText: 'Name',
+                counterText: '',
+              ),
+              onSubmitted: (_) => _submit(),
             ),
-            const SizedBox(width: AppSpacing.sm),
-            Expanded(
-              child: Text(name, maxLines: 1, overflow: TextOverflow.ellipsis),
+          ),
+          const SizedBox(height: AppSpacing.lg),
+          const SectionLabel('Color'),
+          FolderColorPicker(
+            selected: _color,
+            onSelected: (FolderColor color) => setState(() => _color = color),
+          ),
+        ],
+      ),
+      actions: <Widget>[
+        TextButton(
+          onPressed: () => Navigator.of(context).pop(),
+          child: const Text('Cancel'),
+        ),
+        ValueListenableBuilder<TextEditingValue>(
+          valueListenable: _text,
+          builder: (BuildContext context, TextEditingValue value, Widget? _) {
+            return FilledButton(
+              onPressed: cleanName(value.text) == null ? null : _submit,
+              child: Text(widget.action),
+            );
+          },
+        ),
+      ],
+    );
+  }
+}
+
+/// Asks for a folder's color. Returns null when cancelled.
+Future<FolderColor?> pickFolderColor(
+  BuildContext context, {
+  required String title,
+  required FolderColor initial,
+}) {
+  return showDialog<FolderColor>(
+    context: context,
+    builder: (BuildContext context) {
+      return AlertDialog(
+        title: Text(title),
+        content: SizedBox(
+          width: _fieldDialogWidth,
+          child: FolderColorPicker(
+            selected: initial,
+            onSelected: (FolderColor color) => Navigator.of(context).pop(color),
+          ),
+        ),
+        actions: <Widget>[
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(),
+            child: const Text('Cancel'),
+          ),
+        ],
+      );
+    },
+  );
+}
+
+/// A row of color swatches, the chosen one ringed and checked.
+class FolderColorPicker extends StatelessWidget {
+  const FolderColorPicker({
+    super.key,
+    required this.selected,
+    required this.onSelected,
+  });
+
+  final FolderColor selected;
+  final ValueChanged<FolderColor> onSelected;
+
+  @override
+  Widget build(BuildContext context) {
+    return Wrap(
+      runSpacing: AppSpacing.xxs,
+      children: <Widget>[
+        for (final FolderColor color in FolderColor.values)
+          Semantics(
+            button: true,
+            inMutuallyExclusiveGroup: true,
+            selected: color == selected,
+            label: color.label,
+            onTap: () => onSelected(color),
+            excludeSemantics: true,
+            child: Tooltip(
+              message: color.label,
+              excludeFromSemantics: true,
+              child: InkResponse(
+                key: ValueKey<String>('folder-color-${color.name}'),
+                onTap: () => onSelected(color),
+                radius: AppSizes.minTouchTarget / 2,
+                child: SizedBox.square(
+                  dimension: AppSizes.minTouchTarget,
+                  child: Center(
+                    child: AnimatedContainer(
+                      duration: AppMotion.resolve(context, AppMotion.fast),
+                      curve: AppMotion.standard,
+                      width: 38,
+                      height: 38,
+                      alignment: Alignment.center,
+                      decoration: BoxDecoration(
+                        shape: BoxShape.circle,
+                        border: Border.all(
+                          color: resolveFolderColor(
+                            context,
+                            color,
+                          ).withValues(alpha: color == selected ? 1 : 0),
+                          width: AppSizes.focusRingWidth,
+                        ),
+                      ),
+                      child: Container(
+                        width: 28,
+                        height: 28,
+                        decoration: BoxDecoration(
+                          color: resolveFolderColor(context, color),
+                          shape: BoxShape.circle,
+                        ),
+                        child: color == selected
+                            ? const Icon(
+                                AppIcons.check,
+                                size: 16,
+                                color: Colors.white,
+                              )
+                            : null,
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+            ),
+          ),
+      ],
+    );
+  }
+}
+
+/// The page sizes offered for a new note, in the order shown.
+const List<PageSize> templateSizes = <PageSize>[
+  PageSize.fit,
+  PageSize.a4Portrait,
+  PageSize.a4Landscape,
+  PageSize.letterPortrait,
+  PageSize.letterLandscape,
+  PageSize.square,
+  PageSize.infinite,
+];
+
+/// Asks for a new note's template: its page size and its paper. Returns
+/// null when cancelled.
+Future<PageSetup?> pickNoteTemplate(
+  BuildContext context, {
+  PageSetup initial = const PageSetup(),
+}) {
+  return showDialog<PageSetup>(
+    context: context,
+    builder: (BuildContext context) => _TemplateDialog(initial: initial),
+  );
+}
+
+class _TemplateDialog extends StatefulWidget {
+  const _TemplateDialog({required this.initial});
+
+  final PageSetup initial;
+
+  @override
+  State<_TemplateDialog> createState() => _TemplateDialogState();
+}
+
+class _TemplateDialogState extends State<_TemplateDialog> {
+  late PageSize _size = templateSizes.contains(widget.initial.size)
+      ? widget.initial.size
+      : PageSize.fit;
+  late PageBackground _background = widget.initial.background;
+
+  @override
+  Widget build(BuildContext context) {
+    return AlertDialog(
+      title: const Text('New note'),
+      scrollable: true,
+      content: SizedBox(
+        width: 4 * _TemplateTile.width + 3 * AppSpacing.sm,
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: <Widget>[
+            const SectionLabel('Paper'),
+            Wrap(
+              spacing: AppSpacing.sm,
+              runSpacing: AppSpacing.sm,
+              children: <Widget>[
+                for (final PageBackground background in PageBackground.values)
+                  _TemplateTile(
+                    key: ValueKey<String>('template-paper-${background.name}'),
+                    label: background.label,
+                    selected: background == _background,
+                    onTap: () => setState(() => _background = background),
+                    preview: _PaperPreview(
+                      background: background,
+                      aspect: 0.75,
+                    ),
+                  ),
+              ],
+            ),
+            const SizedBox(height: AppSpacing.lg),
+            const SectionLabel('Page size'),
+            Wrap(
+              spacing: AppSpacing.sm,
+              runSpacing: AppSpacing.sm,
+              children: <Widget>[
+                for (final PageSize size in templateSizes)
+                  _TemplateTile(
+                    key: ValueKey<String>('template-size-${size.name}'),
+                    label: size.label,
+                    selected: size == _size,
+                    onTap: () => setState(() => _size = size),
+                    preview: _PaperPreview(
+                      background: _background,
+                      aspect: _aspectOf(size),
+                      icon: switch (size) {
+                        PageSize.fit => AppIcons.fitToScreen,
+                        PageSize.infinite => AppIcons.infinite,
+                        _ => null,
+                      },
+                    ),
+                  ),
+              ],
             ),
           ],
+        ),
+      ),
+      actions: <Widget>[
+        TextButton(
+          onPressed: () => Navigator.of(context).pop(),
+          child: const Text('Cancel'),
+        ),
+        FilledButton(
+          onPressed: () => Navigator.of(
+            context,
+          ).pop(PageSetup(size: _size, background: _background)),
+          child: const Text('Create'),
+        ),
+      ],
+    );
+  }
+
+  /// Width over height of a page of [size]; a screen-shaped guess for the
+  /// sizes that follow the screen.
+  static double _aspectOf(PageSize size) {
+    final Size? fixed = size.fixedSize;
+    return fixed == null ? 4 / 3 : fixed.width / fixed.height;
+  }
+}
+
+/// One choice in the template dialog: a small picture of the paper and
+/// its name, ringed in the accent color when chosen.
+class _TemplateTile extends StatelessWidget {
+  const _TemplateTile({
+    super.key,
+    required this.label,
+    required this.selected,
+    required this.onTap,
+    required this.preview,
+  });
+
+  static const double width = 100;
+
+  final String label;
+  final bool selected;
+  final VoidCallback onTap;
+  final Widget preview;
+
+  @override
+  Widget build(BuildContext context) {
+    final AppColors colors = AppColors.of(context);
+    final BorderRadius radius = BorderRadius.circular(AppRadii.medium);
+    return Semantics(
+      button: true,
+      inMutuallyExclusiveGroup: true,
+      selected: selected,
+      label: label,
+      onTap: onTap,
+      excludeSemantics: true,
+      child: InkWell(
+        onTap: onTap,
+        borderRadius: radius,
+        child: AnimatedContainer(
+          duration: AppMotion.resolve(context, AppMotion.fast),
+          curve: AppMotion.standard,
+          width: width,
+          padding: const EdgeInsets.fromLTRB(
+            AppSpacing.xs,
+            AppSpacing.sm,
+            AppSpacing.xs,
+            AppSpacing.xs,
+          ),
+          decoration: BoxDecoration(
+            color: selected ? colors.selected : colors.background,
+            borderRadius: radius,
+            border: Border.all(
+              color: selected
+                  ? colors.accent
+                  : colors.accent.withValues(alpha: 0),
+              width: AppSizes.focusRingWidth,
+            ),
+          ),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: <Widget>[
+              SizedBox(height: 60, child: Center(child: preview)),
+              const SizedBox(height: AppSpacing.xs),
+              SizedBox(
+                height: 30,
+                child: Center(
+                  child: Text(
+                    label,
+                    maxLines: 2,
+                    textAlign: TextAlign.center,
+                    style: Theme.of(context).textTheme.labelMedium!.copyWith(
+                      color: selected ? colors.accent : colors.textPrimary,
+                      fontWeight: selected ? FontWeight.w600 : FontWeight.w500,
+                      height: 1.2,
+                    ),
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// A miniature page: its proportions and its printed rules.
+class _PaperPreview extends StatelessWidget {
+  const _PaperPreview({
+    required this.background,
+    required this.aspect,
+    this.icon,
+  });
+
+  final PageBackground background;
+
+  /// Width over height.
+  final double aspect;
+
+  /// Marks a page that follows the screen rather than having a size.
+  final IconData? icon;
+
+  /// The preview shows a page this many times smaller than it is.
+  static const double _reduction = 4;
+
+  @override
+  Widget build(BuildContext context) {
+    final AppColors colors = AppColors.of(context);
+    return AspectRatio(
+      aspectRatio: aspect,
+      child: DecoratedBox(
+        decoration: BoxDecoration(
+          borderRadius: BorderRadius.circular(2),
+          boxShadow: AppShadows.paper(colors),
+        ),
+        child: ClipRRect(
+          borderRadius: BorderRadius.circular(2),
+          child: ColoredBox(
+            color: colors.writingSurface,
+            child: Stack(
+              fit: StackFit.expand,
+              children: <Widget>[
+                FittedBox(
+                  fit: BoxFit.cover,
+                  alignment: Alignment.topLeft,
+                  child: SizedBox(
+                    width: 64 * aspect * _reduction,
+                    height: 64 * _reduction,
+                    child: CustomPaint(
+                      painter: PageBackgroundPainter(
+                        background: background,
+                        rule: colors.pageRule,
+                        marginRule: colors.pageMarginRule,
+                      ),
+                    ),
+                  ),
+                ),
+                if (icon != null)
+                  Center(
+                    child: Icon(icon, size: 20, color: colors.textSecondary),
+                  ),
+              ],
+            ),
+          ),
         ),
       ),
     );

@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 
 import '../../../app/theme/app_tokens.dart';
+import '../../../shared/widgets/pressable.dart';
 
 /// A square palette control with a 48-pixel touch target and a smaller
 /// painted body. Disabled when [onPressed] is null.
@@ -12,6 +13,7 @@ class PaletteButton extends StatefulWidget {
     required this.child,
     this.semanticLabel,
     this.selected = false,
+    this.toggled,
     this.dense = false,
   });
 
@@ -22,6 +24,10 @@ class PaletteButton extends StatefulWidget {
 
   final VoidCallback? onPressed;
   final bool selected;
+
+  /// For a control that switches a mode on and off: announced as a toggle,
+  /// on or off, rather than as a selected tool.
+  final bool? toggled;
 
   /// Shrinks the painted body, never the touch target.
   final bool dense;
@@ -54,7 +60,8 @@ class _PaletteButtonState extends State<PaletteButton> {
         container: true,
         button: true,
         enabled: enabled,
-        selected: widget.selected,
+        selected: widget.toggled == null ? widget.selected : null,
+        toggled: widget.toggled,
         label: widget.semanticLabel ?? widget.tooltip,
         child: InkWell(
           onTap: widget.onPressed,
@@ -66,31 +73,33 @@ class _PaletteButtonState extends State<PaletteButton> {
           child: SizedBox.square(
             dimension: AppSizes.minTouchTarget,
             child: Center(
-              child: AnimatedContainer(
-                duration: AppMotion.resolve(context, AppMotion.fast),
-                curve: AppMotion.standard,
-                width: visual,
-                height: visual,
-                alignment: Alignment.center,
-                decoration: BoxDecoration(
-                  color: widget.selected
-                      ? colors.selected
-                      : colors.selected.withValues(alpha: 0),
-                  borderRadius: radius,
-                  border: Border.all(
-                    color: showFocusRing
-                        ? colors.focus
-                        : colors.focus.withValues(alpha: 0),
-                    width: AppSizes.focusRingWidth,
+              child: Pressable(
+                enabled: enabled,
+                child: AnimatedContainer(
+                  duration: AppMotion.resolve(context, AppMotion.fast),
+                  curve: AppMotion.standard,
+                  width: visual,
+                  height: visual,
+                  alignment: Alignment.center,
+                  decoration: BoxDecoration(
+                    color: widget.selected
+                        ? colors.selected
+                        : colors.selected.withValues(alpha: 0),
+                    borderRadius: radius,
+                    border: Border.all(
+                      color: showFocusRing
+                          ? colors.focus
+                          : colors.focus.withValues(alpha: 0),
+                      width: AppSizes.focusRingWidth,
+                    ),
                   ),
-                ),
-                child: Opacity(
-                  opacity: enabled ? 1 : 0.38,
+                  // Dimmed by its color, not an Opacity: a translucent layer
+                  // would be drawn offscreen on every frame it is shown.
                   child: IconTheme.merge(
                     data: IconThemeData(
-                      color: widget.selected
-                          ? colors.accent
-                          : colors.textPrimary,
+                      color:
+                          (widget.selected ? colors.accent : colors.textPrimary)
+                              .withValues(alpha: enabled ? 1 : 0.38),
                       size: AppSizes.icon,
                     ),
                     child: ExcludeSemantics(child: widget.child),

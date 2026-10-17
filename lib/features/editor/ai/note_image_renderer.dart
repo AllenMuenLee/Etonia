@@ -6,6 +6,8 @@ import 'package:flutter/foundation.dart';
 import '../ink/ink_painter.dart';
 import '../ink/ink_sample.dart';
 import '../ink/stroke.dart';
+import '../sticky/sticky_note.dart';
+import '../sticky/sticky_note_painter.dart';
 import 'ai_config.dart';
 import 'ink_attachment.dart';
 import 'selection_image_renderer.dart';
@@ -20,7 +22,9 @@ class NoteInkSnapshot {
     required ui.Color background,
     this.bitmaps = const <SnapshotBitmap>[],
     this.focusBounds,
+    List<StickyNoteElement> stickies = const <StickyNoteElement>[],
   }) : strokes = List<SnapshotStroke>.unmodifiable(strokes),
+       stickies = List<StickyNoteElement>.unmodifiable(stickies),
        background = background.withValues(alpha: 1);
 
   factory NoteInkSnapshot.of(
@@ -31,6 +35,7 @@ class NoteInkSnapshot {
     required ui.Color background,
     ui.Rect? focusBounds,
     List<SnapshotBitmap> bitmaps = const <SnapshotBitmap>[],
+    Iterable<StickyNoteElement> stickies = const <StickyNoteElement>[],
   }) {
     return NoteInkSnapshot(
       strokes: <SnapshotStroke>[
@@ -38,8 +43,9 @@ class NoteInkSnapshot {
           SnapshotStroke(
             points: stroke.points,
             width: stroke.style.width,
-            color: stroke.style.ink.resolve(brightness),
+            color: stroke.style.resolve(brightness),
             isDot: stroke.isDot,
+            widths: stroke.widths,
           ),
       ],
       logicalSize: logicalSize,
@@ -48,11 +54,18 @@ class NoteInkSnapshot {
       background: background,
       focusBounds: focusBounds,
       bitmaps: bitmaps,
+      stickies: <StickyNoteElement>[
+        for (final StickyNoteElement note in stickies)
+          if (note.isValid) note,
+      ],
     );
   }
 
   final List<SnapshotStroke> strokes;
   final List<SnapshotBitmap> bitmaps;
+
+  /// The page's sticky notes, in paint order, under [strokes].
+  final List<StickyNoteElement> stickies;
   final ui.Size logicalSize;
   final int revision;
   final ui.Brightness brightness;
@@ -231,6 +244,9 @@ class NoteImageRenderer {
         );
       canvas.restore();
     }
+    for (final StickyNoteElement note in snapshot.stickies) {
+      paintStickyNote(canvas, note);
+    }
     for (final SnapshotStroke stroke in snapshot.strokes) {
       final InkVector origin = stroke.points.first;
       final ui.Path path = ui.Path()..moveTo(origin.x, origin.y);
@@ -244,6 +260,9 @@ class NoteImageRenderer {
         path: path,
         origin: origin,
         isDot: stroke.isDot,
+        outline: stroke.widths == null
+            ? null
+            : buildInkOutline(stroke.points, stroke.widths!, stroke.width),
       );
     }
     final ui.Picture picture = recorder.endRecording();

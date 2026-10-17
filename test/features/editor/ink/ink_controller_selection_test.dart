@@ -1480,4 +1480,77 @@ void main() {
       }
     });
   });
+
+  group('hidden strokes', () {
+    test('hiding is presentation only, and announced once', () {
+      final _Page page = _Page();
+      final InkController controller = page.controller;
+      final List<Stroke> before = List<Stroke>.of(controller.strokes);
+      final int revision = controller.documentRevision;
+      int hidden = 0;
+      controller.hiddenStrokesListenable.addListener(() => hidden++);
+
+      controller.setStrokesHidden(<Stroke>[before[1], before[4]], true);
+
+      expect(controller.isStrokeHidden(before[1]), isTrue);
+      expect(controller.isStrokeHidden(before[4]), isTrue);
+      expect(controller.isStrokeHidden(before[2]), isFalse);
+      expect(controller.strokes, before);
+      expect(controller.documentRevision, revision);
+      expect(controller.canUndo, isFalse);
+      expect(hidden, 1);
+      expect(page.completed, 1);
+
+      // Already hidden: nothing to announce.
+      controller.setStrokesHidden(<Stroke>[before[1]], true);
+      expect(hidden, 1);
+
+      controller.setStrokesHidden(<Stroke>[before[1], before[4]], false);
+      expect(controller.isStrokeHidden(before[1]), isFalse);
+      expect(hidden, 2);
+    });
+
+    test('the lasso and the eraser pass over hidden strokes', () {
+      final _Page page = _Page();
+      final InkController controller = page.controller;
+      final Stroke thin = controller.strokes[1];
+      controller.setStrokesHidden(<Stroke>[thin], true);
+
+      _lasso(controller, -20, 30, 120, 90);
+      expect(controller.selection!.indices, <int>[2, 4]);
+
+      controller.clearSelection();
+      controller
+        ..startErase(
+          pointer: 1,
+          position: _v(50, 40),
+          settings: const EraserSettings(mode: EraserMode.stroke, size: 10),
+        )
+        ..eraseTo(1, _v(50, 52))
+        ..endErase(1);
+      expect(controller.strokes, contains(same(thin)));
+    });
+
+    test('hidden ink moved with the selection stays hidden', () {
+      final _Page page = _Page();
+      final InkController controller = page.controller;
+      _selectGroup(page);
+      final Stroke thin = controller.strokes[1];
+      controller.setStrokesHidden(<Stroke>[thin], true);
+      final List<Map<Stroke, Stroke>> replacements = <Map<Stroke, Stroke>>[];
+      controller.addStrokeReplacementListener(replacements.add);
+
+      _transform(controller, _v(50, 60), _v(50, 160));
+
+      final Stroke moved = controller.strokes[1];
+      expect(moved, isNot(same(thin)));
+      expect(controller.isStrokeHidden(moved), isTrue);
+      expect(replacements.single[thin], same(moved));
+
+      // An undo brings back the stroke it replaced, still hidden.
+      controller.undo();
+      expect(controller.strokes[1], same(thin));
+      expect(controller.isStrokeHidden(thin), isTrue);
+    });
+  });
 }

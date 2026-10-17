@@ -1,11 +1,13 @@
 import 'dart:math' as math;
 import 'dart:typed_data';
+import 'dart:ui' as ui;
 
 import 'package:flutter/material.dart';
 
 import '../ink/ink_controller.dart';
 import '../ink/ink_selection.dart';
 import 'document_models.dart';
+import 'page_image_cache.dart';
 
 typedef NoteAssetReader = Future<Uint8List?> Function(String assetId);
 
@@ -16,30 +18,38 @@ class PageImageLayer extends StatefulWidget {
     required this.controller,
     required this.readAsset,
     this.maxDecodeDimension = 4096,
+    this.cache,
   });
 
   final InkController controller;
   final NoteAssetReader readAsset;
   final int maxDecodeDimension;
+  final PageImageCache? cache;
 
   @override
   State<PageImageLayer> createState() => _PageImageLayerState();
 }
 
 class _PageImageLayerState extends State<PageImageLayer> {
-  final Map<String, Future<Uint8List?>> _assets =
-      <String, Future<Uint8List?>>{};
+  PageImageCache? _ownedCache;
+  PageImageCache get _cache =>
+      widget.cache ??
+      (_ownedCache ??= PageImageCache(readAsset: widget.readAsset));
 
   @override
   void didUpdateWidget(PageImageLayer oldWidget) {
     super.didUpdateWidget(oldWidget);
-    if (oldWidget.readAsset != widget.readAsset) {
-      _assets.clear();
+    if (oldWidget.readAsset != widget.readAsset ||
+        oldWidget.cache != widget.cache) {
+      _ownedCache?.clear();
+      _ownedCache = null;
     }
   }
 
-  Future<Uint8List?> _read(String assetId) {
-    return _assets.putIfAbsent(assetId, () => widget.readAsset(assetId));
+  @override
+  void dispose() {
+    _ownedCache?.clear();
+    super.dispose();
   }
 
   @override
@@ -58,6 +68,7 @@ class _PageImageLayerState extends State<PageImageLayer> {
           children: <Widget>[
             for (int i = 0; i < widget.controller.images.length; i++)
               _PlacedImage(
+                key: ValueKey(widget.controller.images[i].id),
                 element:
                     selected.contains(i) &&
                         widget.controller.activeTransform != null
@@ -66,7 +77,7 @@ class _PageImageLayerState extends State<PageImageLayer> {
                       )
                     : widget.controller.images[i],
                 selected: selected.contains(i),
-                asset: _read(widget.controller.images[i].assetId),
+                cache: _cache,
                 maxDecodeDimension: widget.maxDecodeDimension,
               ),
           ],
@@ -78,15 +89,16 @@ class _PageImageLayerState extends State<PageImageLayer> {
 
 class _PlacedImage extends StatelessWidget {
   const _PlacedImage({
+    super.key,
     required this.element,
     required this.selected,
-    required this.asset,
+    required this.cache,
     required this.maxDecodeDimension,
   });
 
   final NoteImageElement element;
   final bool selected;
-  final Future<Uint8List?> asset;
+  final PageImageCache cache;
   final int maxDecodeDimension;
 
   @override
@@ -104,40 +116,101 @@ class _PlacedImage extends StatelessWidget {
         selected: selected,
         child: Transform.rotate(
           angle: element.rotation,
-          child: FutureBuilder<Uint8List?>(
-            future: asset,
-            builder: (BuildContext context, AsyncSnapshot<Uint8List?> data) {
-              final Uint8List? bytes = data.data;
-              if (bytes == null) {
-                if (data.connectionState != ConnectionState.done) {
-                  return const ColoredBox(color: Color(0x08000000));
-                }
-                return const DecoratedBox(
-                  decoration: BoxDecoration(color: Color(0x0F000000)),
-                  child: Center(child: Text('Image unavailable')),
-                );
-              }
-              final double pixelRatio = MediaQuery.devicePixelRatioOf(context);
-              final double requestedWidth = element.size.width * pixelRatio;
-              final double requestedHeight = element.size.height * pixelRatio;
-              final double reduction = math.min(
-                1,
-                maxDecodeDimension / math.max(requestedWidth, requestedHeight),
-              );
-              return Image.memory(
-                bytes,
-                fit: BoxFit.fill,
-                filterQuality: FilterQuality.medium,
-                gaplessPlayback: true,
-                cacheWidth: math.max(1, (requestedWidth * reduction).round()),
-                cacheHeight: math.max(1, (requestedHeight * reduction).round()),
-                errorBuilder: (_, _, _) =>
-                    const Center(child: Text('Image unavailable')),
-              );
-            },
+          child: _ImageContents(
+            assetId: element.assetId,
+            size: element.size,
+            cache: cache,
+            maxDimension: maxDecodeDimension,
           ),
         ),
       ),
     );
   }
+}
+
+class _ImageContents extends StatefulWidget {
+  const _ImageContents({
+    required this.assetId,
+    required this.size,
+    required this.cache,
+    required this.maxDimension,
+  });
+  final String assetId;
+  final Size size;
+  final PageImageCache cache;
+  final int maxDimension;
+  @override
+  State<_ImageContents> createState() => _ImageContentsState();
+}
+
+class _ImageContentsState extends State<_ImageContents> {
+  ui.Image? _image;
+  Object? _request;
+  Object? _key;
+  bool _failed = false;
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    _load();
+  }
+
+  @override
+  void didUpdateWidget(_ImageContents oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.assetId != widget.assetId ||
+        oldWidget.cache != widget.cache) {
+      _image?.dispose();
+      _image = null;
+    }
+    _load();
+  }
+
+  void _load() {
+    final requested = widget.size * MediaQuery.devicePixelRatioOf(context);
+    final reduction = math.min(
+      1.0,
+      widget.maxDimension / math.max(requested.width, requested.height),
+    );
+    final width = math.max(1, (requested.width * reduction).round());
+    final height = math.max(1, (requested.height * reduction).round());
+    final key = (widget.cache, widget.assetId, width, height);
+    if (key == _key) return;
+    _key = key;
+    _failed = false;
+    final request = _request = Object();
+    widget.cache
+        .image(widget.assetId, width, height)
+        .then(
+          (image) {
+            if (!mounted || request != _request) {
+              image.dispose();
+              return;
+            }
+            _image?.dispose();
+            setState(() => _image = image);
+          },
+          onError: (Object _) {
+            if (mounted && request == _request) setState(() => _failed = true);
+          },
+        );
+  }
+
+  @override
+  void dispose() {
+    _request = null;
+    _image?.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) => _image != null
+      ? RawImage(
+          image: _image,
+          fit: BoxFit.fill,
+          filterQuality: FilterQuality.medium,
+        )
+      : _failed
+      ? const Center(child: Text('Image unavailable'))
+      : const ColoredBox(color: Color(0x08000000));
 }

@@ -12,10 +12,13 @@ import 'notation_playback.dart';
 import 'selection_config.dart';
 import 'selection_transform.dart';
 import 'stroke.dart';
+import '../sticky/sticky_note.dart';
+import '../sticky/sticky_note_painter.dart';
 
 /// Paints one stroke the way the editor shows it: a filled disc for a dot,
-/// otherwise [path] stroked [width] wide with round caps and joins. Every
-/// ink layer, and the image made of a selection, draws through this.
+/// otherwise [path] stroked [width] wide with round caps and joins, or,
+/// for a stroke of varying width, its [outline] filled. Every ink layer,
+/// and the image made of a selection, draws through this.
 void paintInkStroke(
   Canvas canvas, {
   required Color color,
@@ -23,12 +26,17 @@ void paintInkStroke(
   required Path path,
   required InkVector origin,
   required bool isDot,
+  Path? outline,
 }) {
   final Paint paint = Paint()
     ..color = color
     ..isAntiAlias = true;
   if (isDot) {
     canvas.drawCircle(Offset(origin.x, origin.y), width / 2, paint);
+    return;
+  }
+  if (outline != null) {
+    canvas.drawPath(outline, paint);
     return;
   }
   paint
@@ -46,15 +54,94 @@ void _paintStroke(
   required InkVector origin,
   required bool isDot,
   required Brightness brightness,
+  Path? outline,
 }) {
   paintInkStroke(
     canvas,
-    color: style.ink.resolve(brightness),
+    color: style.resolve(brightness),
     width: style.width,
     path: path,
     origin: origin,
     isDot: isDot,
+    outline: outline,
   );
+}
+
+/// Paints the page's sticky notes, in order, under the page's ink, except
+/// selected ones, which belong to [SelectionPainter] while they are
+/// selected. The note open for writing is outlined in [accent]. Repaints
+/// when the document, the selection, or the note open for writing changes;
+/// never for a pointer move.
+class StickyNotesPainter extends CustomPainter {
+  StickyNotesPainter({
+    required this.controller,
+    required this.accent,
+    this.config = const StickyNoteConfig(),
+  }) : super(
+         repaint: Listenable.merge(<Listenable>[
+           controller.completedStrokesListenable,
+           controller.stickyEditingListenable,
+         ]),
+       );
+
+  final InkController controller;
+  final Color accent;
+  final StickyNoteConfig config;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final List<StickyNoteElement> notes = controller.stickyNotes;
+    if (notes.isEmpty) {
+      return;
+    }
+    final List<int> selected =
+        controller.selection?.stickyIndices ?? const <int>[];
+    final String? editing = controller.editingSticky?.id;
+    int next = 0;
+    for (int i = 0; i < notes.length; i++) {
+      if (next < selected.length && selected[next] == i) {
+        next++;
+        continue;
+      }
+      final StickyNoteElement note = notes[i];
+      paintStickyNote(canvas, note, config: config);
+      if (note.id == editing) {
+        paintStickyEditingOutline(canvas, note, accent, config);
+      }
+    }
+  }
+
+  @override
+  bool shouldRepaint(StickyNotesPainter oldDelegate) {
+    return oldDelegate.controller != controller ||
+        oldDelegate.accent != accent ||
+        oldDelegate.config != config;
+  }
+}
+
+/// The outline that marks [note] as open for writing.
+void paintStickyEditingOutline(
+  Canvas canvas,
+  StickyNoteElement note,
+  Color color,
+  StickyNoteConfig config,
+) {
+  final Size local = note.localSize;
+  canvas
+    ..save()
+    ..translate(note.center.x, note.center.y)
+    ..rotate(note.rotation)
+    ..scale(note.scale)
+    ..translate(-local.width / 2, -local.height / 2)
+    ..drawRRect(
+      stickyPaperRect(note, config).inflate(1.5 / note.scale),
+      Paint()
+        ..color = color
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = AppSizes.focusRingWidth / note.scale
+        ..isAntiAlias = true,
+    )
+    ..restore();
 }
 
 /// Paints finished strokes, except the selected ones, which belong to
@@ -87,7 +174,8 @@ class CompletedStrokesPainter extends CustomPainter {
         continue;
       }
       final Stroke stroke = strokes[i];
-      if (playing && controller.isPlayingStroke(stroke)) {
+      if ((playing && controller.isPlayingStroke(stroke)) ||
+          controller.isStrokeHidden(stroke)) {
         continue;
       }
       _paintStroke(
@@ -97,6 +185,7 @@ class CompletedStrokesPainter extends CustomPainter {
         origin: stroke.points.first,
         isDot: stroke.isDot,
         brightness: brightness,
+        outline: stroke.outline,
       );
     }
   }
@@ -150,7 +239,9 @@ class NotationPlaybackPainter extends CustomPainter {
     final List<Stroke> strokes = playback.strokes;
     for (int i = 0; i < strokes.length; i++) {
       final Stroke stroke = strokes[i];
-      if (!playback.owns(stroke) || skip.contains(stroke)) {
+      if (!playback.owns(stroke) ||
+          skip.contains(stroke) ||
+          controller.isStrokeHidden(stroke)) {
         continue;
       }
       // Document coordinates do not scale with the surface. The reveal can
@@ -169,6 +260,7 @@ class NotationPlaybackPainter extends CustomPainter {
             origin: stroke.points.first,
             isDot: stroke.isDot,
             brightness: brightness,
+            outline: stroke.outline,
           );
         case TraceRevealState.partial:
           final Path? path = stroke.isDot
@@ -260,6 +352,21 @@ class ActiveStrokePainter extends CustomPainter {
 
   @override
   void paint(Canvas canvas, Size size) {
+    final StickyPlacementGesture? placement = controller.activePlacement;
+    if (placement != null) {
+      // The note as it would land, a little see-through until it does.
+      canvas.saveLayer(
+        placement.preview('preview').bounds.inflate(16),
+        Paint()..color = const Color(0xD9000000),
+      );
+      paintStickyNote(
+        canvas,
+        placement.preview('preview'),
+        config: controller.stickyConfig,
+      );
+      canvas.restore();
+      return;
+    }
     final Stroke? shape = controller.activeShape?.preview;
     if (shape != null) {
       _paintStroke(
@@ -276,6 +383,30 @@ class ActiveStrokePainter extends CustomPainter {
     if (stroke == null) {
       return;
     }
+    final StickyNoteElement? sticky = controller.activeStrokeSticky;
+    if (sticky != null) {
+      // Into the note's own coordinates, clipped to its paper, and resolved
+      // for its light paper, exactly as the finished stroke will be.
+      final Size local = sticky.localSize;
+      canvas
+        ..save()
+        ..translate(sticky.center.x, sticky.center.y)
+        ..rotate(sticky.rotation)
+        ..scale(sticky.scale)
+        ..translate(-local.width / 2, -local.height / 2)
+        ..clipRRect(stickyPaperRect(sticky, controller.stickyConfig));
+      _paintStroke(
+        canvas,
+        style: stroke.style,
+        path: stroke.path,
+        origin: stroke.origin,
+        isDot: stroke.isDot,
+        brightness: Brightness.light,
+        outline: stroke.outline,
+      );
+      canvas.restore();
+      return;
+    }
     _paintStroke(
       canvas,
       style: stroke.style,
@@ -283,6 +414,7 @@ class ActiveStrokePainter extends CustomPainter {
       origin: stroke.origin,
       isDot: stroke.isDot,
       brightness: brightness,
+      outline: stroke.outline,
     );
   }
 
@@ -323,7 +455,14 @@ class SelectionPainter extends CustomPainter {
       if (gesture != null) {
         canvas.transform(_matrix(gesture.transform));
       }
+      // Selected sticky notes under the selected ink, as on the page.
+      for (final StickyNoteElement note in selection.stickies) {
+        paintStickyNote(canvas, note, config: controller.stickyConfig);
+      }
       for (final Stroke stroke in selection.strokes) {
+        if (controller.isStrokeHidden(stroke)) {
+          continue;
+        }
         _paintStroke(
           canvas,
           style: stroke.style,
@@ -331,6 +470,7 @@ class SelectionPainter extends CustomPainter {
           origin: stroke.points.first,
           isDot: stroke.isDot,
           brightness: brightness,
+          outline: stroke.outline,
         );
       }
       canvas.restore();

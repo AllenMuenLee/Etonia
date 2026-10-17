@@ -2,6 +2,7 @@ import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:greatnote/app/theme/app_icons.dart';
 import 'package:greatnote/app/greatnote_app.dart';
 import 'package:greatnote/app/theme/app_tokens.dart';
 import 'package:greatnote/features/editor/editor_screen.dart';
@@ -88,12 +89,25 @@ bool _hasFocus(WidgetTester tester, Finder finder) {
   return found;
 }
 
+/// [finder], among the folders and notes in the main area.
+Finder _items(Finder finder) => find.descendant(
+  of: find.byKey(const ValueKey<String>('library-items')),
+  matching: finder,
+);
+
+/// [finder], in the folder sidebar.
+Finder _sidebar(Finder finder) => find.descendant(
+  of: find.byKey(const ValueKey<String>('library-sidebar')),
+  matching: finder,
+);
+
+/// Opens [title]'s menu in the main area and picks [action].
 Future<void> _menuAction(
   WidgetTester tester,
   String title,
   String action,
 ) async {
-  await tester.tap(find.byTooltip('More actions for $title'));
+  await tester.tap(_items(find.byTooltip('More actions for $title')));
   await tester.pumpAndSettle();
   await tester.tap(find.text(action).last);
   await tester.pumpAndSettle();
@@ -115,6 +129,57 @@ Future<void> _drawLine(WidgetTester tester, Offset from, Offset to) async {
 }
 
 void main() {
+  testWidgets('notes open side by side in tabs', (WidgetTester tester) async {
+    final InMemoryNoteRepository repository = _repository();
+    final NoteEntry alpha = await repository.createNote(title: 'Alpha');
+    final NoteEntry beta = await repository.createNote(title: 'Beta');
+    await _pumpLibrary(tester, repository);
+    final Finder editors = find.byType(EditorScreen, skipOffstage: false);
+
+    await tester.tap(find.text('Alpha'));
+    await tester.pumpAndSettle();
+    expect(find.byKey(ValueKey<String>('note-tab-${alpha.id}')), findsOne);
+
+    // Back in the library, Alpha stays open; Beta opens beside it.
+    await tester.tap(find.byTooltip('Open another note'));
+    await tester.pumpAndSettle();
+    expect(editors, findsOneWidget);
+    expect(find.byType(EditorScreen), findsNothing);
+    await tester.tap(find.text('Beta'));
+    await tester.pumpAndSettle();
+    expect(editors, findsNWidgets(2));
+    expect(find.byType(EditorScreen), findsOneWidget);
+    expect(find.byKey(ValueKey<String>('note-tab-${alpha.id}')), findsOne);
+    expect(find.byKey(ValueKey<String>('note-tab-${beta.id}')), findsOne);
+    expect(
+      tester.widget<EditorScreen>(find.byType(EditorScreen)).noteId,
+      beta.id,
+    );
+
+    // Another tab shows its note, and keeps the other's editor.
+    await tester.tap(find.text('Alpha'));
+    await tester.pumpAndSettle();
+    expect(
+      tester.widget<EditorScreen>(find.byType(EditorScreen)).noteId,
+      alpha.id,
+    );
+    expect(editors, findsNWidgets(2));
+
+    await tester.tap(find.byTooltip('Close Alpha'));
+    await tester.pumpAndSettle();
+    expect(editors, findsOneWidget);
+    expect(
+      tester.widget<EditorScreen>(find.byType(EditorScreen)).noteId,
+      beta.id,
+    );
+
+    // Closing the last tab returns to the library.
+    await tester.tap(find.byTooltip('Close Beta'));
+    await tester.pumpAndSettle();
+    expect(editors, findsNothing);
+    expect(find.text('Alpha'), findsOneWidget);
+  });
+
   testWidgets('folders come first, then notes, in the chosen order', (
     WidgetTester tester,
   ) async {
@@ -161,7 +226,7 @@ void main() {
     await tester.tap(find.byTooltip('Show as list'));
     await tester.pumpAndSettle();
     expect(find.byType(GridView), findsNothing);
-    expect(find.byType(ListView), findsOneWidget);
+    expect(_items(find.byType(ListView)), findsOneWidget);
     expect(find.byTooltip('Show as grid'), findsOneWidget);
   });
 
@@ -174,6 +239,12 @@ void main() {
 
     await tester.tap(find.byTooltip('New note'));
     await tester.pumpAndSettle();
+    await tester.tap(find.text('Blank note'));
+    await tester.pumpAndSettle();
+    // The template comes first; its defaults make a fit-to-screen page.
+    expect(find.text('Page size'), findsOneWidget);
+    await tester.tap(find.text('Create'));
+    await tester.pumpAndSettle();
     expect(find.byType(EditorScreen), findsOneWidget);
     expect(find.byTooltip('Back to library'), findsOneWidget);
 
@@ -183,7 +254,11 @@ void main() {
       origin + const Offset(100, 100),
       origin + const Offset(300, 120),
     );
-    await tester.tap(find.byTooltip('Add page'));
+    await tester.tap(find.byTooltip('Add'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Add new page'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Add blank page'));
     await tester.pumpAndSettle();
     await tester.tap(find.byTooltip('Back to library'));
     await tester.pumpAndSettle();
@@ -195,6 +270,65 @@ void main() {
     final NoteContent content = await repository.loadNote(entry.id);
     expect(content.pages.first.strokes, hasLength(1));
     expect(find.text('Untitled note'), findsOneWidget);
+  });
+
+  testWidgets('a new note is made from the template chosen for it', (
+    WidgetTester tester,
+  ) async {
+    final InMemoryNoteRepository repository = _repository();
+    await _pumpLibrary(tester, repository);
+
+    await tester.tap(find.byTooltip('New note'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Blank note'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const ValueKey<String>('template-paper-grid')));
+    await tester.tap(
+      find.byKey(const ValueKey<String>('template-size-a4Portrait')),
+    );
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Create'));
+    await tester.pumpAndSettle();
+
+    expect(find.byType(EditorScreen), findsOneWidget);
+    expect(tester.getSize(find.byType(InkCanvas)), const Size(794, 1123));
+    final NoteEntry entry = (await repository.list(null)).notes.single;
+    final PageSetup setup = (await repository.loadNote(
+      entry.id,
+    )).pages.single.setup;
+    expect(setup.size, PageSize.a4Portrait);
+    expect(setup.background, PageBackground.grid);
+
+    // The next note offers the same template first.
+    await tester.tap(find.byTooltip('Back to library'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byTooltip('New note'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Blank note'));
+    await tester.pumpAndSettle();
+    expect(
+      tester.getSemantics(
+        find.byKey(const ValueKey<String>('template-size-a4Portrait')),
+      ),
+      isSemantics(isSelected: true),
+    );
+  });
+
+  testWidgets('cancelling the template makes no note', (
+    WidgetTester tester,
+  ) async {
+    final InMemoryNoteRepository repository = _repository();
+    await _pumpLibrary(tester, repository);
+
+    await tester.tap(find.byTooltip('New note'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Blank note'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Cancel'));
+    await tester.pumpAndSettle();
+
+    expect(find.byType(EditorScreen), findsNothing);
+    expect((await repository.list(null)).notes, isEmpty);
   });
 
   testWidgets('reopening a note restores its pages, setups, and ink', (
@@ -343,7 +477,7 @@ void main() {
 
     await _menuAction(tester, 'Draft', 'Rename');
     await tester.enterText(find.byType(TextField).last, 'Essay');
-    await tester.tap(find.widgetWithText(TextButton, 'Rename'));
+    await tester.tap(find.widgetWithText(FilledButton, 'Rename'));
     await tester.pumpAndSettle();
     expect(find.text('Essay'), findsOneWidget);
 
@@ -358,7 +492,108 @@ void main() {
     expect((await repository.list(null)).notes.single.title, 'Final essay');
   });
 
-  testWidgets('moves, duplicates, and deletes from the menu and long press', (
+  testWidgets('New note offers a blank note and both PDF imports', (
+    WidgetTester tester,
+  ) async {
+    await _pumpLibrary(tester, _repository());
+    expect(find.byTooltip('Import PDF'), findsNothing);
+
+    await tester.tap(find.byTooltip('New note'));
+    await tester.pumpAndSettle();
+    expect(find.text('Blank note'), findsOneWidget);
+    expect(find.text('Import PDF'), findsOneWidget);
+    expect(find.text('Import from Goodnotes'), findsOneWidget);
+  });
+
+  group('dragging', () {
+    /// Holds [from] until it lifts, then drags it onto [to] and lets go.
+    Future<void> dragOnto(WidgetTester tester, Finder from, Finder to) async {
+      final TestGesture drag = await tester.startGesture(
+        tester.getCenter(from),
+      );
+      await tester.pump(kLongPressTimeout + const Duration(milliseconds: 50));
+      await drag.moveTo(tester.getCenter(to));
+      await tester.pump();
+      await drag.up();
+      await tester.pumpAndSettle();
+    }
+
+    testWidgets('a held note dropped on a folder moves into it', (
+      WidgetTester tester,
+    ) async {
+      final InMemoryNoteRepository repository = _repository();
+      final Folder archive = await repository.createFolder('Archive');
+      await repository.createNote(title: 'Old');
+      await _pumpLibrary(tester, repository);
+
+      await dragOnto(
+        tester,
+        _items(find.text('Old')),
+        _items(find.text('Archive')),
+      );
+
+      expect(_items(find.text('Old')), findsNothing);
+      expect((await repository.list(archive.id)).notes.single.title, 'Old');
+      expect(find.text('Moved "Old" to Archive'), findsOneWidget);
+    });
+
+    testWidgets('a held folder dropped on another folder nests in it', (
+      WidgetTester tester,
+    ) async {
+      final InMemoryNoteRepository repository = _repository();
+      final Folder school = await repository.createFolder('School');
+      await repository.createFolder('Math');
+      await _pumpLibrary(tester, repository);
+
+      await dragOnto(
+        tester,
+        _items(find.text('Math')),
+        _items(find.text('School')),
+      );
+
+      expect((await repository.list(school.id)).folders.single.name, 'Math');
+    });
+
+    testWidgets('dropped on the sidebar Library, it moves to the top', (
+      WidgetTester tester,
+    ) async {
+      final InMemoryNoteRepository repository = _repository();
+      final Folder archive = await repository.createFolder('Archive');
+      await repository.createNote(title: 'Old', folderId: archive.id);
+      await _pumpLibrary(tester, repository);
+      await tester.tap(_items(find.text('Archive')));
+      await tester.pumpAndSettle();
+
+      await dragOnto(
+        tester,
+        _items(find.text('Old')),
+        find.byKey(const ValueKey<String>('sidebar-library')),
+      );
+
+      expect((await repository.list(null)).notes.single.title, 'Old');
+      expect((await repository.list(archive.id)).notes, isEmpty);
+    });
+
+    testWidgets('a quick tap still opens, and a short drag moves nothing', (
+      WidgetTester tester,
+    ) async {
+      final InMemoryNoteRepository repository = _repository();
+      final Folder archive = await repository.createFolder('Archive');
+      await repository.createNote(title: 'Old');
+      await _pumpLibrary(tester, repository);
+
+      final TestGesture drag = await tester.startGesture(
+        tester.getCenter(_items(find.text('Old'))),
+      );
+      await drag.moveTo(tester.getCenter(_items(find.text('Archive'))));
+      await drag.up();
+      await tester.pumpAndSettle();
+
+      expect((await repository.list(archive.id)).notes, isEmpty);
+    });
+  });
+
+  testWidgets('moves, duplicates, and deletes from the menu', (
     WidgetTester tester,
   ) async {
     final InMemoryNoteRepository repository = _repository();
@@ -369,32 +604,143 @@ void main() {
     await _menuAction(tester, 'Old', 'Duplicate');
     expect(find.text('Old copy'), findsOneWidget);
 
-    // A long press opens the same menu.
-    await tester.longPress(find.text('Old copy'));
-    await tester.pumpAndSettle();
-    await tester.tap(find.text('Move to…'));
-    await tester.pumpAndSettle();
+    await _menuAction(tester, 'Old copy', 'Move to…');
     await tester.tap(find.text('Archive').last);
     await tester.pumpAndSettle();
     expect(find.text('Old copy'), findsNothing);
     expect(find.textContaining('1 item'), findsOneWidget);
 
+    // A note goes to Recently Deleted at once, and Undo brings it back.
     await _menuAction(tester, 'Old', 'Delete');
-    expect(find.text('Delete note?'), findsOneWidget);
-    await tester.tap(find.text('Cancel'));
+    expect(find.text('Moved "Old" to Recently Deleted'), findsOneWidget);
+    expect(_items(find.text('Old')), findsNothing);
+    await tester.tap(find.text('Undo'));
     await tester.pumpAndSettle();
-    expect(find.text('Old'), findsOneWidget);
+    expect(_items(find.text('Old')), findsOneWidget);
+    expect(await repository.trash(), isEmpty);
 
+    // A folder is asked about first: it is not kept, its notes are.
     await _menuAction(tester, 'Archive', 'Delete');
     expect(
-      find.textContaining('the 1 note inside it will be deleted'),
+      find.textContaining('the 1 note inside it will move to Recently Deleted'),
       findsOneWidget,
     );
-    await tester.tap(find.widgetWithText(TextButton, 'Delete'));
+    await tester.tap(find.widgetWithText(FilledButton, 'Delete'));
     await tester.pumpAndSettle();
     expect(find.text('Archive'), findsNothing);
     expect(await repository.allFolders(), isEmpty);
     expect((await repository.search('copy')).notes, isEmpty);
+    expect((await repository.trash()).single.title, 'Old copy');
+  });
+
+  testWidgets('Recently Deleted restores notes and deletes them for good', (
+    WidgetTester tester,
+  ) async {
+    final InMemoryNoteRepository repository = _repository();
+    final NoteEntry kept = await repository.createNote(title: 'Kept');
+    final NoteEntry gone = await repository.createNote(title: 'Gone');
+    await repository.deleteNote(kept.id);
+    await repository.deleteNote(gone.id);
+    await _pumpLibrary(tester, repository);
+    expect(find.text('Nothing here yet'), findsOneWidget);
+
+    await tester.tap(_sidebar(find.text('Recently Deleted')));
+    await tester.pumpAndSettle();
+    expect(find.byTooltip('New note'), findsNothing);
+    expect(find.textContaining('days left'), findsNWidgets(2));
+
+    // A tap offers what can be done with a deleted note; it does not open.
+    await tester.tap(_items(find.text('Kept')));
+    await tester.pumpAndSettle();
+    expect(find.byType(EditorScreen), findsNothing);
+    await tester.tap(find.text('Restore'));
+    await tester.pumpAndSettle();
+    expect(_items(find.text('Kept')), findsNothing);
+    expect((await repository.list(null)).notes.single.title, 'Kept');
+
+    await tester.tap(find.text('Empty'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.widgetWithText(FilledButton, 'Delete'));
+    await tester.pumpAndSettle();
+    expect(await repository.trash(), isEmpty);
+    expect(find.text('No recently deleted notes'), findsOneWidget);
+
+    await tester.tap(find.byTooltip('Back to library'));
+    await tester.pumpAndSettle();
+    expect(_items(find.text('Kept')), findsOneWidget);
+  });
+
+  testWidgets('selects several items to move or delete them together', (
+    WidgetTester tester,
+  ) async {
+    final InMemoryNoteRepository repository = _repository();
+    final Folder archive = await repository.createFolder('Archive');
+    await repository.createNote(title: 'First');
+    await repository.createNote(title: 'Second');
+    await repository.createNote(title: 'Third');
+    await _pumpLibrary(tester, repository);
+
+    await tester.tap(find.byTooltip('Select'));
+    await tester.pumpAndSettle();
+    expect(find.text('Select items'), findsOneWidget);
+    expect(find.byTooltip('New note'), findsNothing);
+    expect(find.byTooltip('More actions for First'), findsNothing);
+
+    // A tap now selects instead of opening.
+    await tester.tap(_items(find.text('First')));
+    await tester.tap(_items(find.text('Second')));
+    await tester.pumpAndSettle();
+    expect(find.byType(EditorScreen), findsNothing);
+    expect(find.text('2 selected'), findsOneWidget);
+
+    await tester.tap(find.byTooltip('Move selected'));
+    await tester.pumpAndSettle();
+    expect(find.text('Move 2 notes to'), findsOneWidget);
+    await tester.tap(find.text('Archive').last);
+    await tester.pumpAndSettle();
+    expect(find.text('Moved 2 notes to Archive'), findsOneWidget);
+    expect(find.byTooltip('Select'), findsOneWidget);
+    expect((await repository.list(archive.id)).notes, hasLength(2));
+
+    await tester.tap(find.byTooltip('Select'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byTooltip('Select all'));
+    await tester.pumpAndSettle();
+    expect(find.text('2 selected'), findsOneWidget);
+    await tester.tap(find.byTooltip('Delete selected'));
+    await tester.pumpAndSettle();
+    expect(find.text('Delete 1 note and 1 folder?'), findsOneWidget);
+    await tester.tap(find.widgetWithText(FilledButton, 'Delete'));
+    await tester.pumpAndSettle();
+    expect(await repository.allFolders(), isEmpty);
+    // The notes moved into Archive went with it.
+    expect((await repository.search('i')).notes, isEmpty);
+    expect(find.text('Nothing here yet'), findsOneWidget);
+  });
+
+  testWidgets('back and Done leave selection without acting', (
+    WidgetTester tester,
+  ) async {
+    final InMemoryNoteRepository repository = _repository();
+    await repository.createNote(title: 'Kept');
+    await _pumpLibrary(tester, repository);
+
+    await tester.tap(find.byTooltip('Select'));
+    await tester.pumpAndSettle();
+    await tester.tap(_items(find.text('Kept')));
+    await tester.pumpAndSettle();
+    await tester.binding.handlePopRoute();
+    await tester.pumpAndSettle();
+    expect(find.byTooltip('Select'), findsOneWidget);
+    expect(find.byTooltip('New note'), findsOneWidget);
+
+    await tester.tap(find.byTooltip('Select'));
+    await tester.pumpAndSettle();
+    expect(find.text('Select items'), findsOneWidget);
+    await tester.tap(find.byTooltip('Done selecting'));
+    await tester.pumpAndSettle();
+    expect(find.byTooltip('Select'), findsOneWidget);
+    expect((await repository.list(null)).notes, hasLength(1));
   });
 
   testWidgets('folders open, and breadcrumbs lead back up', (
@@ -405,31 +751,136 @@ void main() {
     await repository.createFolder('Lab', parentId: outer.id);
     await _pumpLibrary(tester, repository);
 
-    await tester.tap(find.text('Physics'));
+    await tester.tap(_items(find.text('Physics')));
     await tester.pumpAndSettle();
-    await tester.tap(find.text('Lab'));
+    await tester.tap(_items(find.text('Lab')));
     await tester.pumpAndSettle();
     expect(find.text('Nothing here yet'), findsOneWidget);
     expect(find.widgetWithText(TextButton, 'Physics'), findsOneWidget);
 
     await tester.tap(find.widgetWithText(TextButton, 'Physics'));
     await tester.pumpAndSettle();
-    expect(find.text('Lab'), findsOneWidget);
+    expect(_items(find.text('Lab')), findsOneWidget);
     await tester.tap(find.byTooltip('Up one folder'));
     await tester.pumpAndSettle();
-    expect(find.text('Physics'), findsOneWidget);
+    expect(_items(find.text('Physics')), findsOneWidget);
     expect(find.byTooltip('Up one folder'), findsNothing);
   });
 
-  testWidgets('new folder asks for a name', (WidgetTester tester) async {
+  testWidgets('new folder asks for a name and a color', (
+    WidgetTester tester,
+  ) async {
     final InMemoryNoteRepository repository = _repository();
     await _pumpLibrary(tester, repository);
     await tester.tap(find.byTooltip('New folder'));
     await tester.pumpAndSettle();
     await tester.enterText(find.byType(TextField).last, 'Ideas');
+    await tester.tap(find.byKey(const ValueKey<String>('folder-color-green')));
+    await tester.pumpAndSettle();
     await tester.tap(find.text('Create'));
     await tester.pumpAndSettle();
-    expect(find.text('Ideas'), findsOneWidget);
+    expect(_items(find.text('Ideas')), findsOneWidget);
+    expect(_sidebar(find.text('Ideas')), findsOneWidget);
+    expect((await repository.allFolders()).single.color, FolderColor.green);
+  });
+
+  testWidgets('the sidebar shows the folder tree and opens folders', (
+    WidgetTester tester,
+  ) async {
+    final InMemoryNoteRepository repository = _repository();
+    final Folder physics = await repository.createFolder(
+      'Physics',
+      color: FolderColor.purple,
+    );
+    final Folder lab = await repository.createFolder(
+      'Lab',
+      parentId: physics.id,
+    );
+    await repository.createNote(title: 'Optics', folderId: lab.id);
+    await _pumpLibrary(tester, repository);
+
+    // Folded: only the top level.
+    expect(_sidebar(find.text('Physics')), findsOneWidget);
+    expect(_sidebar(find.text('Lab')), findsNothing);
+    final Icon icon = tester.widget<Icon>(
+      _sidebar(find.byIcon(AppIcons.folder)).first,
+    );
+    expect(icon.color, Color(FolderColor.purple.light!));
+
+    await tester.tap(find.byTooltip('Expand Physics'));
+    await tester.pumpAndSettle();
+    expect(_sidebar(find.text('Lab')), findsOneWidget);
+
+    // Opening a folder from the sidebar shows what is in it.
+    await tester.tap(_sidebar(find.text('Lab')));
+    await tester.pumpAndSettle();
+    expect(_items(find.text('Optics')), findsOneWidget);
+    expect(find.widgetWithText(TextButton, 'Physics'), findsOneWidget);
+
+    await tester.tap(find.byTooltip('Collapse Physics'));
+    await tester.pumpAndSettle();
+    expect(_sidebar(find.text('Lab')), findsNothing);
+
+    await tester.tap(_sidebar(find.text('Library')));
+    await tester.pumpAndSettle();
+    expect(_items(find.text('Physics')), findsOneWidget);
+  });
+
+  testWidgets('subfolders are made in the open folder', (
+    WidgetTester tester,
+  ) async {
+    final InMemoryNoteRepository repository = _repository();
+    final Folder physics = await repository.createFolder('Physics');
+    await repository.createFolder('Lab', parentId: physics.id);
+    await _pumpLibrary(tester, repository);
+
+    // Folders no longer offer a New subfolder action of their own.
+    await tester.tap(find.byTooltip('More actions for Physics').first);
+    await tester.pumpAndSettle();
+    expect(find.text('New subfolder'), findsNothing);
+    await tester.tapAt(Offset.zero);
+    await tester.pumpAndSettle();
+
+    await tester.tap(_items(find.text('Physics')));
+    await tester.pumpAndSettle();
+    await tester.tap(_sidebar(find.byTooltip('New folder')));
+    await tester.pumpAndSettle();
+    await tester.enterText(find.byType(TextField).last, 'Theory');
+    await tester.pump();
+    await tester.tap(find.text('Create'));
+    await tester.pumpAndSettle();
+    expect(
+      (await repository.list(physics.id)).folders.map((Folder f) => f.name),
+      containsAll(<String>['Lab', 'Theory']),
+    );
+  });
+
+  testWidgets('a folder can be recolored', (WidgetTester tester) async {
+    final InMemoryNoteRepository repository = _repository();
+    await repository.createFolder('Physics');
+    await _pumpLibrary(tester, repository);
+
+    await _menuAction(tester, 'Physics', 'Color…');
+    await tester.tap(find.byKey(const ValueKey<String>('folder-color-red')));
+    await tester.pumpAndSettle();
+    expect((await repository.allFolders()).single.color, FolderColor.red);
+  });
+
+  testWidgets('on compact widths the folders are a drawer', (
+    WidgetTester tester,
+  ) async {
+    final InMemoryNoteRepository repository = _repository();
+    await repository.createFolder('Physics');
+    await _pumpLibrary(tester, repository, viewport: TestViewport.compact);
+    expect(find.byKey(const ValueKey<String>('library-sidebar')), findsNothing);
+
+    await tester.tap(find.byTooltip('Folders'));
+    await tester.pumpAndSettle();
+    await tester.tap(_sidebar(find.text('Physics')));
+    await tester.pumpAndSettle();
+    // The drawer closes on the folder it opened.
+    expect(find.byType(Drawer), findsNothing);
+    expect(find.text('Nothing here yet'), findsOneWidget);
   });
 
   testWidgets('search finds notes in any folder, or says nothing matched', (
@@ -465,14 +916,17 @@ void main() {
       for (final String tooltip in <String>[
         'Sort',
         'Show as list',
+        'Select',
         'New folder',
         'New note',
         'More actions for Note one',
         'More actions for Folder one',
       ]) {
-        final Size size = tester.getSize(find.byTooltip(tooltip));
-        expect(size.width, greaterThanOrEqualTo(AppSizes.minTouchTarget));
-        expect(size.height, greaterThanOrEqualTo(AppSizes.minTouchTarget));
+        for (final Element control in find.byTooltip(tooltip).evaluate()) {
+          final Size size = control.size!;
+          expect(size.width, greaterThanOrEqualTo(AppSizes.minTouchTarget));
+          expect(size.height, greaterThanOrEqualTo(AppSizes.minTouchTarget));
+        }
       }
       expect(
         find.bySemanticsLabel(RegExp(r'^Note, Note one, modified Today')),
@@ -495,11 +949,20 @@ void main() {
     await _pumpLibrary(tester, repository);
     for (final Finder target in <Finder>[
       find.byType(TextField),
+      find.byTooltip('Google Drive'),
       find.byTooltip('Sort'),
       find.byTooltip('Show as list'),
-      find.byTooltip('Import PDF'),
-      find.byTooltip('New folder'),
-      find.byType(InkWell).first,
+      find.byTooltip('Select'),
+      _sidebar(find.byTooltip('New folder')),
+      find.descendant(
+        of: find.byKey(const ValueKey<String>('sidebar-library')),
+        matching: find.byType(InkWell),
+      ),
+      find.descendant(
+        of: find.byKey(const ValueKey<String>('sidebar-trash')),
+        matching: find.byType(InkWell),
+      ),
+      _items(find.byType(InkWell)).first,
       find.byTooltip('More actions for Only'),
       find.byTooltip('New note'),
     ]) {

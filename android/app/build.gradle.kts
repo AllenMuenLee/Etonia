@@ -43,3 +43,9 @@ kotlin {
 flutter {
     source = "../.."
 }
+
+dependencies {
+    // On-device text recognition for handwriting written in AI mode. The
+    // Latin model is bundled, so nothing is downloaded at run time.
+    implementation("com.google.mlkit:text-recognition:16.0.1")
+}

@@ -48,9 +48,14 @@ class RawInkSample {
     required this.position,
     required this.timestamp,
     this.deviceKind = InkDeviceKind.stylus,
+    this.pressure,
   });
 
   final InkVector position;
+
+  /// How hard the pen pressed, from 0 to 1, or null when the device does
+  /// not report pressure (a finger, a mouse, or a stylus without it).
+  final double? pressure;
 
   /// Monotonic time of the sample, as reported by the platform.
   final Duration timestamp;

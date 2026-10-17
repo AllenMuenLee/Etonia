@@ -1,0 +1,678 @@
+import 'package:flutter/material.dart';
+
+import '../../../app/theme/app_icons.dart';
+import '../../../app/theme/app_tokens.dart';
+import '../../../shared/widgets/app_controls.dart';
+import '../../editor/document_io/document_importer.dart';
+import '../library_screen.dart' show formatModified;
+import 'cloud_sync_state.dart';
+import 'goodnotes_drive_replicator.dart';
+import 'google_drive_backup_service.dart';
+import 'google_drive_client.dart';
+
+/// Shows the Google Drive sheet: the connection, backup and restore, and
+/// importing the Goodnotes folder. [onOpenFolder] shows a library folder,
+/// as the one a Goodnotes folder was replicated into.
+Future<void> showGoogleDriveSheet(
+  BuildContext context, {
+  required GoogleDriveClient client,
+  required GoogleDriveBackupService backup,
+  required GoodnotesDriveReplicator replicator,
+  ValueChanged<String>? onOpenFolder,
+  DateTime Function() clock = DateTime.now,
+}) {
+  return showModalBottomSheet<void>(
+    context: context,
+    showDragHandle: true,
+    isScrollControlled: true,
+    builder: (BuildContext context) => GoogleDriveSheet(
+      client: client,
+      backup: backup,
+      replicator: replicator,
+      onOpenFolder: onOpenFolder,
+      clock: clock,
+    ),
+  );
+}
+
+enum _Task { connect, backUp, restore, replicate }
+
+class GoogleDriveSheet extends StatefulWidget {
+  const GoogleDriveSheet({
+    super.key,
+    required this.client,
+    required this.backup,
+    required this.replicator,
+    this.onOpenFolder,
+    this.clock = DateTime.now,
+  });
+
+  final GoogleDriveClient client;
+  final GoogleDriveBackupService backup;
+  final GoodnotesDriveReplicator replicator;
+  final ValueChanged<String>? onOpenFolder;
+  final DateTime Function() clock;
+
+  @override
+  State<GoogleDriveSheet> createState() => _GoogleDriveSheetState();
+}
+
+class _GoogleDriveSheetState extends State<GoogleDriveSheet> {
+  GoogleDriveAccount? _account;
+  DateTime? _lastBackup;
+  _Task? _task;
+  CloudProgress? _progress;
+  ImportCancellationToken? _cancellation;
+
+  /// The outcome of the last action, and whether it was a failure.
+  String? _message;
+  bool _messageIsError = false;
+  List<ReplicationIssue> _issues = const <ReplicationIssue>[];
+  String? _replicatedFolderId;
+
+  bool get _busy => _task != null;
+
+  @override
+  void initState() {
+    super.initState();
+    _account = widget.client.currentAccount;
+    if (_account == null) _restoreSession();
+    widget.backup.lastBackupAt().then((DateTime? time) {
+      if (mounted) setState(() => _lastBackup = time);
+    });
+  }
+
+  @override
+  void dispose() {
+    // A closed sheet stops what it started; a note being imported is
+    // rolled back.
+    _cancellation?.cancel();
+    super.dispose();
+  }
+
+  Future<void> _restoreSession() async {
+    final GoogleDriveAccount? account = await widget.client.restoreSession();
+    if (mounted && account != null && _account == null) {
+      setState(() => _account = account);
+    }
+  }
+
+  void _show(String message, {bool error = false}) {
+    setState(() {
+      _message = message;
+      _messageIsError = error;
+    });
+  }
+
+  /// Runs [work] as [task], with progress and a way to cancel it, and
+  /// shows what went wrong if it fails.
+  Future<void> _run(
+    _Task task,
+    Future<void> Function(
+      ImportCancellationToken cancellation,
+      ValueChanged<CloudProgress> onProgress,
+    )
+    work,
+  ) async {
+    final ImportCancellationToken cancellation = ImportCancellationToken();
+    setState(() {
+      _task = task;
+      _progress = null;
+      _message = null;
+      _issues = const <ReplicationIssue>[];
+      _replicatedFolderId = null;
+      _cancellation = cancellation;
+    });
+    try {
+      await work(cancellation, (CloudProgress progress) {
+        if (mounted) setState(() => _progress = progress);
+      });
+    } on Object catch (error) {
+      if (!mounted) return;
+      if (error is GoogleDriveException &&
+          error.kind == GoogleDriveErrorKind.unauthorized) {
+        _account = widget.client.currentAccount;
+      }
+      _show(_describe(error), error: error is! CloudCancelledException);
+    } finally {
+      if (mounted) {
+        setState(() {
+          _task = null;
+          _progress = null;
+          _cancellation = null;
+        });
+      }
+    }
+  }
+
+  static String _describe(Object error) {
+    return switch (error) {
+      CloudCancelledException() => 'Cancelled',
+      GoogleDriveException(:final String message) => message,
+      GoogleDriveBackupException(:final String message) => message,
+      GoodnotesFolderNotFoundException() => noGoodnotesFolderMessage,
+      _ => 'Something went wrong. Try again.',
+    };
+  }
+
+  Future<void> _connect() async {
+    await _run(_Task.connect, (_, _) async {
+      final GoogleDriveAccount? account = await widget.client.signIn();
+      if (!mounted) return;
+      if (account == null) {
+        _show('Sign-in was cancelled');
+        return;
+      }
+      setState(() => _account = account);
+    });
+  }
+
+  Future<void> _disconnect() async {
+    await widget.client.signOut();
+    if (!mounted) return;
+    setState(() {
+      _account = null;
+      _message = null;
+      _issues = const <ReplicationIssue>[];
+      _replicatedFolderId = null;
+    });
+  }
+
+  Future<void> _backUp() async {
+    await _run(_Task.backUp, (
+      ImportCancellationToken cancellation,
+      ValueChanged<CloudProgress> onProgress,
+    ) async {
+      final BackupSummary summary = await widget.backup.backUp(
+        onProgress: onProgress,
+        cancellation: cancellation,
+      );
+      if (!mounted) return;
+      setState(() => _lastBackup = summary.exportedAt);
+      _show(
+        'Backed up ${_count(summary.noteCount, 'note')} and '
+        '${_count(summary.folderCount, 'folder')}. '
+        '${summary.uploadedFiles} uploaded, '
+        '${summary.unchangedFiles} already up to date.',
+      );
+    });
+  }
+
+  Future<void> _restore() async {
+    final RestoreMode? mode = await showDialog<RestoreMode>(
+      context: context,
+      builder: (BuildContext context) => AlertDialog(
+        title: const Text('Restore from Google Drive?'),
+        content: const Text(
+          'Add the backup to this library, keeping what is here, or replace '
+          'the library with it. Replaced notes go to Recently Deleted.',
+        ),
+        actions: <Widget>[
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(),
+            child: const Text('Cancel'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(RestoreMode.replace),
+            child: const Text('Replace library'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.of(context).pop(RestoreMode.merge),
+            child: const Text('Add to library'),
+          ),
+        ],
+      ),
+    );
+    if (mode == null || !mounted) return;
+    await _run(_Task.restore, (
+      ImportCancellationToken cancellation,
+      ValueChanged<CloudProgress> onProgress,
+    ) async {
+      final RestoreSummary summary = await widget.backup.restore(
+        mode: mode,
+        onProgress: onProgress,
+        cancellation: cancellation,
+      );
+      if (!mounted) return;
+      _show(
+        <String>[
+          'Restored ${_count(summary.notesRestored, 'note')} from the backup '
+              'of ${formatModified(summary.exportedAt, widget.clock())}.',
+          if (summary.notesSkipped > 0)
+            'Skipped ${_count(summary.notesSkipped, 'note')} already here.',
+        ].join(' '),
+      );
+    });
+  }
+
+  Future<void> _importGoodnotes() async {
+    await _run(_Task.replicate, (
+      ImportCancellationToken cancellation,
+      ValueChanged<CloudProgress> onProgress,
+    ) async {
+      onProgress(
+        const CloudProgress(
+          phase: 'Looking for your Goodnotes folder',
+          completedItems: 0,
+          totalItems: 0,
+        ),
+      );
+      final List<GoodnotesDriveRoot> roots = await widget.replicator
+          .findRoots();
+      if (!mounted || cancellation.isCancelled) return;
+      final GoodnotesDriveRoot? root = roots.length == 1
+          ? roots.single
+          : await _pickRoot(roots);
+      if (root == null || !mounted) return;
+      final ReplicationSummary summary = await widget.replicator.replicate(
+        root.folder,
+        onProgress: onProgress,
+        cancellation: cancellation,
+      );
+      if (!mounted) return;
+      final int notImported = summary.skipped.length + summary.failed.length;
+      setState(() {
+        _issues = <ReplicationIssue>[...summary.failed, ...summary.skipped];
+        _replicatedFolderId = summary.localRootId;
+      });
+      _show(
+        <String>[
+          if (summary.cancelled) 'Stopped.',
+          'Imported ${_count(summary.imported.length, 'file')} into '
+              '${root.folder.name}.',
+          if (summary.unchanged > 0) '${summary.unchanged} already up to date.',
+          if (notImported > 0) '$notImported not imported.',
+        ].join(' '),
+      );
+    });
+  }
+
+  Future<GoodnotesDriveRoot?> _pickRoot(List<GoodnotesDriveRoot> roots) {
+    return showDialog<GoodnotesDriveRoot>(
+      context: context,
+      builder: (BuildContext context) {
+        final DateTime now = widget.clock();
+        return SimpleDialog(
+          title: const Text('Choose a Goodnotes folder'),
+          children: <Widget>[
+            for (final GoodnotesDriveRoot root in roots)
+              SimpleDialogOption(
+                onPressed: () => Navigator.of(context).pop(root),
+                child: ConstrainedBox(
+                  constraints: const BoxConstraints(
+                    minHeight: AppSizes.minTouchTarget,
+                  ),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    children: <Widget>[
+                      Text(root.location),
+                      if (root.folder.modifiedTime != null)
+                        Text(
+                          'Modified '
+                          '${formatModified(root.folder.modifiedTime!.toLocal(), now)}',
+                          style: Theme.of(context).textTheme.bodySmall,
+                        ),
+                    ],
+                  ),
+                ),
+              ),
+          ],
+        );
+      },
+    );
+  }
+
+  static String _count(int count, String noun) =>
+      '$count $noun${count == 1 ? '' : 's'}';
+
+  @override
+  Widget build(BuildContext context) {
+    final AppColors colors = AppColors.of(context);
+    final TextTheme text = Theme.of(context).textTheme;
+    final GoogleDriveAccount? account = _account;
+    final bool connected = account != null;
+    final bool canAct = connected && !_busy;
+    const Size wide = Size.fromHeight(AppSizes.minTouchTarget);
+    return SafeArea(
+      child: Center(
+        heightFactor: 1,
+        child: ConstrainedBox(
+          constraints: const BoxConstraints(maxWidth: 520),
+          child: ListView(
+            shrinkWrap: true,
+            padding: const EdgeInsets.fromLTRB(
+              AppSpacing.lg,
+              0,
+              AppSpacing.lg,
+              AppSpacing.lg,
+            ),
+            children: <Widget>[
+              Row(
+                children: <Widget>[
+                  Icon(AppIcons.cloud, size: 20, color: colors.textSecondary),
+                  const SizedBox(width: AppSpacing.sm),
+                  Semantics(
+                    header: true,
+                    child: Text('Google Drive', style: text.titleLarge),
+                  ),
+                ],
+              ),
+              const SizedBox(height: AppSpacing.md),
+              _ConnectionCard(
+                account: account,
+                connecting: _task == _Task.connect,
+                enabled: !_busy,
+                onConnect: _connect,
+                onDisconnect: _disconnect,
+              ),
+              const SizedBox(height: AppSpacing.lg),
+              const SectionLabel('Online backup'),
+              Text(
+                _lastBackup == null
+                    ? 'Not backed up yet'
+                    : 'Last backed up ${formatModified(_lastBackup!, widget.clock())}',
+                style: text.bodyMedium!.copyWith(color: colors.textSecondary),
+              ),
+              const SizedBox(height: AppSpacing.sm),
+              FilledButton.icon(
+                style: FilledButton.styleFrom(minimumSize: wide),
+                onPressed: canAct ? _backUp : null,
+                icon: const Icon(AppIcons.cloudUpload),
+                label: const Text('Back up library now'),
+              ),
+              const SizedBox(height: AppSpacing.xs),
+              TextButton.icon(
+                style: TextButton.styleFrom(minimumSize: wide),
+                onPressed: canAct ? _restore : null,
+                icon: const Icon(AppIcons.restore),
+                label: const Text('Restore from backup'),
+              ),
+              const SizedBox(height: AppSpacing.md),
+              const SectionLabel('Goodnotes'),
+              Text(
+                'Copy your GoodNotes folder from Drive into the library: its '
+                'folders as they are, with every notebook and PDF in them.',
+                style: text.bodyMedium!.copyWith(color: colors.textSecondary),
+              ),
+              const SizedBox(height: AppSpacing.sm),
+              FilledButton.tonalIcon(
+                style: FilledButton.styleFrom(minimumSize: wide),
+                onPressed: canAct ? _importGoodnotes : null,
+                icon: const Icon(AppIcons.cloudDownload),
+                label: const Text('Import Goodnotes folder from Drive'),
+              ),
+              if (_busy && _task != _Task.connect) ...<Widget>[
+                const SizedBox(height: AppSpacing.lg),
+                _ProgressPanel(
+                  progress: _progress,
+                  onCancel:
+                      _task == _Task.restore &&
+                          _progress?.phase == 'Restoring library'
+                      ? null
+                      : () {
+                          _cancellation?.cancel();
+                          setState(() {});
+                        },
+                  cancelling: _cancellation?.isCancelled ?? false,
+                ),
+              ],
+              if (_message != null) ...<Widget>[
+                const SizedBox(height: AppSpacing.lg),
+                _ResultPanel(
+                  message: _message!,
+                  error: _messageIsError,
+                  issues: _issues,
+                  onOpenFolder:
+                      _replicatedFolderId == null || widget.onOpenFolder == null
+                      ? null
+                      : () {
+                          final String id = _replicatedFolderId!;
+                          Navigator.of(context).pop();
+                          widget.onOpenFolder!(id);
+                        },
+                ),
+              ],
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _ConnectionCard extends StatelessWidget {
+  const _ConnectionCard({
+    required this.account,
+    required this.connecting,
+    required this.enabled,
+    required this.onConnect,
+    required this.onDisconnect,
+  });
+
+  final GoogleDriveAccount? account;
+  final bool connecting;
+  final bool enabled;
+  final VoidCallback onConnect;
+  final VoidCallback onDisconnect;
+
+  @override
+  Widget build(BuildContext context) {
+    final AppColors colors = AppColors.of(context);
+    final TextTheme text = Theme.of(context).textTheme;
+    final GoogleDriveAccount? account = this.account;
+    final String title = account == null ? 'Not connected' : account.label;
+    final String detail = account == null
+        ? 'Connect to back up your library and import from Goodnotes.'
+        : account.email;
+    return Semantics(
+      container: true,
+      label: account == null
+          ? 'Google Drive is not connected'
+          : 'Connected to Google Drive as ${account.email}',
+      child: Container(
+        padding: const EdgeInsets.all(AppSpacing.md),
+        decoration: BoxDecoration(
+          color: colors.surfaceMuted,
+          borderRadius: BorderRadius.circular(AppRadii.large),
+        ),
+        child: Row(
+          children: <Widget>[
+            Icon(
+              AppIcons.account,
+              size: 28,
+              color: account == null ? colors.textSecondary : colors.accent,
+            ),
+            const SizedBox(width: AppSpacing.sm),
+            Expanded(
+              child: ExcludeSemantics(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: <Widget>[
+                    Text(
+                      title,
+                      style: text.titleSmall,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                    Text(
+                      detail,
+                      style: text.bodySmall!.copyWith(
+                        color: colors.textSecondary,
+                      ),
+                      maxLines: 2,
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                  ],
+                ),
+              ),
+            ),
+            const SizedBox(width: AppSpacing.sm),
+            if (account == null)
+              FilledButton(
+                style: FilledButton.styleFrom(
+                  minimumSize: const Size(0, AppSizes.minTouchTarget),
+                ),
+                onPressed: enabled ? onConnect : null,
+                child: Text(connecting ? 'Connecting…' : 'Connect'),
+              )
+            else
+              OutlinedButton(
+                style: OutlinedButton.styleFrom(
+                  minimumSize: const Size(0, AppSizes.minTouchTarget),
+                ),
+                onPressed: enabled ? onDisconnect : null,
+                child: const Text('Disconnect'),
+              ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _ProgressPanel extends StatelessWidget {
+  const _ProgressPanel({
+    required this.progress,
+    required this.onCancel,
+    required this.cancelling,
+  });
+
+  final CloudProgress? progress;
+
+  /// Null while the work can no longer be stopped.
+  final VoidCallback? onCancel;
+  final bool cancelling;
+
+  @override
+  Widget build(BuildContext context) {
+    final AppColors colors = AppColors.of(context);
+    final TextTheme text = Theme.of(context).textTheme;
+    final CloudProgress? progress = this.progress;
+    final double? fraction = progress?.fraction;
+    final String phase = cancelling
+        ? 'Stopping…'
+        : progress?.phase ?? 'Starting…';
+    return Semantics(
+      container: true,
+      liveRegion: true,
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: <Widget>[
+          Text(phase, style: text.titleSmall),
+          if (progress?.currentName != null)
+            Text(
+              progress!.currentName!,
+              style: text.bodySmall!.copyWith(color: colors.textSecondary),
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+            ),
+          const SizedBox(height: AppSpacing.xs),
+          ClipRRect(
+            borderRadius: BorderRadius.circular(AppRadii.small),
+            child: LinearProgressIndicator(
+              value: fraction,
+              minHeight: 6,
+              semanticsLabel: 'Google Drive progress',
+            ),
+          ),
+          const SizedBox(height: AppSpacing.xs),
+          Align(
+            alignment: AlignmentDirectional.centerEnd,
+            child: OutlinedButton(
+              style: OutlinedButton.styleFrom(
+                minimumSize: const Size(0, AppSizes.minTouchTarget),
+              ),
+              onPressed: cancelling ? null : onCancel,
+              child: const Text('Cancel'),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _ResultPanel extends StatelessWidget {
+  const _ResultPanel({
+    required this.message,
+    required this.error,
+    required this.issues,
+    required this.onOpenFolder,
+  });
+
+  final String message;
+  final bool error;
+  final List<ReplicationIssue> issues;
+  final VoidCallback? onOpenFolder;
+
+  @override
+  Widget build(BuildContext context) {
+    final AppColors colors = AppColors.of(context);
+    final TextTheme text = Theme.of(context).textTheme;
+    return Container(
+      padding: const EdgeInsets.all(AppSpacing.md),
+      decoration: BoxDecoration(
+        color: colors.surfaceMuted,
+        borderRadius: BorderRadius.circular(AppRadii.large),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: <Widget>[
+          Semantics(
+            liveRegion: true,
+            child: Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: <Widget>[
+                if (error) ...<Widget>[
+                  Icon(AppIcons.warning, size: 18, color: colors.danger),
+                  const SizedBox(width: AppSpacing.xs),
+                ],
+                Expanded(
+                  child: Text(
+                    message,
+                    style: text.bodyMedium!.copyWith(
+                      color: error ? colors.danger : colors.textPrimary,
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+          if (issues.isNotEmpty) ...<Widget>[
+            const SizedBox(height: AppSpacing.xs),
+            for (final ReplicationIssue issue in issues.take(20))
+              Padding(
+                padding: const EdgeInsets.only(top: AppSpacing.xxs),
+                child: Text(
+                  '${issue.path} — ${issue.reason}',
+                  style: text.bodySmall!.copyWith(color: colors.textSecondary),
+                ),
+              ),
+            if (issues.length > 20)
+              Padding(
+                padding: const EdgeInsets.only(top: AppSpacing.xxs),
+                child: Text(
+                  'and ${issues.length - 20} more',
+                  style: text.bodySmall!.copyWith(color: colors.textSecondary),
+                ),
+              ),
+          ],
+          if (onOpenFolder != null) ...<Widget>[
+            const SizedBox(height: AppSpacing.xs),
+            Align(
+              alignment: AlignmentDirectional.centerStart,
+              child: TextButton(
+                style: TextButton.styleFrom(
+                  minimumSize: const Size(0, AppSizes.minTouchTarget),
+                ),
+                onPressed: onOpenFolder,
+                child: const Text('Show folder'),
+              ),
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+}

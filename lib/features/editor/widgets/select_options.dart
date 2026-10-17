@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 
 import '../../../app/theme/app_tokens.dart';
+import '../../../app/theme/app_icons.dart';
 
 /// The Select tool's options: Paste. Disabled when [onPaste] is null, which
 /// is while nothing has been copied or cut.
@@ -34,11 +35,7 @@ class SelectOptions extends StatelessWidget {
               child: Row(
                 children: <Widget>[
                   const SizedBox(width: AppSpacing.xs),
-                  Icon(
-                    Icons.content_paste,
-                    size: AppSizes.icon,
-                    color: colors.textPrimary,
-                  ),
+                  Icon(AppIcons.paste, size: 20, color: colors.textSecondary),
                   const SizedBox(width: AppSpacing.sm),
                   Text('Paste', style: Theme.of(context).textTheme.labelLarge),
                 ],

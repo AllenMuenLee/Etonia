@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:greatnote/app/theme/app_icons.dart';
 import 'package:greatnote/app/theme/app_theme.dart';
 import 'package:greatnote/app/theme/app_tokens.dart';
 import 'package:greatnote/features/editor/widgets/editor_app_bar.dart';
@@ -34,14 +35,14 @@ Future<void> _pumpComponent(WidgetTester tester, Widget child) {
 
 void main() {
   // Previous and next page are disabled on a one-page note, so they are
-  // skipped; on compact widths they, and Add page, live in the page panel.
+  // skipped; on compact widths they live in the page panel.
   List<String> tooltipsAt(TestViewport viewport) {
     return <String>[
       'Open navigation menu',
       'Rename note',
       'Page setup',
-      if (viewport != TestViewport.compact) 'Add page',
-      'More options',
+      'Add',
+      'Settings',
       'Pen',
       'Eraser',
       'Select',
@@ -121,12 +122,12 @@ void main() {
       isSemantics(isButton: true, hasTapAction: true),
     );
     expect(
-      tester.getSemantics(find.widgetWithIcon(IconButton, Icons.menu)),
+      tester.getSemantics(find.widgetWithIcon(IconButton, AppIcons.sidebar)),
       isSemantics(tooltip: 'Open navigation menu', isButton: true),
     );
     expect(
-      tester.getSemantics(find.widgetWithIcon(IconButton, Icons.more_horiz)),
-      isSemantics(tooltip: 'More options', isButton: true),
+      tester.getSemantics(find.widgetWithIcon(IconButton, AppIcons.settings)),
+      isSemantics(tooltip: 'Settings', isButton: true),
     );
     expect(find.bySemanticsLabel('Writing surface'), findsOneWidget);
     expect(find.bySemanticsLabel('Tools'), findsOneWidget);
@@ -142,7 +143,7 @@ void main() {
         PaletteButton(
           tooltip: 'Sample',
           onPressed: () {},
-          child: const Icon(Icons.draw_outlined),
+          child: const Icon(AppIcons.pen),
         ),
       );
 
@@ -177,12 +178,12 @@ void main() {
               tooltip: 'On',
               selected: true,
               onPressed: () {},
-              child: const Icon(Icons.draw_outlined),
+              child: const Icon(AppIcons.pen),
             ),
             PaletteButton(
               tooltip: 'Off',
               onPressed: () {},
-              child: const Icon(Icons.draw_outlined),
+              child: const Icon(AppIcons.pen),
             ),
           ],
         ),
@@ -224,13 +225,13 @@ void main() {
             const PaletteButton(
               tooltip: 'Disabled',
               onPressed: null,
-              child: Icon(Icons.draw_outlined),
+              child: Icon(AppIcons.pen),
             ),
             PaletteButton(
               tooltip: 'Enabled',
               dense: true,
               onPressed: () => taps++,
-              child: const Icon(Icons.draw_outlined),
+              child: const Icon(AppIcons.pen),
             ),
           ],
         ),
@@ -280,14 +281,14 @@ void main() {
 
       await tester.tap(find.byTooltip('Open navigation menu'));
       await tester.tap(find.byTooltip('Rename note'));
-      await tester.tap(find.byTooltip('More options'));
+      await tester.tap(find.byTooltip('Settings'));
       await tester.pumpAndSettle();
 
       expect(pressed, <String>['menu', 'title']);
       expect(
         tester
             .widget<IconButton>(
-              find.widgetWithIcon(IconButton, Icons.more_horiz),
+              find.widgetWithIcon(IconButton, AppIcons.settings),
             )
             .onPressed,
         isNull,
