@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:io';
 import 'dart:math' as math;
 import 'dart:ui' as ui;
@@ -10,6 +11,8 @@ import '../../app/theme/app_tokens.dart';
 import '../../app/theme/app_icons.dart';
 import '../../shared/layout/breakpoints.dart';
 import '../editor/ai/ai_client.dart';
+import '../editor/handwriting/handwriting_calibration.dart';
+import '../editor/handwriting/handwriting_calibration_screen.dart';
 import '../editor/ink/input_defaults.dart';
 import '../editor/ink/pen_settings.dart';
 import '../editor/page/page_setup.dart';
@@ -85,6 +88,29 @@ class _LibraryHomeState extends State<LibraryHome> {
     )..load().then((void _) => _subscription?.connectStore());
   }
 
+  bool _handwritingChecked = false;
+
+  /// Loads the writer's handwriting profile for every note, and offers
+  /// calibration once, on the first launch of the device's library.
+  void _checkHandwriting(NoteRepository repository) {
+    if (_handwritingChecked ||
+        widget.repository != null ||
+        repository is! FileNoteRepository) {
+      return;
+    }
+    _handwritingChecked = true;
+    final HandwritingProfileStore store = handwritingProfileStoreFor(
+      repository,
+    );
+    store.read().then((HandwritingCalibrationState? state) {
+      HandwritingCalibration.current.value = state?.profile;
+      if (state != null || !mounted) return;
+      WidgetsBinding.instance.addPostFrameCallback((Duration _) {
+        if (mounted) showHandwritingCalibration(context, store: store);
+      });
+    });
+  }
+
   @override
   void dispose() {
     _subscription?.dispose();
@@ -98,6 +124,7 @@ class _LibraryHomeState extends State<LibraryHome> {
       builder: (BuildContext context, AsyncSnapshot<NoteRepository> snapshot) {
         final NoteRepository? repository = snapshot.data;
         if (repository != null) {
+          _checkHandwriting(repository);
           return LibraryScreen(
             repository: repository,
             subscription: widget.subscription ?? _subscriptionFor(repository),
@@ -118,6 +145,16 @@ class _LibraryHomeState extends State<LibraryHome> {
     );
   }
 }
+
+/// Where the handwriting profile of [repository] is kept: a file beside
+/// the device's library, or memory for any other library.
+HandwritingProfileStore handwritingProfileStoreFor(NoteRepository repository) =>
+    switch (repository) {
+      final FileNoteRepository files => FileHandwritingProfileStore(
+        File('${files.directory.path}/handwriting_profile.json'),
+      ),
+      _ => InMemoryHandwritingProfileStore(),
+    };
 
 /// A short, human date for when something changed.
 String formatModified(DateTime time, DateTime now) {
@@ -262,6 +299,7 @@ class LibraryScreen extends StatefulWidget {
     this.clock = DateTime.now,
     this.aiClient,
     this.documentPicker = const SystemDocumentPicker(),
+    this.sharedDocuments = const SystemSharedDocumentSource(),
     this.pdfRasterizer = const PdfrxRasterizer(),
     this.exportSink = const SystemExportSink(),
     this.documentIoConfig = const DocumentIoConfig(),
@@ -277,6 +315,7 @@ class LibraryScreen extends StatefulWidget {
   /// Passed to the editor; tests supply one.
   final AiClient? aiClient;
   final DocumentPicker documentPicker;
+  final SharedDocumentSource sharedDocuments;
   final PdfRasterizer pdfRasterizer;
   final ExportSink exportSink;
   final DocumentIoConfig documentIoConfig;
@@ -313,6 +352,9 @@ class _LibraryScreenState extends State<LibraryScreen> {
       ValueNotifier<PalettePlacement>(const PalettePlacement());
   final OpenNotes _openNotes = OpenNotes();
   bool _tabsShowing = false;
+  StreamSubscription<PickedDocument>? _sharedDocumentsSubscription;
+  final List<PickedDocument> _pendingSharedImports = <PickedDocument>[];
+  bool _importingShared = false;
 
   /// Whether Recently Deleted is shown in place of a folder, and how many
   /// notes it holds.
@@ -399,6 +441,13 @@ class _LibraryScreenState extends State<LibraryScreen> {
 
   Future<void> _openPlans() => showPaymentPage(context, _subscription);
 
+  Future<void> _calibrateHandwriting() async {
+    await showHandwritingCalibration(
+      context,
+      store: handwritingProfileStoreFor(widget.repository),
+    );
+  }
+
   String get _query => _search.text.trim();
 
   /// Recently Deleted is shown, rather than a folder or search results.
@@ -412,6 +461,11 @@ class _LibraryScreenState extends State<LibraryScreen> {
     _reload();
     _repository.purgeTrash(_trashKeeps);
     _autoBackup.start();
+    _sharedDocumentsSubscription = widget.sharedDocuments.incomingDocuments
+        .listen(_enqueueSharedDocument);
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _takeInitialSharedDocuments();
+    });
   }
 
   @override
@@ -428,10 +482,17 @@ class _LibraryScreenState extends State<LibraryScreen> {
       _folderId = null;
       _reload();
     }
+    if (oldWidget.sharedDocuments != widget.sharedDocuments) {
+      _sharedDocumentsSubscription?.cancel();
+      _sharedDocumentsSubscription = widget.sharedDocuments.incomingDocuments
+          .listen(_enqueueSharedDocument);
+      _takeInitialSharedDocuments();
+    }
   }
 
   @override
   void dispose() {
+    _sharedDocumentsSubscription?.cancel();
     _repository.removeListener(_reload);
     _search.dispose();
     _thumbnails.dispose();
@@ -593,6 +654,33 @@ class _LibraryScreenState extends State<LibraryScreen> {
     }
   }
 
+  Future<void> _takeInitialSharedDocuments() async {
+    final List<PickedDocument> initial = await widget.sharedDocuments
+        .takeInitialDocuments();
+    if (!mounted || initial.isEmpty) return;
+    for (final PickedDocument doc in initial) {
+      _enqueueSharedDocument(doc);
+    }
+  }
+
+  void _enqueueSharedDocument(PickedDocument picked) {
+    _pendingSharedImports.add(picked);
+    _drainSharedImports();
+  }
+
+  Future<void> _drainSharedImports() async {
+    if (_importingShared || !mounted) return;
+    _importingShared = true;
+    try {
+      while (_pendingSharedImports.isNotEmpty && mounted) {
+        final PickedDocument next = _pendingSharedImports.removeAt(0);
+        await _importPickedDocument(next);
+      }
+    } finally {
+      _importingShared = false;
+    }
+  }
+
   /// Imports a PDF as a new note. A [fromGoodnotes] export also has its
   /// handwriting extracted into editable strokes, and a native `.goodnotes`
   /// notebook comes in whole: pages, paper, and editable ink.
@@ -601,6 +689,14 @@ class _LibraryScreenState extends State<LibraryScreen> {
         ? await widget.documentPicker.pickGoodnotes()
         : await widget.documentPicker.pickPdf();
     if (picked == null || !mounted) return;
+    await _importPickedDocument(picked, fromGoodnotes: fromGoodnotes);
+  }
+
+  Future<void> _importPickedDocument(
+    PickedDocument picked, {
+    bool fromGoodnotes = false,
+  }) async {
+    if (!mounted) return;
     final bool notebook = GoodnotesArchiveExtractor.isGoodnotesArchive(
       picked.bytes,
     );
@@ -623,7 +719,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
             ).importPdfAsNote(
               repository: _repository,
               picked: picked,
-              folderId: _folderId,
+              folderId: _showingTrash ? null : _folderId,
               cancellation: cancellation,
               recoverGoodnotesInk: fromGoodnotes,
               onNoInkRecovered: () => noInk = true,
@@ -1173,6 +1269,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
       onGoogleDrive: _openGoogleDrive,
       subscription: _subscription,
       onPlans: _openPlans,
+      onCalibrateHandwriting: _calibrateHandwriting,
       canDrop: _canDrop,
       onDrop: _drop,
       selecting: _selecting,
@@ -1553,6 +1650,7 @@ class _LibraryBar extends StatelessWidget implements PreferredSizeWidget {
     required this.onGoogleDrive,
     required this.subscription,
     required this.onPlans,
+    required this.onCalibrateHandwriting,
     required this.canDrop,
     required this.onDrop,
     required this.selecting,
@@ -1609,6 +1707,10 @@ class _LibraryBar extends StatelessWidget implements PreferredSizeWidget {
   /// Shown in the Plans & Credits pill, which [onPlans] opens.
   final SubscriptionController subscription;
   final VoidCallback onPlans;
+
+  /// Opens handwriting calibration, which teaches AI notation the writer's
+  /// letters.
+  final VoidCallback onCalibrateHandwriting;
 
   /// Whether a dragged item can go into a folder on the path, and moving
   /// it there; the folders above the open one take drops.
@@ -1773,6 +1875,8 @@ class _LibraryBar extends StatelessWidget implements PreferredSizeWidget {
                                 onSelected: (Object choice) {
                                   if (choice is LibrarySort) {
                                     onSort(choice);
+                                  } else if (choice == #calibrate) {
+                                    onCalibrateHandwriting();
                                   } else {
                                     onToggleView();
                                   }
@@ -1798,6 +1902,13 @@ class _LibraryBar extends StatelessWidget implements PreferredSizeWidget {
                                         checked: false,
                                       ),
                                     ],
+                                    const PopupMenuDivider(),
+                                    _menuItem<Object>(
+                                      context,
+                                      value: #calibrate,
+                                      label: 'Calibrate handwriting…',
+                                      icon: AppIcons.pen,
+                                    ),
                                   ];
                                 },
                               ),

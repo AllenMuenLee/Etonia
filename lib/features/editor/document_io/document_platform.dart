@@ -1,8 +1,9 @@
+import 'dart:async';
 import 'dart:io';
-import 'dart:typed_data';
 import 'dart:ui' as ui;
 
 import 'package:file_picker/file_picker.dart';
+import 'package:flutter/services.dart';
 import 'package:image/image.dart' as image;
 import 'package:pdfrx/pdfrx.dart' as pdfrx;
 import 'package:share_plus/share_plus.dart';
@@ -288,5 +289,77 @@ class SystemExportSink implements ExportSink {
         sharePositionOrigin: sharePositionOrigin,
       ),
     );
+  }
+}
+
+/// PDFs and notebooks shared into the app from another app's share sheet
+/// or "Open with" menu.
+abstract interface class SharedDocumentSource {
+  /// Any documents that launched the app and have not yet been taken.
+  Future<List<PickedDocument>> takeInitialDocuments();
+
+  /// Documents shared into the app while it is already running.
+  Stream<PickedDocument> get incomingDocuments;
+}
+
+class SystemSharedDocumentSource implements SharedDocumentSource {
+  const SystemSharedDocumentSource();
+
+  static const MethodChannel _channel = MethodChannel(
+    'com.etonia.app/shared_documents',
+  );
+
+  static final StreamController<PickedDocument> _incoming =
+      StreamController<PickedDocument>.broadcast();
+  static bool _listening = false;
+
+  static void _ensureListening() {
+    if (_listening) return;
+    _listening = true;
+    _channel.setMethodCallHandler((MethodCall call) async {
+      if (call.method == 'onDocumentShared') {
+        final PickedDocument? doc = _decodeDocument(call.arguments);
+        if (doc != null) {
+          _incoming.add(doc);
+        }
+      }
+    });
+  }
+
+  static PickedDocument? _decodeDocument(Object? raw) {
+    if (raw is! Map<Object?, Object?>) return null;
+    final Object? name = raw['name'];
+    final Object? bytes = raw['bytes'];
+    if (name is! String || bytes is! Uint8List || bytes.isEmpty) {
+      return null;
+    }
+    return PickedDocument(name: name, bytes: bytes);
+  }
+
+  @override
+  Stream<PickedDocument> get incomingDocuments {
+    _ensureListening();
+    return _incoming.stream;
+  }
+
+  @override
+  Future<List<PickedDocument>> takeInitialDocuments() async {
+    _ensureListening();
+    try {
+      final List<Object?>? raw = await _channel.invokeListMethod<Object?>(
+        'takeInitialDocuments',
+      );
+      if (raw == null || raw.isEmpty) {
+        return const <PickedDocument>[];
+      }
+      return <PickedDocument>[
+        for (final Object? entry in raw)
+          if (_decodeDocument(entry) case final PickedDocument doc) doc,
+      ];
+    } on MissingPluginException {
+      return const <PickedDocument>[];
+    } on PlatformException {
+      return const <PickedDocument>[];
+    }
   }
 }

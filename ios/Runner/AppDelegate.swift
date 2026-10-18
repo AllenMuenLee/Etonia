@@ -6,6 +6,7 @@ import Vision
 @objc class AppDelegate: FlutterAppDelegate, FlutterImplicitEngineDelegate {
   private var handwritingRecognizer: HandwritingRecognizerChannel?
   private var nativeInk: NativeInkChannel?
+  let sharedDocuments = SharedDocumentChannel()
 
   override func application(
     _ application: UIApplication,
@@ -26,6 +27,26 @@ import Vision
         self?.flutterRootView()
       }
     }
+    if let registrar = engineBridge.pluginRegistry.registrar(forPlugin: "EtoniaSharedDocuments") {
+      sharedDocuments.attach(messenger: registrar.messenger())
+    }
+  }
+
+  func handleOpenURLContexts(_ urlContexts: Set<UIOpenURLContext>) {
+    for context in urlContexts {
+      _ = sharedDocuments.receive(url: context.url)
+    }
+  }
+
+  override func application(
+    _ app: UIApplication,
+    open url: URL,
+    options: [UIApplication.OpenURLOptionsKey: Any] = [:]
+  ) -> Bool {
+    if sharedDocuments.receive(url: url) {
+      return true
+    }
+    return super.application(app, open: url, options: options)
   }
 
   private func flutterRootView() -> UIView? {
@@ -36,6 +57,72 @@ import Vision
       }
     }
     return nil
+  }
+}
+
+/// Receives PDFs shared into Etonia from another app's share sheet or "Open
+/// in" action and forwards their filename and bytes to Dart.
+final class SharedDocumentChannel {
+  static let name = "com.etonia.app/shared_documents"
+
+  private var channel: FlutterMethodChannel?
+  private var pending: [[String: Any]] = []
+  private var dartReady = false
+  private var recentPaths: [String: TimeInterval] = [:]
+
+  func attach(messenger: FlutterBinaryMessenger) {
+    let methodChannel = FlutterMethodChannel(name: Self.name, binaryMessenger: messenger)
+    methodChannel.setMethodCallHandler { [weak self] call, result in
+      self?.handle(call, result: result)
+    }
+    channel = methodChannel
+  }
+
+  private func handle(_ call: FlutterMethodCall, result: @escaping FlutterResult) {
+    switch call.method {
+    case "takeInitialDocuments":
+      dartReady = true
+      let drained = pending
+      pending.removeAll()
+      result(drained)
+    default:
+      result(FlutterMethodNotImplemented)
+    }
+  }
+
+  @discardableResult
+  func receive(url: URL) -> Bool {
+    guard url.isFileURL else { return false }
+    let standardized = url.standardizedFileURL.path
+    let now = ProcessInfo.processInfo.systemUptime
+    if let last = recentPaths[standardized], now - last < 1.0 {
+      return true
+    }
+    recentPaths[standardized] = now
+
+    let accessed = url.startAccessingSecurityScopedResource()
+    defer {
+      if accessed {
+        url.stopAccessingSecurityScopedResource()
+      }
+    }
+    guard let data = try? Data(contentsOf: url), !data.isEmpty else {
+      return false
+    }
+    let name = url.lastPathComponent.isEmpty ? "Shared.pdf" : url.lastPathComponent
+    if standardized.contains("/Documents/Inbox/") {
+      try? FileManager.default.removeItem(at: url)
+    }
+    let payload: [String: Any] = [
+      "name": name,
+      "bytes": FlutterStandardTypedData(bytes: data),
+    ]
+    if dartReady, let channel {
+      channel.invokeMethod("onDocumentShared", arguments: payload)
+    } else {
+      pending.append(payload)
+    }
+    return true
   }
 }
 

@@ -99,6 +99,18 @@ void main() {
     document.dispose();
   });
 
+  test('moderate-confidence recognition is searchable but not reusable', () {
+    final RecognizedInkWord word = RecognizedInkWord.fromStrokes(
+      text: 'visible',
+      confidence: 0.76,
+      strokes: <Stroke>[_stroke(0, 0, 20, 10)],
+    );
+
+    expect(word.isSearchable, isTrue);
+    expect(word.isReusable, isFalse);
+    expect(word.normalizedStrokes, isEmpty);
+  });
+
   test(
     'storage preserves word links and library search includes ink',
     () async {
@@ -215,6 +227,37 @@ void main() {
     expect(second.single.points.last.x, 40);
   });
 
+  testWidgets('find icon remains available for recognized metadata', (
+    WidgetTester tester,
+  ) async {
+    final Stroke shape = _stroke(5, 8, 45, 28);
+    final NoteDocument document = NoteDocument(
+      pages: <NotePage>[
+        NotePage(
+          ink: InkController(strokes: <Stroke>[shape]),
+          recognizedWords: <RecognizedInkWord>[
+            RecognizedInkWord.fromStrokes(
+              text: 'false-positive',
+              confidence: 0.42,
+              strokes: <Stroke>[shape],
+            ),
+          ],
+        ),
+      ],
+    );
+    addTearDown(document.dispose);
+    await pumpApp(tester, home: EditorScreen(document: document));
+
+    expect(find.byTooltip('Find handwriting'), findsOneWidget);
+    await tester.tap(find.byTooltip('Find handwriting'));
+    await tester.pumpAndSettle();
+    await tester.enterText(find.byType(TextField), 'false-positive');
+    await tester.pump();
+    expect(find.text('No high-confidence handwritten text found.'), findsOne);
+    await tester.tap(find.widgetWithText(TextButton, 'Done'));
+    await tester.pumpAndSettle();
+  });
+
   testWidgets('find filters low confidence, highlights, and closes safely', (
     WidgetTester tester,
   ) async {
@@ -227,7 +270,7 @@ void main() {
           recognizedWords: <RecognizedInkWord>[
             RecognizedInkWord.fromStrokes(
               text: 'Quadratic',
-              confidence: 0.96,
+              confidence: 0.76,
               strokes: <Stroke>[stroke],
             ),
             RecognizedInkWord.fromStrokes(

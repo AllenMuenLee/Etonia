@@ -25,6 +25,10 @@ abstract final class NotationFont {
   /// Every character the font can write.
   static Iterable<String> get characters => _glyphs.keys;
 
+  /// How wide [char] is, in grid units, or null when the font cannot write
+  /// it.
+  static double? glyphWidth(String char) => _glyphs[char]?.width;
+
   /// Whether every character of [text] can be written. Line breaks are
   /// allowed.
   static bool canWrite(String text) {
@@ -504,6 +508,38 @@ abstract final class NotationFont {
         _arc(1.5, 2, 1.3, 1.8, 0, 360),
         _arc(5.5, 8, 1.3, 1.8, 0, 360),
         <InkVector>[_p(6, 0.5), _p(1, 9.5)],
+      ])
+      ..['\$'] = glyph(6, <List<InkVector>>[
+        <InkVector>[
+          ..._arc(3, 2.6, 2.8, 2.1, -30, -270),
+          ..._arc(3, 6.9, 3, 2.2, -90, 150),
+        ],
+        <InkVector>[_p(3, -0.8), _p(3, 9.9)],
+      ])
+      ..['&'] = glyph(6.5, <List<InkVector>>[
+        <InkVector>[
+          _p(6.5, 10),
+          _p(2, 4),
+          _p(1.6, 2.4),
+          _p(2.5, 0.6),
+          _p(3.6, 1),
+          _p(3.8, 2.4),
+          _p(2.8, 4),
+          _p(0.8, 6.3),
+          _p(0.6, 8.4),
+          _p(1.8, 9.9),
+          _p(3.6, 9.8),
+          _p(5.6, 7),
+        ],
+      ])
+      ..['@'] = glyph(8.6, <List<InkVector>>[
+        _arc(4.3, 5.6, 1.7, 2.1, 0, 360),
+        <InkVector>[
+          _p(6, 3.4),
+          _p(6, 7.2),
+          _p(7.2, 7.6),
+          ..._arc(4.3, 5.3, 4.3, 4.7, 10, -300),
+        ],
       ])
       // Mathematics.
       ..['+'] = glyph(6, <List<InkVector>>[

@@ -85,19 +85,26 @@ class HandwritingRecognizerChannel(messenger: BinaryMessenger) :
                     val ranked = recognized.candidates.take(5)
                         .filter { it.text.isNotBlank() }
                     // ML Kit scores are model-specific costs (lower is
-                    // better), not normalized probabilities. Only expose a
-                    // reusable confidence when the winner is clearly
-                    // separated from the runner-up. Unsupported/marginal
-                    // scores remain searchable but cannot enter the pool.
+                    // better), not normalized probabilities. A moderate gap
+                    // is enough for search; only a clear gap enters the
+                    // reusable pool. Ambiguous scores stay as metadata.
                     val winner = ranked.firstOrNull()?.score
                     val runnerUp = ranked.getOrNull(1)?.score
-                    val strongWinner = winner != null &&
-                        (runnerUp == null || runnerUp - winner >= 1.0f)
+                    val winnerGap = if (winner != null && runnerUp != null) {
+                        runnerUp - winner
+                    } else {
+                        null
+                    }
                     val candidates = ranked.mapIndexed { index, candidate ->
                         mapOf<String, Any?>(
                             "text" to candidate.text.trim(),
                             "confidence" to when {
-                                index == 0 && strongWinner -> 0.90
+                                index == 0 && winner != null && runnerUp == null ->
+                                    0.90
+                                index == 0 && winnerGap != null && winnerGap >= 1.0f ->
+                                    0.90
+                                index == 0 && winnerGap != null && winnerGap >= 0.5f ->
+                                    0.75
                                 candidate.score != null -> 0.60
                                 else -> null
                             },

@@ -684,7 +684,7 @@ abstract final class AiPrompts {
       '1.3 * size tall, and \\n starts a new line; convert with the note '
       'size in the metadata and leave the whole text inside the paper. It '
       'can write letters, digits, spaces, and . , : ; ! ? \' " ( ) [ ] { } + '
-      '- × · ÷ / \\ ^ = < > ≤ ≥ ≠ ≈ ± √ π θ Δ ∞ ° → ← ² ³ ✓ % # _ | ~ *; use '
+      '- × · ÷ / \\ ^ = < > ≤ ≥ ≠ ≈ ± √ π θ Δ ∞ ° → ← ² ³ ✓ % # _ | ~ * & \$ @; use '
       'only those. '
       '"plot": a coordinate plane, the way to draw any graph, chart, or '
       'number plane. Give its box on the paper (left, top, right, bottom, '

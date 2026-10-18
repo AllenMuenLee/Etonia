@@ -12,12 +12,14 @@ import 'package:greatnote/features/editor/ink/ink_sample.dart';
 import 'package:greatnote/features/editor/ink/stroke.dart';
 import 'package:greatnote/features/editor/ink/ink_palette.dart';
 import 'package:greatnote/features/editor/page/page_setup.dart';
+import 'package:greatnote/features/editor/document_io/document_platform.dart';
 import 'package:greatnote/features/library/library_models.dart';
 import 'package:greatnote/features/library/library_screen.dart';
 import 'package:greatnote/features/library/note_content.dart';
 import 'package:greatnote/features/library/note_repository.dart';
 
 import '../../helpers/ai_fakes.dart';
+import '../../helpers/document_io_fakes.dart';
 import '../../helpers/pump_app.dart';
 
 final DateTime _now = DateTime(2026, 10, 14, 15, 30);
@@ -994,5 +996,55 @@ void main() {
     expect(formatModified(DateTime(2026, 10, 13, 23), _now), 'Yesterday');
     expect(formatModified(DateTime(2026, 3, 2), _now), 'Mar 2');
     expect(formatModified(DateTime(2024, 3, 2), _now), 'Mar 2, 2024');
+  });
+
+  testWidgets('shared PDFs from other apps are imported and opened', (
+    WidgetTester tester,
+  ) async {
+    final InMemoryNoteRepository repository = _repository();
+    final FakeSharedDocumentSource shared = FakeSharedDocumentSource(
+      initial: <PickedDocument>[
+        PickedDocument(
+          name: 'Lecture 1.pdf',
+          bytes: Uint8List.fromList(<int>[1, 2, 3, 4]),
+        ),
+      ],
+    );
+    addTearDown(shared.dispose);
+
+    setViewportSize(tester, TestViewport.tabletLandscape.size);
+    await tester.pumpWidget(
+      GreatnoteApp(
+        themeMode: ThemeMode.light,
+        home: LibraryScreen(
+          repository: repository,
+          clock: () => _now,
+          sharedDocuments: shared,
+          pdfRasterizer: FakePdfRasterizer(),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.byType(EditorScreen), findsOneWidget);
+    expect(find.text('Lecture 1'), findsWidgets);
+    expect((await repository.list(null)).notes.single.title, 'Lecture 1');
+
+    shared.share(
+      PickedDocument(
+        name: 'Handout.pdf',
+        bytes: Uint8List.fromList(<int>[5, 6, 7, 8]),
+      ),
+    );
+    await tester.pumpAndSettle();
+    await tester.pump(AppMotion.gentle);
+    await tester.pumpAndSettle();
+
+    expect(find.byType(EditorScreen), findsOneWidget);
+    expect(find.text('Handout'), findsWidgets);
+    expect(
+      (await repository.list(null)).notes.map((NoteEntry n) => n.title).toSet(),
+      <String>{'Lecture 1', 'Handout'},
+    );
   });
 }

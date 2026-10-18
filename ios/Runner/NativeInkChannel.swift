@@ -100,9 +100,10 @@ final class NativeInkChannel: NSObject {
     case .down:
       guard active == nil else { return }
       let global = touch.location(in: root)
-      guard let surface = surfaces.values.last(where: {
-        $0.enabled && $0.contains(global)
-      }) else { return }
+      guard let surface = surfaces.values
+        .filter({ $0.enabled && $0.contains(global) })
+        .max(by: { $0.id < $1.id })
+      else { return }
       let pointer = touch.hash
       active = ActiveStroke(surface: surface, pointer: pointer)
       let actual = actualTouches(touch, event: event, coalesced: false)

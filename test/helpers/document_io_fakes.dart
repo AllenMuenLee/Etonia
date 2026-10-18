@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:io';
 import 'dart:typed_data';
 import 'dart:ui';
@@ -17,6 +18,31 @@ class FakeDocumentPicker implements DocumentPicker {
 
   @override
   Future<PickedDocument?> pickImage() async => image;
+}
+
+class FakeSharedDocumentSource implements SharedDocumentSource {
+  FakeSharedDocumentSource({List<PickedDocument>? initial})
+    : _initial = List<PickedDocument>.of(initial ?? const <PickedDocument>[]);
+
+  final List<PickedDocument> _initial;
+  final StreamController<PickedDocument> _controller =
+      StreamController<PickedDocument>.broadcast();
+
+  void share(PickedDocument document) {
+    _controller.add(document);
+  }
+
+  Future<void> dispose() => _controller.close();
+
+  @override
+  Stream<PickedDocument> get incomingDocuments => _controller.stream;
+
+  @override
+  Future<List<PickedDocument>> takeInitialDocuments() async {
+    final List<PickedDocument> taken = List<PickedDocument>.of(_initial);
+    _initial.clear();
+    return taken;
+  }
 }
 
 class FakePdfRasterizer implements PdfRasterizer {

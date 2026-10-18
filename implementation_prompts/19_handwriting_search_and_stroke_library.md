@@ -31,7 +31,7 @@ vector geometry and has negligible model memory cost.
 - Existing pre-schema-5 ink is lazily backfilled when its page is opened with
   the real platform recognizer.
 - Recognition metadata is retained with its source strokes, but only readings
-  with normalized confidence `>= 0.90` enter search. This prevents ordinary
+  with normalized confidence `>= 0.75` enter search. This prevents ordinary
   shapes and diagrams from surfacing as text.
 - Library search matches note titles or recognized handwriting without
   loading every note file. `NoteEntry.searchText` is refreshed whenever the
@@ -47,13 +47,15 @@ vector geometry and has negligible model memory cost.
 
 ### Reusable stroke library
 
-- A recognition enters the reusable pool only at confidence `>= 0.90`, the
-  same threshold used by search.
+- A recognition enters the reusable pool only at confidence `>= 0.90`. This is
+  deliberately stricter than the `>= 0.75` search threshold so a moderately
+  confident word can be found without teaching AI notation the wrong shape.
 - Apple Vision's normalized candidate confidence is used directly.
 - ML Kit Digital Ink scores are model-specific costs rather than
-  probabilities. Android marks only a clearly separated first candidate as
-  high confidence; ambiguous results and bitmap-OCR fallbacks are retained as
-  recognition metadata but cannot be searched or reused.
+  probabilities. Android maps a moderate winner gap to the search threshold
+  and only a clearly separated first candidate to reusable confidence;
+  ambiguous results and bitmap-OCR fallbacks are retained as recognition
+  metadata but cannot be searched or reused.
 - Each reusable sample stores the original trace boundaries and point order,
   normalized into a unit box, plus its aspect ratio. At most 4096 points are
   copied for one sample.
@@ -76,6 +78,31 @@ vector geometry and has negligible model memory cost.
   words and built-in glyphs while preserving spaces and line breaks.
 - Both immediate and timed AI notation, including notation written on an AI
   sticky note, use the same sample pool.
+
+### Handwriting calibration
+
+- On the first launch of the device library, a full-screen calibration asks
+  the writer to copy three silly lines, 13 short phrases on one ruled line
+  each. Together they contain a–z, A–Z, 0–9 and
+  `. , ! ? ' " - : ; ( ) & $ % # @ / + *`. It can be skipped and is offered
+  again from the library's Sort menu ("Calibrate handwriting…").
+- The text is known, so no recognizer runs. Ink is split into words at
+  clear gaps; a phrase whose word count does not match is rejected with a
+  hint (leave more room / keep words together) or can be skipped.
+- Within a word, strokes with overlapping horizontal extents form one mark
+  (i-dots, t-crosses, colons). A word becomes letters only when it has
+  exactly one mark per character (two for `"`). Joined-up words are kept
+  whole, never cut at guessed boundaries.
+- Samples are normalized to writing units: the capital line is y = 0 and
+  the baseline is y = 1, measured from the writer's own capitals and digits
+  when present and otherwise from the guides. Letter gap and word space are
+  measured too.
+- The profile is global (`handwriting_profile.json` beside the library) and
+  shared by every note. AI notation tries, for each word: a note sample, a
+  calibrated whole word, then calibrated letters, with `NotationFont` for
+  any character not calibrated.
+- `&`, `$`, and `@` are calibrated but the notation parser still rejects
+  text the built-in font cannot write, so they are not yet produced.
 
 ## Persistence format
 

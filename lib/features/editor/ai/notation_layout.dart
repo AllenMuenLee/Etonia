@@ -5,6 +5,7 @@ import '../ink/ink_notation.dart';
 import '../ink/ink_palette.dart';
 import '../ink/ink_sample.dart';
 import '../ink/stroke.dart';
+import '../handwriting/handwriting_calibration.dart';
 import '../handwriting/recognized_handwriting.dart';
 import 'ai_config.dart';
 import 'ai_notation.dart';
@@ -251,11 +252,16 @@ List<List<InkVector>> _writeNotationText(
       .allMatches(text)
       .map((RegExpMatch match) => match.group(0)!)
       .toList();
+  final HandwritingProfile? calibration = handwriting.calibration;
   if (!tokens.any(
-    (String token) => handwriting.variantsFor(token) > 0,
+    (String token) =>
+        handwriting.variantsFor(token) > 0 ||
+        (calibration?.canWriteAny(token) ?? false),
   )) {
     return NotationFont.write(text, origin: origin, size: size);
   }
+  final double wordSpace =
+      calibration?.wordSpace ?? HandwritingProfile.defaultWordSpace;
   final List<List<InkVector>> output = <List<InkVector>>[];
   final List<String> lines = text.split('\n');
   for (int row = 0; row < lines.length; row++) {
@@ -265,15 +271,43 @@ List<List<InkVector>> _writeNotationText(
     for (final RegExpMatch match in pieces) {
       final String piece = match.group(0)!;
       if (piece.trim().isEmpty) {
-        x += size * 0.34 * piece.length;
+        x += size * wordSpace * piece.length;
         continue;
       }
       final RecognizedInkWord? sample = handwriting.choose(piece);
       if (sample == null) {
-        output.addAll(
-          NotationFont.write(piece, origin: InkVector(x, y), size: size),
-        );
-        x += NotationFont.width(piece, size);
+        // The note's own sample first, then the calibrated word, then the
+        // word built from calibrated letters; the built-in font fills in
+        // any character calibration never saw.
+        final CalibratedGlyph? word = calibration?.chooseWord(piece);
+        if (word != null) {
+          output.addAll(word.place(InkVector(x, y), size));
+          x += word.width * size;
+          continue;
+        }
+        if (calibration == null || !calibration.canWriteAny(piece)) {
+          output.addAll(
+            NotationFont.write(piece, origin: InkVector(x, y), size: size),
+          );
+          x += NotationFont.width(piece, size);
+          continue;
+        }
+        bool first = true;
+        for (final int rune in piece.runes) {
+          final String char = String.fromCharCode(rune);
+          if (!first) x += calibration.letterGap * size;
+          first = false;
+          final CalibratedGlyph? glyph = calibration.chooseGlyph(char);
+          if (glyph != null) {
+            output.addAll(glyph.place(InkVector(x, y), size));
+            x += glyph.width * size;
+          } else if (NotationFont.canWrite(char)) {
+            output.addAll(
+              NotationFont.write(char, origin: InkVector(x, y), size: size),
+            );
+            x += NotationFont.width(char, size);
+          }
+        }
         continue;
       }
       final double width = sample.aspectRatio * size;

@@ -6,12 +6,16 @@ import 'package:flutter/foundation.dart';
 
 import '../ink/ink_sample.dart';
 import '../ink/stroke.dart';
+import 'handwriting_calibration.dart';
 
 /// The minimum normalized recognizer confidence required for a reading to be
-/// shown in search or reused to draw AI notation. This deliberately rejects
-/// uncertain readings so ordinary diagrams and shapes do not become words.
-const double searchableHandwritingConfidence = 0.90;
-const double reusableHandwritingConfidence = searchableHandwritingConfidence;
+/// shown in search. Uncertain readings remain metadata rather than becoming
+/// searchable words.
+const double searchableHandwritingConfidence = 0.75;
+
+/// Reuse stays stricter than search because a false positive here would make
+/// AI notation draw the wrong source strokes as text.
+const double reusableHandwritingConfidence = 0.90;
 
 /// A searchable reading of a group of page strokes, plus a normalized copy
 /// of their geometry. The copy is deliberately vector-only: fitting it to a
@@ -148,6 +152,7 @@ class HandwritingSampleLibrary {
     Iterable<RecognizedInkWord> words, {
     math.Random? random,
     this.maxVariantsPerText = 12,
+    this.calibration,
   }) : _random = random ?? math.Random() {
     for (final RecognizedInkWord word in words) {
       if (!word.isReusable) continue;
@@ -163,6 +168,11 @@ class HandwritingSampleLibrary {
 
   final math.Random _random;
   final int maxVariantsPerText;
+
+  /// Letters and words from the writer's calibration, shared by every note.
+  /// Used where the note itself has no sample of a word.
+  final HandwritingProfile? calibration;
+
   final Map<String, List<RecognizedInkWord>> _samples =
       <String, List<RecognizedInkWord>>{};
 
@@ -172,7 +182,7 @@ class HandwritingSampleLibrary {
 
   int variantsFor(String text) => _samples[canonical(text)]?.length ?? 0;
 
-  bool get isEmpty => _samples.isEmpty;
+  bool get isEmpty => _samples.isEmpty && (calibration?.isEmpty ?? true);
 
   RecognizedInkWord? choose(String text) {
     final List<RecognizedInkWord>? variants = _samples[canonical(text)];

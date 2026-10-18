@@ -25,6 +25,7 @@ import 'ai/note_image_renderer.dart';
 import 'ai/notation_layout.dart';
 import 'ai/notation_space.dart';
 import 'ai/selection_image_renderer.dart';
+import 'handwriting/handwriting_calibration.dart';
 import 'handwriting/handwriting_indexer.dart';
 import 'handwriting/recognized_handwriting.dart';
 import 'ink/eraser_settings.dart';
@@ -886,6 +887,7 @@ class EditorScreenState extends State<EditorScreen> {
     try {
       final HandwritingSampleLibrary handwriting = HandwritingSampleLibrary(
         _document.recognizedWords,
+        calibration: HandwritingCalibration.current.value,
       );
       traces = timeline == null
           ? layoutNotation(
@@ -1001,6 +1003,7 @@ class EditorScreenState extends State<EditorScreen> {
     try {
       final HandwritingSampleLibrary handwriting = HandwritingSampleLibrary(
         _document.recognizedWords,
+        calibration: HandwritingCalibration.current.value,
       );
       traces = <GeneratedInkTrace>[
         for (final GeneratedInkTrace trace in layoutNotation(
@@ -2128,10 +2131,7 @@ class EditorScreenState extends State<EditorScreen> {
         leadingIsBack: widget.onBack != null,
         onTitlePressed: widget.onTitlePressed ?? () {},
         onSettingsPressed: _openSettings,
-        onFindPressed:
-            !_document.recognizedWords.any(
-              (RecognizedInkWord word) => word.isSearchable,
-            )
+        onFindPressed: _document.recognizedWords.isEmpty
             ? null
             : _openHandwritingFind,
         tabs: widget.tabs,
@@ -2610,7 +2610,7 @@ class _HandwritingFindDialogState extends State<_HandwritingFindDialog> {
               alignment: Alignment.centerLeft,
               child: Text(
                 _query.text.trim().isEmpty
-                    ? 'Search words recognized with at least 90% confidence.'
+                    ? 'Search words recognized with at least 75% confidence.'
                     : found.isEmpty
                     ? 'No high-confidence handwritten text found.'
                     : '${selected + 1} of ${found.length} — Page ${found[selected].$1 + 1}: ${found[selected].$2.text}',
