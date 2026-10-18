@@ -96,25 +96,9 @@ class GoodnotesArchiveExtractor {
     Future<List<Size>> Function(Uint8List pdf)? pdfPageSizes,
     bool Function()? isCancelled,
   }) async {
-    if (bytes.lengthInBytes > config.maxImportGoodnotesBytes) {
-      throw DocumentImportException(
-        'This Goodnotes file is larger than '
-        '${(config.maxImportGoodnotesBytes / (1024 * 1024)).ceil()} MB',
-      );
-    }
-    final int maxExpandedBytes = config.maxGoodnotesExpandedBytes;
-    final int maxAttachmentBytes = config.maxImportPdfBytes;
-    final int maxPages = config.maxImportPdfPages;
     final GoodnotesRawArchive raw;
     try {
-      raw = await Isolate.run(
-        () => decodeGoodnotesArchive(
-          bytes,
-          maxExpandedBytes: maxExpandedBytes,
-          maxAttachmentBytes: maxAttachmentBytes,
-          maxPages: maxPages,
-        ),
-      );
+      raw = await Isolate.run(() => decodeGoodnotesArchive(bytes));
     } on DocumentImportException {
       rethrow;
     } on Object {
@@ -322,19 +306,11 @@ class GoodnotesRawStroke {
   final Float64List? radii;
 }
 
-/// Decodes a whole notebook. Throws [DocumentImportException] when it is
-/// too large and [FormatException] when it is malformed.
-/// [maxExpandedBytes] bounds all inflated and decompressed bytes together.
+/// Decodes a whole notebook. Throws [FormatException] when it is malformed.
 @visibleForTesting
-GoodnotesRawArchive decodeGoodnotesArchive(
-  Uint8List bytes, {
-  int maxExpandedBytes = 512 << 20,
-  int maxAttachmentBytes = 200 << 20,
-  int maxPages = 500,
-}) {
+GoodnotesRawArchive decodeGoodnotesArchive(Uint8List bytes) {
   final _ZipArchive zip = _ZipArchive(bytes);
-  final _Budget budget = _Budget(maxExpandedBytes);
-  Uint8List read(String name) => zip.read(name, budget);
+  Uint8List read(String name) => zip.read(name);
 
   if (!zip.entries.containsKey('index.notes.pb')) {
     throw const FormatException('Not a Goodnotes notebook');
@@ -434,11 +410,6 @@ GoodnotesRawArchive decodeGoodnotesArchive(
   if (pages.isEmpty) {
     throw const FormatException('A notebook without pages');
   }
-  if (pages.length > maxPages) {
-    throw DocumentImportException(
-      'This Goodnotes file has more than $maxPages pages',
-    );
-  }
 
   // Each PDF attachment, read once.
   final List<Uint8List> attachments = <Uint8List>[];
@@ -452,12 +423,6 @@ GoodnotesRawArchive decodeGoodnotesArchive(
       final _ZipEntry? entry = path == null ? null : zip.entries[path];
       if (entry == null) {
         return null;
-      }
-      if (entry.size > maxAttachmentBytes) {
-        throw DocumentImportException(
-          'The PDF in this Goodnotes file is larger than '
-          '${(maxAttachmentBytes / (1024 * 1024)).ceil()} MB',
-        );
       }
       final Uint8List data = read(path!);
       if (!_startsWith(data, _pdfMagic)) {
@@ -504,7 +469,7 @@ GoodnotesRawArchive decodeGoodnotesArchive(
         pdfPageIndex: attachment != null && pdfPage != null && pdfPage >= 1
             ? pdfPage - 1
             : null,
-        strokes: _decodeStrokeStream(stream, budget),
+        strokes: _decodeStrokeStream(stream),
       ),
     );
   }
@@ -566,24 +531,6 @@ bool _startsWith(Uint8List data, List<int> prefix) {
   return true;
 }
 
-/// Counts every byte expanded from the archive, so a small file cannot
-/// unpack into an unbounded amount of memory.
-class _Budget {
-  _Budget(this._remaining);
-  int _remaining;
-
-  int get remaining => _remaining;
-
-  void take(int bytes) {
-    if (bytes < 0 || bytes > _remaining) {
-      throw const DocumentImportException(
-        'This Goodnotes file is too large to import',
-      );
-    }
-    _remaining -= bytes;
-  }
-}
-
 // ---------------------------------------------------------------------------
 // Stroke streams.
 // ---------------------------------------------------------------------------
@@ -592,12 +539,10 @@ class _Budget {
 /// length-delimited records, of which each stroke's last one counts.
 /// Erased strokes leave a record marked deleted with no geometry.
 @visibleForTesting
-List<GoodnotesRawStroke> decodeGoodnotesStrokeStream(
-  Uint8List stream, {
-  int maxExpandedBytes = 512 << 20,
-}) => _decodeStrokeStream(stream, _Budget(maxExpandedBytes));
+List<GoodnotesRawStroke> decodeGoodnotesStrokeStream(Uint8List stream) =>
+    _decodeStrokeStream(stream);
 
-List<GoodnotesRawStroke> _decodeStrokeStream(Uint8List stream, _Budget budget) {
+List<GoodnotesRawStroke> _decodeStrokeStream(Uint8List stream) {
   final Map<String, _Message> latest = <String, _Message>{};
   for (final Uint8List record in _delimited(stream)) {
     final _Message message = _Message.parse(record);
@@ -616,7 +561,7 @@ List<GoodnotesRawStroke> _decodeStrokeStream(Uint8List stream, _Budget budget) {
     if ((payload.varint(14) ?? 0) != 0) {
       continue;
     }
-    final GoodnotesRawStroke? stroke = _decodeStroke(payload, budget);
+    final GoodnotesRawStroke? stroke = _decodeStroke(payload);
     if (stroke != null) {
       strokes.add(stroke);
     }
@@ -627,7 +572,7 @@ List<GoodnotesRawStroke> _decodeStrokeStream(Uint8List stream, _Budget budget) {
 const String _penFormat = 'vA(v)A(u)A(u)A(v)A(v)A(u)A(u)A(u)A(u)A(v)';
 const String _curveFormat = 'vuA(v)A(S(uu))A(S(uuuu))vA(f)';
 
-GoodnotesRawStroke? _decodeStroke(_Message payload, _Budget budget) {
+GoodnotesRawStroke? _decodeStroke(_Message payload) {
   final _Message? rgba = payload.message(4);
   final double r = rgba?.float(1) ?? 0;
   final double g = rgba?.float(2) ?? 0;
@@ -639,7 +584,7 @@ GoodnotesRawStroke? _decodeStroke(_Message payload, _Budget budget) {
   final Uint8List? packed = payload.bytes(2);
   final GoodnotesTpl? tpl = packed == null || packed.isEmpty
       ? null
-      : parseGoodnotesTpl(_decompressBv4(packed, budget));
+      : parseGoodnotesTpl(decompressGoodnotesBv4(packed));
   final bool highlighter =
       highlighterFlag || a < 0.95 || tpl?.format == _curveFormat;
 
@@ -811,10 +756,7 @@ class _Polyline {
 /// Decompresses a `bv4` stream: `bv41` LZ4 blocks and `bv4-` stored
 /// blocks, ended by `bv4$`. A block may copy from earlier blocks.
 @visibleForTesting
-Uint8List decompressGoodnotesBv4(Uint8List data, {int maxBytes = 256 << 20}) =>
-    _decompressBv4(data, _Budget(maxBytes));
-
-Uint8List _decompressBv4(Uint8List data, _Budget budget) {
+Uint8List decompressGoodnotesBv4(Uint8List data) {
   final ByteData view = ByteData.sublistView(data);
   // First pass: sizes, so the output is allocated once.
   int total = 0;
@@ -838,11 +780,7 @@ Uint8List _decompressBv4(Uint8List data, _Budget budget) {
       total += size;
       offset += 8 + size;
     }
-    if (total > budget.remaining) {
-      break; // Too large; refused just below.
-    }
   }
-  budget.take(total);
   final Uint8List out = Uint8List(total);
   int written = 0;
   offset = 0;
@@ -1328,7 +1266,7 @@ class _ZipArchive {
     throw const FormatException('Not a ZIP archive');
   }
 
-  Uint8List read(String name, _Budget budget) {
+  Uint8List read(String name) {
     final _ZipEntry? entry = entries[name];
     if (entry == null) {
       throw FormatException('Missing $name');
@@ -1349,7 +1287,6 @@ class _ZipArchive {
       start,
       start + entry.compressedSize,
     );
-    budget.take(entry.size);
     switch (entry.method) {
       case 0:
         if (entry.compressedSize != entry.size) {
@@ -1397,9 +1334,7 @@ class _BoundedSink implements Sink<List<int>> {
   @override
   void add(List<int> data) {
     if (_builder.length + data.length > _limit) {
-      throw const DocumentImportException(
-        'This Goodnotes file is too large to import',
-      );
+      throw const FormatException('A ZIP entry of the wrong size');
     }
     _builder.add(data);
   }

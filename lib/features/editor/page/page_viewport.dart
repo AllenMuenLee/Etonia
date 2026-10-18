@@ -205,9 +205,12 @@ class PageViewportState extends State<PageViewport>
   @override
   void didUpdateWidget(PageViewport oldWidget) {
     super.didUpdateWidget(oldWidget);
-    if (widget.currentPage != _shownPage) {
+    if (widget.currentPage != oldWidget.currentPage &&
+        widget.currentPage != _shownPage) {
       _shownPage = widget.currentPage;
       _jumpPending = true;
+    } else {
+      _shownPage = widget.currentPage;
     }
   }
 
@@ -219,6 +222,16 @@ class PageViewportState extends State<PageViewport>
     }
     _pull.dispose();
     super.dispose();
+  }
+
+  /// Reports page [index] as touched, as a pointer going down on it would,
+  /// so it becomes the current page without the column scrolling to it.
+  void touchPage(int index) {
+    if (index < 0 || index >= widget.pages.length) {
+      return;
+    }
+    _shownPage = index;
+    widget.onPageTouched?.call(index);
   }
 
   /// Scrolls by [delta] viewport pixels, within the column.

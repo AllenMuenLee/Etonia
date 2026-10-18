@@ -30,14 +30,20 @@ class SelectionActionBar extends StatefulWidget {
   const SelectionActionBar({
     super.key,
     required this.controller,
+    this.crossPageListenable,
+    this.selectionResolver,
     this.onAiPressed,
     this.onCopy,
     this.onCut,
+    this.onDuplicate,
+    this.onDelete,
     this.transform = PageTransform.identity,
     this.obstruction,
   });
 
   final InkController controller;
+  final Listenable? crossPageListenable;
+  final ValueGetter<InkSelection?>? selectionResolver;
 
   /// What floats over the parent that the bar must stay clear of, such as
   /// the tool palette, in the parent's coordinates.
@@ -52,6 +58,8 @@ class SelectionActionBar extends StatefulWidget {
   final VoidCallback? onAiPressed;
   final VoidCallback? onCopy;
   final VoidCallback? onCut;
+  final VoidCallback? onDuplicate;
+  final bool Function(InkSelection expectedSelection)? onDelete;
 
   static String describe(int count) {
     return count == 1 ? '1 stroke selected' : '$count strokes selected';
@@ -93,17 +101,27 @@ class _SelectionActionBarState extends State<SelectionActionBar> {
   void initState() {
     super.initState();
     widget.controller.selectionListenable.addListener(_onSelectionChanged);
+    widget.crossPageListenable?.addListener(_onSelectionChanged);
     _selection = _visibleSelection();
   }
 
   @override
   void didUpdateWidget(SelectionActionBar oldWidget) {
     super.didUpdateWidget(oldWidget);
+    bool changed = false;
     if (oldWidget.controller != widget.controller) {
       oldWidget.controller.selectionListenable.removeListener(
         _onSelectionChanged,
       );
       widget.controller.selectionListenable.addListener(_onSelectionChanged);
+      changed = true;
+    }
+    if (oldWidget.crossPageListenable != widget.crossPageListenable) {
+      oldWidget.crossPageListenable?.removeListener(_onSelectionChanged);
+      widget.crossPageListenable?.addListener(_onSelectionChanged);
+      changed = true;
+    }
+    if (oldWidget.selectionResolver != widget.selectionResolver || changed) {
       _selection = _visibleSelection();
     }
   }
@@ -111,12 +129,16 @@ class _SelectionActionBarState extends State<SelectionActionBar> {
   @override
   void dispose() {
     widget.controller.selectionListenable.removeListener(_onSelectionChanged);
+    widget.crossPageListenable?.removeListener(_onSelectionChanged);
     super.dispose();
   }
 
   /// The selection to show actions for: none while a gesture is reshaping
   /// it.
   InkSelection? _visibleSelection() {
+    if (widget.selectionResolver != null) {
+      return widget.selectionResolver!();
+    }
     final InkController controller = widget.controller;
     final bool gesturing =
         controller.activeLasso != null || controller.activeTransform != null;
@@ -167,7 +189,8 @@ class _SelectionActionBarState extends State<SelectionActionBar> {
             if (selection.stickyCount > 0) ...<Widget>[
               PaletteButton(
                 tooltip: 'Duplicate',
-                onPressed: widget.controller.duplicateSelection,
+                onPressed:
+                    widget.onDuplicate ?? widget.controller.duplicateSelection,
                 child: const Icon(AppIcons.duplicate),
               ),
               PaletteButton(
@@ -177,9 +200,12 @@ class _SelectionActionBarState extends State<SelectionActionBar> {
                       SelectionActionBar.describeSelection(
                         selection,
                       ).replaceFirst(' selected', '');
-                  if (widget.controller.deleteSelection(
-                    expectedSelection: selection,
-                  )) {
+                  final bool deleted = widget.onDelete != null
+                      ? widget.onDelete!(selection)
+                      : widget.controller.deleteSelection(
+                          expectedSelection: selection,
+                        );
+                  if (deleted) {
                     SemanticsService.sendAnnouncement(
                       View.of(context),
                       '$description deleted',

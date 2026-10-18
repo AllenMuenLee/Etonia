@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:math' as math;
 
 import 'package:flutter/gestures.dart';
@@ -6,6 +7,7 @@ import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:greatnote/features/editor/ai/ai_assistant_controller.dart';
 import 'package:greatnote/features/editor/ai/ai_canvas_input.dart';
+import 'package:greatnote/features/editor/ai/flying_words.dart';
 import 'package:greatnote/features/editor/editor_screen.dart';
 import 'package:greatnote/features/editor/ink/eraser_settings.dart';
 import 'package:greatnote/features/editor/ink/ink_canvas.dart';
@@ -455,7 +457,7 @@ void main() {
       await _write(tester, _loop(const Offset(200, 200), 12));
       expect(editor.ink.selection, isNull);
       expect(_input(tester).pendingStrokes, hasLength(1));
-      await tester.pump(const Duration(seconds: 1));
+      await tester.pump(const Duration(seconds: 2));
       await tester.pump();
       expect(editor.recognizer.batches, hasLength(1));
 
@@ -463,7 +465,7 @@ void main() {
       await _write(tester, _loop(const Offset(200, 200), 80, turn: 0.6));
       expect(editor.ink.selection, isNull);
       expect(_input(tester).pendingStrokes, hasLength(1));
-      await tester.pump(const Duration(seconds: 1));
+      await tester.pump(const Duration(seconds: 2));
       await tester.pump();
       expect(editor.recognizer.batches, hasLength(2));
       expect(_assistant(tester).context, isNull);
@@ -481,6 +483,113 @@ void main() {
   });
 
   group('handwriting in AI mode', () {
+    void enqueue(WidgetTester tester, _Editor editor) {
+      _input(tester).onHandwriting!(
+        [
+          AiCanvasStroke(const [
+            AiCanvasPoint(InkVector(300, 300), Duration.zero),
+            AiCanvasPoint(InkVector(320, 310), Duration(milliseconds: 20)),
+          ]),
+        ],
+        editor.ink,
+        openPanel: true,
+      );
+    }
+
+    testWidgets('queued words use the preceding result and latest draft', (
+      tester,
+    ) async {
+      final editor = await _pump(tester);
+      await _turnOnAi(tester);
+      final first = Completer<String>();
+      editor.recognizer.onRecognize = (_) =>
+          editor.recognizer.batches.length == 1
+          ? first.future
+          : Future.value('form');
+      await tester.enterText(find.byType(TextField), 'the');
+      enqueue(tester, editor);
+      enqueue(tester, editor);
+      await tester.pump();
+      expect(editor.recognizer.batches, hasLength(1));
+      await tester.enterText(find.byType(TextField), 'please explain the');
+      first.complete('standard');
+      await tester.pumpAndSettle();
+      expect(editor.recognizer.batches, hasLength(2));
+      expect(
+        editor.recognizer.batches.last.context!.draft,
+        'please explain the standard',
+      );
+      expect(_assistant(tester).draft, 'please explain the standard form');
+    });
+
+    testWidgets('recognition receives the active conversation', (tester) async {
+      final editor = await _pump(
+        tester,
+        strokes: [_mark(const Offset(200, 200))],
+      );
+      await tester.tap(find.byTooltip('Select'));
+      await tester.pump();
+      selectInk(editor.ink, const Rect.fromLTRB(150, 180, 250, 220));
+      await tester.pump();
+      await _turnOnAi(tester);
+      await settleAi(tester);
+      expect(_assistant(tester).send('Explain capacitance'), isTrue);
+      await tester.pump();
+      editor.client.answer('Capacitance measures stored charge per volt.');
+      await tester.pumpAndSettle();
+      enqueue(tester, editor);
+      await tester.pumpAndSettle();
+      expect(editor.recognizer.batches.single.context!.recentMessages, [
+        'Capacitance measures stored charge per volt.',
+        'Explain capacitance',
+      ]);
+      // Recognition is local; only the explicit chat send called the AI client.
+      expect(editor.client.requests, hasLength(1));
+    });
+
+    testWidgets('a recognition timeout releases the next word', (tester) async {
+      final editor = await _pump(tester);
+      await _turnOnAi(tester);
+      final first = Completer<String>();
+      editor.recognizer.onRecognize = (_) =>
+          editor.recognizer.batches.length == 1
+          ? first.future
+          : Future.value('next');
+      enqueue(tester, editor);
+      enqueue(tester, editor);
+      await tester.pump();
+      await tester.pump(const Duration(seconds: 9));
+      await tester.pumpAndSettle();
+      expect(_assistant(tester).draft, 'next');
+      first.complete('late');
+      await tester.pumpAndSettle();
+      expect(_assistant(tester).draft, 'next');
+    });
+
+    testWidgets('turning AI off discards queued and in-flight recognition', (
+      tester,
+    ) async {
+      final editor = await _pump(tester);
+      await _turnOnAi(tester);
+      final first = Completer<String>();
+      editor.recognizer.onRecognize = (_) => first.future;
+      enqueue(tester, editor);
+      enqueue(tester, editor);
+      await tester.pump();
+      await tester.tap(find.byTooltip('Turn off AI'));
+      await tester.pumpAndSettle();
+      editor.recognizer.onRecognize = null;
+      editor.recognizer.text = 'new';
+      await _turnOnAi(tester);
+      enqueue(tester, editor);
+      await tester.pumpAndSettle();
+      expect(_assistant(tester).draft, 'new');
+      first.complete('stale');
+      await tester.pumpAndSettle();
+      expect(editor.recognizer.batches, hasLength(2));
+      expect(_assistant(tester).draft, 'new');
+    });
+
     testWidgets('is read into the composer once the pen rests', (
       WidgetTester tester,
     ) async {
@@ -497,8 +606,8 @@ void main() {
       // A second stroke before the pause joins the first.
       await _write(tester, _letter(const Offset(340, 300)));
       expect(_input(tester).pendingStrokes, hasLength(2));
-      // Still under 0.8 s since the pen left the screen.
-      await tester.pump(const Duration(milliseconds: 750));
+      // Still under 1.2 s since the pen left the screen.
+      await tester.pump(const Duration(milliseconds: 1150));
       expect(editor.recognizer.batches, isEmpty);
       await tester.pump(const Duration(milliseconds: 100));
       await tester.pump();
@@ -506,8 +615,11 @@ void main() {
       expect(editor.recognizer.batches, hasLength(1));
       expect(editor.recognizer.batches.single.strokes, hasLength(2));
       expect(editor.recognizer.batches.single.png, isNotEmpty);
+      expect(editor.recognizer.batches.single.context!.draft, 'Hello');
       expect(editor.renderer.batches.single, hasLength(2));
       expect(_input(tester).isEmpty, isTrue);
+      // The words land in the composer once they have flown there.
+      await tester.pumpAndSettle();
       expect(_assistant(tester).draft, 'Hello what is this');
       final TextField field = tester.widget<TextField>(find.byType(TextField));
       expect(field.controller!.text, 'Hello what is this');
@@ -516,6 +628,27 @@ void main() {
         const TextSelection.collapsed(offset: 'Hello what is this'.length),
       );
       expect(editor.ink.strokes, isEmpty);
+    });
+
+    testWidgets('the words fly from the page into the composer', (
+      WidgetTester tester,
+    ) async {
+      final _Editor editor = await _pump(tester);
+      editor.recognizer.text = 'fly';
+      await _turnOnAi(tester);
+
+      await _write(tester, _letter(const Offset(300, 300)));
+      await tester.pump(const Duration(seconds: 2));
+      await tester.pump();
+      expect(editor.recognizer.batches, hasLength(1));
+      // In flight: shown over the page, not yet in the composer.
+      expect(find.byType(FlyingWords), findsOneWidget);
+      expect(find.text('fly'), findsOneWidget);
+      expect(_assistant(tester).draft, isEmpty);
+
+      await tester.pumpAndSettle();
+      expect(find.byType(FlyingWords), findsNothing);
+      expect(_assistant(tester).draft, 'fly');
     });
 
     testWidgets('reopens a closed chat with the words in the composer', (
@@ -528,7 +661,7 @@ void main() {
       expect(find.byType(AiAssistantPanel), findsNothing);
 
       await _write(tester, _letter(const Offset(300, 300)));
-      await tester.pump(const Duration(seconds: 1));
+      await tester.pump(const Duration(seconds: 2));
       await tester.pumpAndSettle();
 
       expect(find.byType(AiAssistantPanel), findsOneWidget);
@@ -550,6 +683,7 @@ void main() {
       await tester.pump();
       await tester.pump();
       expect(editor.recognizer.batches, hasLength(1));
+      await tester.pumpAndSettle();
       expect(_assistant(tester).draft, 'now');
     });
 
@@ -559,7 +693,7 @@ void main() {
       await _turnOnAi(tester);
       await _closeChat(tester);
       await _write(tester, _letter(const Offset(300, 300)));
-      await tester.pump(const Duration(seconds: 1));
+      await tester.pump(const Duration(seconds: 2));
       await tester.pumpAndSettle();
       expect(editor.recognizer.batches, hasLength(1));
       expect(find.byType(AiAssistantPanel), findsNothing);

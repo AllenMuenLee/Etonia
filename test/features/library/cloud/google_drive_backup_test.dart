@@ -211,7 +211,7 @@ void main() {
   Map<String, Object?> manifest() =>
       jsonDecode(
             utf8.decode(
-              drive.bytesOf(drive.itemAt('Greatnote Backup/manifest.json')!.id),
+              drive.bytesOf(drive.itemAt('Etonia/manifest.json')!.id),
             ),
           )
           as Map<String, Object?>;
@@ -231,7 +231,7 @@ void main() {
       // Two note contents, a PDF, and an image.
       expect(summary.uploadedFiles, 4);
       expect(summary.unchangedFiles, 0);
-      final GoogleDriveItem notes = drive.itemAt('Greatnote Backup/notes')!;
+      final GoogleDriveItem notes = drive.itemAt('Etonia/notes')!;
       expect(drive.childrenOf(notes.id), hasLength(4));
       final Map<String, Object?> json = manifest();
       expect(json['schema'], GoogleDriveBackupService.schema);
@@ -332,7 +332,7 @@ void main() {
       expect(drive.uploads.first, endsWith('.json'));
       expect(drive.uploads.last, GoogleDriveBackupService.manifestName);
       // The old content went to the trash; four files are still referred to.
-      final GoogleDriveItem notes = drive.itemAt('Greatnote Backup/notes')!;
+      final GoogleDriveItem notes = drive.itemAt('Etonia/notes')!;
       expect(drive.childrenOf(notes.id), hasLength(4));
     });
 
@@ -350,7 +350,7 @@ void main() {
         ),
         throwsA(isA<CloudCancelledException>()),
       );
-      expect(drive.itemAt('Greatnote Backup/manifest.json'), isNull);
+      expect(drive.itemAt('Etonia/manifest.json'), isNull);
     });
 
     test('offline and unauthorized errors come through as they are', () async {
@@ -396,6 +396,27 @@ void main() {
       expect(summary.foldersCreated, 3);
       expect(summary.notesRestored, 2);
       expect(summary.notesSkipped, 0);
+      expect(await _describe(fresh), await _describe(original));
+    });
+
+    test('finds a backup in the older Greatnote Backup folder', () async {
+      final InMemoryNoteRepository original = _repository();
+      await _seed(original);
+      await service(original).backUp();
+      // Moved to where older versions kept it.
+      final GoogleDriveItem current = drive.itemAt('Etonia/manifest.json')!;
+      final GoogleDriveItem legacy = drive.addFolder('Greatnote Backup');
+      drive.addFile(
+        GoogleDriveBackupService.manifestName,
+        drive.bytesOf(current.id),
+        parentId: legacy.id,
+      );
+      await drive.deleteFile(current.id);
+
+      final InMemoryNoteRepository fresh = _repository();
+      final RestoreSummary summary = await service(fresh).restore();
+
+      expect(summary.notesRestored, 2);
       expect(await _describe(fresh), await _describe(original));
     });
 
@@ -455,7 +476,7 @@ void main() {
       final InMemoryNoteRepository original = _repository();
       await _seed(original);
       await service(original).backUp();
-      final GoogleDriveItem notes = drive.itemAt('Greatnote Backup/notes')!;
+      final GoogleDriveItem notes = drive.itemAt('Etonia/notes')!;
       final GoogleDriveItem pdf = drive
           .childrenOf(notes.id)
           .firstWhere((GoogleDriveItem item) => item.name.endsWith('.pdf'));
@@ -487,7 +508,7 @@ void main() {
           isA<GoogleDriveBackupException>().having(
             (GoogleDriveBackupException e) => e.message,
             'message',
-            'No Greatnote backup was found in your Google Drive',
+            'No Etonia backup was found in your Google Drive',
           ),
         ),
       );

@@ -1,0 +1,20 @@
+project_id = "etonia"
+
+[functions.billing]
+verify_jwt = false
+
+[functions.ai]
+verify_jwt = false
+
+[functions.store-events]
+verify_jwt = false
+
+# Each function validates its own user token or webhook credential. This also
+# supports the current Supabase publishable keys and asymmetric user JWTs.
+
+[auth]
+# Devices that have not signed in with Google get an anonymous account on the
+# free plan. Enable the same setting in the dashboard (Auth > Sign In / Providers).
+enable_anonymous_sign_ins = true
+# Lets Google sign-in upgrade a device's anonymous account in place.
+enable_manual_linking = true

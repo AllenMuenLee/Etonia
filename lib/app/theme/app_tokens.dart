@@ -82,6 +82,11 @@ abstract final class AppMotion {
   /// One breath of the glow around a busy panel.
   static const Duration pulse = Duration(milliseconds: 2400);
 
+  /// Handwritten words flying from the page into the chat's composer:
+  /// long enough to follow with the eye, short enough not to wait on.
+  static const Duration flight = Duration(milliseconds: 620);
+  static const Curve flightCurve = Cubic(0.45, 0, 0.2, 1);
+
   /// Collapses [duration] to zero when the platform requests reduced motion.
   static Duration resolve(BuildContext context, Duration duration) {
     return MediaQuery.disableAnimationsOf(context) ? Duration.zero : duration;
@@ -369,9 +374,11 @@ abstract final class AppShadows {
 /// edge in one place makes menus, panels, and controls read as one system.
 abstract final class AppGlass {
   /// How much of the surface's own color covers what is behind it.
-  static const double opacity = 0.70;
+  static const double opacity = 0.88;
 
-  static const double blurSigma = 12;
+  /// A deliberately heavy frost: content and ink remain recognizable as
+  /// color, but no longer stay legible through translucent chrome.
+  static const double blurSigma = 48;
 
   /// Colors behind the glass come through richer, as through real frosted
   /// glass, rather than washed out by the blur.
@@ -381,10 +388,10 @@ abstract final class AppGlass {
       colors.surface.withValues(alpha: colors.surface.a * opacity);
 
   static Color muted(AppColors colors) =>
-      colors.surfaceMuted.withValues(alpha: colors.surfaceMuted.a * 0.78);
+      colors.surfaceMuted.withValues(alpha: colors.surfaceMuted.a * 0.90);
 
   static Color background(AppColors colors) =>
-      colors.background.withValues(alpha: colors.background.a * 0.90);
+      colors.background.withValues(alpha: colors.background.a * 0.96);
 
   static BorderSide border(AppColors colors) =>
       BorderSide(color: colors.glassEdge, width: AppSizes.hairline);
@@ -404,6 +411,55 @@ abstract final class AppGlass {
       r - r * s, g - g * s, b + (1 - b) * s, 0, 0, //
       0, 0, 0, 1, 0, //
     ];
+  }
+}
+
+/// Clips and heavily frosts the backdrop behind translucent chrome.
+///
+/// Use this around surfaces that provide their own translucent decoration.
+/// [GlassSurface] already includes it.
+class GlassBlur extends StatelessWidget {
+  const GlassBlur({
+    super.key,
+    required this.child,
+    this.borderRadius = BorderRadius.zero,
+  });
+
+  final Widget child;
+  final BorderRadius borderRadius;
+
+  @override
+  Widget build(BuildContext context) {
+    return ClipRRect(
+      borderRadius: borderRadius,
+      child: BackdropFilter(filter: AppGlass.filter, child: child),
+    );
+  }
+}
+
+/// A Material surface whose translucent color always frosts its backdrop.
+class GlassMaterial extends StatelessWidget {
+  const GlassMaterial({
+    super.key,
+    required this.child,
+    this.color,
+    this.borderRadius = BorderRadius.zero,
+  });
+
+  final Widget child;
+  final Color? color;
+  final BorderRadius borderRadius;
+
+  @override
+  Widget build(BuildContext context) {
+    return GlassBlur(
+      borderRadius: borderRadius,
+      child: Material(
+        color: color ?? AppGlass.surface(AppColors.of(context)),
+        borderRadius: borderRadius,
+        child: child,
+      ),
+    );
   }
 }
 
@@ -431,18 +487,15 @@ class GlassSurface extends StatelessWidget {
         borderRadius: borderRadius,
         boxShadow: boxShadow,
       ),
-      child: ClipRRect(
+      child: GlassBlur(
         borderRadius: borderRadius,
-        child: BackdropFilter(
-          filter: AppGlass.filter,
-          child: DecoratedBox(
-            decoration: BoxDecoration(
-              color: color ?? AppGlass.surface(colors),
-              border: Border.fromBorderSide(AppGlass.border(colors)),
-              borderRadius: borderRadius,
-            ),
-            child: child,
+        child: DecoratedBox(
+          decoration: BoxDecoration(
+            color: color ?? AppGlass.surface(colors),
+            border: Border.fromBorderSide(AppGlass.border(colors)),
+            borderRadius: borderRadius,
           ),
+          child: child,
         ),
       ),
     );

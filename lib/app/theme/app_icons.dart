@@ -56,8 +56,13 @@ abstract final class AppIcons {
   static const IconData account = CupertinoIcons.person_crop_circle;
   static const IconData warning = CupertinoIcons.exclamationmark_triangle;
 
+  // Plans and AI models.
+  static const IconData plans = CupertinoIcons.sparkles;
+  static const IconData lock = CupertinoIcons.lock_fill;
+  static const IconData model = CupertinoIcons.chevron_down;
+
   // Editor.
-  static const IconData pen = CupertinoIcons.pencil_outline;
+  static const IconData pen = CupertinoIcons.pen;
   static const IconData highlighter = CupertinoIcons.paintbrush;
   static const IconData stickyNote = CupertinoIcons.square_on_square;
   static const IconData lasso = CupertinoIcons.lasso;
@@ -69,7 +74,6 @@ abstract final class AppIcons {
   static const IconData tune = CupertinoIcons.slider_horizontal_3;
   static const IconData insertImage = CupertinoIcons.photo;
   static const IconData addPage = CupertinoIcons.doc_text;
-  static const IconData fitToScreen = CupertinoIcons.fullscreen;
   static const IconData infinite = CupertinoIcons.infinite;
   static const IconData grows = CupertinoIcons.arrow_up_left_arrow_down_right;
   static const IconData show = CupertinoIcons.eye;

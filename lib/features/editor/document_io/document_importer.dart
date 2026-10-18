@@ -72,11 +72,6 @@ class DocumentImporter {
   /// The size of each page of [bytes] in page units, once it is known to
   /// be a PDF that can be imported.
   Future<List<Size>> _pdfPageSizes(Uint8List bytes) async {
-    if (bytes.lengthInBytes > config.maxImportPdfBytes) {
-      throw DocumentImportException(
-        'This PDF is larger than ${_megabytes(config.maxImportPdfBytes)} MB',
-      );
-    }
     late final PdfInspection inspection;
     try {
       inspection = await rasterizer.inspect(bytes);
@@ -88,11 +83,6 @@ class DocumentImporter {
     }
     if (inspection.pageSizes.isEmpty) {
       throw const DocumentImportException('This PDF has no pages');
-    }
-    if (inspection.pageSizes.length > config.maxImportPdfPages) {
-      throw DocumentImportException(
-        'This PDF has more than ${config.maxImportPdfPages} pages',
-      );
     }
     final List<Size> pageUnits = <Size>[];
     for (final Size points in inspection.pageSizes) {
@@ -321,11 +311,6 @@ class DocumentImporter {
     required PickedDocument picked,
     required Rect visiblePage,
   }) async {
-    if (picked.bytes.lengthInBytes > config.maxImageImportBytes) {
-      throw DocumentImportException(
-        'This image is larger than ${_megabytes(config.maxImageImportBytes)} MB',
-      );
-    }
     final _NormalizedImage normalized;
     try {
       normalized = await Isolate.run(
@@ -368,8 +353,6 @@ class DocumentImporter {
     return element;
   }
 }
-
-int _megabytes(int bytes) => (bytes / (1024 * 1024)).ceil();
 
 class _NormalizedImage {
   const _NormalizedImage({

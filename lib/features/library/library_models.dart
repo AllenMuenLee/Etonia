@@ -117,6 +117,7 @@ class NoteEntry {
     required this.created,
     required this.modified,
     required this.pageCount,
+    this.searchText = '',
     this.deleted,
   });
 
@@ -128,6 +129,7 @@ class NoteEntry {
       created: DateTime.fromMillisecondsSinceEpoch(json['created']! as int),
       modified: DateTime.fromMillisecondsSinceEpoch(json['modified']! as int),
       pageCount: (json['pageCount'] as int?) ?? 1,
+      searchText: json['searchText'] as String? ?? '',
       deleted: json['deleted'] == null
           ? null
           : DateTime.fromMillisecondsSinceEpoch(json['deleted']! as int),
@@ -141,6 +143,9 @@ class NoteEntry {
   final DateTime modified;
   final int pageCount;
 
+  /// A compact index of text recognized from the note's handwriting.
+  final String searchText;
+
   /// When it was moved to Recently Deleted; null while it is in the
   /// library.
   final DateTime? deleted;
@@ -150,6 +155,7 @@ class NoteEntry {
     String? Function()? folderId,
     DateTime? modified,
     int? pageCount,
+    String? searchText,
     DateTime? Function()? deleted,
   }) {
     return NoteEntry(
@@ -159,6 +165,7 @@ class NoteEntry {
       created: created,
       modified: modified ?? this.modified,
       pageCount: pageCount ?? this.pageCount,
+      searchText: searchText ?? this.searchText,
       deleted: deleted == null ? this.deleted : deleted(),
     );
   }
@@ -171,6 +178,7 @@ class NoteEntry {
       'created': created.millisecondsSinceEpoch,
       'modified': modified.millisecondsSinceEpoch,
       'pageCount': pageCount,
+      if (searchText.isNotEmpty) 'searchText': searchText,
       if (deleted != null) 'deleted': deleted!.millisecondsSinceEpoch,
     };
   }

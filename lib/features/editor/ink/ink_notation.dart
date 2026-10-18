@@ -7,8 +7,10 @@ class GeneratedInkTrace {
     required this.style,
     required List<InkVector> points,
     List<double>? timesMs,
+    List<double>? widths,
   }) : points = List<InkVector>.unmodifiable(points),
-       timesMs = timesMs == null ? null : List<double>.unmodifiable(timesMs);
+       timesMs = timesMs == null ? null : List<double>.unmodifiable(timesMs),
+       widths = widths == null ? null : List<double>.unmodifiable(widths);
 
   final StrokeStyle style;
   final List<InkVector> points;
@@ -17,6 +19,10 @@ class GeneratedInkTrace {
   /// milliseconds from the start of the drawing; never decreasing. Null for
   /// a trace that appears all at once.
   final List<double>? timesMs;
+
+  /// A pen-width factor at each point. AI ink uses a restrained pressure
+  /// rhythm so its traces feel drawn rather than mechanically plotted.
+  final List<double>? widths;
 }
 
 enum AddNotationResult {

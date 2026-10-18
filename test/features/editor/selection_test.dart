@@ -60,8 +60,20 @@ List<Stroke> _page() {
 }
 
 /// A canvas position in global coordinates.
-Offset _at(WidgetTester tester, Offset local) {
-  return canvasRect(tester).topLeft + local;
+Offset _at(WidgetTester tester, Offset local) => pageToGlobal(tester, local);
+
+/// A move of [dx], [dy] page units, as a distance on screen.
+Offset _by(WidgetTester tester, double dx, double dy) =>
+    Offset(dx, dy) * canvasScale(tester);
+
+/// A transform that moves by [dx], [dy], within rounding.
+Matcher _translation(double dx, double dy) {
+  return isA<InkTransform>()
+      .having((InkTransform t) => t.a, 'a', closeTo(1, 1e-9))
+      .having((InkTransform t) => t.b, 'b', closeTo(0, 1e-9))
+      .having((InkTransform t) => t.tx, 'tx', closeTo(dx, 1e-6))
+      .having((InkTransform t) => t.ty, 'ty', closeTo(dy, 1e-6))
+      .having((InkTransform t) => t.scale, 'scale', closeTo(1, 1e-9));
 }
 
 Matcher _near(double x, double y) {
@@ -168,6 +180,10 @@ bool _isSelected(WidgetTester tester, String label) {
 }
 
 /// The action bar: the box around Copy, Cut, and AI.
+/// The writing area the page is shown in, which the actions stay inside.
+Rect _surface(WidgetTester tester) =>
+    tester.getRect(find.byKey(const ValueKey<String>('page-viewport')));
+
 Rect _actionBarRect(WidgetTester tester) {
   return tester.getRect(
     find
@@ -235,15 +251,15 @@ void main() {
         expect(controller.activeStroke, isNull);
         expect(controller.activeLasso, isNull);
         final SelectionFrame frame = controller.selection!.frame;
-        expect(frame.center, const InkVector(170, 220));
+        expect(frame.center, _near(170, 220));
         expect(frame.halfWidth, 52);
         expect(frame.halfHeight, 22);
-        // Copy and Cut appear beside the frame, on the page.
+        // Copy and Cut appear beside the frame, in the writing area.
         final Rect bar = _actionBarRect(tester);
-        final Rect canvas = canvasRect(tester);
-        expect(canvas.contains(bar.topLeft), isTrue);
-        expect(canvas.contains(bar.bottomRight), isTrue);
-        expect(bar.bottom, lessThan(canvas.top + 166));
+        final Rect surface = _surface(tester);
+        expect(surface.contains(bar.topLeft), isTrue);
+        expect(surface.contains(bar.bottomRight), isTrue);
+        expect(bar.bottom, lessThan(_at(tester, _rotationHandle).dy));
         expect(tester.takeException(), isNull);
       });
 
@@ -301,7 +317,7 @@ void main() {
           expect(find.byType(SelectOptions), findsNothing);
           expect(controller.strokes.length, 5);
           expect(controller.selection!.indices, <int>[3, 4]);
-          expect(controller.strokes[3].points.first, const InkVector(144, 224));
+          expect(controller.strokes[3].points.first, _near(144, 224));
           expect(controller.strokes[4].style.ink, _red);
           expect(_isSelected(tester, 'Select'), isTrue);
           expect(tester.takeException(), isNull);
@@ -351,8 +367,8 @@ void main() {
     final LassoGesture lasso = controller.activeLasso!;
     expect(lasso.shape, LassoShape.freeform);
     expect(lasso.isClosed, isFalse);
-    expect(lasso.points.first, const InkVector(100, 170));
-    expect(lasso.points.last, const InkVector(100, 270));
+    expect(lasso.points.first, _near(100, 170));
+    expect(lasso.points.last, _near(100, 270));
     expect(lasso.points.length, lessThan(30));
     // Dashes of 6 px with gaps of 4 px along the 140 px top side: some of
     // it is drawn and some of it is not.
@@ -420,11 +436,11 @@ void main() {
 
     final LassoGesture lasso = controller.activeLasso!;
     expect(lasso.shape, LassoShape.rectangle);
-    expect(lasso.outline, const <InkVector>[
-      InkVector(100, 170),
-      InkVector(240, 170),
-      InkVector(240, 270),
-      InkVector(100, 270),
+    expect(lasso.outline, <Matcher>[
+      _near(100, 170),
+      _near(240, 170),
+      _near(240, 270),
+      _near(100, 270),
     ]);
     // The rectangle is what is shown: dashes along its top and bottom
     // sides, where the pointer never went.
@@ -486,7 +502,7 @@ void main() {
       // Just above the held point, on the page.
       final Rect button = tester.getRect(find.byTooltip('Paste'));
       final Offset held = _at(tester, spot);
-      expect(button.center.dx, held.dx);
+      expect(button.center.dx, closeTo(held.dx, 1e-6));
       expect(button.bottom, lessThan(held.dy));
       expect(held.dy - button.bottom, lessThan(20));
       // Letting go, or moving on afterwards, changes nothing.
@@ -502,9 +518,9 @@ void main() {
       expect(find.byTooltip('Paste'), findsNothing);
       expect(controller.strokes.length, 5);
       expect(controller.selection!.indices, <int>[3, 4]);
-      expect(controller.selection!.frame.center, const InkVector(400, 600));
+      expect(controller.selection!.frame.center, _near(400, 600));
       // The copied frame was centered on (170, 220).
-      expect(controller.strokes[3].points.first, const InkVector(350, 580));
+      expect(controller.strokes[3].points.first, _near(350, 580));
       expect(controller.strokes[4].style.ink, _red);
       expect(find.byTooltip('Copy'), findsOneWidget);
       expect(tester.takeException(), isNull);
@@ -634,13 +650,14 @@ void main() {
       await _selectPair(tester, controller);
       await tester.tap(find.byTooltip('Copy'));
       await tester.pumpAndSettle();
-      final Rect canvas = canvasRect(tester);
+      final Size page = canvasRect(tester).size / canvasScale(tester);
+      final Rect canvas = _surface(tester);
 
       for (final Offset corner in <Offset>[
         const Offset(3, 3),
-        Offset(canvas.width - 3, 3),
-        Offset(3, canvas.height - 3),
-        Offset(canvas.width - 3, canvas.height - 3),
+        Offset(page.width - 3, 3),
+        Offset(3, page.height - 3),
+        Offset(page.width - 3, page.height - 3),
       ]) {
         final TestGesture gesture = await hold(tester, corner);
         await gesture.up();
@@ -723,10 +740,9 @@ void main() {
     for (final int index in <int>[0, 1]) {
       final Stroke moved = controller.strokes[index];
       for (int i = 0; i < moved.points.length; i++) {
-        expect(
-          moved.points[i],
-          before[index].points[i] + const InkVector(60, 50),
-        );
+        final InkVector want =
+            before[index].points[i] + const InkVector(60, 50);
+        expect(moved.points[i], _near(want.x, want.y));
       }
       expect(moved.style, same(before[index].style));
       expect(moved.source, StrokeSource.derived);
@@ -735,7 +751,7 @@ void main() {
     expect(controller.strokes.length, 3);
     // Still selected, and the actions came back beside the moved frame.
     expect(controller.selection!.indices, <int>[0, 1]);
-    expect(controller.selection!.frame.center, const InkVector(230, 270));
+    expect(controller.selection!.frame.center, _near(230, 270));
     expect(find.byTooltip('Copy'), findsOneWidget);
     final ScreenPixels pixels = await captureScreen(tester);
     expect(
@@ -854,10 +870,7 @@ void main() {
     debugOnRebuildDirtyWidget = (Element element, bool builtOnce) => rebuilds++;
     addTearDown(() => debugOnRebuildDirtyWidget = null);
     for (int i = 1; i <= 20; i++) {
-      await gesture.moveBy(
-        const Offset(3, 2.5),
-        timeStamp: _sampleInterval * i,
-      );
+      await gesture.moveBy(_by(tester, 3, 2.5), timeStamp: _sampleInterval * i);
       await tester.pump();
     }
     debugOnRebuildDirtyWidget = null;
@@ -868,10 +881,7 @@ void main() {
     expect(completed, 0);
     expect(selection, 21);
     expect(controller.strokes, before);
-    expect(
-      controller.activeTransform!.transform,
-      InkTransform.translation(const InkVector(60, 50)),
-    );
+    expect(controller.activeTransform!.transform, _translation(60, 50));
     final ScreenPixels pixels = await captureScreen(tester);
     expect(
       pixels.at(_at(tester, const Offset(200, 250))),
@@ -892,7 +902,7 @@ void main() {
     // The paths were rebuilt once, at the end.
     expect(completed, 1);
     expect(controller.strokes[0], isNot(same(before[0])));
-    expect(controller.strokes[0].points.first, const InkVector(180, 250));
+    expect(controller.strokes[0].points.first, _near(180, 250));
     expect(find.byTooltip('Copy'), findsOneWidget);
   });
 
@@ -1106,8 +1116,8 @@ void main() {
       );
       expect(controller.strokes.length, 7);
       // Cut took the first paste; these are one and two offsets from it.
-      expect(controller.strokes[3].points.first, const InkVector(168, 248));
-      expect(controller.strokes[5].points.first, const InkVector(192, 272));
+      expect(controller.strokes[3].points.first, _near(168, 248));
+      expect(controller.strokes[5].points.first, _near(192, 272));
 
       await _chord(
         tester,
@@ -1269,13 +1279,13 @@ void main() {
       _at(tester, _center),
       kind: PointerDeviceKind.stylus,
     );
-    await move.moveBy(const Offset(60, 50), timeStamp: _sampleInterval);
+    await move.moveBy(_by(tester, 60, 50), timeStamp: _sampleInterval);
     await tester.tap(find.byTooltip('Pen'));
     await tester.pumpAndSettle();
 
     expect(controller.activeTransform, isNull);
     expect(controller.selection, isNull);
-    expect(controller.strokes[0].points.first, const InkVector(180, 250));
+    expect(controller.strokes[0].points.first, _near(180, 250));
     expect(find.byTooltip('Copy'), findsNothing);
     // The clipboard is still what was copied before the move.
     expect(controller.canPaste, isTrue);
@@ -1285,11 +1295,11 @@ void main() {
     );
 
     // The rest of that gesture neither moves nor writes.
-    await move.moveBy(const Offset(100, 100), timeStamp: _sampleInterval * 2);
+    await move.moveBy(_by(tester, 100, 100), timeStamp: _sampleInterval * 2);
     await move.up(timeStamp: _sampleInterval * 3);
     await tester.pumpAndSettle();
     expect(controller.strokes.length, 3);
-    expect(controller.strokes[0].points.first, const InkVector(180, 250));
+    expect(controller.strokes[0].points.first, _near(180, 250));
     expect(controller.activeStroke, isNull);
 
     // Back on Select nothing is selected, and Paste still works.
@@ -1372,7 +1382,11 @@ void main() {
 
     // It used the current eraser settings: area mode at 24 px.
     expect(controller.strokes.length, 4);
-    expect(controller.strokes[2].points.last.x, closeTo(156, 1e-6));
+    // The eraser is 24 px on screen, whatever the zoom; the line is 4 wide.
+    expect(
+      controller.strokes[2].points.last.x,
+      closeTo(170 - 12 / canvasScale(tester) - 2, 1e-6),
+    );
     expect(_isSelected(tester, 'Select'), isTrue);
     expect(_isSelected(tester, 'Eraser'), isFalse);
     // Erasing let go of the selection.
@@ -1410,7 +1424,7 @@ void main() {
       _at(tester, _center),
       kind: PointerDeviceKind.stylus,
     );
-    await move.moveBy(const Offset(10, 10), timeStamp: _sampleInterval);
+    await move.moveBy(_by(tester, 10, 10), timeStamp: _sampleInterval);
     // On a corner handle, and then on empty paper.
     final TestGesture other = await tester.startGesture(
       _at(tester, _corners[0] + const Offset(10, 10)),
@@ -1421,15 +1435,12 @@ void main() {
       _at(tester, const Offset(300, 620)),
     );
     await tap.up();
-    expect(
-      controller.activeTransform!.transform,
-      InkTransform.translation(const InkVector(10, 10)),
-    );
+    expect(controller.activeTransform!.transform, _translation(10, 10));
     expect(controller.activeTransform!.operation, SelectionOperation.move);
     await move.up();
     await tester.pumpAndSettle();
 
-    expect(controller.strokes[0].points.first, const InkVector(130, 210));
+    expect(controller.strokes[0].points.first, _near(130, 210));
     expect(controller.strokes[0].style.width, 4);
     expect(controller.selection!.indices, <int>[0, 1]);
     expect(controller.strokes.length, 3);
@@ -1456,13 +1467,13 @@ void main() {
       _at(tester, _center),
       kind: PointerDeviceKind.stylus,
     );
-    await move.moveBy(const Offset(30, 20), timeStamp: _sampleInterval);
+    await move.moveBy(_by(tester, 30, 20), timeStamp: _sampleInterval);
     await move.cancel(timeStamp: _sampleInterval * 2);
     await tester.pumpAndSettle();
 
     expect(controller.activeTransform, isNull);
     expect(controller.activePointer, isNull);
-    expect(controller.strokes[0].points.first, const InkVector(150, 220));
+    expect(controller.strokes[0].points.first, _near(150, 220));
     expect(controller.selection!.indices, <int>[0, 1]);
     expect(tester.takeException(), isNull);
   });
@@ -1506,14 +1517,14 @@ void main() {
       _at(tester, _center),
       kind: PointerDeviceKind.stylus,
     );
-    await move.moveBy(const Offset(0, -215), timeStamp: _sampleInterval);
+    await move.moveBy(_by(tester, 0, -215), timeStamp: _sampleInterval);
     await tester.pump();
     expect((await captureScreen(tester)).at(above), isSameColorAs(background));
     await move.up(timeStamp: _sampleInterval * 2);
     await tester.pumpAndSettle();
 
     // The points are where they were put; only the drawing is clipped.
-    expect(controller.strokes[0].points.first, const InkVector(120, -15));
+    expect(controller.strokes[0].points.first, _near(120, -15));
     expect((await captureScreen(tester)).at(above), isSameColorAs(background));
     final Rect bar = _actionBarRect(tester);
     expect(canvas.contains(bar.topLeft), isTrue);
@@ -1561,7 +1572,7 @@ void main() {
       await tester.pumpAndSettle();
 
       expect(controller.selection, isNotNull, reason: place.key);
-      final Rect canvas = canvasRect(tester);
+      final Rect canvas = _surface(tester);
       final Rect bar = _actionBarRect(tester);
       expect(bar.left, greaterThanOrEqualTo(canvas.left), reason: place.key);
       expect(bar.top, greaterThanOrEqualTo(canvas.top), reason: place.key);
@@ -1583,24 +1594,33 @@ void main() {
         strokes: _page(),
       );
       await _selectPair(tester, controller);
-      final Rect canvas = canvasRect(tester);
 
       final Rect palette = tester.getRect(find.byType(ToolPalette));
       // Ending level with the outside of the frame's right-hand handles;
       // the palette floats across the top, clear of it.
-      double expectedRight(Rect bar) => canvas.left + 222 + 6;
+      double expectedRight(Rect bar) =>
+          _at(tester, const Offset(222 + 6, 0)).dx;
 
       // Above the rotation handle.
       Rect bar = _actionBarRect(tester);
-      expect(bar.right, expectedRight(bar));
+      expect(bar.right, closeTo(expectedRight(bar), 1e-6));
       expect(bar.overlaps(palette), isFalse);
-      expect(bar.bottom, canvas.top + 166 - 6 - AppSpacing.xs);
+      expect(
+        bar.bottom,
+        closeTo(
+          _at(tester, _rotationHandle - const Offset(0, 6)).dy - AppSpacing.xs,
+          1e-6,
+        ),
+      );
 
       // With the frame near the top, it goes below instead.
       await _drag(tester, _center, _center + const Offset(0, -150));
       bar = _actionBarRect(tester);
-      expect(bar.top, canvas.top + 92 + 6 + AppSpacing.xs);
-      expect(bar.right, expectedRight(bar));
+      expect(
+        bar.top,
+        closeTo(_at(tester, const Offset(0, 92 + 6)).dy + AppSpacing.xs, 1e-6),
+      );
+      expect(bar.right, closeTo(expectedRight(bar), 1e-6));
       expect(bar.overlaps(palette), isFalse);
     },
   );
@@ -1631,21 +1651,21 @@ void main() {
       expect(controller.canPaste, isTrue, reason: '$size');
       expect(_isSelected(tester, 'Select'), isTrue, reason: '$size');
       expect(find.bySemanticsLabel('2 strokes selected'), findsOneWidget);
-      final Rect canvas = canvasRect(tester);
+      final Rect surface = _surface(tester);
       final Rect bar = _actionBarRect(tester);
-      expect(canvas.contains(bar.topLeft), isTrue, reason: '$size');
-      expect(canvas.contains(bar.bottomRight), isTrue, reason: '$size');
+      expect(surface.contains(bar.topLeft), isTrue, reason: '$size');
+      expect(surface.contains(bar.bottomRight), isTrue, reason: '$size');
       expect(tester.takeException(), isNull);
     }
 
     // Both still work on the new layout.
     await _drag(tester, _center, _center + const Offset(40, 40));
-    expect(controller.strokes[0].points.first, const InkVector(160, 240));
+    expect(controller.strokes[0].points.first, _near(160, 240));
     await _selectTool(tester);
     await tester.tap(find.text('Paste'));
     await tester.pumpAndSettle();
     expect(controller.strokes.length, 5);
-    expect(controller.strokes[3].points.first, const InkVector(144, 224));
+    expect(controller.strokes[3].points.first, _near(144, 224));
     handle.dispose();
   });
 
@@ -1663,21 +1683,21 @@ void main() {
       _at(tester, _center),
       kind: PointerDeviceKind.stylus,
     );
-    await move.moveBy(const Offset(30, 20), timeStamp: _sampleInterval);
+    await move.moveBy(_by(tester, 30, 20), timeStamp: _sampleInterval);
     expect(controller.activeTransform, isNotNull);
 
     setViewportSize(tester, TestViewport.tabletPortrait.size.flipped);
     await tester.pumpAndSettle();
 
     expect(controller.activeTransform, isNull);
-    expect(controller.strokes[0].points.first, const InkVector(150, 220));
+    expect(controller.strokes[0].points.first, _near(150, 220));
     expect(controller.selection!.indices, <int>[0, 1]);
-    expect(controller.selection!.frame.center, const InkVector(200, 240));
+    expect(controller.selection!.frame.center, _near(200, 240));
     // The pointer that was down no longer moves it.
-    await move.moveBy(const Offset(100, 100), timeStamp: _sampleInterval * 2);
+    await move.moveBy(_by(tester, 100, 100), timeStamp: _sampleInterval * 2);
     await move.up(timeStamp: _sampleInterval * 3);
     await tester.pumpAndSettle();
-    expect(controller.strokes[0].points.first, const InkVector(150, 220));
+    expect(controller.strokes[0].points.first, _near(150, 220));
     expect(find.byTooltip('Copy'), findsOneWidget);
     expect(tester.takeException(), isNull);
   });

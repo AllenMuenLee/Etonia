@@ -13,6 +13,7 @@ import 'ink_selection.dart';
 import 'notation_playback.dart';
 import 'selection_config.dart';
 import 'selection_geometry.dart';
+import 'scribble_erase.dart';
 import 'selection_transform.dart';
 import 'shape_recognizer.dart';
 import 'smoothing_config.dart';
@@ -93,11 +94,15 @@ class InkController {
   /// The sticky note the active stroke is drawn into, if any.
   String? _activeStickyId;
   StickyPlacementGesture? _placement;
+  StickyDragGesture? _stickyDrag;
   int _documentRevision = 0;
   ActiveStroke? _active;
 
   /// Draws the active stroke onto nearby ink, when the pen asks for it.
   StrokeFollower? _follower;
+
+  /// How the active stroke may scribble ink out, when the pen asks for it.
+  ScribbleConfig? _scribble;
   int? _activePointer;
   ShapeAdjustGesture? _shapeAdjust;
   EraseGesture? _erase;
@@ -142,6 +147,9 @@ class InkController {
 
   /// The sticky note being placed, while its pointer is down.
   StickyPlacementGesture? get activePlacement => _placement;
+
+  /// The sticky note being dragged, while its pointer is down.
+  StickyDragGesture? get activeStickyDrag => _stickyDrag;
 
   /// The most recently committed page stroke, if any.
   Stroke? get lastStroke => _strokes.isEmpty ? null : _strokes.last;
@@ -413,6 +421,7 @@ class InkController {
         _shapeAdjust?.pointer ??
         _erase?.pointer ??
         _placement?.pointer ??
+        _stickyDrag?.pointer ??
         selectionPointer;
   }
 
@@ -425,7 +434,8 @@ class InkController {
         _erase != null ||
         _lasso != null ||
         _transform != null ||
-        _placement != null;
+        _placement != null ||
+        _stickyDrag != null;
   }
 
   /// Whether [undo] would change anything.
@@ -436,8 +446,10 @@ class InkController {
 
   /// Records one committed change as a step of history, which also drops
   /// anything that could have been redone.
-  void _documentChanged() {
-    if (historyLimit > 0) {
+  ///
+  /// With [amendLast], the change is folded into the last step instead.
+  void _documentChanged({bool amendLast = false}) {
+    if (!amendLast && historyLimit > 0) {
       _undoStack.add(_committed);
       if (_undoStack.length > historyLimit) {
         _undoStack.removeAt(0);
@@ -501,7 +513,9 @@ class InkController {
   ///
   /// [dynamics] vary the stroke's width along it; [smoothingConfig], when
   /// given, replaces [smoothing] for this stroke. A [follower] draws the
-  /// pen onto the ink it passes close alongside.
+  /// pen onto the ink it passes close alongside. With [scribbleErase], a
+  /// stroke that ends up a scribble over ink erases that ink instead of
+  /// being added: see [ScribbleErase.targets].
   ///
   /// With [intoSticky], the stroke is drawn into that sticky note's own
   /// ink: every sample, this one and later ones, is taken into the note's
@@ -515,6 +529,7 @@ class InkController {
     StrokeDynamics dynamics = StrokeDynamics.none,
     SmoothingConfig? smoothingConfig,
     StrokeFollower? follower,
+    ScribbleConfig? scribbleErase,
     StickyNoteElement? intoSticky,
   }) {
     if (_isBusy || !sample.position.isFinite) {
@@ -528,6 +543,7 @@ class InkController {
     }
     _activeStickyId = sticky?.id;
     _follower = sticky == null ? follower : null;
+    _scribble = scribbleErase;
     final RawInkSample first = sticky == null
         ? (follower?.follow(sample) ?? sample)
         : _toSticky(sticky, sample);
@@ -579,19 +595,20 @@ class InkController {
   }
 
   /// Completes the stroke owned by [pointer], after processing any
-  /// [finalSamples] delivered with the pointer-up.
-  void endStroke(
+  /// [finalSamples] delivered with the pointer-up. Returns how many strokes
+  /// it scribbled out, in which case it was not added itself.
+  int endStroke(
     int pointer, [
     Iterable<RawInkSample> finalSamples = const <RawInkSample>[],
   ]) {
     final ActiveStroke? active = _active;
     if (active == null || pointer != _activePointer) {
-      return;
+      return 0;
     }
     for (final RawInkSample sample in finalSamples) {
       active.add(_forActive(sample));
     }
-    finalizeActiveStroke();
+    return finalizeActiveStroke();
   }
 
   /// A cancelled stroke keeps the ink drawn so far.
@@ -603,32 +620,81 @@ class InkController {
 
   /// Commits the active stroke, if any. Later events from its pointer are
   /// ignored.
-  void finalizeActiveStroke() {
+  ///
+  /// A stroke begun with a scribble config that scribbles ink out erases
+  /// that ink instead, as one change, and is not added. Returns how many
+  /// strokes it erased.
+  int finalizeActiveStroke() {
     final ActiveStroke? active = _active;
     if (active == null) {
-      return;
+      return 0;
     }
     final String? stickyId = _activeStickyId;
+    final ScribbleConfig? scribble = _scribble;
     final Stroke stroke = active.finish();
     _active = null;
     _follower = null;
+    _scribble = null;
     _activePointer = null;
     _activeStickyId = null;
+    int erased = 0;
     if (stickyId == null) {
-      _strokes.add(stroke);
+      final List<int> out = _scribbledOut(stroke, _strokes, scribble);
+      if (out.isEmpty) {
+        _strokes.add(stroke);
+      } else {
+        clearSelection();
+        _strokes = _without(_strokes, out);
+        // Scribbled-out notation ink is let go, like erased ink.
+        _syncPlaybacks();
+        erased = out.length;
+      }
       _documentChanged();
     } else {
       final int index = _stickyIndex(stickyId);
       // A note that went away mid-stroke takes the stroke with it.
       if (index >= 0) {
         final StickyNoteElement note = _stickies[index];
+        final List<int> out = _scribbledOut(stroke, note.strokes, scribble);
+        erased = out.length;
         _stickies = List<StickyNoteElement>.of(_stickies)
-          ..[index] = note.copyWith(strokes: <Stroke>[...note.strokes, stroke]);
+          ..[index] = note.copyWith(
+            strokes: out.isEmpty
+                ? <Stroke>[...note.strokes, stroke]
+                : _without(note.strokes, out),
+          );
         _documentChanged();
       }
     }
     _completedChanged.notify();
     _activeChanged.notify();
+    return erased;
+  }
+
+  /// The indices of the visible strokes in [strokes] that [stroke]
+  /// scribbles out under [config]; none without a config.
+  List<int> _scribbledOut(
+    Stroke stroke,
+    List<Stroke> strokes,
+    ScribbleConfig? config,
+  ) {
+    if (config == null) {
+      return const <int>[];
+    }
+    return ScribbleErase.targets(
+      stroke,
+      strokes,
+      config: config,
+      skip: _hidden.contains,
+    );
+  }
+
+  static List<Stroke> _without(List<Stroke> strokes, List<int> indices) {
+    final Set<int> drop = indices.toSet();
+    return <Stroke>[
+      for (int i = 0; i < strokes.length; i++)
+        if (!drop.contains(i)) strokes[i],
+    ];
   }
 
   /// Turns the stroke owned by [pointer] into the shape it was meant to be,
@@ -673,6 +739,7 @@ class InkController {
       grab: pen,
     );
     _active = null;
+    _scribble = null;
     _activePointer = null;
     _activeChanged.notify();
     return shape;
@@ -784,6 +851,7 @@ class InkController {
       return;
     }
     _active = null;
+    _scribble = null;
     _activePointer = null;
     _activeStickyId = null;
     _activeChanged.notify();
@@ -896,6 +964,10 @@ class InkController {
     final StickyPlacementGesture? placement = _placement;
     if (placement != null) {
       cancelStickyPlacement(placement.pointer);
+    }
+    final StickyDragGesture? drag = _stickyDrag;
+    if (drag != null) {
+      endStickyDrag(drag.pointer);
     }
   }
 
@@ -1062,7 +1134,11 @@ class InkController {
     if (_isBusy || _disposed) {
       return false;
     }
-    final InkSelection? enclosed = _enclosedBy(outline, selectablePdfBounds);
+    final InkSelection? enclosed = _enclosedBy(
+      outline,
+      selectablePdfBounds,
+      includePdfWithForeground: true,
+    );
     if (enclosed == null) {
       return false;
     }
@@ -1073,11 +1149,117 @@ class InkController {
     return true;
   }
 
+  /// Selects every stroke, image, sticky note, or PDF excerpt enclosed by
+  /// [outline], replacing the previous selection, or clears the selection when
+  /// [outline] encloses nothing.
+  bool selectWithOutline(List<InkVector> outline, {Rect? selectablePdfBounds}) {
+    if (_disposed || _isBusy) {
+      return false;
+    }
+    final InkSelection? enclosed = _enclosedBy(outline, selectablePdfBounds);
+    if (_setSelection(enclosed)) {
+      _completedChanged.notify();
+    }
+    _selectionChanged.notify();
+    return enclosed != null;
+  }
+
+  /// Adds [additionalStrokes] from [strokes] to the current selection, or
+  /// creates a selection for them when none is active.
+  void includeStrokesInSelection(Iterable<Stroke> additionalStrokes) {
+    if (_disposed || _isBusy) {
+      return;
+    }
+    final Set<Stroke> wanted = HashSet<Stroke>.identity()
+      ..addAll(additionalStrokes);
+    if (wanted.isEmpty) {
+      return;
+    }
+    final InkSelection? current = _selection;
+    final Set<int> indexSet = <int>{...?current?.indices};
+    for (int i = 0; i < _strokes.length; i++) {
+      if (!_hidden.contains(_strokes[i]) && wanted.contains(_strokes[i])) {
+        indexSet.add(i);
+      }
+    }
+    if (indexSet.isEmpty &&
+        (current == null ||
+            (current.imageIndices.isEmpty &&
+                current.stickyIndices.isEmpty &&
+                current.pdfBounds == null))) {
+      return;
+    }
+    final List<int> indices = indexSet.toList()..sort();
+    final InkSelection next = _selectionOf(
+      indices,
+      current?.imageIndices ?? const <int>[],
+      current?.pdfBounds,
+      current?.stickyIndices ?? const <int>[],
+    );
+    if (_setSelection(next)) {
+      _completedChanged.notify();
+    }
+    _selectionChanged.notify();
+  }
+
+  /// Replaces the current selection's frame with [frame], so pages sharing a
+  /// cross-page selection share the same bounding frame in their own
+  /// coordinates.
+  void setSelectionFrame(SelectionFrame frame) {
+    final InkSelection? current = _selection;
+    if (current == null || _disposed) {
+      return;
+    }
+    _selection = InkSelection(
+      indices: current.indices,
+      strokes: current.strokes,
+      imageIndices: current.imageIndices,
+      images: current.images,
+      stickyIndices: current.stickyIndices,
+      stickies: current.stickies,
+      pdfBounds: current.pdfBounds,
+      frame: frame,
+    );
+    _selectionChanged.notify();
+  }
+
+  /// Selects the topmost sticky note or image containing [position], if any.
+  bool selectStickyOrImageAt(InkVector position) {
+    if (_disposed || _isBusy || !position.isFinite) {
+      return false;
+    }
+    final StickyNoteElement? sticky = stickyAt(position);
+    if (sticky != null) {
+      final int index = _stickyIndex(sticky.id);
+      if (_setSelection(
+        _selectionOf(const <int>[], const <int>[], null, <int>[index]),
+      )) {
+        _completedChanged.notify();
+      }
+      _selectionChanged.notify();
+      return true;
+    }
+    for (int i = _images.length - 1; i >= 0; i--) {
+      if (_images[i].contains(
+        position,
+        tolerance: selectionConfig.geometryTolerance,
+      )) {
+        if (_setSelection(_selectionOf(const <int>[], <int>[i]))) {
+          _completedChanged.notify();
+        }
+        _selectionChanged.notify();
+        return true;
+      }
+    }
+    return false;
+  }
+
   /// What a lasso along [outline] selects, or null for nothing.
   InkSelection? _enclosedBy(
     List<InkVector> outline,
-    Rect? selectablePdfBounds,
-  ) {
+    Rect? selectablePdfBounds, {
+    bool includePdfWithForeground = false,
+  }) {
     final LassoRegion region = LassoRegion(
       outline,
       tolerance: selectionConfig.geometryTolerance,
@@ -1096,8 +1278,17 @@ class InkController {
             region.right,
             region.bottom,
           ).intersect(selectablePdfBounds);
+    // With the Select tool, foreground objects must remain independently
+    // editable on PDF-backed pages. AI selection opts into keeping the paper
+    // too, because it needs the visual context behind the selected ink.
+    final bool selectedForeground =
+        indices.isNotEmpty ||
+        imageIndices.isNotEmpty ||
+        stickyIndices.isNotEmpty;
     final Rect? selectedPdf =
-        clippedPdfBounds == null || clippedPdfBounds.isEmpty
+        (!includePdfWithForeground && selectedForeground) ||
+            clippedPdfBounds == null ||
+            clippedPdfBounds.isEmpty
         ? null
         : clippedPdfBounds;
     return indices.isEmpty &&
@@ -1148,13 +1339,9 @@ class InkController {
 
   /// Adds [note] above the other sticky notes, as one change, and opens it
   /// for writing. Returns false, and changes nothing, while a gesture is in
-  /// progress, for a note that is not valid or whose id is taken, or when
-  /// the page holds as many notes as it may.
+  /// progress, or for a note that is not valid or whose id is taken.
   bool insertStickyNote(StickyNoteElement note) {
-    if (_isBusy ||
-        !note.isValid ||
-        _stickyById(note.id) != null ||
-        _stickies.length >= stickyConfig.maxStickyNotesPerPage) {
+    if (_isBusy || !note.isValid || _stickyById(note.id) != null) {
       return false;
     }
     final bool hadSelection = _selection != null;
@@ -1247,7 +1434,7 @@ class InkController {
   /// [position]: it is shown there, kept within [pageBounds], until the
   /// pointer lifts. With [growsDown], as on an infinite page, only the top
   /// and left edges hold it in. Returns false, and changes nothing, when
-  /// another pointer owns the page or the page is full.
+  /// another pointer owns the page.
   bool beginStickyPlacement({
     required int pointer,
     required InkVector position,
@@ -1255,10 +1442,7 @@ class InkController {
     StickyNoteSettings settings = const StickyNoteSettings(),
     bool growsDown = false,
   }) {
-    if (_isBusy ||
-        !position.isFinite ||
-        !pageBounds.isFinite ||
-        _stickies.length >= stickyConfig.maxStickyNotesPerPage) {
+    if (_isBusy || !position.isFinite || !pageBounds.isFinite) {
       return false;
     }
     clearSelection();
@@ -1318,6 +1502,98 @@ class InkController {
     }
   }
 
+  /// Takes hold of the topmost sticky note under [position] for [pointer],
+  /// to drag it around [pageBounds] (only its top-left edges with
+  /// [growsDown]). Returns false, and changes nothing, when there is no
+  /// note there or another pointer owns the page.
+  bool beginStickyDrag({
+    required int pointer,
+    required InkVector position,
+    required Rect pageBounds,
+    bool growsDown = false,
+  }) {
+    if (_isBusy || !position.isFinite || !pageBounds.isFinite) {
+      return false;
+    }
+    final StickyNoteElement? note = stickyAt(position);
+    if (note == null) {
+      return false;
+    }
+    clearSelection();
+    _stickyDrag = StickyDragGesture._(
+      pointer: pointer,
+      original: note,
+      grab: position - note.center,
+      pageBounds: pageBounds,
+      growsDown: growsDown,
+    );
+    _activeChanged.notify();
+    return true;
+  }
+
+  /// Moves the note [pointer] holds so it stays under the pointer where it
+  /// was taken hold of, kept on the page.
+  void updateStickyDrag(int pointer, InkVector position) {
+    final StickyDragGesture? drag = _stickyDrag;
+    if (drag == null || pointer != drag.pointer || !position.isFinite) {
+      return;
+    }
+    final int index = _stickyIndex(drag.original.id);
+    if (index < 0) {
+      return;
+    }
+    final Rect bounds = drag.original.bounds;
+    final InkVector center = StickyPlacementGesture._clamp(
+      position - drag.grab,
+      bounds.size,
+      drag.pageBounds,
+      drag.growsDown,
+    );
+    if (center == _stickies[index].center) {
+      return;
+    }
+    drag._moved = center != drag.original.center;
+    _stickies = List<StickyNoteElement>.of(_stickies)
+      ..[index] = _stickies[index].copyWith(center: center);
+    _completedChanged.notify();
+  }
+
+  /// Lets go of the note [pointer] holds: a move is one change of history,
+  /// and the note is left open, so the Sticky note tool's options restyle
+  /// it. Returns the note, or null when [pointer] held none.
+  StickyNoteElement? endStickyDrag(int pointer, [InkVector? position]) {
+    final StickyDragGesture? drag = _stickyDrag;
+    if (drag == null || pointer != drag.pointer) {
+      return null;
+    }
+    if (position != null) {
+      updateStickyDrag(pointer, position);
+    }
+    _stickyDrag = null;
+    if (drag._moved) {
+      _documentChanged();
+    }
+    _activeChanged.notify();
+    _setEditingSticky(drag.original.id);
+    return _stickyById(drag.original.id);
+  }
+
+  /// Puts the note [pointer] holds back where it was taken from.
+  void cancelStickyDrag(int pointer) {
+    final StickyDragGesture? drag = _stickyDrag;
+    if (drag == null || pointer != drag.pointer) {
+      return;
+    }
+    _stickyDrag = null;
+    final int index = _stickyIndex(drag.original.id);
+    if (index >= 0 && drag._moved) {
+      _stickies = List<StickyNoteElement>.of(_stickies)
+        ..[index] = drag.original;
+      _completedChanged.notify();
+    }
+    _activeChanged.notify();
+  }
+
   /// A cancelled lasso selects nothing and leaves the selection as it was.
   void cancelLasso(int pointer) {
     if (pointer == _lasso?.pointer) {
@@ -1326,20 +1602,12 @@ class InkController {
     }
   }
 
-  /// Starts the transform [hit] calls for, for [pointer] at [position].
-  /// Returns false, and changes nothing, when nothing is selected, another
-  /// pointer already owns the page, or the position is unusable.
-  bool beginTransform({
-    required int pointer,
-    required InkVector position,
-    required SelectionHit hit,
-  }) {
+  /// Scale limits and widest stroke width for the current selection.
+  (double minScale, double maxScale, double widestStroke)
+  selectionScaleLimits() {
     final InkSelection? selection = _selection;
-    if (selection == null ||
-        selection.includesPdf ||
-        _isBusy ||
-        !position.isFinite) {
-      return false;
+    if (selection == null) {
+      return (selectionConfig.minScale, selectionConfig.maxScale, 0);
     }
     double thinnest = double.infinity;
     double widest = 0;
@@ -1386,6 +1654,34 @@ class InkController {
       1,
       math.max(math.max(selectionConfig.minScale, widthLimit), stickyMin),
     );
+    final double maxScale = math.max(
+      minScale,
+      math.min(selectionConfig.maxScale, stickyMax),
+    );
+    return (minScale, maxScale, widest);
+  }
+
+  /// Starts the transform [hit] calls for, for [pointer] at [position].
+  /// Returns false, and changes nothing, when nothing is selected, another
+  /// pointer already owns the page, or the position is unusable.
+  bool beginTransform({
+    required int pointer,
+    required InkVector position,
+    required SelectionHit hit,
+    double? minScaleOverride,
+    double? maxScaleOverride,
+    double? widestStrokeOverride,
+  }) {
+    final InkSelection? selection = _selection;
+    if (selection == null ||
+        selection.includesPdf ||
+        _isBusy ||
+        !position.isFinite) {
+      return false;
+    }
+    final (double localMin, double localMax, double localWidest) =
+        selectionScaleLimits();
+    final double minScale = minScaleOverride ?? localMin;
     _transform = SelectionTransformGesture._(
       pointer: pointer,
       operation: hit.operation,
@@ -1394,11 +1690,8 @@ class InkController {
       startFrame: selection.frame,
       minScale: minScale,
       // Never below the minimum, so the clamp between them is well formed.
-      maxScale: math.max(
-        minScale,
-        math.min(selectionConfig.maxScale, stickyMax),
-      ),
-      widestStroke: widest,
+      maxScale: math.max(minScale, maxScaleOverride ?? localMax),
+      widestStroke: widestStrokeOverride ?? localWidest,
     );
     _selectionChanged.notify();
     return true;
@@ -1492,6 +1785,22 @@ class InkController {
             !identical(selection, expectedSelection))) {
       return false;
     }
+    _setClipboard(selection, additionalImages: additionalImages);
+    if (_clipboard!.isEmpty) {
+      _clipboard = null;
+      return false;
+    }
+    _selectionChanged.notify();
+    return true;
+  }
+
+  /// Puts [selection] on this controller's clipboard. Used when a cross-page
+  /// selection combines items from multiple pages into one clipboard.
+  bool copyCombinedSelection(
+    InkSelection selection, {
+    Iterable<NoteImageElement> additionalImages = const <NoteImageElement>[],
+  }) {
+    finalizeSelectionGesture();
     _setClipboard(selection, additionalImages: additionalImages);
     if (_clipboard!.isEmpty) {
       _clipboard = null;
@@ -1699,6 +2008,94 @@ class InkController {
     _selectionChanged.notify();
   }
 
+  /// Lets go of the selection [pointer] is moving, for another page to take
+  /// up with [receiveSelection]: what is selected is removed in one change
+  /// and returned as it looks in the move's preview. The clipboard is
+  /// untouched. Returns null, and changes nothing, unless [pointer] is
+  /// moving a selection.
+  InkClipboard? releaseSelection(int pointer) {
+    final SelectionTransformGesture? gesture = _transform;
+    final InkSelection? selection = _selection;
+    if (gesture == null ||
+        gesture.pointer != pointer ||
+        gesture.operation != SelectionOperation.move ||
+        selection == null ||
+        selection.includesPdf) {
+      return null;
+    }
+    final InkTransform transform = gesture._transform;
+    final List<NoteImageElement> images = <NoteImageElement>[
+      for (final NoteImageElement image in selection.images)
+        image.transformed(transform),
+    ];
+    final List<StickyNoteElement> stickies = <StickyNoteElement>[
+      for (final StickyNoteElement note in selection.stickies)
+        note.transformed(transform),
+    ];
+    if (images.any((NoteImageElement image) => !image.isValid) ||
+        stickies.any((StickyNoteElement note) => !note.isValid)) {
+      return null;
+    }
+    final InkClipboard content = InkClipboard.of(
+      InkSelection(
+        indices: selection.indices,
+        // A move only translates, so each stroke keeps its style.
+        strokes: <Stroke>[
+          for (final Stroke stroke in selection.strokes)
+            Stroke.fromPoints(
+              style: stroke.style,
+              points: stroke.points.map(transform.apply).toList(),
+              widths: stroke.widths,
+            ),
+        ],
+        imageIndices: selection.imageIndices,
+        images: images,
+        stickyIndices: selection.stickyIndices,
+        stickies: stickies,
+        frame: gesture._frame,
+      ),
+    );
+    if (content.isEmpty) {
+      return null;
+    }
+    _transform = null;
+    _removeSelected(selection);
+    // Passing through, it leaves this page's history as it found it.
+    if (gesture._carriedIn && _undoStack.length >= 2) {
+      _undoStack
+        ..removeLast()
+        ..removeLast();
+    }
+    return content;
+  }
+
+  /// Takes up [content] let go by another page's [releaseSelection],
+  /// shifted by [offset] into this page's coordinates, selects it, and goes
+  /// on moving it with [pointer] from [position]. The arrival and the rest
+  /// of the move are one change. Returns false, and changes nothing, when
+  /// another pointer owns the page or the content would land out of range.
+  bool receiveSelection(
+    InkClipboard content, {
+    required InkVector offset,
+    required int pointer,
+    required InkVector position,
+  }) {
+    if (_disposed || _isBusy || !position.isFinite) {
+      return false;
+    }
+    if (!_pasteFrom(content, InkTransform.translation(offset))) {
+      return false;
+    }
+    if (beginTransform(
+      pointer: pointer,
+      position: position,
+      hit: const SelectionHit.move(),
+    )) {
+      _transform!._carriedIn = true;
+    }
+    return true;
+  }
+
   /// Installs a session clipboard restored by the note owner.
   void takeClipboard(InkClipboard? clipboard) {
     if (identical(clipboard, _clipboard)) {
@@ -1839,7 +2236,7 @@ class InkController {
         in List<ValueChanged<Map<Stroke, Stroke>>>.of(_replacementListeners)) {
       listener(replaced);
     }
-    _documentChanged();
+    _documentChanged(amendLast: gesture._carriedIn);
     _selection = InkSelection(
       indices: selection.indices,
       strokes: transformed,
@@ -1850,6 +2247,169 @@ class InkController {
       pdfBounds: selection.pdfBounds,
       frame: gesture._frame,
     );
+    _completedChanged.notify();
+    _selectionChanged.notify();
+  }
+
+  /// Whether the transform in progress has not moved or scaled beyond the
+  /// geometry tolerance.
+  bool get isActiveTransformIdentity {
+    final SelectionTransformGesture? gesture = _transform;
+    if (gesture == null) {
+      return true;
+    }
+    return _isIdentity(gesture._transform, gesture);
+  }
+
+  /// Drops the active transform preview without changing the document.
+  void discardActiveTransform() {
+    if (_transform != null) {
+      _transform = null;
+      _selectionChanged.notify();
+    }
+  }
+
+  /// Applies the result of a cross-page selection transform to this page in a
+  /// single history step.
+  void commitCrossPageTransform({
+    Map<int, Stroke> stayingStrokes = const <int, Stroke>{},
+    Set<int> leavingStrokeIndices = const <int>{},
+    List<Stroke> arrivingStrokes = const <Stroke>[],
+    Set<Stroke> arrivingHiddenStrokes = const <Stroke>{},
+    Map<int, NoteImageElement> stayingImages = const <int, NoteImageElement>{},
+    Set<int> leavingImageIndices = const <int>{},
+    List<NoteImageElement> arrivingImages = const <NoteImageElement>[],
+    Map<int, StickyNoteElement> stayingStickies =
+        const <int, StickyNoteElement>{},
+    Set<int> leavingStickyIndices = const <int>{},
+    List<StickyNoteElement> arrivingStickies = const <StickyNoteElement>[],
+    SelectionFrame? selectionFrame,
+  }) {
+    _transform = null;
+    final List<Stroke> nextStrokes = <Stroke>[];
+    final List<int> selectedStrokeIndices = <int>[];
+    final List<Stroke> selectedStrokes = <Stroke>[];
+    final Map<Stroke, Stroke> replaced = HashMap<Stroke, Stroke>.identity();
+    for (int i = 0; i < _strokes.length; i++) {
+      if (leavingStrokeIndices.contains(i)) {
+        continue;
+      }
+      final Stroke? replacement = stayingStrokes[i];
+      if (replacement != null) {
+        final Stroke oldStroke = _strokes[i];
+        selectedStrokeIndices.add(nextStrokes.length);
+        selectedStrokes.add(replacement);
+        nextStrokes.add(replacement);
+        replaced[oldStroke] = replacement;
+        if (_hidden.contains(oldStroke)) {
+          _hidden.add(replacement);
+        }
+      } else {
+        nextStrokes.add(_strokes[i]);
+      }
+    }
+    for (final Stroke arriving in arrivingStrokes) {
+      selectedStrokeIndices.add(nextStrokes.length);
+      selectedStrokes.add(arriving);
+      nextStrokes.add(arriving);
+      if (arrivingHiddenStrokes.contains(arriving)) {
+        _hidden.add(arriving);
+      }
+    }
+    _strokes = nextStrokes;
+
+    final List<NoteImageElement> nextImages = <NoteImageElement>[];
+    final List<int> selectedImageIndices = <int>[];
+    final List<NoteImageElement> selectedImages = <NoteImageElement>[];
+    for (int i = 0; i < _images.length; i++) {
+      if (leavingImageIndices.contains(i)) {
+        continue;
+      }
+      final NoteImageElement? replacement = stayingImages[i];
+      if (replacement != null) {
+        selectedImageIndices.add(nextImages.length);
+        selectedImages.add(replacement);
+        nextImages.add(replacement);
+      } else {
+        nextImages.add(_images[i]);
+      }
+    }
+    for (final NoteImageElement arriving in arrivingImages) {
+      selectedImageIndices.add(nextImages.length);
+      selectedImages.add(arriving);
+      nextImages.add(arriving);
+    }
+    _images = nextImages;
+
+    final List<StickyNoteElement> nextStickies = <StickyNoteElement>[];
+    final List<int> selectedStickyIndices = <int>[];
+    final List<StickyNoteElement> selectedStickies = <StickyNoteElement>[];
+    for (int i = 0; i < _stickies.length; i++) {
+      if (leavingStickyIndices.contains(i)) {
+        continue;
+      }
+      final StickyNoteElement? replacement = stayingStickies[i];
+      if (replacement != null) {
+        selectedStickyIndices.add(nextStickies.length);
+        selectedStickies.add(replacement);
+        nextStickies.add(replacement);
+      } else {
+        nextStickies.add(_stickies[i]);
+      }
+    }
+    for (final StickyNoteElement arriving in arrivingStickies) {
+      selectedStickyIndices.add(nextStickies.length);
+      selectedStickies.add(arriving);
+      nextStickies.add(arriving);
+    }
+    _stickies = nextStickies;
+
+    if (_editingStickyId != null && _stickyById(_editingStickyId) == null) {
+      _setEditingSticky(null);
+    }
+    _syncPlaybacks(replaced);
+    if (replaced.isNotEmpty) {
+      for (final ValueChanged<Map<Stroke, Stroke>> listener
+          in List<ValueChanged<Map<Stroke, Stroke>>>.of(
+            _replacementListeners,
+          )) {
+        listener(replaced);
+      }
+    }
+    final bool changed =
+        stayingStrokes.isNotEmpty ||
+        leavingStrokeIndices.isNotEmpty ||
+        arrivingStrokes.isNotEmpty ||
+        stayingImages.isNotEmpty ||
+        leavingImageIndices.isNotEmpty ||
+        arrivingImages.isNotEmpty ||
+        stayingStickies.isNotEmpty ||
+        leavingStickyIndices.isNotEmpty ||
+        arrivingStickies.isNotEmpty;
+    if (changed) {
+      _documentChanged();
+    }
+    if (selectedStrokes.isEmpty &&
+        selectedImages.isEmpty &&
+        selectedStickies.isEmpty) {
+      _selection = null;
+    } else {
+      _selection = InkSelection(
+        indices: selectedStrokeIndices,
+        strokes: selectedStrokes,
+        imageIndices: selectedImageIndices,
+        images: selectedImages,
+        stickyIndices: selectedStickyIndices,
+        stickies: selectedStickies,
+        frame:
+            selectionFrame ??
+            frameAroundContent(
+              selectedStrokes,
+              selectedImages,
+              stickies: selectedStickies,
+            ),
+      );
+    }
     _completedChanged.notify();
     _selectionChanged.notify();
   }
@@ -1890,41 +2450,19 @@ class InkController {
     final double? durationMs = playbackDuration == null
         ? null
         : playbackDuration.inMicroseconds / Duration.microsecondsPerMillisecond;
-    int totalPoints = 0;
-    final List<Stroke> additions = <Stroke>[];
-    for (final GeneratedInkTrace trace in traces) {
-      final double width = trace.style.width;
-      if (!identical(InkPalette.byId(trace.style.ink.id), trace.style.ink) ||
-          !width.isFinite ||
-          width < limits.minWidth ||
-          width > limits.maxWidth ||
-          trace.points.isEmpty ||
-          trace.points.length > limits.maxPointsPerTrace) {
-        return AddNotationResult.invalid;
-      }
-      totalPoints += trace.points.length;
-      if (totalPoints > limits.maxTotalPoints) {
-        return AddNotationResult.invalid;
-      }
-      final double half = width / 2;
-      for (final InkVector point in trace.points) {
-        if (!point.isFinite ||
-            point.x - half < 0 ||
-            point.y - half < 0 ||
-            point.x + half > surfaceSize.width ||
-            point.y + half > surfaceSize.height ||
-            point.x + half > selectionConfig.maxCoordinate ||
-            point.y + half > selectionConfig.maxCoordinate) {
-          return AddNotationResult.invalid;
-        }
-      }
-      if (durationMs != null && !_validTimes(trace, durationMs)) {
-        return AddNotationResult.invalid;
-      }
-      additions.add(
-        Stroke.fromPoints(style: trace.style, points: trace.points),
-      );
+    final List<Stroke>? strokes = _generatedStrokes(
+      traces,
+      surfaceSize,
+      limits,
+    );
+    if (strokes == null ||
+        (durationMs != null &&
+            traces.any(
+              (GeneratedInkTrace trace) => !_validTimes(trace, durationMs),
+            ))) {
+      return AddNotationResult.invalid;
     }
+    final List<Stroke> additions = strokes;
     // In place before anything hears of the new strokes, so that no frame
     // can paint them whole before they are drawn. Earlier playbacks keep
     // going alongside it.
@@ -1951,6 +2489,116 @@ class InkController {
     return playback == null
         ? AddNotationResult.added
         : AddNotationResult.addedWithPlayback;
+  }
+
+  /// Adds [note], a new sticky note carrying a complete, prevalidated AI
+  /// notation in its own coordinates, above the other sticky notes, as one
+  /// change. Unlike [insertStickyNote], it is not opened for writing. Its
+  /// ink must lie on its paper, and it must lie on the [surfaceSize] page.
+  AddNotationResult addAiStickyNote({
+    required StickyNoteElement note,
+    required int expectedRevision,
+    required Size surfaceSize,
+    GeneratedInkLimits limits = const GeneratedInkLimits(),
+  }) {
+    if (expectedRevision != _documentRevision) {
+      return AddNotationResult.stale;
+    }
+    if (_isBusy) {
+      return AddNotationResult.busy;
+    }
+    final Rect bounds = note.bounds;
+    if (!note.isValid ||
+        _stickyById(note.id) != null ||
+        note.strokes.isEmpty ||
+        note.strokes.length > limits.maxTraces ||
+        bounds.left < 0 ||
+        bounds.top < 0 ||
+        bounds.right > surfaceSize.width ||
+        bounds.bottom > surfaceSize.height) {
+      return AddNotationResult.invalid;
+    }
+    final bool hadSelection = _selection != null;
+    _stickies = <StickyNoteElement>[..._stickies, note];
+    _selection = null;
+    _documentChanged();
+    _completedChanged.notify();
+    if (hadSelection) {
+      _selectionChanged.notify();
+    }
+    return AddNotationResult.added;
+  }
+
+  /// [traces] as strokes, or null when any breaks [limits] or reaches
+  /// past [area], from the origin to its size.
+  List<Stroke>? _generatedStrokes(
+    List<GeneratedInkTrace> traces,
+    Size area,
+    GeneratedInkLimits limits,
+  ) {
+    int totalPoints = 0;
+    final List<Stroke> strokes = <Stroke>[];
+    for (final GeneratedInkTrace trace in traces) {
+      final double width = trace.style.width;
+      final List<double>? widths = trace.widths;
+      if (!identical(InkPalette.byId(trace.style.ink.id), trace.style.ink) ||
+          !width.isFinite ||
+          width < limits.minWidth ||
+          width > limits.maxWidth ||
+          trace.points.isEmpty ||
+          trace.points.length > limits.maxPointsPerTrace ||
+          (widths != null &&
+              (widths.length != trace.points.length ||
+                  widths.any(
+                    (double factor) =>
+                        !factor.isFinite ||
+                        factor <= 0 ||
+                        width * factor > limits.maxWidth,
+                  )))) {
+        return null;
+      }
+      totalPoints += trace.points.length;
+      if (totalPoints > limits.maxTotalPoints) {
+        return null;
+      }
+      final double widest = widths == null
+          ? 1
+          : widths.fold<double>(0, math.max);
+      final double half = width * widest / 2;
+      for (final InkVector point in trace.points) {
+        if (!point.isFinite ||
+            point.x - half < 0 ||
+            point.y - half < 0 ||
+            point.x + half > area.width ||
+            point.y + half > area.height ||
+            point.x + half > selectionConfig.maxCoordinate ||
+            point.y + half > selectionConfig.maxCoordinate) {
+          return null;
+        }
+      }
+      strokes.add(
+        Stroke.fromPoints(
+          style: trace.style,
+          points: trace.points,
+          widths: widths,
+        ),
+      );
+    }
+    return strokes;
+  }
+
+  /// [traces], laid out in a sticky note's own coordinates over [localSize],
+  /// as that note's strokes, or null when any breaks [limits] or leaves
+  /// its paper.
+  List<Stroke>? generatedStickyStrokes(
+    List<GeneratedInkTrace> traces,
+    Size localSize, {
+    GeneratedInkLimits limits = const GeneratedInkLimits(),
+  }) {
+    if (traces.isEmpty || traces.length > limits.maxTraces) {
+      return null;
+    }
+    return _generatedStrokes(traces, localSize, limits);
   }
 
   /// Whether [trace] has a time for each point, each within the playback's
@@ -2241,6 +2889,10 @@ class SelectionTransformGesture {
   InkTransform _transform = InkTransform.identity;
   SelectionFrame _frame;
 
+  /// Whether the selection arrived from another page with this move, so
+  /// that the arrival and the move are one change.
+  bool _carriedIn = false;
+
   /// The preview: what the gesture would do to the selection if it ended
   /// now.
   InkTransform get transform => _transform;
@@ -2429,6 +3081,35 @@ class StickyPlacementGesture {
       axis(position.y, page.top, page.bottom, size.height / 2),
     );
   }
+}
+
+/// A sticky note being dragged to a new spot by its pointer. The note on
+/// the page follows as it moves; the history records the move once it
+/// lifts.
+class StickyDragGesture {
+  StickyDragGesture._({
+    required this.pointer,
+    required this.original,
+    required this.grab,
+    required this.pageBounds,
+    required this.growsDown,
+  });
+
+  final int pointer;
+
+  /// The note as it was when taken hold of.
+  final StickyNoteElement original;
+
+  /// Where the pointer took hold, from the note's center.
+  final InkVector grab;
+
+  final Rect pageBounds;
+  final bool growsDown;
+
+  bool _moved = false;
+
+  /// Whether the note has left where it was taken from.
+  bool get moved => _moved;
 }
 
 class _Notifier extends ChangeNotifier {

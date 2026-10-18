@@ -99,9 +99,6 @@ class StickyNoteConfig {
     this.dotRadius = 1.2,
     this.hitSlop = 4,
     this.maxPatternMarks = 4000,
-    this.maxStickyNotesPerPage = 500,
-    this.maxStrokesPerNote = 5000,
-    this.maxPointsPerNote = 200000,
     this.doubleTapTimeout = const Duration(milliseconds: 350),
     this.doubleTapSlop = 24,
   });
@@ -129,11 +126,6 @@ class StickyNoteConfig {
   /// At most this many rules or dots are drawn for one note, whatever
   /// its size, so malformed input cannot make painting unbounded.
   final int maxPatternMarks;
-
-  /// Limits on what one file may hold. More is skipped on load.
-  final int maxStickyNotesPerPage;
-  final int maxStrokesPerNote;
-  final int maxPointsPerNote;
 
   /// Two taps on a note this close in time and space open it for writing.
   final Duration doubleTapTimeout;

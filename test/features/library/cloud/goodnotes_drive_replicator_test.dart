@@ -183,13 +183,12 @@ void main() {
       );
 
       expect(await library(), <String, List<String>>{
-        '': <String>[],
-        'GoodNotes': <String>['Inbox'],
-        'GoodNotes/MGY377': <String>[],
-        'GoodNotes/MGY377/Lectures': <String>['Lecture 1', 'Lecture 2'],
-        'GoodNotes/MGY377/Labs': <String>['Lab 1'],
+        '': <String>['Inbox'],
+        'MGY377': <String>[],
+        'MGY377/Lectures': <String>['Lecture 1', 'Lecture 2'],
+        'MGY377/Labs': <String>['Lab 1'],
       });
-      expect(summary.foldersCreated, 4);
+      expect(summary.foldersCreated, 3);
       expect(summary.foldersReused, 0);
       expect(summary.imported, <String>[
         'Inbox.goodnotes',
@@ -200,10 +199,7 @@ void main() {
       expect(summary.skipped.single.path, 'MGY377/Labs/notes.txt');
       expect(summary.failed, isEmpty);
       expect(summary.cancelled, isFalse);
-      expect(
-        (await repository.pathTo(summary.localRootId)).single.name,
-        'GoodNotes',
-      );
+      expect(summary.localRootId, isNull);
 
       // A notebook keeps its editable strokes.
       final NoteContent notebook = await repository.loadNote(
@@ -241,11 +237,9 @@ void main() {
       await replicator().replicate(root, targetFolderId: imports.id);
       expect(
         (await library()).keys,
-        containsAll(<String>[
-          'Imports/GoodNotes',
-          'Imports/GoodNotes/MGY377/Labs',
-        ]),
+        containsAll(<String>['Imports', 'Imports/MGY377/Labs']),
       );
+      expect((await library())['Imports'], <String>['Inbox']);
     });
 
     test('running again reuses the folders and the unchanged notes', () async {
@@ -258,7 +252,7 @@ void main() {
       final ReplicationSummary again = await replicator().replicate(tree.root);
 
       expect(again.foldersCreated, 0);
-      expect(again.foldersReused, 4);
+      expect(again.foldersReused, 3);
       expect(again.imported, isEmpty);
       expect(again.unchanged, 4);
       expect(await library(), first);
@@ -287,6 +281,29 @@ void main() {
     });
 
     test(
+      'moves an unchanged prior import out of a GoodNotes wrapper',
+      () async {
+        final GoogleDriveItem root = drive.addFolder('GoodNotes');
+        drive.addFile(
+          'Inbox.goodnotes',
+          syntheticGoodnotesNotebook(),
+          parentId: root.id,
+        );
+        await replicator().replicate(root);
+        final NoteEntry inbox = await noteTitled('Inbox');
+        final Folder oldWrapper = await repository.createFolder('GoodNotes');
+        await repository.moveNote(inbox.id, oldWrapper.id);
+
+        final ReplicationSummary again = await replicator().replicate(root);
+
+        expect(again.imported, isEmpty);
+        expect(again.unchanged, 1);
+        expect((await repository.list(null)).notes.single.id, inbox.id);
+        expect((await repository.list(oldWrapper.id)).notes, isEmpty);
+      },
+    );
+
+    test(
       'cancelling keeps finished notes and rolls back the one in flight',
       () async {
         final GoogleDriveItem root = driveTree().root;
@@ -303,9 +320,9 @@ void main() {
         expect(summary.imported, <String>['Inbox.goodnotes']);
         expect(summary.failed, isEmpty);
         final Map<String, List<String>> after = await library();
-        expect(after['GoodNotes'], <String>['Inbox']);
-        expect(after['GoodNotes/MGY377/Labs'], isEmpty);
-        expect(after['GoodNotes/MGY377/Lectures'], isEmpty);
+        expect(after[''], <String>['Inbox']);
+        expect(after['MGY377/Labs'], isEmpty);
+        expect(after['MGY377/Lectures'], isEmpty);
         // Gone for good, not left in Recently Deleted.
         expect(await repository.trash(), isEmpty);
       },

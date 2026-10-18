@@ -13,7 +13,7 @@ class GreatnoteApp extends StatelessWidget {
     this.repository,
   });
 
-  static const String title = 'Greatnote';
+  static const String title = 'Etonia';
 
   final ThemeMode themeMode;
 

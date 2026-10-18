@@ -180,6 +180,17 @@ class PenAdvancedPanel extends StatelessWidget {
                               ),
                               ToggleSetting(
                                 key: const ValueKey<String>(
+                                  'pen-scribble-to-erase',
+                                ),
+                                label: 'Scribble to erase',
+                                hint: 'Scribble over ink to erase it',
+                                value: settings.scribbleToErase,
+                                onChanged: (bool value) => onChanged(
+                                  settings.copyWith(scribbleToErase: value),
+                                ),
+                              ),
+                              ToggleSetting(
+                                key: const ValueKey<String>(
                                   'pen-follow-stroke',
                                 ),
                                 label: 'Follow nearby strokes',

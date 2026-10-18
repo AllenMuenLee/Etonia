@@ -495,7 +495,6 @@ class FolderColorPicker extends StatelessWidget {
 
 /// The page sizes offered for a new note, in the order shown.
 const List<PageSize> templateSizes = <PageSize>[
-  PageSize.fit,
   PageSize.a4Portrait,
   PageSize.a4Landscape,
   PageSize.letterPortrait,
@@ -504,32 +503,63 @@ const List<PageSize> templateSizes = <PageSize>[
   PageSize.infinite,
 ];
 
-/// Asks for a new note's template: its page size and its paper. Returns
-/// null when cancelled.
-Future<PageSetup?> pickNoteTemplate(
+/// The name and paper chosen before a note is created.
+class NoteDraft {
+  const NoteDraft(this.name, this.setup);
+
+  final String name;
+  final PageSetup setup;
+}
+
+/// Asks for a new note's name and template. Returns null when cancelled.
+Future<NoteDraft?> pickNoteTemplate(
   BuildContext context, {
   PageSetup initial = const PageSetup(),
+  String initialName = 'Untitled note',
 }) {
-  return showDialog<PageSetup>(
+  return showDialog<NoteDraft>(
     context: context,
-    builder: (BuildContext context) => _TemplateDialog(initial: initial),
+    builder: (BuildContext context) =>
+        _TemplateDialog(initial: initial, initialName: initialName),
   );
 }
 
 class _TemplateDialog extends StatefulWidget {
-  const _TemplateDialog({required this.initial});
+  const _TemplateDialog({required this.initial, required this.initialName});
 
   final PageSetup initial;
+  final String initialName;
 
   @override
   State<_TemplateDialog> createState() => _TemplateDialogState();
 }
 
 class _TemplateDialogState extends State<_TemplateDialog> {
+  late final TextEditingController _name =
+      TextEditingController(text: widget.initialName)
+        ..selection = TextSelection(
+          baseOffset: 0,
+          extentOffset: widget.initialName.length,
+        );
   late PageSize _size = templateSizes.contains(widget.initial.size)
       ? widget.initial.size
-      : PageSize.fit;
+      : PageSize.a4Portrait;
   late PageBackground _background = widget.initial.background;
+
+  @override
+  void dispose() {
+    _name.dispose();
+    super.dispose();
+  }
+
+  void _submit() {
+    final String? name = cleanName(_name.text);
+    if (name != null) {
+      Navigator.of(
+        context,
+      ).pop(NoteDraft(name, PageSetup(size: _size, background: _background)));
+    }
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -542,6 +572,21 @@ class _TemplateDialogState extends State<_TemplateDialog> {
           mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.start,
           children: <Widget>[
+            const SectionLabel('File name'),
+            const SizedBox(height: AppSpacing.xs),
+            TextField(
+              key: const ValueKey<String>('new-note-name'),
+              controller: _name,
+              autofocus: true,
+              maxLength: maxNameLength,
+              textInputAction: TextInputAction.done,
+              decoration: const InputDecoration(
+                hintText: 'Note name',
+                counterText: '',
+              ),
+              onSubmitted: (_) => _submit(),
+            ),
+            const SizedBox(height: AppSpacing.lg),
             const SectionLabel('Paper'),
             Wrap(
               spacing: AppSpacing.sm,
@@ -576,7 +621,6 @@ class _TemplateDialogState extends State<_TemplateDialog> {
                       background: _background,
                       aspect: _aspectOf(size),
                       icon: switch (size) {
-                        PageSize.fit => AppIcons.fitToScreen,
                         PageSize.infinite => AppIcons.infinite,
                         _ => null,
                       },
@@ -592,11 +636,14 @@ class _TemplateDialogState extends State<_TemplateDialog> {
           onPressed: () => Navigator.of(context).pop(),
           child: const Text('Cancel'),
         ),
-        FilledButton(
-          onPressed: () => Navigator.of(
-            context,
-          ).pop(PageSetup(size: _size, background: _background)),
-          child: const Text('Create'),
+        ValueListenableBuilder<TextEditingValue>(
+          valueListenable: _name,
+          builder: (BuildContext context, TextEditingValue value, Widget? _) {
+            return FilledButton(
+              onPressed: cleanName(value.text) == null ? null : _submit,
+              child: const Text('Create'),
+            );
+          },
         ),
       ],
     );

@@ -187,7 +187,7 @@ void main() {
     await tester.enterText(find.byType(TextField), 'Mark it');
     await tester.pump();
     await tester.tap(find.byTooltip('Send'));
-    // Whole-note rasterization is intentionally real in this smoke test and
+    // Measuring the whole note is intentionally real in this smoke test and
     // can take longer on a physical device than under flutter_tester.
     for (int i = 0; i < 500 && controller.notationPlayback == null; i++) {
       await tester.pump(const Duration(milliseconds: 20));
@@ -198,12 +198,8 @@ void main() {
     expect(notationRequest.notationEnabled, isTrue);
     expect(notationRequest.animationEnabled, isTrue);
     expect(notationRequest.noteImage, isNotNull);
-    expect(notationRequest.noteImage!.png.sublist(0, 4), <int>[
-      0x89,
-      0x50,
-      0x4E,
-      0x47,
-    ]);
+    // The note is measured, not pictured.
+    expect(notationRequest.noteImage!.space, isNotNull);
     expect(
       tester
           .widget<AiAssistantPanel>(find.byType(AiAssistantPanel))

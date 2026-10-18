@@ -5,9 +5,6 @@ import 'package:flutter/foundation.dart';
 
 /// How big a page is.
 enum PageSize {
-  /// Fills the writing area and follows it when the window changes. Never
-  /// scrolls.
-  fit('Fit to screen'),
   a4Portrait('A4 portrait', Size(794, 1123)),
   a4Landscape('A4 landscape', Size(1123, 794)),
   letterPortrait('Letter portrait', Size(816, 1056)),
@@ -48,7 +45,7 @@ enum PageBackground {
 @immutable
 class PageSetup {
   const PageSetup({
-    this.size = PageSize.fit,
+    this.size = PageSize.a4Portrait,
     this.background = PageBackground.blank,
     Size? customSize,
   }) : customSize = size == PageSize.custom
@@ -138,9 +135,8 @@ class PageConfig {
 class PageGeometry {
   const PageGeometry(this.pageSize, this.scale);
 
-  /// A fit page is the area itself; a fixed page is scaled to the area's
-  /// width; an infinite page is shown at scale 1 and is never smaller than
-  /// the area.
+  /// A fixed page is scaled to the area's width; an infinite page is shown at
+  /// scale 1 and is never smaller than the area.
   factory PageGeometry.of(
     PageSetup setup,
     Size? extent,
@@ -154,8 +150,6 @@ class PageGeometry {
       return PageGeometry(pdfPageSize, scale);
     }
     switch (setup.size) {
-      case PageSize.fit:
-        return PageGeometry(viewport, 1);
       case PageSize.infinite:
         return PageGeometry(
           Size(

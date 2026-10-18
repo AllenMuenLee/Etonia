@@ -150,17 +150,32 @@ abstract class GoogleDriveClient {
 /// package name and signing certificate registered with Google.
 @immutable
 class GoogleDriveConfig {
-  const GoogleDriveConfig({this.clientId = '', this.serverClientId = ''});
+  const GoogleDriveConfig({
+    this.clientId = '',
+    this.iosClientId = '',
+    this.androidClientId = '',
+    this.serverClientId = '',
+  });
 
   const GoogleDriveConfig.fromEnvironment()
     : clientId = const String.fromEnvironment(clientIdKey),
+      iosClientId = const String.fromEnvironment(iosClientIdKey),
+      androidClientId = const String.fromEnvironment(androidClientIdKey),
       serverClientId = const String.fromEnvironment(serverClientIdKey);
 
   static const String clientIdKey = 'GOOGLE_OAUTH_CLIENT_ID';
+  static const String iosClientIdKey = 'GOOGLE_OAUTH_IOS_CLIENT_ID';
+  static const String androidClientIdKey = 'GOOGLE_OAUTH_ANDROID_CLIENT_ID';
   static const String serverClientIdKey = 'GOOGLE_OAUTH_SERVER_CLIENT_ID';
 
   final String clientId;
+  final String iosClientId;
+  final String androidClientId;
   final String serverClientId;
+
+  /// Effective client ID for platforms that use one (iOS/macOS/Web).
+  String get effectiveClientId =>
+      iosClientId.isNotEmpty ? iosClientId : clientId;
 }
 
 /// Signs in with `google_sign_in` and talks to the Drive v3 REST API.
@@ -196,17 +211,57 @@ class HttpGoogleDriveClient implements GoogleDriveClient {
 
   GoogleSignIn get _google => _signInOverride ?? GoogleSignIn.instance;
 
+  static Future<void>? _sharedInitialized;
+  static GoogleSignInAccount? sharedUser;
+  static Future<void> Function(GoogleSignInAccount user)? onSharedSignIn;
+  static Future<void> Function()? onSharedSignOut;
+
   Future<void>? _initialized;
   GoogleSignInAccount? _user;
   GoogleDriveAccount? _account;
 
+  GoogleSignInAccount? get _activeUser =>
+      _signInOverride == null ? (sharedUser ?? _user) : _user;
+
   @override
-  GoogleDriveAccount? get currentAccount => _account;
+  GoogleDriveAccount? get currentAccount {
+    if (_signInOverride == null) {
+      final GoogleSignInAccount? shared = sharedUser;
+      if (shared == null) {
+        _user = null;
+        _account = null;
+        return null;
+      }
+      if (_user != shared || _account == null) {
+        _user = shared;
+        _account = GoogleDriveAccount(
+          email: shared.email,
+          displayName: shared.displayName,
+        );
+      }
+    }
+    return _account;
+  }
 
   Future<void> _initialize() {
+    final String resolvedClientId = config.effectiveClientId;
+    if (_signInOverride == null) {
+      return _initialized = _sharedInitialized ??= _google
+          .initialize(
+            clientId: resolvedClientId.isEmpty ? null : resolvedClientId,
+            serverClientId: config.serverClientId.isEmpty
+                ? null
+                : config.serverClientId,
+          )
+          .catchError((Object error) {
+            _sharedInitialized = null;
+            _initialized = null;
+            throw _signInError(error);
+          });
+    }
     return _initialized ??= _google
         .initialize(
-          clientId: config.clientId.isEmpty ? null : config.clientId,
+          clientId: resolvedClientId.isEmpty ? null : resolvedClientId,
           serverClientId: config.serverClientId.isEmpty
               ? null
               : config.serverClientId,
@@ -219,14 +274,69 @@ class HttpGoogleDriveClient implements GoogleDriveClient {
 
   GoogleDriveAccount _remember(GoogleSignInAccount user) {
     _user = user;
+    if (_signInOverride == null) {
+      sharedUser = user;
+      final Future<void> Function(GoogleSignInAccount)? callback =
+          onSharedSignIn;
+      if (callback != null) {
+        unawaited(callback(user).catchError((Object _) {}));
+      }
+    }
     return _account = GoogleDriveAccount(
       email: user.email,
       displayName: user.displayName,
     );
   }
 
+  /// Authenticates the shared Google account with Drive scopes so a sign-in
+  /// initiated from Plans & Credits also connects Google Drive backup.
+  static Future<GoogleSignInAccount?> authenticateShared({
+    GoogleDriveConfig config = const GoogleDriveConfig.fromEnvironment(),
+  }) async {
+    final String resolvedClientId = config.effectiveClientId;
+    await (_sharedInitialized ??= GoogleSignIn.instance
+        .initialize(
+          clientId: resolvedClientId.isEmpty ? null : resolvedClientId,
+          serverClientId: config.serverClientId.isEmpty
+              ? null
+              : config.serverClientId,
+        )
+        .catchError((Object error) {
+          _sharedInitialized = null;
+          throw _signInError(error);
+        }));
+    try {
+      final GoogleSignInAccount user = await GoogleSignIn.instance.authenticate(
+        scopeHint: scopes,
+      );
+      await user.authorizationClient.authorizeScopes(scopes);
+      sharedUser = user;
+      return user;
+    } on GoogleSignInException catch (error) {
+      if (error.code == GoogleSignInExceptionCode.canceled ||
+          error.code == GoogleSignInExceptionCode.interrupted) {
+        return null;
+      }
+      throw _signInError(error);
+    }
+  }
+
+  /// Signs out the shared Google session without notifying the caller twice.
+  static Future<void> signOutShared() async {
+    sharedUser = null;
+    if (_sharedInitialized == null) return;
+    try {
+      await GoogleSignIn.instance.disconnect();
+    } on Object {
+      await GoogleSignIn.instance.signOut();
+    }
+  }
+
   @override
   Future<GoogleDriveAccount?> restoreSession() async {
+    if (_signInOverride == null && sharedUser != null) {
+      return _remember(sharedUser!);
+    }
     try {
       await _initialize();
       final GoogleSignInAccount? user = await _google
@@ -264,7 +374,14 @@ class HttpGoogleDriveClient implements GoogleDriveClient {
   Future<void> signOut() async {
     _user = null;
     _account = null;
-    if (_initialized == null) return;
+    if (_signInOverride == null) {
+      sharedUser = null;
+      final Future<void> Function()? callback = onSharedSignOut;
+      if (callback != null) {
+        unawaited(callback().catchError((Object _) {}));
+      }
+    }
+    if (_initialized == null && _sharedInitialized == null) return;
     try {
       await _google.disconnect();
     } on Object {
@@ -290,7 +407,7 @@ class HttpGoogleDriveClient implements GoogleDriveClient {
   }
 
   Future<Map<String, String>> _headers({bool prompt = false}) async {
-    final GoogleSignInAccount? user = _user;
+    final GoogleSignInAccount? user = _activeUser;
     if (user == null) {
       throw const GoogleDriveException(
         GoogleDriveErrorKind.unauthorized,

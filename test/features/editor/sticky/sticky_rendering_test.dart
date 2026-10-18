@@ -70,8 +70,7 @@ Color _at((ByteData, int) image, int x, int y) {
 }
 
 void main() {
-  test('the whole-note image draws the paper, clipped ink, and the '
-      'highlighter at its opacity once', () async {
+  test('the assistant is told a sticky note is not blank paper', () async {
     final StickyNoteElement note = _note(strokes: <Stroke>[_marker]);
     final NoteImage image = await const NoteImageRenderer().render(
       NoteInkSnapshot.of(
@@ -83,25 +82,14 @@ void main() {
         stickies: <StickyNoteElement>[note],
       ),
     );
-    final (ByteData, int) pixels = await _pixels(image.png);
-    final double scale = image.scale;
-    Color atPage(InkVector page) =>
-        _at(pixels, (page.x * scale).round(), (page.y * scale).round());
 
-    // Paper, not themed: the same blue in a dark snapshot.
-    final Color paper = atPage(note.toPage(const InkVector(80, 100)));
-    expect(paper, isSameColorAs(note.color.paper));
-    // The highlighter over it: blended once at 35%.
-    final Color marked = atPage(note.toPage(const InkVector(60, 60)));
-    final Color expected = Color.alphaBlend(
-      InkPalette.highlighterYellow.onLightPaper.withValues(alpha: 0.35),
-      note.color.paper,
-    );
-    expect((marked.r - expected.r).abs(), lessThan(0.02));
-    expect((marked.g - expected.g).abs(), lessThan(0.02));
-    expect((marked.b - expected.b).abs(), lessThan(0.02));
-    // Outside the note, the page.
-    expect(atPage(const InkVector(250, 250)), isSameColorAs(Colors.black));
+    expect(image.space!.hasRoom, isTrue);
+    for (final area in image.space!.areas) {
+      for (final Rect part in area.parts) {
+        final Rect overlap = part.intersect(note.bounds);
+        expect(overlap.width <= 0 || overlap.height <= 0, isTrue);
+      }
+    }
   });
 
   test('a selected note is captured for the assistant', () async {

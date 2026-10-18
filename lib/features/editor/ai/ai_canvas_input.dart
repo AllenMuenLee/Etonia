@@ -6,6 +6,7 @@ import 'package:flutter/material.dart';
 import '../ink/ink_controller.dart';
 import '../ink/ink_sample.dart';
 import '../ink/one_euro_smoother.dart';
+import '../ink/scribble_erase.dart';
 import '../ink/smoothing_config.dart';
 
 /// Thresholds for writing on the page in AI mode. All lengths are logical
@@ -13,7 +14,7 @@ import '../ink/smoothing_config.dart';
 @immutable
 class AiCanvasConfig {
   const AiCanvasConfig({
-    this.recognitionDelay = const Duration(milliseconds: 800),
+    this.recognitionDelay = const Duration(milliseconds: 1200),
     this.minLoopLength = 160,
     this.minLoopExtent = 56,
     this.loopClosingFraction = 0.2,
@@ -27,6 +28,12 @@ class AiCanvasConfig {
     this.maxRecognitionDimension = 1600,
     this.minRecognitionScale = 1,
     this.maxRecognitionScale = 3,
+    this.minWordGap = 20,
+    this.wordGapFraction = 0.6,
+    this.minScribbleReversals = 4,
+    this.scribbleSwingFraction = 0.3,
+    this.minScribbleSwing = 8,
+    this.scribbleCoverage = 0.5,
   }) : assert(minLoopLength > 0),
        assert(minLoopExtent > 0),
        assert(loopClosingFraction > 0 && loopClosingFraction < 1),
@@ -35,7 +42,9 @@ class AiCanvasConfig {
 
   /// How long the pen stays off the screen after a stroke before the
   /// strokes written so far are read as words and go into the chat's
-  /// input. A new stroke started sooner joins them.
+  /// input. A new stroke started sooner joins them. Long enough that the
+  /// pause before dotting an `i` or crossing a `t` does not cut a word in
+  /// two, each half read on its own.
   final Duration recognitionDelay;
 
   /// A loop shorter than this, or narrower or shorter than
@@ -70,6 +79,27 @@ class AiCanvasConfig {
   final double maxRecognitionDimension;
   final double minRecognitionScale;
   final double maxRecognitionScale;
+
+  /// A stroke begun this far to the right of the waiting handwriting, or
+  /// this far below it, starts a new word: what was waiting is read at once
+  /// rather than when the pen rests. The gap is [wordGapFraction] of the
+  /// waiting handwriting's height, and never less than [minWordGap].
+  final double minWordGap;
+  final double wordGapFraction;
+
+  /// A stroke over the waiting handwriting that swings back and forth at
+  /// least [minScribbleReversals] times, each swing at least
+  /// [scribbleSwingFraction] of its own extent and [minScribbleSwing], is a
+  /// scribble: what was waiting is dropped, never read. It must cover at
+  /// least [scribbleCoverage] of the handwriting's width and height.
+  final int minScribbleReversals;
+  final double scribbleSwingFraction;
+  final double minScribbleSwing;
+  final double scribbleCoverage;
+
+  /// How far from [written] a stroke must begin to start a new word.
+  double wordGap(Rect written) =>
+      math.max(minWordGap, written.height * wordGapFraction);
 }
 
 /// One point of a stroke written in AI mode.
@@ -85,26 +115,32 @@ class AiCanvasPoint {
 /// document, its history, or what is saved.
 @immutable
 class AiCanvasStroke {
-  AiCanvasStroke(List<AiCanvasPoint> points)
+  AiCanvasStroke(List<AiCanvasPoint> points, {this.screenBounds})
     : points = List<AiCanvasPoint>.unmodifiable(points);
 
   final List<AiCanvasPoint> points;
 
+  /// Where the stroke was shown on screen, in global coordinates, when it
+  /// was finished; null when that was not known.
+  final Rect? screenBounds;
+
   Iterable<InkVector> get positions =>
       points.map((AiCanvasPoint point) => point.position);
 
-  Rect get bounds {
+  Rect get bounds => _boundsOf(positions);
+
+  static Rect _boundsOf(Iterable<InkVector> points) {
     double left = double.infinity;
     double top = double.infinity;
     double right = double.negativeInfinity;
     double bottom = double.negativeInfinity;
-    for (final AiCanvasPoint point in points) {
-      left = math.min(left, point.position.x);
-      top = math.min(top, point.position.y);
-      right = math.max(right, point.position.x);
-      bottom = math.max(bottom, point.position.y);
+    for (final InkVector point in points) {
+      left = math.min(left, point.x);
+      top = math.min(top, point.y);
+      right = math.max(right, point.x);
+      bottom = math.max(bottom, point.y);
     }
-    return points.isEmpty ? Rect.zero : Rect.fromLTRB(left, top, right, bottom);
+    return left.isFinite ? Rect.fromLTRB(left, top, right, bottom) : Rect.zero;
   }
 }
 
@@ -156,6 +192,32 @@ abstract final class AiCanvasGestures {
     }
     final double compactness = 4 * math.pi * area / (perimeter * perimeter);
     return compactness >= config.minLoopCompactness ? outline : null;
+  }
+
+  /// Whether [points] scribble out [target]: a stroke over most of it that
+  /// swings back and forth along its longer side, as crossing words out.
+  static bool isScribble(
+    List<InkVector> points,
+    Rect target, [
+    AiCanvasConfig config = const AiCanvasConfig(),
+  ]) {
+    if (points.length < 2 * config.minScribbleReversals || target.isEmpty) {
+      return false;
+    }
+    final Rect bounds = AiCanvasStroke._boundsOf(points);
+    final Rect overlap = bounds.intersect(target);
+    if (overlap.width < target.width * config.scribbleCoverage ||
+        overlap.height < target.height * config.scribbleCoverage) {
+      return false;
+    }
+    final bool across = bounds.width >= bounds.height;
+    final double extent = across ? bounds.width : bounds.height;
+    final double swing = math.max(
+      config.minScribbleSwing,
+      extent * config.scribbleSwingFraction,
+    );
+    return ScribbleErase.reversals(points, alongX: across, swing: swing) >=
+        config.minScribbleReversals;
   }
 
   static double _length(List<InkVector> points) {
@@ -231,12 +293,17 @@ abstract final class AiCanvasGestures {
 
 /// The stroke being written in AI mode, smoothed as it comes in.
 class _ActiveAiStroke {
-  _ActiveAiStroke(this.pointer, RawInkSample first, SmoothingConfig smoothing)
-    : _smoother = OneEuroSmoother(config: smoothing) {
+  _ActiveAiStroke(
+    this.pointer,
+    RawInkSample first,
+    SmoothingConfig smoothing,
+    this.toScreen,
+  ) : _smoother = OneEuroSmoother(config: smoothing) {
     points.add(AiCanvasPoint(_smoother.start(first), first.timestamp));
   }
 
   final int pointer;
+  final Rect? Function(Rect page)? toScreen;
   final OneEuroSmoother _smoother;
   final List<AiCanvasPoint> points = <AiCanvasPoint>[];
 
@@ -260,8 +327,9 @@ class _ActiveAiStroke {
 /// ink. A finished stroke either circles a spot, which [onCircle] is asked
 /// to take as the assistant's context, or is handwriting: strokes written
 /// one soon after another are held together until the pen rests for
-/// [AiCanvasConfig.recognitionDelay], then handed to [onHandwriting] as one
-/// batch and cleared.
+/// [AiCanvasConfig.recognitionDelay], or until a stroke begins a clear space
+/// away, as the next word does, then handed to [onHandwriting] as one batch
+/// and cleared. Scribbling over strokes still waiting drops them unread.
 ///
 /// It notifies only the glow layer that paints it, never the editor.
 class AiCanvasInputController extends ChangeNotifier {
@@ -315,18 +383,29 @@ class AiCanvasInputController extends ChangeNotifier {
   bool get isWaiting => _timer?.isActive ?? false;
 
   /// Starts a stroke on [page]. Returns false while another pointer writes.
-  bool begin(int pointer, InkController page, RawInkSample sample) {
+  /// [toScreen] maps a rectangle on the page to global coordinates, so the
+  /// finished stroke knows where it was shown.
+  bool begin(
+    int pointer,
+    InkController page,
+    RawInkSample sample, {
+    Rect? Function(Rect page)? toScreen,
+  }) {
     if (_disposed || _active != null || !sample.position.isFinite) {
       return false;
     }
     if (_page != null && !identical(_page, page)) {
       // Writing moved to another page: what was written stays together.
       flush();
+    } else if (_startsNewWord(sample.position)) {
+      // A clear space after the word: it is finished, so it goes into the
+      // chat now, and this stroke begins the next.
+      flush();
     }
     _timer?.cancel();
     _timer = null;
     _page = page;
-    _active = _ActiveAiStroke(pointer, sample, smoothing);
+    _active = _ActiveAiStroke(pointer, sample, smoothing, toScreen);
     notifyListeners();
     return true;
   }
@@ -356,8 +435,24 @@ class AiCanvasInputController extends ChangeNotifier {
       samples.isEmpty ? active.points.last.timestamp : samples.last.timestamp,
     );
     _active = null;
-    final AiCanvasStroke stroke = AiCanvasStroke(active.points);
+    final Rect pageBounds = AiCanvasStroke._boundsOf(
+      active.points.map((AiCanvasPoint point) => point.position),
+    );
+    final AiCanvasStroke stroke = AiCanvasStroke(
+      active.points,
+      screenBounds: active.toScreen?.call(pageBounds),
+    );
     final InkController page = _page!;
+    if (_pending.isNotEmpty &&
+        AiCanvasGestures.isScribble(
+          stroke.positions.toList(growable: false),
+          _pendingBounds(),
+          config,
+        )) {
+      // Scribbled out: the word and the scribble go, and nothing is read.
+      clear();
+      return;
+    }
     if (_pending.isEmpty) {
       final List<InkVector>? outline = AiCanvasGestures.contextLoop(
         stroke.positions.toList(growable: false),
@@ -374,6 +469,26 @@ class AiCanvasInputController extends ChangeNotifier {
     _pending.add(stroke);
     _timer = Timer(config.recognitionDelay, flush);
     notifyListeners();
+  }
+
+  Rect _pendingBounds() {
+    Rect? union;
+    for (final AiCanvasStroke stroke in _pending) {
+      if (stroke.points.isEmpty) continue;
+      union = union?.expandToInclude(stroke.bounds) ?? stroke.bounds;
+    }
+    return union ?? Rect.zero;
+  }
+
+  /// Whether a stroke begun at [start] leaves a clear space after the
+  /// waiting handwriting: to its right, or below it on a new line.
+  bool _startsNewWord(InkVector start) {
+    if (_pending.isEmpty) {
+      return false;
+    }
+    final Rect written = _pendingBounds();
+    final double gap = config.wordGap(written);
+    return start.x > written.right + gap || start.y > written.bottom + gap;
   }
 
   /// Drops the stroke [pointer] is writing.

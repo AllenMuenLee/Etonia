@@ -57,8 +57,9 @@ class ReplicationSummary {
     required this.cancelled,
   });
 
-  /// The library folder the Drive folder was replicated into.
-  final String localRootId;
+  /// The library folder the Drive folder's contents were replicated into;
+  /// null means the library root.
+  final String? localRootId;
   final int foldersCreated;
   final int foldersReused;
 
@@ -79,9 +80,8 @@ class ReplicationSummary {
 }
 
 /// Finds the Goodnotes folder in Google Drive and replicates it into the
-/// library: the same folders, nested the same way under a top-level folder
-/// of the same name, with every `.goodnotes` notebook and PDF in it
-/// imported as a note in its folder.
+/// library: the same folders nested directly under the chosen destination,
+/// with every `.goodnotes` notebook and PDF imported as a note in its folder.
 ///
 /// Running it again reuses the folders already made, matched by name and
 /// place, and leaves out files imported before that have not changed since;
@@ -197,9 +197,10 @@ class GoodnotesDriveReplicator {
       return (await repository.createFolder(clean, parentId: parentId)).id;
     }
 
-    // Folders first, breadth first, so the whole tree is known before any
-    // file is imported.
-    final String localRoot = await folderIn(targetFolderId, root.name);
+    // The Drive folder is only the source boundary. Its contents go directly
+    // into the chosen destination (the library root by default), without an
+    // extra local `GoodNotes` wrapper folder.
+    final String? localRoot = targetFolderId;
     final List<_RemoteFile> files = <_RemoteFile>[];
     final Queue<_RemoteFolder> queue = Queue<_RemoteFolder>()
       ..add(_RemoteFolder(root, localRoot, ''));
@@ -248,7 +249,7 @@ class GoodnotesDriveReplicator {
     }
 
     final Map<String, Object?> imports = _importsFrom(await state.read());
-    final Set<String> liveNotes = await _liveNoteIds();
+    final Map<String, NoteEntry> liveNotes = await _liveNotes();
     final List<String> imported = <String>[];
     final List<ReplicationIssue> skipped = <ReplicationIssue>[];
     final List<ReplicationIssue> failed = <ReplicationIssue>[];
@@ -280,26 +281,22 @@ class GoodnotesDriveReplicator {
         skipped.add(ReplicationIssue(file.path, 'Not a notebook or PDF'));
         continue;
       }
-      final int limit = switch (kind) {
-        _FileKind.goodnotes => importer.config.maxImportGoodnotesBytes,
-        _FileKind.pdf => importer.config.maxImportPdfBytes,
-      };
-      final int? size = file.item.sizeBytes;
-      if (size != null && size > limit) {
-        failed.add(ReplicationIssue(file.path, 'Too large to import'));
-        continue;
-      }
-
       final String modified =
           file.item.modifiedTime?.toUtc().toIso8601String() ?? '';
       final Object? previous = imports[file.item.id];
       final String? previousNote = previous is Map<String, Object?>
           ? previous['noteId'] as String?
           : null;
-      final bool previousExists =
-          previousNote != null && liveNotes.contains(previousNote);
+      final NoteEntry? previousEntry = previousNote == null
+          ? null
+          : liveNotes[previousNote];
+      final bool previousExists = previousEntry != null;
       if (previousExists &&
           (previous! as Map<String, Object?>)['modified'] == modified) {
+        final NoteEntry existing = previousEntry;
+        if (existing.folderId != file.localFolderId) {
+          await repository.moveNote(existing.id, file.localFolderId);
+        }
         unchanged++;
         continue;
       }
@@ -336,8 +333,8 @@ class GoodnotesDriveReplicator {
         continue;
       }
       imported.add(file.path);
-      if (previousExists && previousNote != note.id) {
-        await repository.deleteNote(previousNote);
+      if (previousEntry != null && previousEntry.id != note.id) {
+        await repository.deleteNote(previousEntry.id);
       }
       imports[file.item.id] = <String, Object?>{
         'noteId': note.id,
@@ -379,7 +376,7 @@ class GoodnotesDriveReplicator {
   }
 
   ReplicationSummary _summary(
-    String localRoot,
+    String? localRoot,
     int created,
     int reused, {
     List<String> imported = const <String>[],
@@ -408,14 +405,14 @@ class GoodnotesDriveReplicator {
   }
 
   /// The notes in the library, outside Recently Deleted.
-  Future<Set<String>> _liveNoteIds() async {
-    return <String>{
+  Future<Map<String, NoteEntry>> _liveNotes() async {
+    return <String, NoteEntry>{
       for (final String? folder in <String?>[
         null,
         for (final Folder folder in await repository.allFolders()) folder.id,
       ])
         for (final NoteEntry note in (await repository.list(folder)).notes)
-          note.id,
+          note.id: note,
     };
   }
 
@@ -443,7 +440,7 @@ class _RemoteFolder {
   _RemoteFolder(this.item, this.localId, this.path);
 
   final GoogleDriveItem item;
-  final String localId;
+  final String? localId;
   final String path;
 }
 
@@ -451,6 +448,6 @@ class _RemoteFile {
   _RemoteFile(this.item, this.localFolderId, this.path);
 
   final GoogleDriveItem item;
-  final String localFolderId;
+  final String? localFolderId;
   final String path;
 }

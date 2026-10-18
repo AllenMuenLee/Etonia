@@ -3,7 +3,10 @@ import 'dart:ui';
 
 import 'package:flutter/foundation.dart';
 
+import '../handwriting/recognized_handwriting.dart';
 import '../ink/ink_controller.dart';
+import '../ink/stroke.dart';
+import '../sticky/sticky_note.dart';
 import '../document_io/document_models.dart';
 import 'page_setup.dart';
 
@@ -16,7 +19,8 @@ class NotePage {
     this.lastFitSize,
     this.pdfSource,
     this.ownsInk = true,
-  });
+    Iterable<RecognizedInkWord> recognizedWords = const <RecognizedInkWord>[],
+  }) : recognizedWords = List<RecognizedInkWord>.of(recognizedWords);
 
   final InkController ink;
 
@@ -26,7 +30,7 @@ class NotePage {
   /// grows; until then it is the size of the writing area.
   Size? extent;
 
-  /// Last writing-area size used by a Fit page, so export is deterministic.
+  /// Legacy Fit-page size, retained when old notes are read and rewritten.
   Size? lastFitSize;
 
   /// Original PDF paper under this page's images and ink.
@@ -34,6 +38,10 @@ class NotePage {
 
   /// Whether the document disposes [ink] with itself.
   final bool ownsInk;
+
+  /// Searchable handwriting and the high-confidence vector samples learned
+  /// from it. Mutated only through [NoteDocument].
+  final List<RecognizedInkWord> recognizedWords;
 }
 
 /// The pages of one note, and which one is shown.
@@ -89,6 +97,52 @@ class NoteDocument extends ChangeNotifier {
 
   /// The AI session changed, so the note needs saving.
   void aiSessionChanged() => _changed();
+
+  /// Adds one on-device handwriting reading. This is document metadata, so
+  /// it is autosaved without creating an ink undo step.
+  void addRecognizedWord(NotePage page, RecognizedInkWord word) {
+    if (!_pages.contains(page) || word.text.isEmpty) return;
+    page.recognizedWords.add(word);
+    _changed();
+  }
+
+  /// Keeps recognition links aligned with transformed strokes and removes
+  /// readings whose source ink was erased or moved to another page.
+  void reconcileRecognizedWords(
+    NotePage page, {
+    Map<Stroke, Stroke> replacements = const <Stroke, Stroke>{},
+  }) {
+    if (!_pages.contains(page) || page.recognizedWords.isEmpty) return;
+    final List<RecognizedInkWord> next = <RecognizedInkWord>[];
+    for (final RecognizedInkWord word in page.recognizedWords) {
+      final RecognizedInkWord followed = replacements.isEmpty
+          ? word
+          : word.follow(replacements);
+      final StickyNoteElement? sticky = followed.stickyId == null
+          ? null
+          : page.ink.stickyNotes
+                .where((StickyNoteElement note) => note.id == followed.stickyId)
+                .firstOrNull;
+      final Set<Stroke> present = Set<Stroke>.identity()
+        ..addAll(
+          followed.stickyId == null
+              ? page.ink.strokes
+              : sticky?.strokes ?? const <Stroke>[],
+        );
+      if (followed.sourceStrokes.every(present.contains)) next.add(followed);
+    }
+    if (listEquals(next, page.recognizedWords)) return;
+    page.recognizedWords
+      ..clear()
+      ..addAll(next);
+    _changed();
+  }
+
+  Iterable<RecognizedInkWord> get recognizedWords sync* {
+    for (final NotePage page in _pages) {
+      yield* page.recognizedWords;
+    }
+  }
 
   List<NotePage> get pages => UnmodifiableListView<NotePage>(_pages);
 
@@ -191,18 +245,6 @@ class NoteDocument extends ChangeNotifier {
       return;
     }
     page.extent = extent;
-    _changed();
-  }
-
-  void recordFitSize(NotePage page, Size size) {
-    if (!_pages.contains(page) ||
-        page.setup.size != PageSize.fit ||
-        !size.isFinite ||
-        size.isEmpty ||
-        page.lastFitSize == size) {
-      return;
-    }
-    page.lastFitSize = size;
     _changed();
   }
 

@@ -10,6 +10,7 @@ import '../ink/stroke.dart';
 import 'ai_client.dart';
 import 'ai_config.dart';
 import 'ai_notation.dart';
+import 'ai_usage_gate.dart';
 import 'note_image_renderer.dart';
 import 'selection_image_renderer.dart';
 
@@ -104,12 +105,77 @@ class AiAssistantController extends ChangeNotifier {
     this.renderer = const SelectionImageRenderer(),
     this.captureNote,
     this.applyNotation,
-    AiPanelSide side = AiPanelSide.right,
+    AiPanelSide side = AiPanelSide.left,
     this._notationEnabled = false,
     this._animationEnabled = true,
+    AiUsageGate? usageGate,
   }) : _placement = ValueNotifier<AiPanelPlacement>(
          AiPanelPlacement(isOpen: false, side: side),
-       );
+       ) {
+    this.usageGate = usageGate;
+  }
+
+  AiUsageGate? _usageGate;
+  AiModelId? _selectedModel;
+
+  /// Decides which models may be used and is charged for each answer.
+  /// Without one, every model may be used and nothing is metered.
+  AiUsageGate? get usageGate => _usageGate;
+
+  set usageGate(AiUsageGate? gate) {
+    if (identical(gate, _usageGate) || _disposed) {
+      return;
+    }
+    _usageGate?.removeListener(_onGateChanged);
+    _usageGate = gate;
+    gate?.addListener(_onGateChanged);
+    notifyListeners();
+  }
+
+  void _onGateChanged() {
+    if (!_disposed) {
+      notifyListeners();
+    }
+  }
+
+  /// The models the user can pick between; empty when the client serves
+  /// only one.
+  List<AiModelId> get models {
+    final AiClient client = _client;
+    return client is AiModelRouter ? client.models : const <AiModelId>[];
+  }
+
+  /// The model the next message goes to: the one picked in this editor,
+  /// else the one last picked anywhere, else the client's default. Null
+  /// when the client serves only one.
+  AiModelId? get selectedModel {
+    final AiClient client = _client;
+    if (client is! AiModelRouter) {
+      return null;
+    }
+    return _selectedModel ?? _usageGate?.preferredModel ?? client.defaultModel;
+  }
+
+  /// Sends the next messages to [model], and remembers the choice.
+  void selectModel(AiModelId model) {
+    if (_disposed || !models.contains(model) || model == selectedModel) {
+      return;
+    }
+    _selectedModel = model;
+    _usageGate?.setPreferredModel(model);
+    notifyListeners();
+  }
+
+  /// What the plan allows with [model]; null when nothing is metered.
+  AiModelAccess? accessFor(AiModelId model) => _usageGate?.accessFor(model);
+
+  /// Whether [model] has a key to send with.
+  bool isModelConfigured(AiModelId model) {
+    final AiClient client = _client;
+    return client is AiModelRouter
+        ? client.isModelConfigured(model)
+        : client.isConfigured;
+  }
 
   final AiClient _client;
   final SelectionImageRenderer renderer;
@@ -206,9 +272,12 @@ class AiAssistantController extends ChangeNotifier {
   bool get selectionHasChat => _selectionHasChat;
 
   /// False when there is no API key to send with.
-  bool get isConfigured => _client.isConfigured;
+  bool get isConfigured {
+    final AiModelId? model = selectedModel;
+    return model == null ? _client.isConfigured : isModelConfigured(model);
+  }
 
-  String get modelLabel => _client.modelLabel;
+  String get modelLabel => selectedModel?.label ?? _client.modelLabel;
 
   bool get notationEnabled => _notationEnabled;
 
@@ -474,6 +543,7 @@ class AiAssistantController extends ChangeNotifier {
     final bool animationAuthorized = notationAuthorized && _animationEnabled;
     final int revocations = _notationRevocations;
     final int animationRevocations = _animationRevocations;
+    final AiModelId? model = selectedModel;
     conversation.requestState = AiRequestState.sending;
     conversation.failure = null;
     conversation.partialAnswer = null;
@@ -489,6 +559,7 @@ class AiAssistantController extends ChangeNotifier {
         animationAuthorized,
         revocations,
         animationRevocations,
+        model,
       ),
     );
   }
@@ -501,6 +572,7 @@ class AiAssistantController extends ChangeNotifier {
     bool animationAuthorized,
     int revocations,
     int animationRevocations,
+    AiModelId? model,
   ) async {
     void finish(AiResult result, {NoteImage? noteImage}) {
       _finish(
@@ -515,6 +587,16 @@ class AiAssistantController extends ChangeNotifier {
       );
     }
 
+    final AiUsageGate? gate = _usageGate;
+    if (gate != null && model != null) {
+      final AiFailure? refused = gate.checkAccess(model);
+      if (refused != null) {
+        // Answered at once, so the panel's message and its choices show.
+        await Future<void>.value();
+        finish(AiError(refused));
+        return;
+      }
+    }
     NoteImage? noteImage;
     if (notationAuthorized) {
       final AiNoteCapture? capture = captureNote;
@@ -532,10 +614,11 @@ class AiAssistantController extends ChangeNotifier {
         return;
       }
     }
+    final AiRequest request;
     final AiResult result;
     try {
       result = await _client.send(
-        AiRequest(
+        request = AiRequest(
           systemInstruction: AiPrompts.systemFor(
             notationEnabled: notationAuthorized,
             animationEnabled: animationAuthorized,
@@ -545,6 +628,7 @@ class AiAssistantController extends ChangeNotifier {
           noteImage: noteImage,
           notationEnabled: notationAuthorized,
           animationEnabled: animationAuthorized,
+          model: model,
         ),
         onPartial: (String message, bool isComplete) {
           if (_disposed ||
@@ -566,6 +650,13 @@ class AiAssistantController extends ChangeNotifier {
         noteImage: noteImage,
       );
       return;
+    }
+    // The provider charged for the answer whatever becomes of it here.
+    if (result case AiSuccess(
+      :final String text,
+      :final AiTokenUsage? usage,
+    ) when gate != null && model != null && !_disposed) {
+      gate.recordUsage(model, usage ?? AiTokenUsage.estimate(request, text));
     }
     finish(result, noteImage: noteImage);
   }
@@ -837,6 +928,7 @@ class AiAssistantController extends ChangeNotifier {
 
   @override
   void dispose() {
+    _usageGate?.removeListener(_onGateChanged);
     _disposed = true;
     for (final _AiConversation conversation in _conversations) {
       conversation.requestToken++;

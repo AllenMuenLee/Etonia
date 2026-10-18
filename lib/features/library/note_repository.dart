@@ -343,7 +343,9 @@ abstract class IndexedNoteRepository extends NoteRepository {
       ],
       notes: <NoteEntry>[
         for (final NoteEntry note in _notes.values)
-          if (note.title.toLowerCase().contains(needle)) note,
+          if (note.title.toLowerCase().contains(needle) ||
+              note.searchText.toLowerCase().contains(needle))
+            note,
       ],
     );
   }
@@ -458,6 +460,7 @@ abstract class IndexedNoteRepository extends NoteRepository {
         created: now,
         modified: now,
         pageCount: original.pageCount,
+        searchText: original.searchText,
       );
       try {
         // Assets land first, so persisted content never points at files that
@@ -626,6 +629,7 @@ abstract class IndexedNoteRepository extends NoteRepository {
       _notes[id] = note.copyWith(
         modified: _clock(),
         pageCount: content.pages.length,
+        searchText: content.searchableText,
       );
       await writeIndex();
     });

@@ -159,6 +159,64 @@ void main() {
     expect(find.text('Add to note'), findsNothing);
   });
 
+  testWidgets('a notation on a sticky note adds one, drawn on, beside the '
+      'selection', (WidgetTester tester) async {
+    final (InkController controller, FakeAiClient client) = await _open(tester);
+    await tester.enterText(find.byType(TextField), 'Sketch it');
+    await tester.pump();
+    await tester.tap(find.byTooltip('Send'));
+    await settleAi(tester);
+    client.answerResponse(
+      AiAssistantResponse(
+        message: 'I sketched it on a sticky note.',
+        notation: AiNotation(
+          label: 'Sketch',
+          sticky: const AiStickySize(240, 180),
+          items: <AiNotationItem>[
+            AiNotationStroke(
+              ink: 'blue',
+              width: 3,
+              points: const <AiNotationPoint>[
+                AiNotationPoint(0.1, 0.1),
+                AiNotationPoint(0.9, 0.9),
+              ],
+            ),
+          ],
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    // The page's own ink is untouched; the drawing is on the new note.
+    expect(controller.strokes, hasLength(1));
+    expect(controller.stickyNotes, hasLength(1));
+    final note = controller.stickyNotes.single;
+    expect(note.strokes, hasLength(1));
+    expect(note.localSize, const Size(240, 180));
+    expect(note.colorId, 'blue');
+    // Inside its paper's padding.
+    for (final InkVector point in note.strokes.single.points) {
+      expect(point.x, inInclusiveRange(16, 224));
+      expect(point.y, inInclusiveRange(16, 164));
+    }
+    // Not opened for writing, and not over the selected line, but close by.
+    expect(controller.editingSticky, isNull);
+    const Rect line = Rect.fromLTRB(98, 98, 202, 102);
+    final Rect overlap = note.bounds.intersect(line);
+    expect(overlap.width <= 0 || overlap.height <= 0, isTrue);
+    expect(note.bounds.top - line.bottom, lessThan(40));
+    expect(controller.documentRevision, 1);
+    expect(
+      tester
+          .widget<AiAssistantPanel>(find.byType(AiAssistantPanel))
+          .controller
+          .messages
+          .last
+          .notationStatus,
+      AiNotationStatus.applied,
+    );
+  });
+
   testWidgets('the AI button shows AI notes while on and hides them when off', (
     WidgetTester tester,
   ) async {
@@ -324,8 +382,12 @@ void main() {
     final NotationPlayback playback = controller.notationPlayback!;
     expect(playback.isFinished, isFalse);
     expect(controller.activeStroke, isNotNull);
-    expect(controller.activeStroke!.origin.x, closeTo(local.dx, 0.001));
-    expect(controller.activeStroke!.origin.y, closeTo(local.dy, 0.001));
+    // In the canvas's own units, whatever the page's fit.
+    final Offset onPage = tester
+        .renderObject<RenderBox>(find.byType(InkCanvas))
+        .globalToLocal(canvas.topLeft + local);
+    expect(controller.activeStroke!.origin.x, closeTo(onPage.dx, 0.001));
+    expect(controller.activeStroke!.origin.y, closeTo(onPage.dy, 0.001));
     expect(find.textContaining('Added to note'), findsNothing);
 
     await gesture.up();

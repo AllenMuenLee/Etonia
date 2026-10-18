@@ -56,6 +56,11 @@ class FakeAiClient implements AiClient {
     );
   }
 
+  /// Ends request number [index] with [result].
+  void complete(AiResult result, {int? index}) {
+    _pending[index ?? _pending.length - 1].complete(result);
+  }
+
   /// Fails request number [index].
   void fail(AiFailureKind kind, {int? index}) {
     _pending[index ?? _pending.length - 1].complete(AiError(AiFailure(kind)));
@@ -105,10 +110,6 @@ class FakeNoteImageRenderer extends NoteImageRenderer {
   Future<NoteImage> render(NoteInkSnapshot snapshot) async {
     snapshots.add(snapshot);
     return NoteImage(
-      png: Uint8List.fromList(<int>[0x89, 0x50, 0x4E, 0x47]),
-      width: snapshot.logicalSize.width.ceil(),
-      height: snapshot.logicalSize.height.ceil(),
-      scale: 1,
       logicalSize: snapshot.logicalSize,
       revision: snapshot.revision,
       normalizedFocusBounds: snapshot.focusBounds == null
@@ -175,12 +176,34 @@ class FakeCanvasTextRecognizer implements CanvasTextRecognizer {
   /// What the next batches are read as.
   String text;
 
+  Future<String> Function(HandwritingBatch batch)? onRecognize;
+
   /// Every batch it was asked to read, in order.
   final List<HandwritingBatch> batches = <HandwritingBatch>[];
 
   @override
   Future<String> recognize(HandwritingBatch batch) async {
     batches.add(batch);
-    return text;
+    return onRecognize == null ? text : await onRecognize!(batch);
   }
+}
+
+/// A [FakeAiClient] that serves every model, as the editor's own client
+/// does, so the model picker shows. [unconfigured] models have no key.
+class FakeAiModelRouter extends FakeAiClient implements AiModelRouter {
+  FakeAiModelRouter({
+    this.defaultModel = AiModelId.sol,
+    this.unconfigured = const <AiModelId>{},
+  });
+
+  @override
+  final AiModelId defaultModel;
+
+  final Set<AiModelId> unconfigured;
+
+  @override
+  List<AiModelId> get models => AiModelId.values;
+
+  @override
+  bool isModelConfigured(AiModelId model) => !unconfigured.contains(model);
 }

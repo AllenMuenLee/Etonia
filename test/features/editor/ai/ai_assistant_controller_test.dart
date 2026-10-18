@@ -1,5 +1,4 @@
 import 'dart:async';
-import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -123,7 +122,7 @@ void main() {
       rig.ink.selectionListenable.addListener(() => selectionChanges++);
 
       expect(rig.assistant.isOpen, isFalse);
-      expect(rig.assistant.side, AiPanelSide.right);
+      expect(rig.assistant.side, AiPanelSide.left);
       rig.assistant.open(
         selection,
         brightness: Brightness.dark,
@@ -192,18 +191,21 @@ void main() {
     expect(AiPrompts.explain, startsWith('Teach me the subject'));
     expect(AiPrompts.explain, contains('what each part or component is'));
     expect(AiPrompts.explain, contains('Do not describe what the image'));
-    expect(AiPrompts.explain, contains('too ambiguous to read'));
+    // Unclear work is read the likeliest way and answered, not queried.
+    expect(AiPrompts.explain, contains('go with the most likely reading'));
     expect(
       AiPrompts.grade,
       'Review the selected handwritten work for correctness. State what is '
       'correct, identify mistakes with specific explanations, and suggest '
       'an improved answer. If no question, answer key, rubric, or point '
-      'total is visible, say what assumptions you are making and give '
-      'formative feedback rather than inventing an authoritative score.',
+      'total is visible, assume the most likely task, state that in one '
+      'short line, and give full formative feedback rather than inventing '
+      'an authoritative score.',
     );
     expect(AiPrompts.system, contains('teach that subject'));
     expect(AiPrompts.system, contains('do not describe the image'));
-    expect(AiPrompts.system, contains('do not fabricate missing context'));
+    expect(AiPrompts.system, contains('Never ask the user to confirm'));
+    expect(AiPrompts.system, contains('do not invent facts'));
     expect(
       AiPrompts.system,
       contains('never claim an official grade without a provided rubric'),
@@ -212,6 +214,11 @@ void main() {
     final String drawing = AiPrompts.systemFor(notationEnabled: true);
     expect(drawing, contains('build on their ink'));
     expect(drawing, contains('no text sits on a line'));
+    // Anything beyond a simple text answer is written on the note.
+    expect(drawing, contains('Every answer must come with a notation'));
+    expect(drawing, contains('except a simple text answer'));
+    expect(drawing, contains('make the most reasonable choice and draw it'));
+    expect(drawing, isNot(contains('is ambiguous')));
     expect(drawing, isNot(contains('op amp')));
   });
 
@@ -569,14 +576,8 @@ void main() {
       client: client,
       renderer: renderer,
       animationEnabled: false,
-      captureNote: () async => NoteImage(
-        png: Uint8List.fromList(<int>[1]),
-        width: 10,
-        height: 10,
-        scale: 1,
-        logicalSize: const Size(10, 10),
-        revision: 0,
-      ),
+      captureNote: () async =>
+          NoteImage(logicalSize: const Size(10, 10), revision: 0),
       // Stands in for the editor, which reports the strokes it added.
       applyNotation: (AiNotation _, NoteImage _) => AiNotationApplication(
         AiNotationStatus.applied,
@@ -813,14 +814,14 @@ void main() {
     rig.assistant.send('Question');
     rig.client.answer('Answer');
     await pumpEventQueue();
-    rig.assistant.setSide(AiPanelSide.right);
     rig.assistant.setSide(AiPanelSide.left);
+    rig.assistant.setSide(AiPanelSide.right);
     rig.assistant.close();
 
     expect(placements, const <AiPanelPlacement>[
-      AiPanelPlacement(isOpen: true, side: AiPanelSide.right),
       AiPanelPlacement(isOpen: true, side: AiPanelSide.left),
-      AiPanelPlacement(isOpen: false, side: AiPanelSide.left),
+      AiPanelPlacement(isOpen: true, side: AiPanelSide.right),
+      AiPanelPlacement(isOpen: false, side: AiPanelSide.right),
     ]);
   });
 
@@ -910,10 +911,6 @@ void main() {
       final FakeAiClient client = FakeAiClient();
       final FakeSelectionImageRenderer renderer = FakeSelectionImageRenderer();
       final NoteImage note = NoteImage(
-        png: Uint8List.fromList(<int>[1, 2, 3]),
-        width: 200,
-        height: 100,
-        scale: 2,
         logicalSize: const Size(100, 50),
         revision: 4,
       );
@@ -992,14 +989,8 @@ void main() {
       final AiAssistantController assistant = AiAssistantController(
         client: client,
         renderer: FakeSelectionImageRenderer(),
-        captureNote: () async => NoteImage(
-          png: Uint8List.fromList(<int>[1]),
-          width: 10,
-          height: 10,
-          scale: 1,
-          logicalSize: const Size(10, 10),
-          revision: 0,
-        ),
+        captureNote: () async =>
+            NoteImage(logicalSize: const Size(10, 10), revision: 0),
         applyNotation: (AiNotation notation, NoteImage _) {
           applications++;
           expect(notation.timeline, isNotNull);
@@ -1090,14 +1081,8 @@ void main() {
       final AiAssistantController assistant = AiAssistantController(
         client: client,
         renderer: FakeSelectionImageRenderer(),
-        captureNote: () async => NoteImage(
-          png: Uint8List.fromList(<int>[1]),
-          width: 10,
-          height: 10,
-          scale: 1,
-          logicalSize: const Size(10, 10),
-          revision: 0,
-        ),
+        captureNote: () async =>
+            NoteImage(logicalSize: const Size(10, 10), revision: 0),
         applyNotation: (AiNotation _, NoteImage _) {
           applications++;
           return const AiNotationApplication(AiNotationStatus.applied);
@@ -1261,14 +1246,8 @@ void _streamingTests() {
       final AiAssistantController assistant = AiAssistantController(
         client: rig.client,
         renderer: rig.renderer,
-        captureNote: () async => NoteImage(
-          png: Uint8List.fromList(<int>[1]),
-          width: 10,
-          height: 10,
-          scale: 1,
-          logicalSize: const Size(10, 10),
-          revision: 0,
-        ),
+        captureNote: () async =>
+            NoteImage(logicalSize: const Size(10, 10), revision: 0),
         applyNotation: (AiNotation _, NoteImage _) {
           applications++;
           return const AiNotationApplication(AiNotationStatus.applied);

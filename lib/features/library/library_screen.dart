@@ -1,6 +1,7 @@
 import 'dart:io';
 import 'dart:math' as math;
 import 'dart:ui' as ui;
+import '../../backend/backend_service.dart';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/semantics.dart';
@@ -21,6 +22,7 @@ import '../editor/widgets/export_options_sheet.dart';
 import '../editor/widgets/document_io_progress_dialog.dart';
 import '../editor/widgets/tool_palette.dart';
 
+import 'cloud/auto_backup_scheduler.dart';
 import 'cloud/cloud_sync_state.dart';
 import 'cloud/goodnotes_drive_replicator.dart';
 import 'cloud/google_drive_backup_service.dart';
@@ -36,15 +38,26 @@ import 'note_tabs_page.dart';
 import 'note_thumbnails.dart';
 import 'open_notes.dart';
 import 'shared_note_clipboard.dart';
+import '../../shared/widgets/ignore_keyboard.dart';
 import '../../shared/widgets/processing.dart';
 import '../../shared/widgets/pressable.dart';
+import '../payment/in_app_purchase_gateway.dart';
+import '../payment/payment_models.dart';
+import '../payment/payment_page.dart';
+import '../payment/plans_button.dart';
+import '../payment/subscription_controller.dart';
 
 /// Opens the library on this device, then shows it. With a [repository]
 /// that one is used instead.
 class LibraryHome extends StatefulWidget {
-  const LibraryHome({super.key, this.repository});
+  const LibraryHome({super.key, this.repository, this.subscription});
 
   final NoteRepository? repository;
+
+  /// The user's plan and AI credits. Without one, the device's library
+  /// gets one beside it, connected to the platform store; a library
+  /// supplied from outside gets one with no store.
+  final SubscriptionController? subscription;
 
   @override
   State<LibraryHome> createState() => _LibraryHomeState();
@@ -55,6 +68,29 @@ class _LibraryHomeState extends State<LibraryHome> {
       ? FileNoteRepository.openDefault()
       : Future<NoteRepository>.value(widget.repository);
 
+  SubscriptionController? _subscription;
+
+  /// The store's subscription, kept beside the device's library.
+  SubscriptionController? _subscriptionFor(NoteRepository repository) {
+    if (widget.repository != null || repository is! FileNoteRepository) {
+      return null;
+    }
+    return _subscription ??= SubscriptionController(
+      store: FileSubscriptionStore(
+        File('${repository.directory.path}/subscription.json'),
+      ),
+      gateway: PlatformInAppPurchaseGateway(),
+      backend: BackendService.instance,
+      config: const PaymentConfig.fromEnvironment(),
+    )..load().then((void _) => _subscription?.connectStore());
+  }
+
+  @override
+  void dispose() {
+    _subscription?.dispose();
+    super.dispose();
+  }
+
   @override
   Widget build(BuildContext context) {
     return FutureBuilder<NoteRepository>(
@@ -62,7 +98,10 @@ class _LibraryHomeState extends State<LibraryHome> {
       builder: (BuildContext context, AsyncSnapshot<NoteRepository> snapshot) {
         final NoteRepository? repository = snapshot.data;
         if (repository != null) {
-          return LibraryScreen(repository: repository);
+          return LibraryScreen(
+            repository: repository,
+            subscription: widget.subscription ?? _subscriptionFor(repository),
+          );
         }
         return Scaffold(
           backgroundColor: AppColors.of(context).background,
@@ -229,6 +268,7 @@ class LibraryScreen extends StatefulWidget {
     this.initialNotationEnabled = true,
     this.googleDriveClient,
     this.cloudStateStore,
+    this.subscription,
   });
 
   final NoteRepository repository;
@@ -251,6 +291,11 @@ class LibraryScreen extends StatefulWidget {
   /// What is remembered about Google Drive between launches; kept beside
   /// the library by default.
   final CloudStateStore? cloudStateStore;
+
+  /// The user's plan and AI credits, shown in the top bar and passed to
+  /// the editor. Without one, the screen keeps its own beside the library,
+  /// with no store to buy from.
+  final SubscriptionController? subscription;
 
   @override
   State<LibraryScreen> createState() => _LibraryScreenState();
@@ -323,6 +368,37 @@ class _LibraryScreenState extends State<LibraryScreen> {
         _ => InMemoryCloudStateStore(),
       };
 
+  /// One for the screen's life, so a backup asked for in the sheet and an
+  /// automatic one take turns.
+  late final GoogleDriveBackupService _backup = GoogleDriveBackupService(
+    client: _drive,
+    repository: _repository,
+    state: _cloudState,
+    clock: widget.clock,
+  );
+
+  late final AutoBackupScheduler _autoBackup = AutoBackupScheduler(
+    backup: _backup,
+    client: _drive,
+    library: _repository,
+    clock: widget.clock,
+  );
+
+  SubscriptionController? _ownedSubscription;
+
+  SubscriptionController get _subscription =>
+      widget.subscription ??
+      (_ownedSubscription ??= SubscriptionController(
+        store: switch (widget.repository) {
+          final FileNoteRepository files => FileSubscriptionStore(
+            File('${files.directory.path}/subscription.json'),
+          ),
+          _ => InMemorySubscriptionStore(),
+        },
+      )..load());
+
+  Future<void> _openPlans() => showPaymentPage(context, _subscription);
+
   String get _query => _search.text.trim();
 
   /// Recently Deleted is shown, rather than a folder or search results.
@@ -335,6 +411,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
     _search.addListener(_reload);
     _reload();
     _repository.purgeTrash(_trashKeeps);
+    _autoBackup.start();
   }
 
   @override
@@ -362,6 +439,8 @@ class _LibraryScreenState extends State<LibraryScreen> {
     _penSettings.dispose();
     _palettePlacement.dispose();
     _openNotes.dispose();
+    _autoBackup.dispose();
+    _ownedSubscription?.dispose();
     super.dispose();
   }
 
@@ -457,6 +536,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
       note: note,
       preview: _thumbnails.peek(note, Theme.of(context).brightness),
       aiClient: widget.aiClient,
+      subscription: _subscription,
       documentPicker: widget.documentPicker,
       pdfRasterizer: widget.pdfRasterizer,
       exportSink: widget.exportSink,
@@ -472,19 +552,20 @@ class _LibraryScreenState extends State<LibraryScreen> {
     );
   }
 
-  /// Asks for the new note's template first: its page size and paper.
+  /// Asks for the new note's name, page size, and paper together.
   Future<void> _newNote() async {
-    final PageSetup? setup = await pickNoteTemplate(
+    final NoteDraft? draft = await pickNoteTemplate(
       context,
       initial: _template,
     );
-    if (setup == null || !mounted) {
+    if (draft == null || !mounted) {
       return;
     }
-    _template = setup;
+    _template = draft.setup;
     final NoteEntry note = await _repository.createNote(
+      title: draft.name,
       folderId: _folderId,
-      setup: setup,
+      setup: draft.setup,
     );
     if (mounted) {
       await _openNote(note);
@@ -581,11 +662,8 @@ class _LibraryScreenState extends State<LibraryScreen> {
     return showGoogleDriveSheet(
       context,
       client: _drive,
-      backup: GoogleDriveBackupService(
-        client: _drive,
-        repository: _repository,
-        state: _cloudState,
-      ),
+      backup: _backup,
+      autoBackup: _autoBackup,
       replicator: GoodnotesDriveReplicator(
         client: _drive,
         repository: _repository,
@@ -1093,6 +1171,8 @@ class _LibraryScreenState extends State<LibraryScreen> {
       onToggleView: () => setState(() => _grid = !_grid),
       onNewFolder: _newFolder,
       onGoogleDrive: _openGoogleDrive,
+      subscription: _subscription,
+      onPlans: _openPlans,
       canDrop: _canDrop,
       onDrop: _drop,
       selecting: _selecting,
@@ -1353,17 +1433,34 @@ class _LibraryEditorTransition extends StatefulWidget {
 class _LibraryEditorTransitionState extends State<_LibraryEditorTransition> {
   bool _transitioning = false;
 
+  /// While the two slide past each other, each is drawn once into a
+  /// picture and the pictures move. Fading the live screens would draw
+  /// them, frosted glass and all, offscreen again on every frame.
+  final SnapshotController _librarySnapshot = SnapshotController();
+  final SnapshotController _editorSnapshot = SnapshotController();
+
   @override
   void didUpdateWidget(_LibraryEditorTransition oldWidget) {
     super.didUpdateWidget(oldWidget);
     if (oldWidget.showEditor != widget.showEditor) {
       _transitioning = true;
     }
+    _librarySnapshot.allowSnapshotting = _transitioning;
+    _editorSnapshot.allowSnapshotting = _transitioning;
+  }
+
+  @override
+  void dispose() {
+    _librarySnapshot.dispose();
+    _editorSnapshot.dispose();
+    super.dispose();
   }
 
   void _finishTransition() {
     if (!_transitioning || !mounted) return;
     setState(() => _transitioning = false);
+    _librarySnapshot.allowSnapshotting = false;
+    _editorSnapshot.allowSnapshotting = false;
   }
 
   @override
@@ -1391,7 +1488,14 @@ class _LibraryEditorTransitionState extends State<_LibraryEditorTransition> {
                     curve: AppMotion.gentleCurve,
                     child: TickerMode(
                       enabled: !showEditor,
-                      child: RepaintBoundary(child: widget.library),
+                      child: IgnoreKeyboard(
+                        ignoring: showEditor,
+                        child: SnapshotWidget(
+                          controller: _librarySnapshot,
+                          mode: SnapshotMode.permissive,
+                          child: RepaintBoundary(child: widget.library),
+                        ),
+                      ),
                     ),
                   ),
                 ),
@@ -1418,7 +1522,11 @@ class _LibraryEditorTransitionState extends State<_LibraryEditorTransition> {
                     onEnd: _finishTransition,
                     child: TickerMode(
                       enabled: showEditor,
-                      child: RepaintBoundary(child: widget.editor),
+                      child: SnapshotWidget(
+                        controller: _editorSnapshot,
+                        mode: SnapshotMode.permissive,
+                        child: RepaintBoundary(child: widget.editor),
+                      ),
                     ),
                   ),
                 ),
@@ -1443,6 +1551,8 @@ class _LibraryBar extends StatelessWidget implements PreferredSizeWidget {
     required this.onToggleView,
     required this.onNewFolder,
     required this.onGoogleDrive,
+    required this.subscription,
+    required this.onPlans,
     required this.canDrop,
     required this.onDrop,
     required this.selecting,
@@ -1495,6 +1605,10 @@ class _LibraryBar extends StatelessWidget implements PreferredSizeWidget {
 
   /// Opens the Google Drive sheet: backup, restore, and Goodnotes import.
   final VoidCallback onGoogleDrive;
+
+  /// Shown in the Plans & Credits pill, which [onPlans] opens.
+  final SubscriptionController subscription;
+  final VoidCallback onPlans;
 
   /// Whether a dragged item can go into a folder on the path, and moving
   /// it there; the folders above the open one take drops.
@@ -1555,7 +1669,7 @@ class _LibraryBar extends StatelessWidget implements PreferredSizeWidget {
   Widget build(BuildContext context) {
     final AppColors colors = AppColors.of(context);
     final Widget field = _SearchField(controller: search);
-    return Material(
+    return GlassMaterial(
       color: AppGlass.surface(colors),
       child: SafeArea(
         bottom: false,
@@ -1641,35 +1755,64 @@ class _LibraryBar extends StatelessWidget implements PreferredSizeWidget {
                                 SizedBox(width: 240, child: field),
                                 const SizedBox(width: AppSpacing.xs),
                               ],
+                              PlansButton(
+                                controller: subscription,
+                                onPressed: onPlans,
+                                compact: compact,
+                              ),
                               IconButton(
                                 tooltip: 'Google Drive',
                                 onPressed: onGoogleDrive,
                                 icon: const Icon(AppIcons.cloud),
                               ),
-                              PopupMenuButton<LibrarySort>(
+                              // On compact widths, where the bar is full,
+                              // the view toggle is in this menu too.
+                              PopupMenuButton<Object>(
                                 tooltip: 'Sort',
                                 icon: const Icon(AppIcons.sort),
-                                onSelected: onSort,
+                                onSelected: (Object choice) {
+                                  if (choice is LibrarySort) {
+                                    onSort(choice);
+                                  } else {
+                                    onToggleView();
+                                  }
+                                },
                                 itemBuilder: (BuildContext context) {
-                                  return <PopupMenuEntry<LibrarySort>>[
+                                  return <PopupMenuEntry<Object>>[
                                     for (final LibrarySort option
                                         in LibrarySort.values)
-                                      _menuItem<LibrarySort>(
+                                      _menuItem<Object>(
                                         context,
                                         value: option,
                                         label: option.label,
                                         checked: option == sort,
                                       ),
+                                    if (compact) ...<PopupMenuEntry<Object>>[
+                                      const PopupMenuDivider(),
+                                      _menuItem<Object>(
+                                        context,
+                                        value: #toggleView,
+                                        label: grid
+                                            ? 'Show as list'
+                                            : 'Show as grid',
+                                        checked: false,
+                                      ),
+                                    ],
                                   ];
                                 },
                               ),
-                              IconButton(
-                                tooltip: grid ? 'Show as list' : 'Show as grid',
-                                onPressed: onToggleView,
-                                icon: Icon(
-                                  grid ? AppIcons.listView : AppIcons.gridView,
+                              if (!compact)
+                                IconButton(
+                                  tooltip: grid
+                                      ? 'Show as list'
+                                      : 'Show as grid',
+                                  onPressed: onToggleView,
+                                  icon: Icon(
+                                    grid
+                                        ? AppIcons.listView
+                                        : AppIcons.gridView,
+                                  ),
                                 ),
-                              ),
                               // Beside the folders where they are shown.
                               if (onOpenSidebar != null)
                                 IconButton(
@@ -1875,9 +2018,9 @@ class _NewNoteButton extends StatelessWidget {
     return Directionality(
       textDirection: opposite,
       child: MenuAnchor(
-        // The directional end alignment keeps the menu's trailing edge on
-        // the button's trailing edge, including the FAB's outer margin.
-        style: const MenuStyle(alignment: AlignmentDirectional.topEnd),
+        // Under the opposite direction above, directional start resolves to
+        // the button's trailing edge and aligns the menu's trailing edge to it.
+        style: const MenuStyle(alignment: AlignmentDirectional.topStart),
         alignmentOffset: const Offset(0, AppSpacing.sm),
         menuChildren: <Widget>[
           reads(
@@ -1898,7 +2041,7 @@ class _NewNoteButton extends StatelessWidget {
             MenuItemButton(
               leadingIcon: const Icon(AppIcons.pen),
               onPressed: onImportGoodnotesPdf,
-              child: const Text('Import from Goodnotes'),
+              child: const Text('Import editable PDF'),
             ),
           ),
         ],

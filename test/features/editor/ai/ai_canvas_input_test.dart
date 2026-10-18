@@ -8,6 +8,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:greatnote/features/editor/ai/ai_assistant_controller.dart';
 import 'package:greatnote/features/editor/ai/ai_canvas_input.dart';
 import 'package:greatnote/features/editor/ai/canvas_text_recognizer.dart';
+import 'package:greatnote/features/editor/ai/handwriting_prediction.dart';
 import 'package:greatnote/features/editor/ink/ink_controller.dart';
 import 'package:greatnote/features/editor/ink/ink_palette.dart';
 import 'package:greatnote/features/editor/ink/ink_sample.dart';
@@ -147,7 +148,7 @@ void main() {
         expect(input.pendingStrokes, hasLength(1));
         async.elapse(const Duration(milliseconds: 500));
         _write(input, page, _letter(const InkVector(140, 100)), pointer: 2);
-        async.elapse(const Duration(milliseconds: 750));
+        async.elapse(const Duration(milliseconds: 1150));
         expect(read, isEmpty);
         async.elapse(const Duration(milliseconds: 100));
         expect(read, hasLength(1));
@@ -176,7 +177,7 @@ void main() {
         async.elapse(const Duration(seconds: 2));
         expect(batches, 0);
         input.end(2, next.sublist(1));
-        async.elapse(const Duration(seconds: 1));
+        async.elapse(const Duration(seconds: 2));
         expect(batches, 1);
         input.dispose();
       });
@@ -217,7 +218,8 @@ void main() {
           },
         );
         _write(input, page, _letter(const InkVector(100, 100)));
-        _write(input, page, _loop(const InkVector(300, 300), 80), pointer: 2);
+        // Begun beside the letter, at the loop's right, (140, 100).
+        _write(input, page, _loop(const InkVector(60, 100), 80), pointer: 2);
         expect(circles, 0);
         expect(input.pendingStrokes, hasLength(2));
         input.dispose();
@@ -231,6 +233,72 @@ void main() {
       _write(input, page, _loop(const InkVector(300, 300), 80));
       expect(input.pendingStrokes, hasLength(1));
       input.dispose();
+    });
+
+    test('a stroke begun a clear space away hands over the word before it '
+        'at once', () {
+      fakeAsync((FakeAsync async) {
+        final List<List<AiCanvasStroke>> read = <List<AiCanvasStroke>>[];
+        final AiCanvasInputController input = AiCanvasInputController(
+          onHandwriting:
+              (
+                List<AiCanvasStroke> strokes,
+                InkController _, {
+                required bool openPanel,
+              }) => read.add(strokes),
+        );
+        // The letter spans x 100 to 124: a new word begins past 144.
+        _write(input, page, _letter(const InkVector(100, 100)));
+        _write(input, page, _letter(const InkVector(180, 100)), pointer: 2);
+        expect(read, hasLength(1));
+        expect(read.single, hasLength(1));
+        expect(input.pendingStrokes, hasLength(1));
+        // And on a new line, below.
+        _write(input, page, _letter(const InkVector(100, 160)), pointer: 3);
+        expect(read, hasLength(2));
+        async.elapse(const Duration(seconds: 2));
+        expect(read, hasLength(3));
+        input.dispose();
+      });
+    });
+
+    test('scribbling over waiting handwriting drops it unread', () {
+      fakeAsync((FakeAsync async) {
+        int batches = 0;
+        final AiCanvasInputController input = AiCanvasInputController(
+          onHandwriting:
+              (
+                List<AiCanvasStroke> _,
+                InkController _, {
+                required bool openPanel,
+              }) => batches++,
+        );
+        _write(input, page, _letter(const InkVector(100, 100)));
+        _write(input, page, _letter(const InkVector(120, 100)), pointer: 2);
+        // Back and forth across the word, drifting down it.
+        _write(input, page, <InkVector>[
+          for (int i = 0; i <= 60; i++)
+            InkVector(96 + 52 * (1 - ((i % 12) / 6 - 1).abs()), 90 + i / 3),
+        ], pointer: 3);
+        expect(input.isEmpty, isTrue);
+        async.elapse(const Duration(seconds: 2));
+        expect(batches, 0);
+        input.dispose();
+      });
+    });
+
+    test('a scribble is not a stroke of a word', () {
+      const ui.Rect word = ui.Rect.fromLTWH(100, 90, 44, 20);
+      expect(
+        AiCanvasGestures.isScribble(_letter(const InkVector(100, 100)), word),
+        isFalse,
+      );
+      expect(
+        AiCanvasGestures.isScribble(<InkVector>[
+          for (int i = 0; i <= 40; i++) InkVector(96.0 + i, 100),
+        ], word),
+        isFalse,
+      );
     });
 
     test('flush hands over at once; clear reads nothing', () {
@@ -442,6 +510,79 @@ void main() {
       expect(arguments['strokes'], <List<double>>[
         <double>[10, 10, 0, 20, 10, 8],
       ]);
+    });
+
+    test(
+      'passes context and ranks native alternatives in reading order',
+      () async {
+        MethodCall? received;
+        TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+            .setMockMethodCallHandler(PlatformCanvasTextRecognizer.channel, (
+              call,
+            ) async {
+              received = call;
+              return {
+                'segments': [
+                  [
+                    {'text': 'standard'},
+                  ],
+                  [
+                    {'text': 'farm', 'confidence': 0.8},
+                    {'text': 'form', 'confidence': 0.8},
+                  ],
+                ],
+              };
+            });
+        addTearDown(
+          () => TestDefaultBinaryMessengerBinding
+              .instance
+              .defaultBinaryMessenger
+              .setMockMethodCallHandler(
+                PlatformCanvasTextRecognizer.channel,
+                null,
+              ),
+        );
+        final words = await const PlatformCanvasTextRecognizer().recognize(
+          batch().withContext(
+            HandwritingContext(
+              draft: 'the',
+              recentMessages: ['The standard form. A farm.'],
+            ),
+          ),
+        );
+        expect(words, 'standard form');
+        final arguments = received!.arguments as Map<Object?, Object?>;
+        expect(arguments['preContext'], 'the ');
+        expect(arguments['customWords'], contains('standard'));
+      },
+    );
+
+    test('ignores malformed candidates without adding invented text', () async {
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(
+            PlatformCanvasTextRecognizer.channel,
+            (call) async => {
+              'segments': [
+                null,
+                [
+                  4,
+                  {'text': 7},
+                  {'text': 'hello', 'confidence': 'bad'},
+                ],
+              ],
+            },
+          );
+      addTearDown(
+        () => TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+            .setMockMethodCallHandler(
+              PlatformCanvasTextRecognizer.channel,
+              null,
+            ),
+      );
+      expect(
+        await const PlatformCanvasTextRecognizer().recognize(batch()),
+        'hello',
+      );
     });
 
     test('reads nothing where recognition is unavailable', () async {

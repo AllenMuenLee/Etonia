@@ -10,6 +10,7 @@ import 'package:greatnote/features/editor/editor_screen.dart';
 import 'package:greatnote/features/editor/ink/ink_canvas.dart';
 import 'package:greatnote/features/editor/ink/ink_controller.dart';
 import 'package:greatnote/features/editor/ink/stroke.dart';
+import 'package:greatnote/features/payment/subscription_controller.dart';
 
 import 'pump_app.dart';
 
@@ -26,6 +27,7 @@ Future<InkController> pumpEditor(
       const SelectionImageRenderer(),
   // Notation sends capture the whole note, which only some tests pump for.
   bool initialNotationEnabled = false,
+  SubscriptionController? subscription,
 }) async {
   final InkController controller = InkController(strokes: strokes);
   addTearDown(controller.dispose);
@@ -38,6 +40,7 @@ Future<InkController> pumpEditor(
       aiClient: aiClient,
       selectionImageRenderer: selectionImageRenderer,
       initialNotationEnabled: initialNotationEnabled,
+      subscription: subscription,
     ),
   );
   return controller;
@@ -47,6 +50,17 @@ Future<InkController> pumpEditor(
 /// on the last page adds another canvas below it.
 Rect canvasRect(WidgetTester tester) =>
     tester.getRect(find.byType(InkCanvas).first);
+
+/// Where page point [page] of the first canvas is on screen, through the
+/// viewport's zoom.
+Offset pageToGlobal(WidgetTester tester, Offset page) => tester
+    .renderObject<RenderBox>(find.byType(InkCanvas).first)
+    .localToGlobal(page);
+
+/// How many logical pixels on screen one page unit spans.
+double canvasScale(WidgetTester tester) =>
+    pageToGlobal(tester, const Offset(1, 0)).dx -
+    pageToGlobal(tester, Offset.zero).dx;
 
 /// A snapshot of the whole screen. At the test pixel ratio of 1, pixel
 /// coordinates equal global logical coordinates.

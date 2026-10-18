@@ -67,24 +67,74 @@ abstract final class NotationFont {
     for (int row = 0; row < lines.length; row++) {
       double x = 0;
       final double top = origin.y + row * size * lineHeight;
+      int column = 0;
       for (final int rune in lines[row].runes) {
         final _Glyph? glyph = _glyphs[String.fromCharCode(rune)];
         if (glyph == null) {
           throw ArgumentError('A character the font cannot write');
         }
-        for (final List<InkVector> line in glyph.strokes) {
+        final double gesture = rune * 0.071 + column * 1.37 + row * 2.11;
+        final double baselineDrift = 0.11 * math.sin(gesture);
+        final double stretch = 1 + 0.025 * math.sin(gesture * 1.73);
+        final double rotation = 0.018 * math.sin(gesture * 0.83);
+        final double cosine = math.cos(rotation);
+        final double sine = math.sin(rotation);
+        for (int stroke = 0; stroke < glyph.strokes.length; stroke++) {
+          final List<InkVector> line = glyph.strokes[stroke];
           strokes.add(<InkVector>[
             for (final InkVector point in line)
-              InkVector(
-                origin.x + (x + point.x) * scale,
-                top + point.y * scale,
+              _handPoint(
+                point,
+                origin: origin,
+                top: top,
+                x: x,
+                glyphWidth: glyph.width,
+                scale: scale,
+                stretch: stretch,
+                cosine: cosine,
+                sine: sine,
+                baselineDrift: baselineDrift,
+                gesture: gesture + stroke * 0.91,
               ),
           ]);
         }
         x += glyph.width + spacing;
+        column++;
       }
     }
     return strokes;
+  }
+
+  /// Gives the otherwise exact plotter font the small inconsistencies of a
+  /// real hand. The variation is derived from the text itself rather than
+  /// randomness, so a note lays out identically every time it is opened.
+  static InkVector _handPoint(
+    InkVector point, {
+    required InkVector origin,
+    required double top,
+    required double x,
+    required double glyphWidth,
+    required double scale,
+    required double stretch,
+    required double cosine,
+    required double sine,
+    required double baselineDrift,
+    required double gesture,
+  }) {
+    final double centerX = glyphWidth / 2;
+    final double dx = (point.x - centerX) * stretch;
+    final double dy = point.y - capHeight;
+    // A shared forward lean reads as handwriting. Rotation, baseline drift,
+    // and a very small pen wobble stop repeated letters looking stamped.
+    final double leanedX =
+        dx * cosine - dy * sine + (capHeight - point.y) * 0.055;
+    final double turnedY = dx * sine + dy * cosine + capHeight;
+    final double wobbleX = 0.055 * math.sin(gesture + point.y * 0.79);
+    final double wobbleY = 0.065 * math.sin(gesture * 1.19 + point.x * 0.67);
+    return InkVector(
+      origin.x + (x + centerX + leanedX + wobbleX) * scale,
+      top + (turnedY + baselineDrift + wobbleY) * scale,
+    );
   }
 
   static double _lineWidth(String line) {

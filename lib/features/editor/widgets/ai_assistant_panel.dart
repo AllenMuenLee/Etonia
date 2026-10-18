@@ -16,6 +16,7 @@ import '../../../shared/widgets/app_controls.dart';
 import '../ai/ai_assistant_controller.dart';
 import '../ai/ai_client.dart';
 import '../ai/ai_config.dart';
+import '../ai/ai_usage_gate.dart';
 import '../ai/chat_math.dart';
 import '../ai/selection_image_renderer.dart';
 
@@ -34,6 +35,8 @@ class AiAssistantPanel extends StatefulWidget {
     required this.onNewChat,
     required this.onAddToContext,
     this.config = const AiLayoutConfig(),
+    this.composerKey,
+    this.onOpenPlans,
   });
 
   static const String title = 'AI assistant';
@@ -47,9 +50,10 @@ class AiAssistantPanel extends StatefulWidget {
       'Circle a spot on the note to ask about it, or write your question '
       'on the page.';
   static const String notConfigured =
-      'AI is not set up. Start the app with '
-      '--dart-define=${AiApiConfig.environmentKey}=<your key> to send '
-      'messages.';
+      'AI is not set up for this model. Add its key to dart_defines.json '
+      '(${AiApiConfig.environmentKey}, ${AiApiConfig.claudeEnvironmentKey}, '
+      'or ${AiApiConfig.openAiEnvironmentKey}) and start the app with '
+      '--dart-define-from-file=dart_defines.json, or pick another model.';
 
   final AiAssistantController controller;
   final VoidCallback onClose;
@@ -63,6 +67,13 @@ class AiAssistantPanel extends StatefulWidget {
   final VoidCallback onAddToContext;
 
   final AiLayoutConfig config;
+
+  /// Given to the composer's message field, so the editor can tell where it
+  /// is, as words written on the page fly into it.
+  final GlobalKey? composerKey;
+
+  /// Opens the plans and credits page. Without it, nothing offers to.
+  final VoidCallback? onOpenPlans;
 
   @override
   State<AiAssistantPanel> createState() => _AiAssistantPanelState();
@@ -262,7 +273,7 @@ class _AiAssistantPanelState extends State<AiAssistantPanel> {
       bindings: <ShortcutActivator, VoidCallback>{
         const SingleActivator(LogicalKeyboardKey.escape): widget.onClose,
       },
-      child: Material(
+      child: GlassMaterial(
         color: AppGlass.surface(colors),
         // Each part of the panel is its own node for a screen reader.
         child: Semantics(
@@ -273,8 +284,9 @@ class _AiAssistantPanelState extends State<AiAssistantPanel> {
               crossAxisAlignment: CrossAxisAlignment.stretch,
               children: <Widget>[
                 _Header(
-                  modelLabel: controller.modelLabel,
+                  controller: controller,
                   onClose: widget.onClose,
+                  onOpenPlans: widget.onOpenPlans,
                 ),
                 const Divider(),
                 Expanded(
@@ -336,6 +348,7 @@ class _AiAssistantPanelState extends State<AiAssistantPanel> {
                   ),
                 ),
                 _Composer(
+                  fieldKey: widget.composerKey,
                   text: _text,
                   focusNode: _composerFocus,
                   maxLines: widget.config.composerMaxLines,
@@ -353,6 +366,36 @@ class _AiAssistantPanelState extends State<AiAssistantPanel> {
         ),
       ),
     );
+  }
+
+  /// For a model the plan does not cover: see the plans, or ask again with
+  /// one of the unlimited models.
+  List<(String, VoidCallback)> _accessActions(
+    AiAssistantController controller,
+    AiFailure failure,
+  ) {
+    if (failure.kind != AiFailureKind.planRequired &&
+        failure.kind != AiFailureKind.insufficientCredits) {
+      return const <(String, VoidCallback)>[];
+    }
+    final VoidCallback? openPlans = widget.onOpenPlans;
+    return <(String, VoidCallback)>[
+      if (openPlans != null) ('See plans', openPlans),
+      for (final AiModelId model in const <AiModelId>[
+        AiModelId.haiku,
+        AiModelId.luna,
+      ])
+        if (model != controller.selectedModel &&
+            controller.models.contains(model) &&
+            (controller.accessFor(model)?.canSend ?? true))
+          (
+            'Use ${model.label}',
+            () {
+              controller.selectModel(model);
+              controller.retry();
+            },
+          ),
+    ];
   }
 
   List<Widget> _body(BuildContext context, AiAssistantController controller) {
@@ -413,6 +456,7 @@ class _AiAssistantPanelState extends State<AiAssistantPanel> {
           actionLabel: 'Retry',
           onAction: controller.retry,
           isError: true,
+          extraActions: _accessActions(controller, failure),
         ),
       // Room to scroll the last message out from under the selection choice.
       if (controller.selectionChanged)
@@ -422,14 +466,21 @@ class _AiAssistantPanelState extends State<AiAssistantPanel> {
 }
 
 class _Header extends StatelessWidget {
-  const _Header({required this.modelLabel, required this.onClose});
+  const _Header({
+    required this.controller,
+    required this.onClose,
+    required this.onOpenPlans,
+  });
 
-  final String modelLabel;
+  final AiAssistantController controller;
   final VoidCallback onClose;
+  final VoidCallback? onOpenPlans;
 
   @override
   Widget build(BuildContext context) {
     final TextTheme text = Theme.of(context).textTheme;
+    final AiUsageGate? gate = controller.usageGate;
+    final VoidCallback? openPlans = onOpenPlans;
     return Padding(
       padding: const EdgeInsetsDirectional.only(
         start: AppSpacing.md,
@@ -454,15 +505,23 @@ class _Header extends StatelessWidget {
                   ),
                 ),
                 const SizedBox(height: 2),
-                Text(
-                  modelLabel,
-                  style: text.labelMedium,
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                ),
+                if (controller.models.isEmpty)
+                  Text(
+                    controller.modelLabel,
+                    style: text.labelMedium,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                  )
+                else
+                  AiModelSelector(
+                    controller: controller,
+                    onOpenPlans: openPlans,
+                  ),
               ],
             ),
           ),
+          if (gate != null && openPlans != null)
+            _CreditsPill(label: gate.creditsLabel, onPressed: openPlans),
           CompactIconButton(
             tooltip: 'Close AI assistant',
             onPressed: onClose,
@@ -470,6 +529,275 @@ class _Header extends StatelessWidget {
           ),
         ],
       ),
+    );
+  }
+}
+
+/// The credits left, or Upgrade; opens the plans.
+class _CreditsPill extends StatelessWidget {
+  const _CreditsPill({required this.label, required this.onPressed});
+
+  final String label;
+  final VoidCallback onPressed;
+
+  @override
+  Widget build(BuildContext context) {
+    final AppColors colors = AppColors.of(context);
+    final bool upgrade = label == 'Upgrade';
+    final Color foreground = upgrade ? colors.onAccent : colors.textPrimary;
+    return Tooltip(
+      message: 'Plans & Credits',
+      child: Semantics(
+        button: true,
+        label: upgrade ? 'Upgrade plan' : 'AI credits, $label',
+        excludeSemantics: true,
+        child: InkWell(
+          key: const ValueKey<String>('ai-credits-pill'),
+          onTap: onPressed,
+          customBorder: const StadiumBorder(),
+          child: ConstrainedBox(
+            constraints: const BoxConstraints(
+              minWidth: AppSizes.minTouchTarget,
+              minHeight: AppSizes.minTouchTarget,
+            ),
+            child: Center(
+              widthFactor: 1,
+              child: DecoratedBox(
+                decoration: ShapeDecoration(
+                  shape: const StadiumBorder(),
+                  color: upgrade ? colors.accent : AppGlass.muted(colors),
+                ),
+                child: Padding(
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: AppSpacing.sm,
+                    vertical: AppSpacing.xxs + 2,
+                  ),
+                  child: Text(
+                    label,
+                    style: Theme.of(context).textTheme.labelMedium?.copyWith(
+                      color: foreground,
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                ),
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// The model the next message goes to, as a button that lists every model
+/// to switch to: what each is for, and what the plan gives of it.
+class AiModelSelector extends StatelessWidget {
+  const AiModelSelector({
+    super.key,
+    required this.controller,
+    this.onOpenPlans,
+  });
+
+  final AiAssistantController controller;
+  final VoidCallback? onOpenPlans;
+
+  static bool _alwaysUnlimited(AiModelId model) =>
+      model == AiModelId.haiku || model == AiModelId.luna;
+
+  /// What the plan gives of [model], in a word or two; null when there is
+  /// nothing to say.
+  static String? badgeFor(AiModelId model, AiModelAccess? access) {
+    if (_alwaysUnlimited(model)) {
+      return 'Unlimited';
+    }
+    return switch (access) {
+      null => null,
+      AiModelAccess.unlimited => 'Unlimited',
+      AiModelAccess.metered => 'Credits',
+      AiModelAccess.outOfCredits => 'No credits',
+      AiModelAccess.locked => 'Pro',
+      AiModelAccess.noPlan => 'Plan',
+    };
+  }
+
+  /// Whether [model] shows a lock: the plan does not include it.
+  static bool isLocked(AiModelId model, AiModelAccess? access) {
+    return !_alwaysUnlimited(model) &&
+        (access == AiModelAccess.locked || access == AiModelAccess.noPlan);
+  }
+
+  void _choose(AiModelId model) {
+    final VoidCallback? openPlans = onOpenPlans;
+    // A model the plan lacks leads to the plans that have it.
+    if (openPlans != null && isLocked(model, controller.accessFor(model))) {
+      openPlans();
+      return;
+    }
+    controller.selectModel(model);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final AppColors colors = AppColors.of(context);
+    final TextTheme text = Theme.of(context).textTheme;
+    final AiModelId? selected = controller.selectedModel;
+    final String label = selected?.label ?? controller.modelLabel;
+    return PopupMenuButton<AiModelId>(
+      key: const ValueKey<String>('ai-model-selector'),
+      tooltip: 'Choose model',
+      initialValue: selected,
+      onSelected: _choose,
+      position: PopupMenuPosition.under,
+      constraints: const BoxConstraints(minWidth: 280, maxWidth: 320),
+      itemBuilder: (BuildContext context) {
+        return <PopupMenuEntry<AiModelId>>[
+          for (final AiModelId model in controller.models)
+            PopupMenuItem<AiModelId>(
+              key: ValueKey<String>('ai-model-${model.name}'),
+              value: model,
+              enabled: controller.isModelConfigured(model),
+              child: _ModelOption(
+                model: model,
+                selected: model == selected,
+                configured: controller.isModelConfigured(model),
+                access: controller.accessFor(model),
+              ),
+            ),
+        ];
+      },
+      child: Semantics(
+        button: true,
+        label: 'Model: $label. Choose model',
+        excludeSemantics: true,
+        child: ConstrainedBox(
+          constraints: const BoxConstraints(minHeight: AppSizes.minTouchTarget),
+          child: Align(
+            alignment: AlignmentDirectional.centerStart,
+            widthFactor: 1,
+            child: DecoratedBox(
+              decoration: ShapeDecoration(
+                shape: const StadiumBorder(),
+                color: AppGlass.muted(colors),
+              ),
+              child: Padding(
+                padding: const EdgeInsetsDirectional.only(
+                  start: AppSpacing.sm,
+                  end: AppSpacing.xs,
+                  top: AppSpacing.xxs + 2,
+                  bottom: AppSpacing.xxs + 2,
+                ),
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: <Widget>[
+                    Icon(AppIcons.plans, size: 14, color: colors.textPrimary),
+                    const SizedBox(width: AppSpacing.xxs),
+                    Flexible(
+                      child: Text(
+                        label,
+                        key: const ValueKey<String>('ai-model-label'),
+                        style: text.labelLarge?.copyWith(
+                          color: colors.textPrimary,
+                        ),
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                    ),
+                    const SizedBox(width: 2),
+                    Icon(AppIcons.model, size: 14, color: colors.textPrimary),
+                  ],
+                ),
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// One model in the picker: a check by the chosen one, its name, its
+/// provider and what it is for, and what the plan gives of it.
+class _ModelOption extends StatelessWidget {
+  const _ModelOption({
+    required this.model,
+    required this.selected,
+    required this.configured,
+    required this.access,
+  });
+
+  final AiModelId model;
+  final bool selected;
+  final bool configured;
+  final AiModelAccess? access;
+
+  @override
+  Widget build(BuildContext context) {
+    final AppColors colors = AppColors.of(context);
+    final TextTheme text = Theme.of(context).textTheme;
+    final String? badge = AiModelSelector.badgeFor(model, access);
+    final bool locked = AiModelSelector.isLocked(model, access);
+    return Row(
+      children: <Widget>[
+        SizedBox(
+          width: 24,
+          child: selected
+              ? Icon(AppIcons.check, size: 16, color: colors.accent)
+              : null,
+        ),
+        Expanded(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            mainAxisSize: MainAxisSize.min,
+            children: <Widget>[
+              Text(
+                model.label,
+                style: text.bodyLarge?.copyWith(
+                  color: colors.textPrimary,
+                  fontWeight: selected ? FontWeight.w600 : null,
+                ),
+              ),
+              Text(
+                configured
+                    ? '${model.provider.label} · ${model.summary}'
+                    : '${model.provider.label} · No API key',
+                style: text.bodySmall?.copyWith(color: colors.textSecondary),
+              ),
+            ],
+          ),
+        ),
+        if (badge != null)
+          DecoratedBox(
+            decoration: ShapeDecoration(
+              shape: const StadiumBorder(),
+              color: colors.selected,
+            ),
+            child: Padding(
+              padding: const EdgeInsets.symmetric(
+                horizontal: AppSpacing.xs,
+                vertical: 2,
+              ),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: <Widget>[
+                  if (locked) ...<Widget>[
+                    Icon(
+                      AppIcons.lock,
+                      key: ValueKey<String>('ai-model-lock-${model.name}'),
+                      size: 12,
+                      color: colors.textPrimary,
+                      semanticLabel: 'Locked',
+                    ),
+                    const SizedBox(width: 2),
+                  ],
+                  Text(
+                    badge,
+                    style: text.labelSmall?.copyWith(color: colors.textPrimary),
+                  ),
+                ],
+              ),
+            ),
+          ),
+      ],
     );
   }
 }
@@ -618,12 +946,16 @@ class _Notice extends StatelessWidget {
     this.actionLabel,
     this.onAction,
     this.isError = false,
+    this.extraActions = const <(String, VoidCallback)>[],
   });
 
   final String message;
   final String? actionLabel;
   final VoidCallback? onAction;
   final bool isError;
+
+  /// Offered before [actionLabel], such as switching model.
+  final List<(String, VoidCallback)> extraActions;
 
   @override
   Widget build(BuildContext context) {
@@ -667,18 +999,30 @@ class _Notice extends StatelessWidget {
                 ),
                 child: Text(message, style: theme.textTheme.bodyMedium),
               ),
-              if (actionLabel != null)
+              if (actionLabel != null || extraActions.isNotEmpty)
                 Align(
                   alignment: AlignmentDirectional.centerEnd,
-                  child: TextButton(
-                    style: TextButton.styleFrom(
-                      foregroundColor: colors.accent,
-                      shape: RoundedRectangleBorder(
-                        borderRadius: BorderRadius.circular(AppRadii.medium),
-                      ),
-                    ),
-                    onPressed: onAction,
-                    child: Text(actionLabel),
+                  child: Wrap(
+                    alignment: WrapAlignment.end,
+                    children: <Widget>[
+                      for (final (String label, VoidCallback? action)
+                          in <(String, VoidCallback?)>[
+                            ...extraActions,
+                            if (actionLabel != null) (actionLabel, onAction),
+                          ])
+                        TextButton(
+                          style: TextButton.styleFrom(
+                            foregroundColor: colors.accent,
+                            shape: RoundedRectangleBorder(
+                              borderRadius: BorderRadius.circular(
+                                AppRadii.medium,
+                              ),
+                            ),
+                          ),
+                          onPressed: action,
+                          child: Text(label),
+                        ),
+                    ],
                   ),
                 ),
             ],
@@ -770,6 +1114,7 @@ class _MessageBubble extends StatelessWidget {
 /// Enter sends.
 class _Composer extends StatelessWidget {
   const _Composer({
+    this.fieldKey,
     required this.text,
     required this.focusNode,
     required this.maxLines,
@@ -779,6 +1124,7 @@ class _Composer extends StatelessWidget {
     required this.onSend,
   });
 
+  final Key? fieldKey;
   final TextEditingController text;
   final FocusNode focusNode;
   final int maxLines;
@@ -816,6 +1162,7 @@ class _Composer extends StatelessWidget {
         crossAxisAlignment: CrossAxisAlignment.end,
         children: <Widget>[
           Expanded(
+            key: fieldKey,
             child: AmbientGlow(
               active: processing,
               borderRadius: BorderRadius.circular(AppRadii.large + 6),

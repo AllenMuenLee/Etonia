@@ -43,9 +43,8 @@ void main() {
     WidgetTester tester,
   ) async {
     final InkController controller = await pumpEditor(tester);
-    final Rect canvas = canvasRect(tester);
-    final Offset from = canvas.topLeft + const Offset(100, 200);
-    final Offset to = from + const Offset(300, 0);
+    final Offset from = pageToGlobal(tester, const Offset(100, 200));
+    final Offset to = pageToGlobal(tester, const Offset(400, 200));
     final Offset middle = Offset.lerp(from, to, 0.5)!;
 
     final TestGesture gesture = await tester.startGesture(
@@ -76,7 +75,8 @@ void main() {
     expect(stroke.isDot, isFalse);
     expect(stroke.rawSamples.length, 12);
     // Samples are stored in canvas-local coordinates.
-    expect(stroke.points.first, const InkVector(100, 200));
+    expect(stroke.points.first.x, closeTo(100, 1e-6));
+    expect(stroke.points.first.y, closeTo(200, 1e-6));
     expect(stroke.points.last.x, closeTo(400, 1e-6));
     expect(stroke.points.last.y, closeTo(200, 1e-6));
     expect(stroke.rawSamples.first.deviceKind, InkDeviceKind.stylus);
@@ -125,14 +125,15 @@ void main() {
 
   testWidgets('a tap leaves a round dot', (WidgetTester tester) async {
     final InkController controller = await pumpEditor(tester);
-    final Offset position = canvasRect(tester).topLeft + const Offset(150, 150);
+    final Offset position = pageToGlobal(tester, const Offset(150, 150));
 
     await tester.tapAt(position, kind: PointerDeviceKind.stylus);
     await tester.pump();
 
     final Stroke dot = controller.strokes.single;
     expect(dot.isDot, isTrue);
-    expect(dot.points, <InkVector>[const InkVector(150, 150)]);
+    expect(dot.points.single.x, closeTo(150, 1e-6));
+    expect(dot.points.single.y, closeTo(150, 1e-6));
     final ScreenPixels pixels = await captureScreen(tester);
     expect(pixels.at(position), isSameColorAs(InkPalette.ink.onLightPaper));
     // Default width is 3, so the dot ends well within 4 px of its center.
@@ -153,13 +154,14 @@ void main() {
     WidgetTester tester,
   ) async {
     final InkController controller = await pumpEditor(tester);
-    final Offset origin = canvasRect(tester).topLeft + const Offset(100, 100);
+    final double scale = canvasScale(tester);
+    final Offset origin = pageToGlobal(tester, const Offset(100, 100));
 
     final TestGesture pen = await tester.startGesture(
       origin,
       kind: PointerDeviceKind.stylus,
     );
-    await pen.moveBy(const Offset(40, 0), timeStamp: _sampleInterval);
+    await pen.moveBy(const Offset(40, 0) * scale, timeStamp: _sampleInterval);
     final int penPointer = controller.activePointer!;
     final int pointsBefore = controller.activeStroke!.pointCount;
 
@@ -175,14 +177,17 @@ void main() {
     expect(controller.activeStroke!.pointCount, pointsBefore);
     expect(controller.strokes, isEmpty);
 
-    await pen.moveBy(const Offset(40, 0), timeStamp: _sampleInterval * 4);
+    await pen.moveBy(
+      const Offset(40, 0) * scale,
+      timeStamp: _sampleInterval * 4,
+    );
     await pen.up(timeStamp: _sampleInterval * 5);
     await tester.pump();
 
     final Stroke stroke = controller.strokes.single;
     expect(stroke.rawSamples.first.deviceKind, InkDeviceKind.stylus);
     for (final RawInkSample sample in stroke.rawSamples) {
-      expect(sample.position.y, 100);
+      expect(sample.position.y, closeTo(100, 1e-6));
     }
     expect(stroke.points.last.x, closeTo(180, 1e-6));
   });
@@ -192,10 +197,13 @@ void main() {
   ) async {
     final InkController controller = await pumpEditor(tester);
     final Rect canvas = canvasRect(tester);
-    final double x = canvas.left + 200;
-    final Offset inside = Offset(x, canvas.top + 120);
+    final Offset inside = pageToGlobal(tester, const Offset(200, 120));
+    final double x = inside.dx;
     // Ends inside the app bar, above the page.
     final Offset outside = Offset(x, canvas.top - 30);
+    final Color chrome = (await captureScreen(
+      tester,
+    )).at(Offset(x, canvas.top - 15));
 
     await _drawLine(tester, inside, outside, steps: 15);
 
@@ -216,10 +224,7 @@ void main() {
       pixels.at(Offset(x, canvas.top + 60)),
       isSameColorAs(InkPalette.ink.onLightPaper),
     );
-    expect(
-      pixels.at(Offset(x, canvas.top - 15)),
-      isSameColorAs(AppColors.light.background),
-    );
+    expect(pixels.at(Offset(x, canvas.top - 15)), isSameColorAs(chrome));
   });
 
   testWidgets('color and width changes apply only to later strokes', (
@@ -302,13 +307,16 @@ void main() {
       tester,
       viewport: TestViewport.tabletPortrait,
     );
-    final Offset origin = canvasRect(tester).topLeft + const Offset(100, 100);
+    final Offset origin = pageToGlobal(tester, const Offset(100, 100));
 
     final TestGesture gesture = await tester.startGesture(
       origin,
       kind: PointerDeviceKind.stylus,
     );
-    await gesture.moveBy(const Offset(60, 0), timeStamp: _sampleInterval);
+    await gesture.moveBy(
+      const Offset(60, 0) * canvasScale(tester),
+      timeStamp: _sampleInterval,
+    );
     expect(controller.activeStroke, isNotNull);
 
     setViewportSize(tester, TestViewport.tabletPortrait.size.flipped);

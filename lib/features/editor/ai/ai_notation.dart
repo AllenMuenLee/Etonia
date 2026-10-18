@@ -769,16 +769,47 @@ class AiNotationTimeline {
   }
 }
 
+/// The sticky note a notation is drawn on, in logical units, instead of
+/// the page. The app decides where it goes.
+@immutable
+class AiStickySize {
+  const AiStickySize(this.width, this.height);
+
+  final double width;
+  final double height;
+
+  Map<String, Object?> toJson() => <String, Object?>{
+    'width': width,
+    'height': height,
+  };
+
+  @override
+  bool operator ==(Object other) =>
+      other is AiStickySize && other.width == width && other.height == height;
+
+  @override
+  int get hashCode => Object.hash(width, height);
+}
+
 /// An append-only drawing returned with one assistant answer.
 class AiNotation {
   AiNotation({
     required this.label,
     required List<AiNotationItem> items,
     this.timeline,
+    this.sticky,
   }) : assert(timeline == null || timeline.items.length == items.length),
        items = List<AiNotationItem>.unmodifiable(items);
 
   static const String coordinateSpace = 'note_normalized';
+
+  /// The coordinates of a notation on a [sticky] note: (0, 0) is the
+  /// sticky note's top-left corner and (1, 1) its bottom-right.
+  static const String stickyCoordinateSpace = 'sticky_normalized';
+
+  /// When not null, the whole notation goes on a new sticky note this big,
+  /// and its coordinates are [stickyCoordinateSpace].
+  final AiStickySize? sticky;
 
   final String label;
 
@@ -793,7 +824,10 @@ class AiNotation {
     final List<int>? steps = timeline?.steps;
     return <String, Object?>{
       'label': label,
-      'coordinate_space': coordinateSpace,
+      'coordinate_space': sticky == null
+          ? coordinateSpace
+          : stickyCoordinateSpace,
+      'sticky': ?sticky?.toJson(),
       'items': <Object?>[
         for (int i = 0; i < items.length; i++)
           <String, Object?>{
@@ -875,21 +909,34 @@ class AiAssistantResponse {
     }
   }
 
+  /// A notation's label when the model gave none.
+  static const String defaultLabel = 'Notes';
+
   static AiNotation _notation(Object? raw, AiNotationConfig config) {
-    final Map<String, Object?> notation = _object(raw, const <String>{
-      'label',
-      'coordinate_space',
-      'items',
-    });
-    final Object? rawLabel = notation['label'];
+    // Models not held to the schema leave out the label and the coordinate
+    // space; neither changes what is drawn, so each has a default.
+    final Map<String, Object?> notation = _object(
+      raw,
+      const <String>{'items'},
+      optional: const <String>{'label', 'coordinate_space', 'sticky'},
+    );
+    final Object rawLabel = notation['label'] ?? defaultLabel;
     if (rawLabel is! String) {
       throw const FormatException('Invalid AI response');
     }
-    final String label = rawLabel.trim();
-    if (label.isEmpty || label.runes.length > config.maxLabelRunes) {
+    final String label = rawLabel.trim().isEmpty
+        ? defaultLabel
+        : rawLabel.trim();
+    if (label.runes.length > config.maxLabelRunes) {
       throw const FormatException('Invalid AI response');
     }
-    if (notation['coordinate_space'] != AiNotation.coordinateSpace) {
+    final AiStickySize? sticky = notation['sticky'] == null
+        ? null
+        : _sticky(notation['sticky'], config);
+    final String space = sticky == null
+        ? AiNotation.coordinateSpace
+        : AiNotation.stickyCoordinateSpace;
+    if ((notation['coordinate_space'] ?? space) != space) {
       throw const FormatException('Invalid AI response');
     }
     final Object? rawItems = notation['items'];
@@ -918,6 +965,24 @@ class AiAssistantResponse {
       label: label,
       items: items,
       timeline: anyStep ? _timeline(items, steps, config) : null,
+      sticky: sticky,
+    );
+  }
+
+  /// The sticky note's size, brought within the sizes one may be.
+  static AiStickySize _sticky(Object? raw, AiNotationConfig config) {
+    final Map<String, Object?> sticky = _object(raw, const <String>{
+      'width',
+      'height',
+    });
+    final double width = _number(sticky['width']);
+    final double height = _number(sticky['height']);
+    if (width <= 0 || height <= 0) {
+      throw const FormatException('Invalid AI response');
+    }
+    return AiStickySize(
+      width.clamp(config.minStickyWidth, config.maxStickyWidth),
+      height.clamp(config.minStickyHeight, config.maxStickyHeight),
     );
   }
 
@@ -1161,12 +1226,8 @@ class AiAssistantResponse {
           'ink',
           'width',
         });
-        final AiNotationPoint from = _pointOf(
-          _object(item['from'], const <String>{'x', 'y'}),
-        );
-        final AiNotationPoint to = _pointOf(
-          _object(item['to'], const <String>{'x', 'y'}),
-        );
+        final AiNotationPoint from = _pointOf(_xy(item['from']));
+        final AiNotationPoint to = _pointOf(_xy(item['to']));
         if (from.x == to.x && from.y == to.y) {
           throw const FormatException('Invalid AI response');
         }
@@ -1377,8 +1438,17 @@ class AiAssistantResponse {
   }
 
   static AiPlotPoint _plotPoint(Object? raw, AiNotationConfig config) {
-    final Map<String, Object?> point = _object(raw, const <String>{'x', 'y'});
+    final Map<String, Object?> point = _xy(raw);
     return AiPlotPoint(_range(point['x'], config), _range(point['y'], config));
+  }
+
+  /// A point given as {"x": x, "y": y}, or as [x, y], which models not
+  /// held to the schema often write, as {"x": x, "y": y}.
+  static Map<String, Object?> _xy(Object? raw) {
+    if (raw is List<Object?> && raw.length == 2) {
+      return <String, Object?>{'x': raw[0], 'y': raw[1]};
+    }
+    return _object(raw, const <String>{'x', 'y'});
   }
 
   static List<AiNotationPoint> _points(
@@ -1391,8 +1461,7 @@ class AiAssistantResponse {
     }
     budget.points(raw.length);
     return <AiNotationPoint>[
-      for (final Object? rawPoint in raw)
-        _pointOf(_object(rawPoint, const <String>{'x', 'y'})),
+      for (final Object? rawPoint in raw) _pointOf(_xy(rawPoint)),
     ];
   }
 
@@ -1947,40 +2016,70 @@ Map<String, Object?> aiResponseJsonSchema([
       description: 'One pen stroke through the given points.',
     ),
   ];
-  final Map<String, Object?> notation = object(<String, Object?>{
-    'label': <String, Object?>{
-      'type': 'string',
-      'minLength': 1,
-      'maxLength': config.maxLabelRunes,
-      'description': 'A short description of the drawing.',
+  final Map<String, Object?> notation = object(
+    <String, Object?>{
+      'label': <String, Object?>{
+        'type': 'string',
+        'minLength': 1,
+        'maxLength': config.maxLabelRunes,
+        'description': 'A short description of the drawing.',
+      },
+      'coordinate_space': choice(<String>[
+        AiNotation.coordinateSpace,
+        AiNotation.stickyCoordinateSpace,
+      ]),
+      'items': <String, Object?>{
+        'type': 'array',
+        'minItems': 1,
+        'items': <String, Object?>{'anyOf': items},
+      },
     },
-    'coordinate_space': type(AiNotation.coordinateSpace),
-    'items': <String, Object?>{
-      'type': 'array',
-      'minItems': 1,
-      'items': <String, Object?>{'anyOf': items},
+    optional: <String, Object?>{
+      'sticky': object(
+        <String, Object?>{
+          'width': <String, Object?>{
+            'type': 'number',
+            'minimum': config.minStickyWidth,
+            'maximum': config.maxStickyWidth,
+          },
+          'height': <String, Object?>{
+            'type': 'number',
+            'minimum': config.minStickyHeight,
+            'maximum': config.maxStickyHeight,
+          },
+        },
+        description:
+            'Only when the note has no room: draw on a new sticky note '
+            'this big, in logical units, with coordinate_space '
+            'sticky_normalized.',
+      ),
     },
-  });
+  );
   return <String, Object?>{
     'type': 'object',
     'additionalProperties': false,
+    // The readable answer first, so it is written, and can be shown, before
+    // the drawing; then everything the app needs to draw.
     'properties': <String, Object?>{
+      'message': <String, Object?>{
+        'type': 'string',
+        'minLength': 1,
+        'description': 'The readable assistant answer, in Markdown.',
+      },
       'version': <String, Object?>{
         'type': 'integer',
         'enum': <int>[AiAssistantResponse.version],
       },
-      'message': <String, Object?>{
-        'type': 'string',
-        'minLength': 1,
-        'description': 'The readable assistant answer.',
-      },
       'notation': <String, Object?>{
+        'description':
+            'What to write and draw on the note, or null for a simple text '
+            'answer.',
         'anyOf': <Object?>[
           <String, Object?>{'type': 'null'},
           notation,
         ],
       },
     },
-    'required': <String>['version', 'message', 'notation'],
+    'required': <String>['message', 'version', 'notation'],
   };
 }

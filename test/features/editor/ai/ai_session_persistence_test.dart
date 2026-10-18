@@ -1,5 +1,4 @@
 import 'dart:convert';
-import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -60,14 +59,8 @@ void main() {
     final AiAssistantController first = AiAssistantController(
       client: client,
       renderer: FakeSelectionImageRenderer(),
-      captureNote: () async => NoteImage(
-        png: Uint8List.fromList(<int>[1]),
-        width: 10,
-        height: 10,
-        scale: 1,
-        logicalSize: const Size(10, 10),
-        revision: 0,
-      ),
+      captureNote: () async =>
+          NoteImage(logicalSize: const Size(10, 10), revision: 0),
       // Stands in for the editor, which reports the strokes it added.
       applyNotation: (AiNotation _, NoteImage _) => AiNotationApplication(
         AiNotationStatus.applied,

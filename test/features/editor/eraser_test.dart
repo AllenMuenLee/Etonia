@@ -7,7 +7,6 @@ import 'package:greatnote/features/editor/ink/eraser_settings.dart';
 import 'package:greatnote/features/editor/ink/ink_controller.dart';
 import 'package:greatnote/features/editor/ink/ink_painter.dart';
 import 'package:greatnote/features/editor/ink/ink_palette.dart';
-import 'package:greatnote/features/editor/ink/ink_sample.dart';
 import 'package:greatnote/features/editor/ink/stroke.dart';
 import 'package:greatnote/features/editor/widgets/eraser_options.dart';
 import 'package:greatnote/features/editor/widgets/tool_palette.dart';
@@ -222,15 +221,15 @@ void main() {
     WidgetTester tester,
   ) async {
     final InkController controller = await pumpEditor(tester);
-    final Offset origin = canvasRect(tester).topLeft;
-    final Offset from = origin + const Offset(100, 200);
-    final Offset to = origin + const Offset(400, 200);
+    Offset at(double x, double y) => pageToGlobal(tester, Offset(x, y));
+    final Offset from = at(100, 200);
+    final Offset to = at(400, 200);
     await _drag(tester, from, to);
     final StrokeStyle style = controller.strokes.single.style;
     await _selectEraser(tester);
 
     // Down beside the stroke, then across it; finger input erases too.
-    final Offset middle = origin + const Offset(250, 200);
+    final Offset middle = at(250, 200);
     final TestGesture gesture = await tester.startGesture(
       middle - const Offset(0, 50),
       kind: PointerDeviceKind.touch,
@@ -260,16 +259,19 @@ void main() {
       expect(piece.source, StrokeSource.derived);
       expect(piece.style, same(style));
     }
-    // The 24 px eraser plus half the 3 px stroke: 13.5 px either side.
-    expect(controller.strokes[0].points.first, const InkVector(100, 200));
-    expect(controller.strokes[0].points.last.x, closeTo(236.5, 1e-6));
-    expect(controller.strokes[1].points.first.x, closeTo(263.5, 1e-6));
+    // The eraser is 24 px across on screen, whatever the zoom, plus half
+    // the 3 px stroke either side.
+    final double reach = 12 / canvasScale(tester) + 1.5;
+    expect(controller.strokes[0].points.first.x, closeTo(100, 1e-6));
+    expect(controller.strokes[0].points.first.y, closeTo(200, 1e-6));
+    expect(controller.strokes[0].points.last.x, closeTo(250 - reach, 1e-6));
+    expect(controller.strokes[1].points.first.x, closeTo(250 + reach, 1e-6));
     expect(controller.strokes[1].points.last.x, closeTo(400, 1e-6));
     final ScreenPixels pixels = await captureScreen(tester);
     expect(pixels.at(middle), isSameColorAs(AppColors.light.writingSurface));
     for (final double x in <double>[150, 230, 270, 350]) {
       expect(
-        pixels.at(origin + Offset(x, 200)),
+        pixels.at(at(x, 200)),
         isSameColorAs(InkPalette.ink.onLightPaper),
         reason: 'x = $x',
       );
@@ -463,32 +465,27 @@ void main() {
   ) async {
     final SemanticsHandle handle = tester.ensureSemantics();
     final InkController controller = await pumpEditor(tester);
-    final Offset origin = canvasRect(tester).topLeft;
-    await _drag(
-      tester,
-      origin + const Offset(100, 200),
-      origin + const Offset(400, 200),
-    );
+    Offset at(double x, double y) => pageToGlobal(tester, Offset(x, y));
+    await _drag(tester, at(100, 200), at(400, 200));
 
     await _drag(
       tester,
-      origin + const Offset(250, 150),
-      origin + const Offset(250, 250),
+      at(250, 150),
+      at(250, 250),
       kind: PointerDeviceKind.invertedStylus,
     );
 
     // It used the current eraser settings: area mode at 24 px.
     expect(controller.strokes.length, 2);
-    expect(controller.strokes[0].points.last.x, closeTo(236.5, 1e-6));
+    expect(
+      controller.strokes[0].points.last.x,
+      closeTo(250 - 12 / canvasScale(tester) - 1.5, 1e-6),
+    );
     expect(_isSelected(tester, 'Pen'), isTrue);
     expect(_isSelected(tester, 'Eraser'), isFalse);
 
     // The tip still writes.
-    await _drag(
-      tester,
-      origin + const Offset(100, 300),
-      origin + const Offset(400, 300),
-    );
+    await _drag(tester, at(100, 300), at(400, 300));
     expect(controller.strokes.length, 3);
     expect(controller.strokes.last.source, StrokeSource.input);
     handle.dispose();
@@ -498,7 +495,10 @@ void main() {
     WidgetTester tester,
   ) async {
     final InkController controller = await pumpEditor(tester);
-    final Offset position = canvasRect(tester).topLeft + const Offset(300, 300);
+    final Offset position = pageToGlobal(tester, const Offset(300, 300));
+    // Sizes are on screen; the eraser's reach on the page is that over the
+    // zoom.
+    final double scale = canvasScale(tester);
     await _openEraserOptions(tester);
     _slider(tester).onChanged!(40);
     await tester.pumpAndSettle();
@@ -533,14 +533,15 @@ void main() {
     await tester.pump();
 
     expect(controller.activeErase!.mode, EraserMode.area);
-    expect(controller.activeErase!.radius, 20);
+    expect(controller.activeErase!.radius, closeTo(20 / scale, 1e-9));
     expect(await hasRing(position, 20), isTrue);
     expect(await hasRing(position, 12), isFalse);
 
     // It follows the pointer.
     await gesture.moveBy(const Offset(90, 30), timeStamp: _sampleInterval);
     await tester.pump();
-    expect(controller.activeErase!.position, const InkVector(390, 330));
+    expect(controller.activeErase!.position.x, closeTo(300 + 90 / scale, 1e-6));
+    expect(controller.activeErase!.position.y, closeTo(300 + 30 / scale, 1e-6));
     expect(await hasRing(position, 20), isFalse);
     expect(await hasRing(position + const Offset(90, 30), 20), isTrue);
 
@@ -552,7 +553,7 @@ void main() {
     await _setMode(tester, EraserMode.stroke);
     final TestGesture second = await tester.startGesture(position);
     await tester.pump();
-    expect(controller.activeErase!.radius, 6);
+    expect(controller.activeErase!.radius, closeTo(6 / scale, 1e-9));
     expect(await hasRing(position, 6), isTrue);
     expect(await hasRing(position, 20), isFalse);
     await second.cancel();
@@ -568,7 +569,6 @@ void main() {
       tester,
       themeMode: ThemeMode.dark,
     );
-    final Rect canvas = canvasRect(tester);
     await _selectEraser(tester);
     final CustomPaint layer = tester.widget<CustomPaint>(
       find.byKey(const ValueKey<String>('eraser-indicator')),
@@ -589,17 +589,21 @@ void main() {
       greaterThan(3),
     );
 
-    // Dragged off the top of the page, over the app bar.
-    final Offset inside = canvas.topLeft + const Offset(300, 40);
-    final TestGesture gesture = await tester.startGesture(inside);
+    // Dragged off the top of the page, over the app bar, from beside the
+    // palette floating across the top.
+    final Offset inside = pageToGlobal(tester, const Offset(40, 40));
+    // Where the ring's top would be, off the page: it shows what was there.
+    final Offset outside = inside + const Offset(0, -60 - 11);
+    final Color chrome = (await captureScreen(tester)).at(outside);
+    final TestGesture gesture = await tester.startGesture(
+      inside,
+      kind: PointerDeviceKind.stylus,
+    );
     await gesture.moveBy(const Offset(0, -60), timeStamp: _sampleInterval);
     await tester.pump();
 
     expect(controller.activeErase!.position.y, lessThan(0));
-    expect(
-      (await captureScreen(tester)).at(inside + const Offset(0, -60 - 11)),
-      isSameColorAs(AppColors.dark.background),
-    );
+    expect((await captureScreen(tester)).at(outside), isSameColorAs(chrome));
     // Nothing about the indicator reaches the semantics tree.
     expect(
       tester

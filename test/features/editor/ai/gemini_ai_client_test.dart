@@ -423,20 +423,14 @@ void main() {
   });
 
   test('notation context is attached only to the latest user turn', () {
-    final Uint8List notePng = Uint8List.fromList(<int>[7, 8, 9]);
     final Map<String, Object?> body = GeminiAiClient.buildBody(
       AiRequest(
         systemInstruction: AiPrompts.systemFor(notationEnabled: true),
         imagePng: _png,
         noteImage: NoteImage(
-          png: notePng,
-          width: 600,
-          height: 400,
-          scale: 2,
           logicalSize: const ui.Size(300, 200),
           revision: 42,
           normalizedFocusBounds: const ui.Rect.fromLTRB(0.1, 0.2, 0.4, 0.6),
-          gridDivisions: 10,
           focusInk: const <List<InkVector>>[
             <InkVector>[
               InkVector(0.12, 0.25),
@@ -461,15 +455,13 @@ void main() {
         (contents[2]! as Map<String, Object?>)['parts']! as List<Object?>;
 
     expect(firstParts, hasLength(3));
-    expect(latestParts, hasLength(3));
+    // The metadata, then the words: no picture of the note.
+    expect(latestParts, hasLength(2));
+    expect(jsonEncode(latestParts), isNot(contains('inline_data')));
     expect(
       (latestParts[0]! as Map<String, Object?>)['text'],
       allOf(
-        contains('Current note image'),
-        // The grid on the image, and how to read it.
-        contains('Labelled lines run every 0.1 of x and of y'),
-        contains('x0.1 is at x = 0.1'),
-        contains('every 0.05'),
+        contains('You are not shown the whole sheet'),
         contains('"logical_aspect_ratio":1.5'),
         contains('"focus_bounds":{"left":0.1,"top":0.2,'),
         contains('"note_logical_width":300.0'),
@@ -501,12 +493,7 @@ void main() {
         contains('every point must keep 0 < x < 1 and 0 < y < 1'),
       ),
     );
-    expect(
-      ((latestParts[1]! as Map<String, Object?>)['inline_data']!
-          as Map<String, Object?>)['data'],
-      base64Encode(notePng),
-    );
-    expect(latestParts[2], <String, Object?>{'text': 'Draw a label'});
+    expect(latestParts[1], <String, Object?>{'text': 'Draw a label'});
     expect(
       jsonEncode(body),
       isNot(contains('"revision"')),

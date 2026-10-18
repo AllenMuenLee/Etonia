@@ -18,6 +18,7 @@ import '../editor/document_io/document_platform.dart';
 import '../editor/page/note_document.dart';
 import '../editor/widgets/editor_app_bar.dart';
 import '../editor/widgets/writing_surface_frame.dart';
+import '../payment/subscription_controller.dart';
 import 'library_dialogs.dart';
 import 'library_models.dart';
 import 'note_autosaver.dart';
@@ -41,6 +42,7 @@ class NoteEditorPage extends StatefulWidget {
     this.preview,
     this.saveDelay = const Duration(milliseconds: 800),
     this.aiClient,
+    this.subscription,
     this.documentPicker = const SystemDocumentPicker(),
     this.pdfRasterizer = const PdfrxRasterizer(),
     this.exportSink = const SystemExportSink(),
@@ -80,6 +82,9 @@ class NoteEditorPage extends StatefulWidget {
 
   /// Passed to the editor; tests supply one.
   final AiClient? aiClient;
+
+  /// Passed to the editor, to meter its AI.
+  final SubscriptionController? subscription;
   final DocumentPicker documentPicker;
   final PdfRasterizer pdfRasterizer;
   final ExportSink exportSink;
@@ -368,6 +373,7 @@ class _NoteEditorPageState extends State<NoteEditorPage> {
         onTitlePressed: _rename,
         tabs: widget.tabsBuilder?.call(_rename),
         aiClient: widget.aiClient,
+        subscription: widget.subscription,
         repository: widget.repository,
         noteId: widget.note.id,
         documentPicker: widget.documentPicker,

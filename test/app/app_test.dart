@@ -17,7 +17,7 @@ void main() {
 
     expect(
       tester.widget<MaterialApp>(find.byType(MaterialApp)).title,
-      'Greatnote',
+      'Etonia',
     );
     expect(find.byType(LibraryScreen), findsOneWidget);
     // In the breadcrumb, and at the top of the folder sidebar.

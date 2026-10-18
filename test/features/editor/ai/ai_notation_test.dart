@@ -660,7 +660,7 @@ void main() {
       ),
       'too much text in all': jsonEncode(
         _valid(<Map<String, Object?>>[
-          for (int i = 0; i < 6; i++) _text()..['text'] = 'a' * 101,
+          for (int i = 0; i < 10; i++) _text()..['text'] = 'a' * 101,
         ]),
       ),
       'a label too long': jsonEncode(
@@ -675,6 +675,28 @@ void main() {
           ..['notation'] = <String, Object?>{
             ...(_valid()['notation']! as Map<String, Object?>),
             'coordinate_space': 'screen_pixels',
+          },
+      ),
+      'a sticky note in note coordinates': jsonEncode(
+        _valid()
+          ..['notation'] = <String, Object?>{
+            ...(_valid()['notation']! as Map<String, Object?>),
+            'sticky': <String, Object?>{'width': 300, 'height': 200},
+          },
+      ),
+      'sticky coordinates without a sticky note': jsonEncode(
+        _valid()
+          ..['notation'] = <String, Object?>{
+            ...(_valid()['notation']! as Map<String, Object?>),
+            'coordinate_space': 'sticky_normalized',
+          },
+      ),
+      'a sticky note with no height': jsonEncode(
+        _valid()
+          ..['notation'] = <String, Object?>{
+            ...(_valid()['notation']! as Map<String, Object?>),
+            'coordinate_space': 'sticky_normalized',
+            'sticky': <String, Object?>{'width': 300},
           },
       ),
       'the old strokes shape': jsonEncode(
@@ -704,6 +726,75 @@ void main() {
         reason: '${entry.key}: nothing of it is replayed',
       );
     }
+  });
+
+  test('a notation on a sticky note keeps its size, brought within the '
+      'sizes a sticky note may be, and serializes back', () {
+    final AiAssistantResponse response = AiAssistantResponse.parse(
+      jsonEncode(
+        _valid()
+          ..['notation'] = <String, Object?>{
+            ...(_valid()['notation']! as Map<String, Object?>),
+            'coordinate_space': 'sticky_normalized',
+            'sticky': <String, Object?>{'width': 900, 'height': 200},
+          },
+      ),
+    );
+
+    expect(response.notationRejected, isFalse);
+    expect(response.notation!.sticky, const AiStickySize(640, 200));
+    final Map<String, Object?> notation =
+        (jsonDecode(response.toJsonString())
+                as Map<String, Object?>)['notation']!
+            as Map<String, Object?>;
+    expect(notation['coordinate_space'], 'sticky_normalized');
+    expect(notation['sticky'], <String, Object?>{'width': 640, 'height': 200});
+    expect(
+      AiAssistantResponse.parse(response.toJsonString()).notation!.sticky,
+      const AiStickySize(640, 200),
+    );
+  });
+
+  test('a notation without a label or coordinate space, with points as '
+      '[x, y], is drawn: as Claude Haiku answered through the backend', () {
+    const String answer =
+        '{"version":2,"message":"The hypotenuse is **5**.","notation":'
+        '{"coordinate_space":"note_normalized","items":[{"type":"text",'
+        '"ink":"blue","width":2,"text":"c = √25 = 5","x":0.565,"y":0.528,'
+        '"size":22},{"type":"line","ink":"red","width":2,"from":[0.565,0.562],'
+        '"to":[0.78,0.562],"line_style":"solid","arrow":"none"}]}}';
+    final AiAssistantResponse response = AiAssistantResponse.parse(answer);
+
+    expect(response.notationRejected, isFalse);
+    final AiNotation notation = response.notation!;
+    expect(notation.label, AiAssistantResponse.defaultLabel);
+    final AiNotationLine line = notation.items[1] as AiNotationLine;
+    expect((line.from.x, line.from.y), (0.565, 0.562));
+    expect((line.to.x, line.to.y), (0.78, 0.562));
+
+    // No coordinate space at all is the paper's.
+    final Map<String, Object?> bare =
+        jsonDecode(answer) as Map<String, Object?>;
+    (bare['notation']! as Map<String, Object?>).remove('coordinate_space');
+    expect(AiAssistantResponse.parse(jsonEncode(bare)).notation, isNotNull);
+    // A point of three numbers is still no point.
+    expect(
+      AiAssistantResponse.parse(
+        answer.replaceFirst('[0.565,0.562]', '[0.565,0.562,1]'),
+      ).notationRejected,
+      isTrue,
+    );
+  });
+
+  test('a notation on the paper has no sticky note', () {
+    final AiAssistantResponse response = AiAssistantResponse.parse(
+      jsonEncode(_valid()),
+    );
+    expect(response.notation!.sticky, isNull);
+    expect(
+      (jsonDecode(response.toJsonString()) as Map<String, Object?>)['notation'],
+      isNot(contains('sticky')),
+    );
   });
 
   test('points count over strokes and paths, not text or graphs', () {
@@ -785,7 +876,13 @@ void main() {
       'label',
       'coordinate_space',
       'items',
+      'sticky',
     ]);
+    final Map<String, Object?> sticky =
+        (notation['properties']! as Map<String, Object?>)['sticky']!
+            as Map<String, Object?>;
+    expect(sticky['additionalProperties'], isFalse);
+    expect(sticky['required'], <String>['width', 'height']);
     expect(jsonEncode(schema), isNot(contains('_ms')));
     expect(byType['[text]']!['required'], _text().keys);
     expect(byType['[graph]']!['required'], _graph().keys);

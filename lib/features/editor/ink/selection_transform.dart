@@ -13,6 +13,8 @@ import 'ink_sample.dart';
 /// of truth for a transform; the matrix handed to the renderer for a preview
 /// is derived from it.
 class InkTransform {
+  const InkTransform(this.a, this.b, this.tx, this.ty, this.scale);
+
   const InkTransform._(this.a, this.b, this.tx, this.ty, this.scale);
 
   static const InkTransform identity = InkTransform._(1, 0, 0, 0, 1);
@@ -57,6 +59,8 @@ class InkTransform {
 
   /// The rotation, in radians, in `-pi..pi`.
   double get angle => math.atan2(b, a);
+
+  bool get isIdentity => this == identity;
 
   bool get isFinite {
     return a.isFinite &&

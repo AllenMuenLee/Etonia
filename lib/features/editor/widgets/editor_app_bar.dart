@@ -21,6 +21,7 @@ class EditorAppBar extends StatelessWidget implements PreferredSizeWidget {
     this.leadingIsBack = false,
     this.onTitlePressed,
     this.onSettingsPressed,
+    this.onFindPressed,
     this.historyControls,
     this.pageControls,
     this.tabs,
@@ -38,6 +39,7 @@ class EditorAppBar extends StatelessWidget implements PreferredSizeWidget {
   final bool leadingIsBack;
   final VoidCallback? onTitlePressed;
   final VoidCallback? onSettingsPressed;
+  final VoidCallback? onFindPressed;
 
   /// Sits before the page controls, after the title in focus order.
   final Widget? historyControls;
@@ -56,7 +58,7 @@ class EditorAppBar extends StatelessWidget implements PreferredSizeWidget {
     final double barWidth =
         MediaQuery.sizeOf(context).width - 2 * AppSpacing.xxs;
 
-    return Material(
+    return GlassMaterial(
       color: AppGlass.surface(colors),
       child: SafeArea(
         bottom: false,
@@ -111,8 +113,17 @@ class EditorAppBar extends StatelessWidget implements PreferredSizeWidget {
                             order: const NumericFocusOrder(4),
                             child: FocusTraversalGroup(child: pageControls!),
                           ),
+                        if (onFindPressed != null)
+                          FocusTraversalOrder(
+                            order: const NumericFocusOrder(5),
+                            child: IconButton(
+                              tooltip: 'Find handwriting',
+                              onPressed: onFindPressed,
+                              icon: const Icon(AppIcons.search),
+                            ),
+                          ),
                         FocusTraversalOrder(
-                          order: const NumericFocusOrder(5),
+                          order: const NumericFocusOrder(6),
                           child: IconButton(
                             tooltip: 'Settings',
                             onPressed: onSettingsPressed,

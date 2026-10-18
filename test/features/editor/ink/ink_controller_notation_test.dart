@@ -58,6 +58,30 @@ void main() {
     expect(revisions, 1);
   });
 
+  test('keeps the pressure rhythm of generated traces', () {
+    final InkController controller = InkController();
+    addTearDown(controller.dispose);
+
+    final AddNotationResult result = controller.addAiNotation(
+      traces: <GeneratedInkTrace>[
+        GeneratedInkTrace(
+          style: StrokeStyle(ink: _blue, width: 3),
+          points: const <InkVector>[
+            InkVector(20, 20),
+            InkVector(30, 30),
+            InkVector(40, 40),
+          ],
+          widths: const <double>[0.82, 1, 0.88],
+        ),
+      ],
+      expectedRevision: 0,
+      surfaceSize: const Size(100, 100),
+    );
+
+    expect(result, AddNotationResult.added);
+    expect(controller.strokes.single.widths, const <double>[0.82, 1, 0.88]);
+  });
+
   test('stale, busy, and invalid batches change nothing', () {
     final InkController controller = InkController();
     addTearDown(controller.dispose);

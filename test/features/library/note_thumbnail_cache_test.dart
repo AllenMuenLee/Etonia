@@ -16,7 +16,8 @@ void main() {
           repository: repository,
           rasterizer: const PdfrxRasterizer(),
           pixelWidth: 40,
-          maxBytes: 5000,
+          // Room for one 40 px wide portrait page, not two.
+          maxBytes: 12000,
         );
         const style = ThumbnailStyle(
           brightness: Brightness.light,
@@ -29,12 +30,15 @@ void main() {
           await Future<void>.delayed(const Duration(milliseconds: 10));
         }
         final owner = first.value!;
+        final int one = owner.image.width * owner.image.height * 4;
+        expect(one, lessThanOrEqualTo(12000));
+        expect(2 * one, greaterThan(12000));
         final visible = owner.clone();
         final second = cache.watch(b, style);
         for (var i = 0; i < 100 && second.value == null; i++) {
           await Future<void>.delayed(const Duration(milliseconds: 10));
         }
-        expect(cache.retainedBytes, lessThanOrEqualTo(5000));
+        expect(cache.retainedBytes, lessThanOrEqualTo(12000));
         expect(owner.image.debugDisposed, isTrue);
         expect(visible.image.debugDisposed, isFalse);
         expect(cache.peek(a, Brightness.light), isNull);

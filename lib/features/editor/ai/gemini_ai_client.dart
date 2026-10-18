@@ -6,9 +6,8 @@ import 'package:http/http.dart' as http;
 
 import 'ai_client.dart';
 import 'ai_config.dart';
-import '../ink/ink_sample.dart';
 import 'ai_notation.dart';
-import 'note_image_renderer.dart';
+import 'streaming_ai_client.dart';
 
 /// Calls Gemini's streaming `generateContent` directly from the app.
 ///
@@ -81,16 +80,8 @@ class GeminiAiClient implements AiClient {
               },
             },
           ],
-          if (request.noteImage case final note?
-              when index == lastUser) ...<Map<String, Object?>>[
-            <String, Object?>{'text': _noteMetadata(note)},
-            <String, Object?>{
-              'inline_data': <String, Object?>{
-                'mime_type': 'image/png',
-                'data': base64Encode(note.png),
-              },
-            },
-          ],
+          if (request.noteImage case final note? when index == lastUser)
+            <String, Object?>{'text': aiNoteMetadata(note)},
           <String, Object?>{'text': message.wireText},
         ],
       });
@@ -113,91 +104,6 @@ class GeminiAiClient implements AiClient {
           },
       },
     };
-  }
-
-  /// Tells the model what the note image is, where the selected-ink image
-  /// sits on it, and where it may draw. Coordinates are rounded to 4
-  /// places, finer than a logical pixel on any page the editor shows.
-  static String _noteMetadata(NoteImage note) {
-    String n(double value) => double.parse(value.toStringAsFixed(4)).toString();
-    final double width = note.logicalSize.width;
-    final double height = note.logicalSize.height;
-    final StringBuffer text = StringBuffer(
-      'Current note image: the whole sheet of paper, '
-      '${n(width)} x ${n(height)} logical units, shown at '
-      '${note.width} x ${note.height} pixels. Note coordinates are '
-      'note_normalized: x = 0 is the left edge of the paper and x = 1 the '
-      'right edge; y = 0 is the top edge and y = 1 the bottom edge. One '
-      'logical unit is 1/${n(width)} of x and 1/${n(height)} of y.',
-    );
-    if (note.gridDivisions > 0) {
-      final String step = n(1 / note.gridDivisions);
-      final String half = n(0.5 / note.gridDivisions);
-      text.write(
-        ' The app has drawn a faint coordinate grid over the note image to '
-        'help you place marks; it is not on the paper. Labelled lines run '
-        'every $step of x and of y: the labels along the top edge give each '
-        'vertical line its x (x$step is at x = $step), and those along the '
-        'left edge give each horizontal line its y. Fainter, unlabelled '
-        'lines fall halfway between, every $half. Read every position you '
-        'draw at off this grid, measuring from the nearest lines, and check '
-        'the ink you mark against it. Never mark, trace, or mention the '
-        'grid itself.',
-      );
-    }
-    final bounds = note.normalizedFocusBounds;
-    Object? focus;
-    if (bounds != null) {
-      focus = <String, Object?>{
-        'left': double.parse(n(bounds.left)),
-        'top': double.parse(n(bounds.top)),
-        'right': double.parse(n(bounds.right)),
-        'bottom': double.parse(n(bounds.bottom)),
-      };
-      text.write(
-        ' The selected-ink image is a crop of this note covering '
-        'x ${n(bounds.left)} to ${n(bounds.right)} and '
-        'y ${n(bounds.top)} to ${n(bounds.bottom)}. A point u of the way '
-        'across and v of the way down the selected-ink image is at note '
-        'x = ${n(bounds.left)} + u * ${n(bounds.width)}, '
-        'y = ${n(bounds.top)} + v * ${n(bounds.height)}.',
-      );
-    }
-    List<Object?>? ink;
-    if (note.focusInk.isNotEmpty) {
-      double r(double value) => double.parse(value.toStringAsFixed(3));
-      ink = <Object?>[
-        for (final List<InkVector> outline in note.focusInk)
-          <Object?>[
-            for (final InkVector point in outline)
-              <double>[r(point.x), r(point.y)],
-          ],
-      ];
-      text.write(
-        ' selected_ink in the metadata is the user\'s ink in and around the '
-        'selected region, measured exactly: one polyline per pen stroke, as '
-        '[x, y] note coordinates, reduced to its ends and corners, so each '
-        'straight side of a shape is the segment between two consecutive '
-        'points. A triangle drawn in one stroke, for example, is its three '
-        'corners with the first repeated at the end. Whenever your drawing '
-        'connects to this ink, such as a lead or wire to a component, a '
-        'pin, a line completing a shape, or an arrow or leader line to a '
-        'part, take the touching point from selected_ink, not from the '
-        'image: use a listed point for a corner or an end, or interpolate '
-        'between two consecutive points for a place along a side (a third '
-        'of the way down a side from (x1, y1) to (x2, y2) is '
-        'x1 + (x2 - x1) / 3, y1 + (y2 - y1) / 3). Start or end your line '
-        'exactly there, so it touches the ink without a gap or overlap, '
-        'and run it away from the shape, outward.',
-      );
-    }
-    text.write(
-      ' You may draw anywhere on the paper, inside or outside the selected '
-      'region: every point must keep 0 < x < 1 and 0 < y < 1, with a margin '
-      'of at least the stroke width from each edge. Metadata: '
-      '${jsonEncode(<String, Object?>{'logical_aspect_ratio': double.parse(n(width / height)), 'focus_bounds': focus, 'note_logical_width': double.parse(n(width)), 'note_logical_height': double.parse(n(height)), 'selected_ink': ?ink})}',
-    );
-    return text.toString();
   }
 
   @override
@@ -318,14 +224,8 @@ class GeminiAiClient implements AiClient {
     return reader.finish();
   }
 
-  static AiFailureKind _failureKind(int status) {
-    return switch (status) {
-      401 || 403 => AiFailureKind.unauthorized,
-      429 => AiFailureKind.rateLimited,
-      >= 500 => AiFailureKind.server,
-      _ => AiFailureKind.rejected,
-    };
-  }
+  static AiFailureKind _failureKind(int status) =>
+      aiFailureKindForStatus(status);
 
   static String? _blockReason(Object? promptFeedback) {
     if (promptFeedback is! Map<String, Object?>) {
@@ -373,6 +273,8 @@ class _AnswerReader {
   AiFailure? _error;
   String? _shown;
   bool _shownComplete = false;
+  int? _inputTokens;
+  int? _outputTokens;
 
   bool get _stopped => _malformed || _error != null;
 
@@ -392,6 +294,8 @@ class _AnswerReader {
     _error = null;
     _shown = null;
     _shownComplete = false;
+    _inputTokens = null;
+    _outputTokens = null;
   }
 
   /// Takes one line of the body. Returns false once nothing more is
@@ -442,9 +346,17 @@ class _AnswerReader {
       if (answer.isEmpty) {
         continue;
       }
+      final int? input = _inputTokens;
+      final int? output = _outputTokens;
       try {
         return AiSuccess.response(
           AiAssistantResponse.parse(answer, config: _config),
+          usage: input == null && output == null
+              ? null
+              : AiTokenUsage(
+                  inputTokens: input ?? 0,
+                  outputTokens: output ?? 0,
+                ),
         );
       } on FormatException {
         return AiError(AiFailure(AiFailureKind.malformed, statusCode: _status));
@@ -504,6 +416,20 @@ class _AnswerReader {
         statusCode: status,
       );
       return;
+    }
+    // Each event repeats the running totals; the last one holds.
+    if (value['usageMetadata'] case final Map<String, Object?> usage) {
+      if (usage['promptTokenCount'] case final int prompt) {
+        _inputTokens = prompt;
+      }
+      // Thinking is billed as output.
+      final Object? candidates = usage['candidatesTokenCount'];
+      final Object? thoughts = usage['thoughtsTokenCount'];
+      if (candidates is int || thoughts is int) {
+        _outputTokens =
+            (candidates is int ? candidates : 0) +
+            (thoughts is int ? thoughts : 0);
+      }
     }
     if (GeminiAiClient._blockReason(value['promptFeedback']) != null) {
       _blocked = true;

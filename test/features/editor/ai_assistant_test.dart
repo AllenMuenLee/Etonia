@@ -199,7 +199,6 @@ void main() {
       // Nearest the frame's top-right corner: the frame's right edge is at
       // 222, and its handles reach 6 further. The palette floats across
       // the top, clear of it.
-      final Rect canvas = canvasRect(tester);
       final Rect palette = _paletteRect(tester);
       final Rect bar = Rect.fromLTRB(
         tester.getRect(find.byTooltip('Copy')).left - AppSpacing.xxs,
@@ -207,9 +206,15 @@ void main() {
         ai.right + AppSpacing.xxs,
         ai.bottom,
       );
-      expect(bar.right, canvas.left + 222 + 6);
+      expect(
+        bar.right,
+        closeTo(pageToGlobal(tester, const Offset(222 + 6, 0)).dx, 1e-6),
+      );
       expect(bar.overlaps(palette), isFalse);
-      expect(ai.bottom, lessThan(canvas.top + 198));
+      expect(
+        ai.bottom,
+        lessThan(pageToGlobal(tester, const Offset(0, 198)).dy),
+      );
       handle.dispose();
     });
 
@@ -276,10 +281,19 @@ void main() {
       expect(ai.right, lessThanOrEqualTo(cut.left));
       expect(cut.right, lessThanOrEqualTo(copy.left));
       // At the frame's top-left corner, which is the trailing one here.
-      expect(ai.left, canvasRect(tester).left + 118 - 6 + AppSpacing.xxs);
+      expect(
+        ai.left,
+        closeTo(
+          pageToGlobal(tester, const Offset(118 - 6, 0)).dx + AppSpacing.xxs,
+          1e-6,
+        ),
+      );
 
       // The setting's Left and Right still mean the screen's physical edges.
       await _openAi(tester);
+      expect(_panelRect(tester).left, 0);
+      _assistant(tester).setSide(AiPanelSide.right);
+      await tester.pumpAndSettle();
       expect(_panelRect(tester).right, TestViewport.tabletLandscape.size.width);
       _assistant(tester).setSide(AiPanelSide.left);
       await tester.pumpAndSettle();
@@ -408,23 +422,24 @@ void main() {
         await _pumpOpen(tester, viewport: viewport);
         final Size screen = viewport.size;
 
-        // On the right to begin with, 360 wide, below the app bar.
+        // On the left to begin with, 360 wide, below the app bar.
         Rect panel = _panelRect(tester);
         expect(panel.width, 360);
-        expect(panel.right, screen.width);
+        expect(panel.left, 0);
         expect(panel.top, surfaceBefore.top);
         expect(panel.bottom, screen.height);
+        expect(_assistant(tester).side, AiPanelSide.left);
         // The page fills what the panel leaves, edge to edge.
-        expect(_surfaceRect(tester).right, panel.left);
-        expect(_surfaceRect(tester).left, surfaceBefore.left);
-        expect(_paletteRect(tester).overlaps(panel), isFalse);
+        expect(_surfaceRect(tester).left, panel.right);
+        expect(_surfaceRect(tester).right, surfaceBefore.right);
+        expect(_paletteRect(tester).left, greaterThan(panel.right));
         expect(
           _surfaceRect(tester).intersect(_paletteRect(tester)),
           _paletteRect(tester),
         );
         expect(_paletteRect(tester).size, ToolPalette.sizeFor(Axis.horizontal));
 
-        _assistant(tester).setSide(AiPanelSide.left);
+        _assistant(tester).setSide(AiPanelSide.right);
         await tester.pump();
         // Mid-move frames are clean too.
         await tester.pump(const Duration(milliseconds: 60));
@@ -432,18 +447,17 @@ void main() {
         await tester.pumpAndSettle();
 
         panel = _panelRect(tester);
-        expect(panel.left, 0);
+        expect(panel.right, screen.width);
         expect(panel.width, 360);
-        expect(_assistant(tester).side, AiPanelSide.left);
-        expect(_paletteRect(tester).left, greaterThan(panel.right));
-        expect(_surfaceRect(tester).left, panel.right);
-        expect(_surfaceRect(tester).right, surfaceBefore.right);
+        expect(_surfaceRect(tester).right, panel.left);
+        expect(_surfaceRect(tester).left, surfaceBefore.left);
+        expect(_paletteRect(tester).overlaps(panel), isFalse);
 
-        _assistant(tester).setSide(AiPanelSide.right);
+        _assistant(tester).setSide(AiPanelSide.left);
         await tester.pumpAndSettle();
 
-        expect(_panelRect(tester).right, screen.width);
-        expect(_surfaceRect(tester).right, _panelRect(tester).left);
+        expect(_panelRect(tester).left, 0);
+        expect(_surfaceRect(tester).left, _panelRect(tester).right);
 
         // Closed, the editor has the whole width back.
         await tester.tap(find.byTooltip('Close AI assistant'));
@@ -501,6 +515,10 @@ void main() {
         final Rect paletteBefore = _paletteRect(tester);
         await _openAi(tester);
         final Size screen = TestViewport.compact.size;
+        // Opens on the left; Right is chosen to begin with here.
+        expect(_panelRect(tester).left, 0);
+        _assistant(tester).setSide(AiPanelSide.right);
+        await tester.pumpAndSettle();
 
         // 88% of 390, from the right edge, over an untouched editor.
         Rect panel = _panelRect(tester);
@@ -910,7 +928,16 @@ void main() {
 
       expect(find.text(AiAssistantPanel.notConfigured), findsOneWidget);
       expect(AiAssistantPanel.notConfigured, contains('GEMINI_API_KEY'));
-      expect(find.text('Gemini 2.5 Flash'), findsOneWidget);
+      expect(AiAssistantPanel.notConfigured, contains('Claude_API_KEY'));
+      expect(AiAssistantPanel.notConfigured, contains('Openai_API_KEY'));
+      // The editor's own client serves every model, starting on Sol.
+      expect(
+        find.descendant(
+          of: find.byKey(const ValueKey<String>('ai-model-selector')),
+          matching: find.text('Sol'),
+        ),
+        findsOneWidget,
+      );
       for (final String label in <String>['Explain this', 'Grade this']) {
         expect(
           tester.widget<OutlinedButton>(_quickAction(label)).onPressed,
@@ -1041,7 +1068,7 @@ void main() {
       await tester.pumpAndSettle();
       expect(controller.selection, isNull);
       await tester.dragFrom(
-        canvasRect(tester).topLeft + const Offset(300, 300),
+        pageToGlobal(tester, const Offset(300, 300)),
         const Offset(80, 40),
       );
       await tester.pumpAndSettle();
@@ -1049,7 +1076,7 @@ void main() {
       await tester.tap(find.byTooltip('Eraser'));
       await tester.pumpAndSettle();
       await tester.dragFrom(
-        canvasRect(tester).topLeft + const Offset(170, 180),
+        pageToGlobal(tester, const Offset(170, 180)),
         const Offset(0, 40),
       );
       await tester.pumpAndSettle();

@@ -508,7 +508,6 @@ class PagePanel extends StatelessWidget {
                   thumbnailOf: (PageSize size) => _SizeThumbnail(
                     paper: _paperFor(size, setup),
                     icon: switch (size) {
-                      PageSize.fit => AppIcons.fitToScreen,
                       PageSize.infinite => AppIcons.infinite,
                       _ => null,
                     },

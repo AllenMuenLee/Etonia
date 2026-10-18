@@ -1,4 +1,4 @@
-# Greatnote
+# Etonia
 
 A handwriting-focused note app for Android tablets and iPads, built with
 Flutter. The current build is an editor with a single pen, selectable ink
@@ -17,7 +17,7 @@ saved yet.
 | Android `minSdk` | 24 (Android 7.0), set in `android/app/build.gradle.kts` |
 | Android `compileSdk` / `targetSdk` | 36, from the Flutter Gradle plugin |
 | iOS deployment target | 13.0, set in `ios/Runner.xcodeproj` |
-| Application ID / bundle ID | `com.greatnote.app` |
+| Application ID / bundle ID | `com.etonia.app` |
 
 The layout targets tablets. Widths below 600 logical pixels get a working
 compact fallback, not the primary experience.
@@ -118,7 +118,7 @@ fvm flutter run -d <device-id>
 
 | Task | Command |
 | --- | --- |
-| Run with the AI assistant enabled | `fvm flutter run -d <device-id> --dart-define=GEMINI_API_KEY=<your key>` |
+| Run with account-backed AI enabled | `fvm flutter run -d <device-id> --dart-define-from-file=dart_defines.json` |
 | Format | `fvm dart format .` |
 | Verify formatting | `fvm dart format --output=none --set-exit-if-changed .` |
 | Static analysis | `fvm flutter analyze` |
@@ -392,8 +392,8 @@ library, and its title renames the note.
   pause.
 - Thumbnails are painted from each note's content and cached for the session
   only.
-- There is no live sync: a Google Drive backup runs only when asked (see
-  below).
+- There is no live sync: Google Drive backups run on a schedule or when
+  asked (see below).
 
 ## Google Drive
 
@@ -404,8 +404,8 @@ sign-in and Drive REST v3 calls sit behind `GoogleDriveClient`, so tests use
 `FakeGoogleDriveClient` (`test/helpers/google_drive_fakes.dart`) and never
 touch the network.
 
-**Backup** (`GoogleDriveBackupService`) writes to `My Drive/Greatnote Backup`:
-`manifest.json` (schema, `exportedAt`, folder and note counts, every folder
+**Backup** (`GoogleDriveBackupService`) writes to `My Drive/Etonia` (a
+restore also finds an older `Greatnote Backup` folder): `manifest.json` (schema, `exportedAt`, folder and note counts, every folder
 and note entry, and the SHA-256 and Drive file of each note's content and
 assets) and a `notes/` folder of content-addressed files. Files already in
 Drive with the same hash are not uploaded again; the manifest is replaced
@@ -416,11 +416,18 @@ reuses folders with the same name and place and skips notes whose title is
 already in their folder; *Replace library* moves the current library to
 Recently Deleted.
 
+**Automatic backup** (`AutoBackupScheduler`) backs up every 15 minutes by
+default while the app runs, once Drive has been connected on the device; the
+sheet's *Back up automatically* menu picks 5 or 30 minutes, 1 or 4 hours, a
+day, or off. It runs only when the library has changed, restores the Google
+session silently or skips the turn, and takes turns with backups and
+restores started from the sheet.
+
 **Goodnotes import** (`GoodnotesDriveReplicator`) looks for non-trashed
 folders named GoodNotes in any case, asks which one to use when there are
-several, rebuilds its folder tree breadth first under a top-level folder of
-the same name, and imports each `.goodnotes` notebook and PDF (with Goodnotes
-ink recovery) into its folder. Other files are listed as skipped. Running it
+several, rebuilds its subfolder tree breadth first directly in the library
+root, and imports each `.goodnotes` notebook and PDF (with Goodnotes ink
+recovery) into its folder. Other files are listed as skipped. Running it
 again reuses the folders and skips files that have not changed since;
 which Drive file became which note is kept in `greatnote/cloud_state.json`.
 
@@ -433,19 +440,22 @@ and create OAuth clients:
 
 - **Web application**: its client ID goes in `GOOGLE_OAUTH_SERVER_CLIENT_ID`.
   Android needs it.
-- **Android**: package `com.greatnote.app` and the SHA-1 of your signing key
-  (`cd android && ./gradlew signingReport`). Nothing to copy into the app.
-- **iOS**: bundle ID of the Runner target. Its client ID goes in
-  `GOOGLE_OAUTH_CLIENT_ID`, and its *reversed* client ID
-  (`com.googleusercontent.apps.…`) must be added to `ios/Runner/Info.plist`
-  as a URL scheme under `CFBundleURLTypes`.
+- **Android**: package `com.etonia.app` and the SHA-1 of your signing key
+  (`cd android && ./gradlew signingReport`). Its client ID can be recorded in
+  `GOOGLE_OAUTH_ANDROID_CLIENT_ID` (Google Play Services matches the app by
+  package name + SHA-1).
+- **iOS**: bundle ID `com.etonia.app` of the Runner target. Its client ID goes
+  in `GOOGLE_OAUTH_IOS_CLIENT_ID` (or `GOOGLE_OAUTH_CLIENT_ID`), and its
+  *reversed* client ID (`com.googleusercontent.apps.…`) must be added to
+  `ios/Runner/Info.plist` as a URL scheme under `CFBundleURLTypes`.
 
-Then put both IDs in `dart_defines.json` and run with
+Then put the IDs in `dart_defines.json` and run with
 `--dart-define-from-file=dart_defines.json` (as `tool/run.sh` does):
 
 ```json
 {
-  "GOOGLE_OAUTH_CLIENT_ID": "<ios client id>.apps.googleusercontent.com",
+  "GOOGLE_OAUTH_IOS_CLIENT_ID": "<ios client id>.apps.googleusercontent.com",
+  "GOOGLE_OAUTH_ANDROID_CLIENT_ID": "<android client id>.apps.googleusercontent.com",
   "GOOGLE_OAUTH_SERVER_CLIENT_ID": "<web client id>.apps.googleusercontent.com"
 }
 ```
@@ -749,10 +759,10 @@ Every successful model answer is JSON matching a closed, versioned schema:
 ```
 
 When enabled, `notation` may instead hold a label and 1–48 items. The model
-says what to draw; Greatnote draws it. Every item has a palette ID and a
+says what to draw; Etonia draws it. Every item has a palette ID and a
 1–20 logical-pixel pen width, and is one of:
 
-| `type` | The model gives | Greatnote draws |
+| `type` | The model gives | Etonia draws |
 | --- | --- | --- |
 | `text` | the words, the top-left corner, and the capital height (8–120 px) | them in its built-in single-stroke handwriting font (letters, digits, punctuation, and common math symbols such as `× ÷ √ π ² ≤ → ✓`) |
 | `plot` | the box on the note, the x range and an optional y range, whether to draw `axes` and number them with `ticks`, and `children` placed in the plot's own units (below) | a coordinate plane: axes through 0 (or along the box edge), round tick numbers, and every child mapped into the box and cut off at its edge |
@@ -766,7 +776,7 @@ A plot's children use the graph's own x and y, never note coordinates, so
 the model does no mapping arithmetic. Each has an ink; the plot's width is
 theirs too:
 
-| Child | The model gives | Greatnote draws |
+| Child | The model gives | Etonia draws |
 | --- | --- | --- |
 | `function` | a formula, an optional `line_style`, and optional `marks`: `roots`, `extrema`, `y_intercept` | the curve, and for each mark the points it finds (`plot_features.dart`: sign changes refined by bisection, turning points by golden-section search, breaks such as `1/x` ignored), each dotted and labelled with its coordinates |
 | `intersections` | `of`, two formulas | a labelled dot wherever their curves meet |
@@ -775,7 +785,7 @@ theirs too:
 | `label` | `x`, `y`, `text` | the text just above and right of the point |
 | `shade` | a formula, an optional `base` (y = 0 by default), `from`, `to` | vertical hatching between the two curves |
 
-The labels Greatnote writes itself, tick numbers and marked coordinates, are
+The labels Etonia writes itself, tick numbers and marked coordinates, are
 moved back onto the paper if they would run off it. A plot holds at most 16
 children, and each mark labels at most 8 points.
 
@@ -806,7 +816,7 @@ stateless service using this canonical JSON; local application state is never
 sent.
 
 Notation coordinates address the whole writing surface: `(0, 0)` is its
-top-left and `(1, 1)` is its bottom-right. Greatnote maps them with
+top-left and `(1, 1)` is its bottom-right. Etonia maps them with
 `pageX = x * width` and `pageY = y * height`, without smoothing or clamping.
 If the mode was disabled, the document or surface changed, a gesture is
 active, or any trace falls outside the note, the whole notation is rejected
@@ -830,17 +840,17 @@ nothing that moves has no steps at all and appears immediately.
 
 A step is an integer from 1 through 24. The model gives only the order:
 items are drawn lowest step first, and items that share a step are drawn
-together. Steps need not be consecutive. Greatnote works out the times
+together. Steps need not be consecutive. Etonia works out the times
 itself (`AiNotationTimeline.fromSteps`): each item takes about as long as a
 hand would to draw it (about 140 ms a character of text, about 1.5 s for a
 line across the whole note, longer for a plot with more children), each step
 lasts as long as its slowest item, steps are 250 ms apart, and the loop holds
 600 ms before it repeats. An animation that would run past 12000 ms is sped
 up to fit; fixed items do not count toward it. If any step given is not an
-integer in range, Greatnote keeps the validated drawing but shows it
+integer in range, Etonia keeps the validated drawing but shows it
 immediately.
 
-Greatnote lays each item out once into its final page-local vector strokes,
+Etonia lays each item out once into its final page-local vector strokes,
 then distributes its time span over those strokes at a constant pen speed.
 The final strokes are appended atomically before playback starts. While they
 are being revealed, the completed-ink layer omits those exact stroke objects
@@ -870,88 +880,73 @@ development comparisons and on physical target tablets for representative
 build/raster times; do not treat debug-mode or emulator timing as device
 performance.
 
-### API key
+### Account services and API keys
 
-The key is read at build time from `GEMINI_API_KEY`:
+Production AI uses `BackendAiClient` and the Supabase Edge Functions in
+`supabase/`. Follow [the backend deployment guide](supabase/README.md) to create
+and configure your project, email-code authentication, store verification,
+webhooks, and server secrets.
 
-```sh
-fvm flutter run -d <device-id> --dart-define=GEMINI_API_KEY=<your key>
-```
-
-or from a file that Git ignores (`.env`, `.env.*`, and `dart_defines*.json`
-are in `.gitignore`):
-
-```sh
-fvm flutter run -d <device-id> --dart-define-from-file=dart_defines.json
-```
-
-`tool/run.ps1` (Windows) and `tool/run.sh` (macOS, Linux) do the same,
-passing any other arguments on to `flutter run`:
-
-```sh
-./tool/run.sh -d <device-id>
-```
+The app build needs only public Supabase configuration:
 
 ```json
 {
-  "GEMINI_API_KEY": "<your key>",
-  "GEMINI_MODEL": "gemini-3.5-flash-lite",
-  "GEMINI_THINKING_LEVEL": "LOW"
+  "SUPABASE_URL": "https://YOUR_PROJECT_REF.supabase.co",
+  "SUPABASE_PUBLISHABLE_KEY": "sb_publishable_REPLACE_ME"
 }
 ```
 
-### Thinking
+Put those values in ignored `dart_defines.json` and run:
 
-`GEMINI_THINKING_LEVEL` sets how long the model thinks before answering:
-`MINIMAL`, `LOW`, `MEDIUM`, or `HIGH`, the values of the SDKs'
-`ThinkingLevel` (`ThinkingLevel.LOW` and `low` are accepted too). It is sent
-as `generationConfig.thinkingConfig.thinkingLevel`, as the SDKs'
-`thinkingConfig: { thinkingLevel: ThinkingLevel.LOW }` sends it. Leave it
-out for the model's default.
+```sh
+flutter run --dart-define-from-file=dart_defines.json
+```
 
-Gemini 2.5 models refuse a thinking level with a 400, so for them the level
-is sent as a `thinkingBudget` instead: `MINIMAL` 0 (128 for 2.5 Pro, which
-cannot stop thinking), `LOW` 1024, `MEDIUM` 4096, `HIGH` 16384 tokens.
-`GEMINI_THINKING_BUDGET` sets a budget directly, for any model, and wins
-over the level; `-1` lets the model decide.
+AI provider keys, store verification credentials, and the Supabase service-role
+key stay on the server. `AiApiConfig.fromEnvironment` no longer reads provider
+keys from build defines. Direct provider clients remain available for isolated
+tests and explicit dependency injection; the editor uses the backend by default.
+Without configured account services, local editing works and paid AI fails closed.
 
-### Model
+### Models and privacy
 
-`GEMINI_MODEL` picks the model, by its ID in the Gemini API's model list
-(a `models/` prefix copied from that list is accepted). Leave it out, or
-blank, for the default, `gemini-2.5-flash`. It is fixed when the app is
-built, so a change takes a full restart, not a hot reload. The panel
-header shows the model's name, or its ID for one the app has no name for.
+The picker offers Haiku, Luna, Sonnet, Sol, Opus, Argon, and Astra. Provider model
+IDs, token rates, and output limits come from the server's `AI_MODEL_CONFIG`, with
+an example in `supabase/model-config.example.json`. The selected alias is a local
+preference; the client cannot choose an arbitrary provider URL, price, or balance.
 
-Things to know when changing it:
+Each AI request temporarily forwards only the current question and the selected
+PNG crop. Notation also sends numeric page dimensions and crop bounds, so returned
+marks can be placed on the page. Full note images, PDFs, and earlier chat messages
+are never sent to Supabase. No prompt, image, answer, or conversation is persisted
+or logged by the backend. Existing chat remains visible locally but is not sent
+as context. Responses currently arrive in full after server-side accounting.
 
-- **Notation quality varies.** `gemini-2.5-flash` was the only model tried
-  that drew where it was asked, legibly. The Gemma 4 models often answered
-  in words alone, or drew small marks in the right place without writing.
-- **Thinking settings are per model family.** The app sends none by
-  default, which every model accepts. `thinkingLevel` (Gemini 3, Gemma 4)
-  is refused by Gemini 2.5 with a 400; Gemini 2.5 takes `thinkingBudget`.
-- **Free-tier quotas are per model.** On the free tier,
-  `gemini-2.5-flash` allows 20 requests a day; switching models is one way
-  to keep working after that runs out.
+### Plans and credits
 
-Without a key the panel still opens, shows the preview, and says how to add
-one; the quick actions and Send are disabled. Never put a key in source,
-tests, fixtures, or documentation.
+| Plan | Display price | Included models without credit charges | AI credits |
+| --- | --- | --- | --- |
+| Starter | $4.99/month | Haiku, Luna | $1.20 for Sonnet & Sol |
+| Pro | $12.99/month | Haiku, Luna | $5.00 for all metered models |
+| Max | $29.99/month | Haiku, Luna | $15.00 for all metered models |
 
-**This is not safe for production.** `--dart-define` compiles the key into
-the app, and anything compiled into a mobile binary can be extracted from
-it. Use it for development and prototypes only, with a key you can revoke,
-and rotate any key that has been shared. A released app should send
-requests to a backend that authenticates the user and holds the provider
-key. The editor depends only on the `AiClient` interface
-(`lib/features/editor/ai/ai_client.dart`), so that backend client can be
-passed to `EditorScreen(aiClient: ...)` in place of `GeminiAiClient`. The
-backend itself is not part of this repository.
+Actual localized prices come from the store. Product mappings and allowances
+live in the database migration and must match the products configured in Apple
+and Google. Store product-ID overrides still use the `IAP_ANDROID_*` and
+`IAP_IOS_*` build defines.
 
-Android declares `android.permission.INTERNET` in the main manifest. iOS
-needs nothing extra: the service is HTTPS, and App Transport Security is
-left at its default.
+Sign in from Plans & Credits before purchasing or restoring. The user UUID is
+bound to each purchase. Only verified store transactions grant access or credits;
+notifications and live verification maintain renewal, refund, grace-period and
+expiry status. Unique transaction records prevent duplicate restore grants.
+
+The server reserves credits before each AI call and settles provider-reported
+usage atomically. Client roles cannot edit entitlements or balances. The app
+refreshes its display after calls, on resume, and at expiry. `subscription.json`
+now stores only the preferred model; local balances and `IAP_DEBUG_PLAN` are
+ignored by the production controller. The in-memory/local accounting path remains
+for isolated test harnesses. See the backend guide for uncertain-call recovery,
+rate limits, and live sandbox validation before release.
 
 The sizes and limits live in `AiLayoutConfig`, `AiImageConfig`, and
 `AiNotationConfig`
@@ -1009,10 +1004,11 @@ The sizes and limits live in `AiLayoutConfig`, `AiImageConfig`, and
 
 ## Changing the application ID
 
-`com.greatnote.app` appears in three places:
+`com.etonia.app` appears in these places (the Kotlin `namespace` and the native
+handwriting channel name `com.etonia.app/handwriting_recognizer` must stay in step):
 
 - `android/app/build.gradle.kts`: `namespace` and `applicationId`
-- `android/app/src/main/kotlin/com/greatnote/app/MainActivity.kt`: the
+- `android/app/src/main/kotlin/com/etonia/app/MainActivity.kt`: the
   `package` line, and the directory path, must match `namespace`
 - `ios/Runner.xcodeproj/project.pbxproj`: every `PRODUCT_BUNDLE_IDENTIFIER`
   (the test target uses the same ID with a `.RunnerTests` suffix)
@@ -1097,13 +1093,11 @@ runs only on editor open/close and preserves assets referenced by the in-app
 clipboard. Copy/Cut snapshots image bytes, so a cross-note paste stores a new
 asset in the destination even after the source image was cut.
 
-`DocumentIoConfig` centralizes the limits:
+`DocumentIoConfig` centralizes the settings; imports have no size or page
+limit:
 
 | Value | Default |
 | --- | ---: |
-| `maxImportPdfBytes` | 200 MiB |
-| `maxImportPdfPages` | 500 pages |
-| `maxImageImportBytes` | 50 MiB |
 | `maxStoredImageDimension` | 4096 px |
 | `insertedImageMaxFraction` | 0.6 |
 | `maxPdfRenderDimension` | 4096 px |

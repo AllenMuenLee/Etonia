@@ -5,7 +5,7 @@ plugins {
 }
 
 android {
-    namespace = "com.greatnote.app"
+    namespace = "com.etonia.app"
     compileSdk = flutter.compileSdkVersion
     ndkVersion = flutter.ndkVersion
 
@@ -16,7 +16,7 @@ android {
 
     defaultConfig {
         // TODO: Specify your own unique Application ID (https://developer.android.com/studio/build/application-id.html).
-        applicationId = "com.greatnote.app"
+        applicationId = "com.etonia.app"
         // You can update the following values to match your application needs.
         // For more information, see: https://flutter.dev/to/review-gradle-config.
         minSdk = 24
@@ -45,7 +45,10 @@ flutter {
 }
 
 dependencies {
-    // On-device text recognition for handwriting written in AI mode. The
-    // Latin model is bundled, so nothing is downloaded at run time.
+    // On-device recognition for handwriting written in AI mode. Digital ink
+    // reads the strokes themselves; its language model is downloaded on
+    // first use. Until then, text recognition, whose Latin model is
+    // bundled, reads a picture of them.
+    implementation("com.google.mlkit:digital-ink-recognition:18.1.0")
     implementation("com.google.mlkit:text-recognition:16.0.1")
 }

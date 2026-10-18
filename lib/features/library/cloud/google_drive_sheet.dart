@@ -2,22 +2,23 @@ import 'package:flutter/material.dart';
 
 import '../../../app/theme/app_icons.dart';
 import '../../../app/theme/app_tokens.dart';
-import '../../../shared/widgets/app_controls.dart';
 import '../../editor/document_io/document_importer.dart';
 import '../library_screen.dart' show formatModified;
+import 'auto_backup_scheduler.dart';
 import 'cloud_sync_state.dart';
 import 'goodnotes_drive_replicator.dart';
 import 'google_drive_backup_service.dart';
 import 'google_drive_client.dart';
 
 /// Shows the Google Drive sheet: the connection, backup and restore, and
-/// importing the Goodnotes folder. [onOpenFolder] shows a library folder,
-/// as the one a Goodnotes folder was replicated into.
+/// importing the Goodnotes folder. [onOpenFolder] shows a non-root library
+/// destination when one is used.
 Future<void> showGoogleDriveSheet(
   BuildContext context, {
   required GoogleDriveClient client,
   required GoogleDriveBackupService backup,
   required GoodnotesDriveReplicator replicator,
+  AutoBackupScheduler? autoBackup,
   ValueChanged<String>? onOpenFolder,
   DateTime Function() clock = DateTime.now,
 }) {
@@ -29,6 +30,7 @@ Future<void> showGoogleDriveSheet(
       client: client,
       backup: backup,
       replicator: replicator,
+      autoBackup: autoBackup,
       onOpenFolder: onOpenFolder,
       clock: clock,
     ),
@@ -43,6 +45,7 @@ class GoogleDriveSheet extends StatefulWidget {
     required this.client,
     required this.backup,
     required this.replicator,
+    this.autoBackup,
     this.onOpenFolder,
     this.clock = DateTime.now,
   });
@@ -50,6 +53,10 @@ class GoogleDriveSheet extends StatefulWidget {
   final GoogleDriveClient client;
   final GoogleDriveBackupService backup;
   final GoodnotesDriveReplicator replicator;
+
+  /// Offers the choice of how often to back up on its own; without one
+  /// the choice is not shown.
+  final AutoBackupScheduler? autoBackup;
   final ValueChanged<String>? onOpenFolder;
   final DateTime Function() clock;
 
@@ -94,7 +101,15 @@ class _GoogleDriveSheetState extends State<GoogleDriveSheet> {
     final GoogleDriveAccount? account = await widget.client.restoreSession();
     if (mounted && account != null && _account == null) {
       setState(() => _account = account);
+      await _link(true);
     }
+  }
+
+  /// Records whether Drive is connected, so automatic backup knows whether
+  /// it may run.
+  Future<void> _link(bool linked) async {
+    await widget.backup.setLinked(linked);
+    await widget.autoBackup?.reschedule();
   }
 
   void _show(String message, {bool error = false}) {
@@ -164,11 +179,13 @@ class _GoogleDriveSheetState extends State<GoogleDriveSheet> {
         return;
       }
       setState(() => _account = account);
+      await _link(true);
     });
   }
 
   Future<void> _disconnect() async {
     await widget.client.signOut();
+    await _link(false);
     if (!mounted) return;
     setState(() {
       _account = null;
@@ -279,7 +296,7 @@ class _GoogleDriveSheetState extends State<GoogleDriveSheet> {
         <String>[
           if (summary.cancelled) 'Stopped.',
           'Imported ${_count(summary.imported.length, 'file')} into '
-              '${root.folder.name}.',
+              '${summary.localRootId == null ? 'Library' : root.folder.name}.',
           if (summary.unchanged > 0) '${summary.unchanged} already up to date.',
           if (notImported > 0) '$notImported not imported.',
         ].join(' '),
@@ -333,7 +350,6 @@ class _GoogleDriveSheetState extends State<GoogleDriveSheet> {
     final GoogleDriveAccount? account = _account;
     final bool connected = account != null;
     final bool canAct = connected && !_busy;
-    const Size wide = Size.fromHeight(AppSizes.minTouchTarget);
     return SafeArea(
       child: Center(
         heightFactor: 1,
@@ -366,42 +382,17 @@ class _GoogleDriveSheetState extends State<GoogleDriveSheet> {
                 onConnect: _connect,
                 onDisconnect: _disconnect,
               ),
-              const SizedBox(height: AppSpacing.lg),
-              const SectionLabel('Online backup'),
-              Text(
-                _lastBackup == null
-                    ? 'Not backed up yet'
-                    : 'Last backed up ${formatModified(_lastBackup!, widget.clock())}',
-                style: text.bodyMedium!.copyWith(color: colors.textSecondary),
-              ),
-              const SizedBox(height: AppSpacing.sm),
-              FilledButton.icon(
-                style: FilledButton.styleFrom(minimumSize: wide),
-                onPressed: canAct ? _backUp : null,
-                icon: const Icon(AppIcons.cloudUpload),
-                label: const Text('Back up library now'),
-              ),
-              const SizedBox(height: AppSpacing.xs),
-              TextButton.icon(
-                style: TextButton.styleFrom(minimumSize: wide),
-                onPressed: canAct ? _restore : null,
-                icon: const Icon(AppIcons.restore),
-                label: const Text('Restore from backup'),
+              const SizedBox(height: AppSpacing.md),
+              _BackupCard(
+                lastBackup: _lastBackup,
+                now: widget.clock(),
+                scheduler: widget.autoBackup,
+                enabled: canAct,
+                onBackUp: _backUp,
+                onRestore: _restore,
               ),
               const SizedBox(height: AppSpacing.md),
-              const SectionLabel('Goodnotes'),
-              Text(
-                'Copy your GoodNotes folder from Drive into the library: its '
-                'folders as they are, with every notebook and PDF in them.',
-                style: text.bodyMedium!.copyWith(color: colors.textSecondary),
-              ),
-              const SizedBox(height: AppSpacing.sm),
-              FilledButton.tonalIcon(
-                style: FilledButton.styleFrom(minimumSize: wide),
-                onPressed: canAct ? _importGoodnotes : null,
-                icon: const Icon(AppIcons.cloudDownload),
-                label: const Text('Import Goodnotes folder from Drive'),
-              ),
+              _GoodnotesCard(enabled: canAct, onImport: _importGoodnotes),
               if (_busy && _task != _Task.connect) ...<Widget>[
                 const SizedBox(height: AppSpacing.lg),
                 _ProgressPanel(
@@ -437,6 +428,309 @@ class _GoogleDriveSheetState extends State<GoogleDriveSheet> {
           ),
         ),
       ),
+    );
+  }
+}
+
+class _BackupCard extends StatelessWidget {
+  const _BackupCard({
+    required this.lastBackup,
+    required this.now,
+    required this.scheduler,
+    required this.enabled,
+    required this.onBackUp,
+    required this.onRestore,
+  });
+
+  final DateTime? lastBackup;
+  final DateTime now;
+  final AutoBackupScheduler? scheduler;
+  final bool enabled;
+  final VoidCallback onBackUp;
+  final VoidCallback onRestore;
+
+  @override
+  Widget build(BuildContext context) {
+    final AppColors colors = AppColors.of(context);
+    final TextTheme text = Theme.of(context).textTheme;
+    return _DriveCard(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: <Widget>[
+          Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: <Widget>[
+              const _CardIcon(icon: AppIcons.cloudUpload),
+              const SizedBox(width: AppSpacing.sm),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: <Widget>[
+                    Text('Library backup', style: text.titleMedium),
+                    const SizedBox(height: AppSpacing.xxs),
+                    Text(
+                      lastBackup == null
+                          ? 'Not backed up yet'
+                          : 'Last backed up ${formatModified(lastBackup!, now)}',
+                      style: text.bodySmall!.copyWith(
+                        color: colors.textSecondary,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              _BackupMenu(enabled: enabled, onRestore: onRestore),
+            ],
+          ),
+          if (scheduler case final AutoBackupScheduler scheduler) ...<Widget>[
+            const SizedBox(height: AppSpacing.md),
+            _AutoBackupControl(scheduler: scheduler),
+          ],
+          const SizedBox(height: AppSpacing.md),
+          FilledButton.icon(
+            onPressed: enabled ? onBackUp : null,
+            icon: const Icon(AppIcons.cloudUpload),
+            label: const Text('Back up library now'),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _BackupMenu extends StatelessWidget {
+  const _BackupMenu({required this.enabled, required this.onRestore});
+
+  final bool enabled;
+  final VoidCallback onRestore;
+
+  @override
+  Widget build(BuildContext context) {
+    return MenuAnchor(
+      alignmentOffset: const Offset(0, AppSpacing.xxs),
+      menuChildren: <Widget>[
+        MenuItemButton(
+          leadingIcon: const Icon(AppIcons.restore),
+          onPressed: enabled ? onRestore : null,
+          child: const Text('Restore from backup'),
+        ),
+      ],
+      builder: (BuildContext context, MenuController menu, Widget? child) {
+        return IconButton(
+          tooltip: 'Backup options',
+          onPressed: enabled
+              ? () => menu.isOpen ? menu.close() : menu.open()
+              : null,
+          icon: const Icon(AppIcons.more),
+        );
+      },
+    );
+  }
+}
+
+/// A calm two-level control: the switch answers whether automatic backups
+/// happen, and the schedule only appears when it is relevant.
+class _AutoBackupControl extends StatelessWidget {
+  const _AutoBackupControl({required this.scheduler});
+
+  final AutoBackupScheduler scheduler;
+
+  @override
+  Widget build(BuildContext context) {
+    final AppColors colors = AppColors.of(context);
+    final TextTheme text = Theme.of(context).textTheme;
+    return ValueListenableBuilder<Duration>(
+      valueListenable: scheduler.interval,
+      builder: (BuildContext context, Duration interval, _) {
+        final bool automatic = interval != AutoBackupScheduler.off;
+        return AnimatedContainer(
+          duration: AppMotion.resolve(context, AppMotion.fast),
+          curve: AppMotion.standard,
+          padding: const EdgeInsets.fromLTRB(
+            AppSpacing.md,
+            AppSpacing.sm,
+            AppSpacing.xs,
+            AppSpacing.sm,
+          ),
+          decoration: BoxDecoration(
+            color: automatic ? colors.selected : colors.surface,
+            borderRadius: BorderRadius.circular(AppRadii.medium),
+          ),
+          child: Column(
+            children: <Widget>[
+              Row(
+                children: <Widget>[
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: <Widget>[
+                        Text('Automatic backup', style: text.titleSmall),
+                        const SizedBox(height: AppSpacing.xxs),
+                        Text(
+                          automatic
+                              ? 'Keeps your library protected in the background'
+                              : 'Turn on scheduled cloud backups',
+                          style: text.bodySmall!.copyWith(
+                            color: colors.textSecondary,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                  const SizedBox(width: AppSpacing.sm),
+                  Semantics(
+                    label: 'Automatic backup',
+                    child: Switch(
+                      value: automatic,
+                      onChanged: (bool value) {
+                        scheduler.setInterval(
+                          value
+                              ? AutoBackupScheduler.defaultInterval
+                              : AutoBackupScheduler.off,
+                        );
+                      },
+                    ),
+                  ),
+                ],
+              ),
+              if (automatic) ...<Widget>[
+                const SizedBox(height: AppSpacing.xs),
+                Divider(color: colors.divider),
+                Padding(
+                  padding: const EdgeInsets.only(left: AppSpacing.xxs),
+                  child: Row(
+                    children: <Widget>[
+                      Expanded(
+                        child: Text('Frequency', style: text.bodyMedium),
+                      ),
+                      Semantics(
+                        label: 'Automatic backup frequency',
+                        child: DropdownButtonHideUnderline(
+                          child: DropdownButton<Duration>(
+                            value:
+                                AutoBackupScheduler.choices.contains(interval)
+                                ? interval
+                                : null,
+                            hint: Text(AutoBackupScheduler.describe(interval)),
+                            borderRadius: BorderRadius.circular(
+                              AppRadii.medium,
+                            ),
+                            onChanged: (Duration? every) {
+                              if (every != null) {
+                                scheduler.setInterval(every);
+                              }
+                            },
+                            items: <DropdownMenuItem<Duration>>[
+                              for (final Duration every
+                                  in AutoBackupScheduler.choices)
+                                if (every != AutoBackupScheduler.off)
+                                  DropdownMenuItem<Duration>(
+                                    value: every,
+                                    child: Text(
+                                      AutoBackupScheduler.describe(every),
+                                    ),
+                                  ),
+                            ],
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ],
+            ],
+          ),
+        );
+      },
+    );
+  }
+}
+
+class _GoodnotesCard extends StatelessWidget {
+  const _GoodnotesCard({required this.enabled, required this.onImport});
+
+  final bool enabled;
+  final VoidCallback onImport;
+
+  @override
+  Widget build(BuildContext context) {
+    final AppColors colors = AppColors.of(context);
+    final TextTheme text = Theme.of(context).textTheme;
+    return _DriveCard(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: <Widget>[
+          Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: <Widget>[
+              const _CardIcon(icon: AppIcons.goodnotes),
+              const SizedBox(width: AppSpacing.sm),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: <Widget>[
+                    Text('Import from Goodnotes', style: text.titleMedium),
+                    const SizedBox(height: AppSpacing.xxs),
+                    Text(
+                      'Bring in every notebook and PDF while keeping your '
+                      'folder structure.',
+                      style: text.bodySmall!.copyWith(
+                        color: colors.textSecondary,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: AppSpacing.md),
+          OutlinedButton.icon(
+            onPressed: enabled ? onImport : null,
+            icon: const Icon(AppIcons.cloudDownload),
+            label: const Text('Import Goodnotes folder from Drive'),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _DriveCard extends StatelessWidget {
+  const _DriveCard({required this.child});
+
+  final Widget child;
+
+  @override
+  Widget build(BuildContext context) {
+    final AppColors colors = AppColors.of(context);
+    return Container(
+      padding: const EdgeInsets.all(AppSpacing.md),
+      decoration: BoxDecoration(
+        color: colors.surfaceMuted,
+        borderRadius: BorderRadius.circular(AppRadii.large),
+        border: Border.all(color: colors.divider, width: AppSizes.hairline),
+      ),
+      child: child,
+    );
+  }
+}
+
+class _CardIcon extends StatelessWidget {
+  const _CardIcon({required this.icon});
+
+  final IconData icon;
+
+  @override
+  Widget build(BuildContext context) {
+    final AppColors colors = AppColors.of(context);
+    return Container(
+      width: 40,
+      height: 40,
+      decoration: BoxDecoration(
+        color: colors.selected,
+        borderRadius: BorderRadius.circular(AppRadii.medium),
+      ),
+      child: Icon(icon, size: 20, color: colors.accent),
     );
   }
 }

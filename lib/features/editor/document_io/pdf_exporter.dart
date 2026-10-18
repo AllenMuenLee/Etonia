@@ -89,12 +89,6 @@ ExportPageGeometry exportPageGeometry(
                 math.max(extent.height, currentWritingArea.height),
               );
         points = logical * DocumentUnits.pdfPointsPerPageUnit;
-      case PageSize.fit:
-        logical =
-            page.lastFitSize ??
-            currentWritingArea ??
-            PageSize.a4Portrait.fixedSize!;
-        points = logical * DocumentUnits.pdfPointsPerPageUnit;
     }
   }
   final double reduction = math.min(
@@ -519,7 +513,7 @@ Future<Uint8List> _generateInIsolate(_PreparedExport prepared) =>
 Future<Uint8List> _generatePdf(_PreparedExport export) async {
   final pw.Document document = pw.Document(
     title: export.title,
-    creator: 'Greatnote',
+    creator: 'Etonia',
   );
   final Map<String, pw.ImageProvider> images = <String, pw.ImageProvider>{};
   for (final MapEntry<String, Uint8List> asset in export.assets.entries) {

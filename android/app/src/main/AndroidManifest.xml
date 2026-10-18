@@ -3,9 +3,12 @@
     <uses-permission android:name="android.permission.INTERNET"/>
     <!-- Lets the AI composer transcribe a spoken prompt on demand. -->
     <uses-permission android:name="android.permission.RECORD_AUDIO"/>
+    <!-- Google Play Billing, for the subscription plans. -->
+    <uses-permission android:name="com.android.vending.BILLING"/>
     <application
-        android:label="Greatnote"
+        android:label="Etonia"
         android:name="${applicationName}"
+        android:allowBackup="false"
         android:icon="@mipmap/ic_launcher">
         <activity
             android:name=".MainActivity"

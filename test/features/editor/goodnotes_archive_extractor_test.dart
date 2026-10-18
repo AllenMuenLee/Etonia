@@ -5,7 +5,6 @@ import 'dart:ui';
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:greatnote/features/editor/document_io/document_importer.dart';
-import 'package:greatnote/features/editor/document_io/document_io_config.dart';
 import 'package:greatnote/features/editor/document_io/document_platform.dart';
 import 'package:greatnote/features/editor/document_io/goodnotes_archive_extractor.dart';
 import 'package:greatnote/features/editor/document_io/pdf_exporter.dart';
@@ -283,16 +282,6 @@ void main() {
         );
       }
     });
-
-    test('refuses to expand past its budget', () {
-      expect(
-        () => decompressGoodnotesBv4(
-          _bv4(<List<int>>[_bv4Stored(List<int>.filled(64, 1))]),
-          maxBytes: 63,
-        ),
-        throwsA(isA<DocumentImportException>()),
-      );
-    });
   });
 
   group('tpl', () {
@@ -526,43 +515,17 @@ void main() {
       }
     });
 
-    test('a decompression bomb is refused', () async {
+    test('an entry inflating past its declared size is refused', () async {
       // A megabyte of zeros deflates to about a kilobyte.
-      final Uint8List bomb = _zip(<String, List<int>>{
+      final Uint8List forged = _zip(<String, List<int>>{
         'index.notes.pb': _delimitedMessages(<List<int>>[
           _fields(<int, Object>{1: 'S', 2: 'notes/S'}),
         ]),
         'notes/S': Uint8List(1 << 20),
       }, deflate: true);
-      expect(bomb.length, lessThan(16 * 1024));
-      await expectLater(
-        const GoodnotesArchiveExtractor().extract(
-          bomb,
-          config: const DocumentIoConfig(maxGoodnotesExpandedBytes: 64 * 1024),
-        ),
-        throwsA(
-          isA<DocumentImportException>().having(
-            (DocumentImportException e) => e.message,
-            'message',
-            contains('too large'),
-          ),
-        ),
-      );
-      // A forged size in the directory does not get past it either.
-      final Uint8List forged = Uint8List.fromList(bomb);
       _forgeUncompressedSize(forged, 'notes/S', 1024);
       await expectLater(
         const GoodnotesArchiveExtractor().extract(forged),
-        throwsA(isA<DocumentImportException>()),
-      );
-    });
-
-    test('a file over the size limit is refused before reading', () async {
-      await expectLater(
-        const GoodnotesArchiveExtractor().extract(
-          Uint8List(2048),
-          config: const DocumentIoConfig(maxImportGoodnotesBytes: 1024),
-        ),
         throwsA(isA<DocumentImportException>()),
       );
     });

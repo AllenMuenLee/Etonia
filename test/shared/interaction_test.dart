@@ -184,7 +184,8 @@ void main() {
     const AppColors light = AppColors.light;
     expect(light.background, const Color(0xFFF9FAFB));
     expect(light.textPrimary, const Color(0xFF0F172A));
-    expect(AppGlass.surface(light).a, moreOrLessEquals(0.70));
+    expect(AppGlass.surface(light).a, moreOrLessEquals(0.88));
+    expect(AppGlass.blurSigma, 48);
     expect(light.glassEdge.a, moreOrLessEquals(0.40, epsilon: 0.01));
     expect(GlassBackdrop.spacing, 20);
     for (final double space in <double>[

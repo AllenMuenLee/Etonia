@@ -1,3 +1,5 @@
+import 'ai_models.dart';
+
 /// Sizes of the AI assistant panel.
 class AiLayoutConfig {
   const AiLayoutConfig({
@@ -44,13 +46,15 @@ class AiImageConfig {
   const AiImageConfig({
     this.padding = 12,
     this.pixelRatio = 2,
-    this.maxDimension = 2048,
+    this.maxDimension = 768,
     this.minPixelRatio = 0.05,
-    this.noteGridDivisions = 10,
-    this.noteGridLabelSize = 14,
     this.focusInkTolerance = 0.012,
     this.focusInkMaxPoints = 240,
+    this.space = const AiSpaceConfig(),
   });
+
+  /// How the blank areas the model is told it may draw in are found.
+  final AiSpaceConfig space;
 
   /// Logical pixels of background kept around the ink on every side.
   final double padding;
@@ -59,21 +63,14 @@ class AiImageConfig {
   final double pixelRatio;
 
   /// Neither side of the image is longer than this, in physical pixels.
+  /// Providers charge for an image by its size, not its bytes: at 768 it
+  /// is one Gemini tile (258 tokens) and at most about 790 Claude tokens,
+  /// where 2048 was up to six tiles and about 1600.
   final int maxDimension;
 
   /// A selection that would have to be shrunk below this ratio to fit is
   /// refused: its ink would no longer be visible.
   final double minPixelRatio;
-
-  /// The whole-note image is overlaid with a faint coordinate grid: a
-  /// labelled line every 1/[noteGridDivisions] of the paper, and an
-  /// unlabelled one halfway between, so the model can read positions off
-  /// it. Below 2, no grid is drawn.
-  final int noteGridDivisions;
-
-  /// The grid labels' font size, in image pixels, so they stay legible
-  /// however far the note is scaled.
-  final double noteGridLabelSize;
 
   /// The ink in the selected region is also sent as coordinates, so the
   /// model can attach to it exactly: each stroke cut down to its ends and
@@ -85,6 +82,60 @@ class AiImageConfig {
   final int focusInkMaxPoints;
 }
 
+/// How the app finds blank paper for the model to draw in, and where it
+/// puts a sticky note when there is none. In logical units.
+class AiSpaceConfig {
+  const AiSpaceConfig({
+    this.cellSize = 8,
+    this.maxCells = 160,
+    this.clearance = 12,
+    this.edgeMargin = 16,
+    this.minWidth = 120,
+    this.minHeight = 60,
+    this.maxAreas = 3,
+    this.nearness = 0.3,
+    this.backgroundInkThreshold = 48,
+    this.nearbyReach = 240,
+    this.maxNearby = 16,
+  });
+
+  /// Content this close to the selection is described to the model, as a
+  /// box round each group, in place of a picture of the page...
+  final double nearbyReach;
+
+  /// ...at most this many boxes, the nearest.
+  final int maxNearby;
+
+  /// The paper is looked at in square cells this wide...
+  final double cellSize;
+
+  /// ...or wider, so that neither side has more than this many.
+  final int maxCells;
+
+  /// Blank paper this close to ink, an image, or a sticky note is not
+  /// offered: a drawing there would crowd it.
+  final double clearance;
+
+  /// Nor is paper this close to its edge.
+  final double edgeMargin;
+
+  /// The smallest box worth offering. An L's arm is offered when it is at
+  /// least [minHeight] thick and as big as such a box.
+  final double minWidth;
+  final double minHeight;
+
+  /// The most areas, each a box or an L, the model is told about.
+  final int maxAreas;
+
+  /// How much nearness to the selection counts against size: an area this
+  /// fraction of the paper's diagonal away counts as a quarter its size.
+  final double nearness;
+
+  /// A pixel of a page-wide background, such as a PDF page, that differs
+  /// from white by more than this in any channel is printed on.
+  final int backgroundInkThreshold;
+}
+
 /// Limits for structured, model-produced notation.
 class AiNotationConfig {
   const AiNotationConfig({
@@ -94,7 +145,7 @@ class AiNotationConfig {
     this.maxPathPoints = 64,
     this.maxTotalPoints = 4096,
     this.maxTextRunes = 120,
-    this.maxTotalTextRunes = 600,
+    this.maxTotalTextRunes = 1000,
     this.minTextSize = 8,
     this.maxTextSize = 120,
     this.maxFormulaLength = 160,
@@ -115,9 +166,21 @@ class AiNotationConfig {
     // this too.
     this.maxOutputTokens = 32768,
     this.inkSnapDistance = 16,
+    this.minStickyWidth = 120,
+    this.minStickyHeight = 90,
+    this.maxStickyWidth = 640,
+    this.maxStickyHeight = 480,
   });
 
   final int maxLabelRunes;
+
+  /// The sizes a sticky note the model asks for may be, in logical units:
+  /// those a user's own sticky note may be. A size outside is brought
+  /// within.
+  final double minStickyWidth;
+  final double minStickyHeight;
+  final double maxStickyWidth;
+  final double maxStickyHeight;
 
   /// A loose end of a line, path, or stroke the model draws that lands this
   /// close to existing ink, in logical pixels, is moved onto it, so a lead
@@ -214,10 +277,18 @@ class AiApiConfig {
     this.thinkingBudget = defaultThinkingBudget,
     this.serverErrorRetries = 1,
     this.retryDelay = const Duration(seconds: 1),
+    this.claudeApiKey = '',
+    this.claudeApiKeyFallbacks = const <String>[],
+    this.openAiApiKey = '',
+    this.openAiApiKeyFallbacks = const <String>[],
+    this.claudeBaseUrl = defaultClaudeBaseUrl,
+    this.openAiBaseUrl = defaultOpenAiBaseUrl,
+    this.modelOverrides = const <AiModelId, String>{},
   });
 
-  /// Reads the key given with `--dart-define=GEMINI_API_KEY=...`, and,
-  /// when given, the model (`GEMINI_MODEL`), thinking level
+  /// Provider credentials are deliberately never read from build defines.
+  /// Production requests use BackendAiClient. Direct provider clients remain
+  /// injectable for isolated tests. Reads the model (`GEMINI_MODEL`), thinking level
   /// (`GEMINI_THINKING_LEVEL`), and thinking budget
   /// (`GEMINI_THINKING_BUDGET`). They are usually given with
   /// `--dart-define-from-file=dart_defines.json`, and are fixed when the
@@ -225,7 +296,7 @@ class AiApiConfig {
   /// default.
   const AiApiConfig.fromEnvironment()
     : this(
-        apiKey: const String.fromEnvironment(environmentKey),
+        apiKey: '',
         model: const String.fromEnvironment(
           modelEnvironmentKey,
           defaultValue: defaultModel,
@@ -241,7 +312,28 @@ class AiApiConfig {
                 // Not a whole number: treated as not given.
                 defaultValue: _notABudget,
               ),
+        claudeApiKey: '',
+        openAiApiKey: '',
+        modelOverrides: const <AiModelId, String>{
+          AiModelId.haiku: String.fromEnvironment('HAIKU_MODEL_ID'),
+          AiModelId.luna: String.fromEnvironment('LUNA_MODEL_ID'),
+          AiModelId.sonnet: String.fromEnvironment('SONNET_MODEL_ID'),
+          AiModelId.sol: String.fromEnvironment('SOL_MODEL_ID'),
+          AiModelId.opus: String.fromEnvironment('OPUS_MODEL_ID'),
+          AiModelId.argon: String.fromEnvironment('ARGON_MODEL_ID'),
+          AiModelId.astra: String.fromEnvironment('ASTRA_MODEL_ID'),
+        },
       );
+
+  /// The `dart_defines.json` keys for the Claude and OpenAI keys, spelled
+  /// as existing local files spell them. `CLAUDE_API_KEY`,
+  /// `ANTHROPIC_API_KEY`, and `OPENAI_API_KEY` are read when these are
+  /// blank.
+  static const String claudeEnvironmentKey = 'Claude_API_KEY';
+  static const String openAiEnvironmentKey = 'Openai_API_KEY';
+
+  static const String defaultClaudeBaseUrl = 'https://api.anthropic.com/v1';
+  static const String defaultOpenAiBaseUrl = 'https://api.openai.com/v1';
 
   static const String environmentKey = 'GEMINI_API_KEY';
   static const String modelEnvironmentKey = 'GEMINI_MODEL';
@@ -327,6 +419,81 @@ class AiApiConfig {
 
   bool get hasApiKey => apiKey.trim().isNotEmpty;
 
+  /// As given with `Claude_API_KEY`; see [claudeKey] for the one used.
+  final String claudeApiKey;
+
+  /// Read in order when [claudeApiKey] is blank.
+  final List<String> claudeApiKeyFallbacks;
+
+  /// As given with `Openai_API_KEY`; see [openAiKey] for the one used.
+  final String openAiApiKey;
+
+  /// Read in order when [openAiApiKey] is blank.
+  final List<String> openAiApiKeyFallbacks;
+
+  final String claudeBaseUrl;
+  final String openAiBaseUrl;
+
+  /// Provider model IDs given in place of each model's default; blank
+  /// ones are ignored.
+  final Map<AiModelId, String> modelOverrides;
+
+  static String _firstGiven(String key, List<String> fallbacks) {
+    for (final String candidate in <String>[key, ...fallbacks]) {
+      if (candidate.trim().isNotEmpty) {
+        return candidate.trim();
+      }
+    }
+    return '';
+  }
+
+  /// The Claude key requests are sent with; blank when none was given.
+  String get claudeKey => _firstGiven(claudeApiKey, claudeApiKeyFallbacks);
+
+  /// The OpenAI key requests are sent with; blank when none was given.
+  String get openAiKey => _firstGiven(openAiApiKey, openAiApiKeyFallbacks);
+
+  /// Whether requests to [provider] have a key to go with them.
+  bool hasKeyFor(AiProvider provider) {
+    return switch (provider) {
+      AiProvider.gemini => hasApiKey,
+      AiProvider.claude => claudeKey.isNotEmpty,
+      AiProvider.openai => openAiKey.isNotEmpty,
+    };
+  }
+
+  /// The provider's ID for [model]: its override when one was given, and
+  /// otherwise its default.
+  String providerModelId(AiModelId model) {
+    String id = (modelOverrides[model] ?? '').trim();
+    if (id.startsWith('models/')) {
+      id = id.substring('models/'.length);
+    }
+    return id.isEmpty ? model.defaultProviderModelId : id;
+  }
+
+  /// This configuration with Gemini requests going to [model] instead.
+  AiApiConfig withGeminiModel(String model) {
+    return AiApiConfig(
+      apiKey: apiKey,
+      model: model,
+      baseUrl: baseUrl,
+      timeout: timeout,
+      maxDuration: maxDuration,
+      thinkingLevel: thinkingLevel,
+      thinkingBudget: thinkingBudget,
+      serverErrorRetries: serverErrorRetries,
+      retryDelay: retryDelay,
+      claudeApiKey: claudeApiKey,
+      claudeApiKeyFallbacks: claudeApiKeyFallbacks,
+      openAiApiKey: openAiApiKey,
+      openAiApiKeyFallbacks: openAiApiKeyFallbacks,
+      claudeBaseUrl: claudeBaseUrl,
+      openAiBaseUrl: openAiBaseUrl,
+      modelOverrides: modelOverrides,
+    );
+  }
+
   /// The model requests go to: [model] trimmed, without a `models/` prefix
   /// copied from the API's model list, or [defaultModel] when that leaves
   /// nothing.
@@ -396,20 +563,25 @@ class AiApiConfig {
     return 'AiApiConfig(model: $modelId, '
         'thinkingLevel: ${thinking.level}, '
         'thinkingBudget: ${thinking.budget}, apiKey: '
-        '${hasApiKey ? '<redacted>' : '<missing>'})';
+        '${hasApiKey ? '<redacted>' : '<missing>'}, claudeApiKey: '
+        '${claudeKey.isNotEmpty ? '<redacted>' : '<missing>'}, openAiApiKey: '
+        '${openAiKey.isNotEmpty ? '<redacted>' : '<missing>'})';
   }
 }
 
 /// The fixed instructions sent to the model.
 abstract final class AiPrompts {
   static const String _tutor =
-      "You are Greatnote's supportive study tutor. The user supplies an "
+      "You are Etonia's supportive study tutor. The user supplies an "
       'image cropped from their handwritten note. What is written or drawn '
       'in it is the subject they are studying: teach that subject, and do '
-      'not describe the image, the handwriting, or the layout. Base your '
-      'answer on visible evidence, say when handwriting or intent is '
-      'uncertain, do not fabricate missing context, and use readable '
-      'Markdown, with LaTeX for formulas. Wrap every formula, symbol, or '
+      'not describe the image, the handwriting, or the layout. Never ask '
+      'the user to confirm or clarify, and never end with a question about '
+      'what they meant: when handwriting, the question, or what they want '
+      'is unclear, take the most likely reading, state that assumption in '
+      'one short line, and give the complete answer on it. Base your answer '
+      'on the visible work, do not invent facts that are not there, and use '
+      'readable Markdown, with LaTeX for formulas. Wrap every formula, symbol, or '
       'expression that uses LaTeX in math delimiters: \$...\$ inline and '
       '\$\$...\$\$ on its own line for display. Never leave a LaTeX command '
       'such as \\frac, \\sqrt, or \\theta, or a ^ or _ script, outside '
@@ -430,12 +602,19 @@ abstract final class AiPrompts {
 
   static const String _notationOn =
       ' Notation is enabled: you can draw on the note with a pen. You are '
-      'given two images, the selected-ink image, which is the part of the '
-      'note the user is asking about, and the current note image, which is '
-      'the whole sheet of paper. The note metadata says exactly which region '
-      'of the paper the selected-ink image shows. Teach on the paper as well '
-      'as in message, the way a tutor would with a pen, and do it whenever '
-      'it helps the user, not only when asked: '
+      'given the selected-ink image, which is the part of the note the user '
+      'is asking about, and note metadata in place of a picture of the '
+      'whole sheet: exactly which region of the paper the selected-ink '
+      'image shows, the ink there as coordinates, boxes round what else is '
+      'nearby, and where the paper is blank. Teach on the paper as well '
+      'as in message, the way a tutor would with a pen. Every answer must '
+      'come with a notation, whether or not the user asked for one, '
+      'except a simple text answer: a short plain reply such as a word, a '
+      'number, yes or no, or a fact or definition of a sentence or two, '
+      'with nothing worth writing by hand. Anything more, such as a full '
+      'explanation, a worked solution, a review of their work, or anything '
+      'with steps, is always written on the note too. Its notation does '
+      'all of these that apply: '
       '(1) write the answer or the key result by hand on the note, near the '
       'work it belongs to, such as the solution to an equation, a missing '
       'step, or a corrected value; '
@@ -464,23 +643,34 @@ abstract final class AiPrompts {
       'When the user asks you to draw, mark, circle, underline, label, '
       'annotate, correct, or write on the note, you must return a notation '
       'that does it; never only describe the drawing in message. Return '
-      'null only when nothing on the paper would help, or there is no room. '
-      'message still carries the full explanation; the notation is the '
-      'short handwritten version of it. Write message first and notation '
+      'null only for a simple text answer: when the paper has no room, '
+      'draw on a sticky note, as the note metadata explains. message still '
+      'carries the full explanation; the notation is its handwritten '
+      'version on the note: the key steps, points, or result, with the '
+      'annotations and drawing that go with them. Write message first and notation '
       'after it. A valid notation is drawn on the note at once. '
       'Coordinates are note_normalized over the whole paper: (0,0) is the '
       'top-left corner and (1,1) the bottom-right, x grows right and y grows '
-      'down. Work out positions from the selected region given in the '
-      'metadata: to mark selected ink, map its place in the selected-ink '
-      'image onto the note. You may draw anywhere on the paper, inside or '
-      'outside the selected region, but never off the paper: keep every '
+      'down; a notation on a sticky note is sticky_normalized instead. Work '
+      'out positions from the selected region given in the metadata: to '
+      'mark selected ink, map its place in the selected-ink image onto the '
+      'note. You may draw inside or outside the selected region, where the '
+      'note metadata says there is room, but never off the paper: keep every '
       'mark a little inside 0 and 1, because a drawing that reaches an edge '
       'is rejected whole. Give coordinates to 3 decimals. '
       'When the user asks you to finish or add to something they drew, '
       'build on their ink instead of drawing the part again: work out from '
       'selected_ink in the metadata where the parts you add meet theirs, '
       'and make them touch their ink exactly there. '
-      'A notation is a list of items. You say what to draw and where; the '
+      'A notation is an object with label, coordinate_space, and items, a '
+      'list of items, each with exactly the fields its kind lists below. '
+      'Every point is an object {"x":0.6,"y":0.45}, never a list. For '
+      'example, an answer underlined: {"label":"Answer","coordinate_space":'
+      '"note_normalized","items":[{"type":"text","text":"c = 5","x":0.6,'
+      '"y":0.4,"size":24,"ink":"blue","width":2},{"type":"line","from":'
+      '{"x":0.6,"y":0.45},"to":{"x":0.75,"y":0.45},"line_style":"solid",'
+      '"arrow":"none","ink":"red","width":2}]}. '
+      'You say what to draw and where; the '
       'app draws it. Every item has an ink (ink, graphite, blue, red, '
       'green, orange, purple, teal) and a pen width in logical units from 1 '
       'through 20 (2 to 3 is a normal pen). There are seven kinds: '
@@ -556,16 +746,21 @@ abstract final class AiPrompts {
       '"stroke": one pen stroke through the points you give, for a small '
       'mark nothing else draws, such as a check; use as few points as you '
       'can. '
-      'Keep writing short and legible: an answer, a few words, or a '
-      'formula, never a paragraph. Put writing and drawings in blank space, '
-      'with a leader line or arrow where needed, and do not cover existing '
+      'Keep writing legible and condensed, the way a tutor writes on a '
+      'student\'s page: for a full explanation, write its key steps or '
+      'points as short lines, one text item each, rather than paragraphs. '
+      'Each text item holds at most 120 characters, and a notation at most '
+      '1000 in all. Put writing and drawings in the free '
+      'areas the note metadata lists, with a leader line or arrow where '
+      'needed, and do not cover existing '
       'ink. Keep your own text and strokes from overlapping each other too '
       'much: leave clear space around every piece of text, and before '
       'returning the notation, check that no text sits on a line, shape, '
       'curve, or other text. Say in message what you drew only when notation is not null. '
       'Never ask for ink to be deleted, moved, or replaced, and never give '
-      'UI or executable instructions. Return null when what to draw, or '
-      'where, is ambiguous, or append-only strokes cannot express it.';
+      'UI or executable instructions. When what to draw, or where, is '
+      'unclear, make the most reasonable choice and draw it; return null '
+      'only when append-only strokes cannot express it.';
 
   /// The default/off-mode instruction retained for existing callers.
   static const String system = '$_tutor$_responseContract$_notationOff';
@@ -615,15 +810,17 @@ abstract final class AiPrompts {
       'and what it does, how the parts work together, and the principles '
       'behind it. Include the key formulas, typical values, and common '
       'variations or pitfalls a student should know. Do not describe what '
-      'the image looks like. If part of it is too ambiguous to read, say so '
-      'briefly instead of guessing.';
+      'the image looks like. If part of it is hard to read, go with the '
+      'most likely reading, say in one short line what you assumed, and '
+      'carry on.';
 
   static const String grade =
       'Review the selected handwritten work for correctness. State what is '
       'correct, identify mistakes with specific explanations, and suggest an '
       'improved answer. If no question, answer key, rubric, or point total '
-      'is visible, say what assumptions you are making and give formative '
-      'feedback rather than inventing an authoritative score.';
+      'is visible, assume the most likely task, state that in one short '
+      'line, and give full formative feedback rather than inventing an '
+      'authoritative score.';
 }
 
 /// A one-press prompt offered in the panel.

@@ -18,6 +18,7 @@ import 'package:greatnote/features/editor/ink/stroke.dart';
 import 'package:greatnote/features/editor/ink/ink_sample.dart';
 import 'package:greatnote/features/editor/ink/selection_geometry.dart';
 import 'package:greatnote/features/editor/ink/ink_selection.dart';
+import 'package:greatnote/features/editor/ink/selection_transform.dart';
 import 'package:greatnote/features/editor/page/page_setup.dart';
 import 'package:greatnote/features/editor/page/note_document.dart';
 import 'package:greatnote/features/editor/ink/ink_canvas.dart';
@@ -72,6 +73,7 @@ void main() {
       ],
     });
     expect(content.pages, hasLength(1));
+    expect(content.pages.single.setup.size, PageSize.a4Portrait);
     expect(content.pages.single.images, isEmpty);
   });
 
@@ -137,6 +139,34 @@ void main() {
     expect(controller.clipboard!.images, const <NoteImageElement>[excerpt]);
     expect(controller.paste(at: const InkVector(200, 200)), isTrue);
     expect(controller.images.single.center, const InkVector(200, 200));
+  });
+
+  test('a lasso selects editable ink instead of PDF paper behind it', () {
+    final Stroke stroke = Stroke.fromPoints(
+      style: const StrokeStyle(ink: InkPalette.ink, width: 4),
+      points: const <InkVector>[InkVector(20, 20), InkVector(40, 40)],
+    );
+    final InkController controller = InkController(strokes: <Stroke>[stroke]);
+    addTearDown(controller.dispose);
+    controller
+      ..beginLasso(pointer: 1, position: const InkVector(10, 10))
+      ..endLasso(
+        1,
+        const InkVector(50, 50),
+        const Rect.fromLTWH(0, 0, 100, 100),
+      );
+
+    final InkSelection selection = controller.selection!;
+    expect(selection.strokes, <Stroke>[stroke]);
+    expect(selection.includesPdf, isFalse);
+    expect(
+      controller.beginTransform(
+        pointer: 2,
+        position: selection.frame.center,
+        hit: const SelectionHit.move(),
+      ),
+      isTrue,
+    );
   });
 
   test('a rendered PDF selection is cropped at page coordinates', () {
@@ -305,13 +335,6 @@ void main() {
             'This PDF is password-protected',
           ),
         ),
-      );
-      await expectLater(
-        DocumentImporter(
-          rasterizer: FakePdfRasterizer(),
-          config: const DocumentIoConfig(maxImportPdfBytes: 2),
-        ).importPdfAsNote(repository: repository, picked: picked),
-        throwsA(isA<DocumentImportException>()),
       );
       expect((await repository.list(null)).notes, isEmpty);
     },

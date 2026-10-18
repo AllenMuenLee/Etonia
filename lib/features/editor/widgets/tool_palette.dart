@@ -701,7 +701,7 @@ class _LiftableSurfaceState extends State<_LiftableSurface> {
   }
 }
 
-/// A small square of the next sticky note's paper, folded at a corner.
+/// A small square of the next sticky note's paper, ruled with lines.
 class _StickyIcon extends StatelessWidget {
   const _StickyIcon({required this.color});
 
@@ -719,13 +719,38 @@ class _StickyIcon extends StatelessWidget {
           borderRadius: BorderRadius.circular(3),
           border: Border.all(color: outline, width: 1.4),
         ),
+        child: CustomPaint(painter: _StickyLinesPainter(outline)),
       ),
     );
   }
 }
 
+/// Three rules across the sticky icon's paper.
+class _StickyLinesPainter extends CustomPainter {
+  const _StickyLinesPainter(this.color);
+
+  final Color color;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final Paint rule = Paint()
+      ..color = color
+      ..strokeWidth = 1.2
+      ..strokeCap = StrokeCap.round;
+    final double inset = size.width * 0.25;
+    for (int i = 1; i <= 3; i++) {
+      final double y = size.height * i / 4;
+      canvas.drawLine(Offset(inset, y), Offset(size.width - inset, y), rule);
+    }
+  }
+
+  @override
+  bool shouldRepaint(_StickyLinesPainter oldDelegate) =>
+      oldDelegate.color != color;
+}
+
 /// The writing tool's glyph with a sample of the current ink at its
-/// corner: a dot for the pen, a translucent bar for the highlighter.
+/// corner: a translucent bar for the highlighter. The pen is shown plain.
 class _PenIcon extends StatelessWidget {
   const _PenIcon({
     required this.ink,
@@ -741,27 +766,32 @@ class _PenIcon extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    if (!highlighter) {
+      return const SizedBox.square(
+        dimension: AppSizes.icon + AppSpacing.xxs,
+        child: Center(child: Icon(AppIcons.pen)),
+      );
+    }
     final AppColors colors = AppColors.of(context);
     final Color color = ink.resolve(Theme.of(context).brightness);
     return SizedBox.square(
       dimension: AppSizes.icon + AppSpacing.xxs,
       child: Stack(
         children: <Widget>[
-          Align(
+          const Align(
             alignment: Alignment.topLeft,
-            child: Icon(highlighter ? AppIcons.highlighter : AppIcons.pen),
+            child: Icon(AppIcons.highlighter),
           ),
           Positioned(
             right: 0,
             bottom: 0,
             child: Container(
               key: const ValueKey<String>('pen-ink-dot'),
-              width: highlighter ? _dot * 1.6 : _dot,
+              width: _dot * 1.6,
               height: _dot,
               decoration: BoxDecoration(
-                color: highlighter ? color.withValues(alpha: opacity) : color,
-                shape: highlighter ? BoxShape.rectangle : BoxShape.circle,
-                borderRadius: highlighter ? BorderRadius.circular(2) : null,
+                color: color.withValues(alpha: opacity),
+                borderRadius: BorderRadius.circular(2),
                 border: Border.all(color: colors.surface, width: 1.5),
               ),
             ),

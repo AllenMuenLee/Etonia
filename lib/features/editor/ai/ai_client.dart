@@ -1,7 +1,10 @@
 import 'dart:typed_data';
 
+import 'ai_models.dart';
 import 'ai_notation.dart';
 import 'note_image_renderer.dart';
+
+export 'ai_models.dart';
 
 /// Receives the assistant's message as far as it has been written, and
 /// whether all of it has: then only the notation, if any, is still coming.
@@ -73,7 +76,12 @@ class AiRequest {
     this.noteImage,
     this.notationEnabled = false,
     this.animationEnabled = false,
+    this.model,
   }) : messages = List<AiMessage>.unmodifiable(messages);
+
+  /// Which model answers, for a client that serves several
+  /// ([AiModelRouter]). A client with one model ignores it.
+  final AiModelId? model;
 
   final String systemInstruction;
 
@@ -129,6 +137,12 @@ enum AiFailureKind {
 
   /// The note was closed before the answer arrived.
   interrupted,
+
+  /// No active plan includes the chosen model.
+  planRequired,
+
+  /// The plan's AI credits for metered models are spent.
+  insufficientCredits,
 }
 
 /// A failed request. Carries nothing from the request or the response body,
@@ -145,11 +159,11 @@ class AiFailure {
   String get message {
     return switch (kind) {
       AiFailureKind.notConfigured =>
-        'AI is not set up. Add a Gemini API key to send messages.',
+        'AI account services are not configured in this build.',
       AiFailureKind.timeout => 'The AI service took too long to respond.',
       AiFailureKind.network =>
         'Could not reach the AI service. Check your connection.',
-      AiFailureKind.unauthorized => 'The AI service rejected the API key.',
+      AiFailureKind.unauthorized => 'Sign in from Plans & Credits to use AI.',
       AiFailureKind.rateLimited =>
         'The AI service is busy or over its limit. Try again shortly.',
       AiFailureKind.rejected => 'The AI service could not accept the request.',
@@ -163,6 +177,12 @@ class AiFailure {
         'The current note could not be prepared for Notation.',
       AiFailureKind.interrupted =>
         'The note was closed before the answer arrived. Try again.',
+      AiFailureKind.planRequired =>
+        'Your plan does not include this model. Upgrade in Plans & '
+            'Credits, or pick a model your plan includes.',
+      AiFailureKind.insufficientCredits =>
+        'Your AI credits are used up. Upgrade in Plans & Credits; Haiku '
+            'and Luna are unlimited on every paid plan.',
     };
   }
 
@@ -178,16 +198,82 @@ sealed class AiResult {
   const AiResult();
 }
 
-class AiSuccess extends AiResult {
-  const AiSuccess(this.text, {this.notation, this.notationRejected = false});
+/// The tokens one answer took, as the provider reported them or, when it
+/// did not, as [AiTokenUsage.estimate] guessed.
+class AiTokenUsage {
+  const AiTokenUsage({
+    required this.inputTokens,
+    required this.outputTokens,
+    this.estimated = false,
+  });
 
-  factory AiSuccess.response(AiAssistantResponse response) {
+  /// About what a provider counts for the one image the app sends, at most
+  /// [AiImageConfig.maxDimension] on a side.
+  static const int imageTokens = 800;
+
+  /// Characters per token, near enough for English and JSON.
+  static const int charactersPerToken = 4;
+
+  /// A deterministic guess from what was sent and what came back, for a
+  /// provider that reported no usage.
+  factory AiTokenUsage.estimate(AiRequest request, String answer) {
+    int characters = request.systemInstruction.length;
+    for (final AiMessage message in request.messages) {
+      characters += message.wireText.length;
+    }
+    return AiTokenUsage(
+      inputTokens: (characters / charactersPerToken).ceil() + imageTokens,
+      outputTokens: (answer.length / charactersPerToken).ceil(),
+      estimated: true,
+    );
+  }
+
+  final int inputTokens;
+  final int outputTokens;
+
+  /// Whether this was guessed rather than reported.
+  final bool estimated;
+
+  @override
+  bool operator ==(Object other) {
+    return other is AiTokenUsage &&
+        other.inputTokens == inputTokens &&
+        other.outputTokens == outputTokens &&
+        other.estimated == estimated;
+  }
+
+  @override
+  int get hashCode => Object.hash(inputTokens, outputTokens, estimated);
+
+  @override
+  String toString() {
+    return 'AiTokenUsage(in: $inputTokens, out: $outputTokens'
+        '${estimated ? ', estimated' : ''})';
+  }
+}
+
+class AiSuccess extends AiResult {
+  const AiSuccess(
+    this.text, {
+    this.notation,
+    this.notationRejected = false,
+    this.usage,
+  });
+
+  factory AiSuccess.response(
+    AiAssistantResponse response, {
+    AiTokenUsage? usage,
+  }) {
     return AiSuccess(
       response.message,
       notation: response.notation,
       notationRejected: response.notationRejected,
+      usage: usage,
     );
   }
+
+  /// The tokens the answer took, when the provider said.
+  final AiTokenUsage? usage;
 
   final String text;
   final AiNotation? notation;
@@ -222,4 +308,17 @@ abstract class AiClient {
 
   /// Releases what the client holds. It must not be used afterwards.
   void close();
+}
+
+/// A client that serves several models, chosen per request by
+/// [AiRequest.model].
+abstract class AiModelRouter implements AiClient {
+  /// Every model a request may name, in the order the picker shows them.
+  List<AiModelId> get models;
+
+  /// The model a request that names none is answered by.
+  AiModelId get defaultModel;
+
+  /// Whether a request naming [model] can be sent: its provider has a key.
+  bool isModelConfigured(AiModelId model);
 }

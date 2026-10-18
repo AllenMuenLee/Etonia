@@ -5,10 +5,12 @@ import '../ink/ink_notation.dart';
 import '../ink/ink_palette.dart';
 import '../ink/ink_sample.dart';
 import '../ink/stroke.dart';
+import '../handwriting/recognized_handwriting.dart';
 import 'ai_config.dart';
 import 'ai_notation.dart';
 import 'ink_attachment.dart';
 import 'notation_font.dart';
+import 'notation_space.dart';
 import 'plot_features.dart';
 
 /// Draws a notation: turns each item the model asked for into pen strokes
@@ -20,17 +22,37 @@ import 'plot_features.dart';
 /// as a graph with no point where its formula is defined.
 ///
 /// With a [snapper], the loose ends of lines, open paths, and strokes that
-/// nearly reach existing ink are moved onto it.
+/// nearly reach existing ink are moved onto it. With a [clearance], text that
+/// would land on the assistant's earlier notes, or on text it wrote before
+/// in this notation, is moved clear.
 List<GeneratedInkTrace> layoutNotation(
   AiNotation notation,
   Size size, {
   AiNotationConfig config = const AiNotationConfig(),
   InkSnapper? snapper,
+  NotationClearance? clearance,
+  HandwritingSampleLibrary? handwriting,
 }) {
   return <GeneratedInkTrace>[
     for (final AiNotationItem item in notation.items)
-      ..._layoutItem(item, size, config, snapper),
+      ..._placed(
+        item,
+        _layoutItem(item, size, config, snapper, handwriting),
+        clearance,
+      ),
   ];
+}
+
+/// [traces], the strokes of [item], moved clear by [clearance] when it is
+/// text.
+List<GeneratedInkTrace> _placed(
+  AiNotationItem item,
+  List<GeneratedInkTrace> traces,
+  NotationClearance? clearance,
+) {
+  return clearance != null && item is AiNotationText
+      ? clearance.place(traces)
+      : traces;
 }
 
 /// [layoutNotation], with every point given the time it is drawn at, from
@@ -45,15 +67,16 @@ List<GeneratedInkTrace> layoutTimedNotation(
   Size size, {
   AiNotationConfig config = const AiNotationConfig(),
   InkSnapper? snapper,
+  NotationClearance? clearance,
+  HandwritingSampleLibrary? handwriting,
 }) {
   final AiNotationTimeline timeline = notation.timeline!;
   final List<GeneratedInkTrace> timed = <GeneratedInkTrace>[];
   for (int i = 0; i < notation.items.length; i++) {
-    final List<GeneratedInkTrace> traces = _layoutItem(
+    final List<GeneratedInkTrace> traces = _placed(
       notation.items[i],
-      size,
-      config,
-      snapper,
+      _layoutItem(notation.items[i], size, config, snapper, handwriting),
+      clearance,
     );
     final AiItemTiming timing = timeline.items[i];
     double total = 0;
@@ -76,7 +99,12 @@ List<GeneratedInkTrace> layoutTimedNotation(
         }
       }
       timed.add(
-        GeneratedInkTrace(style: trace.style, points: points, timesMs: times),
+        GeneratedInkTrace(
+          style: trace.style,
+          points: points,
+          timesMs: times,
+          widths: trace.widths,
+        ),
       );
     }
   }
@@ -111,6 +139,7 @@ List<GeneratedInkTrace> _layoutItem(
   Size size,
   AiNotationConfig config,
   InkSnapper? snapper,
+  HandwritingSampleLibrary? handwriting,
 ) {
   final List<GeneratedInkTrace> traces = <GeneratedInkTrace>[];
   List<InkVector> snapEnds(List<InkVector> line) {
@@ -124,9 +153,16 @@ List<GeneratedInkTrace> _layoutItem(
           (throw const FormatException('Unknown ink')),
       width: item.width,
     );
+    int traceNumber = 0;
     void add(List<InkVector> line, [StrokeStyle? lineStyle]) {
       for (final List<InkVector> piece in _pieces(line)) {
-        traces.add(GeneratedInkTrace(style: lineStyle ?? style, points: piece));
+        traces.add(
+          GeneratedInkTrace(
+            style: lineStyle ?? style,
+            points: piece,
+            widths: _handPressure(piece, traceNumber++),
+          ),
+        );
       }
     }
 
@@ -151,10 +187,11 @@ List<GeneratedInkTrace> _layoutItem(
 
     switch (item) {
       case AiNotationText():
-        NotationFont.write(
+        _writeNotationText(
           item.text,
           origin: InkVector(item.x * size.width, item.y * size.height),
           size: item.size,
+          handwriting: handwriting,
         ).forEach(add);
       case AiNotationGraph():
         _graph(item, size, config, add);
@@ -191,6 +228,86 @@ List<GeneratedInkTrace> _layoutItem(
     }
   }
   return traces;
+}
+
+/// Writes text from high-confidence user samples where an exact word is in
+/// the pool, and from the built-in vector alphabet everywhere else. A sample
+/// is only translated and independently scaled; distinct pen strokes are
+/// never averaged or joined, preserving legibility and stroke order.
+List<List<InkVector>> _writeNotationText(
+  String text, {
+  required InkVector origin,
+  required double size,
+  HandwritingSampleLibrary? handwriting,
+}) {
+  if (handwriting == null) {
+    return NotationFont.write(text, origin: origin, size: size);
+  }
+  final RegExp parts = RegExp(
+    r"\s+|[\p{L}\p{M}\p{N}]+(?:['’][\p{L}\p{M}\p{N}]+)*|.",
+    unicode: true,
+  );
+  final List<String> tokens = parts
+      .allMatches(text)
+      .map((RegExpMatch match) => match.group(0)!)
+      .toList();
+  if (!tokens.any(
+    (String token) => handwriting.variantsFor(token) > 0,
+  )) {
+    return NotationFont.write(text, origin: origin, size: size);
+  }
+  final List<List<InkVector>> output = <List<InkVector>>[];
+  final List<String> lines = text.split('\n');
+  for (int row = 0; row < lines.length; row++) {
+    double x = origin.x;
+    final double y = origin.y + row * size * NotationFont.lineHeight;
+    final Iterable<RegExpMatch> pieces = parts.allMatches(lines[row]);
+    for (final RegExpMatch match in pieces) {
+      final String piece = match.group(0)!;
+      if (piece.trim().isEmpty) {
+        x += size * 0.34 * piece.length;
+        continue;
+      }
+      final RecognizedInkWord? sample = handwriting.choose(piece);
+      if (sample == null) {
+        output.addAll(
+          NotationFont.write(piece, origin: InkVector(x, y), size: size),
+        );
+        x += NotationFont.width(piece, size);
+        continue;
+      }
+      final double width = sample.aspectRatio * size;
+      output.addAll(<List<InkVector>>[
+        for (final List<InkVector> stroke in sample.normalizedStrokes)
+          <InkVector>[
+            for (final InkVector point in stroke)
+              InkVector(x + point.x * width, y + point.y * size),
+          ],
+      ]);
+      x += width;
+    }
+  }
+  return output;
+}
+
+/// A subtle, deterministic pressure rhythm for generated pen marks. Keeping
+/// factors at or below one preserves all of the layout's existing bounds.
+List<double>? _handPressure(List<InkVector> points, int traceNumber) {
+  if (points.length < 2) {
+    return null;
+  }
+  return <double>[
+    for (int i = 0; i < points.length; i++)
+      (0.9 +
+              0.065 *
+                  math.sin(
+                    points[i].x * 0.031 +
+                        points[i].y * 0.023 +
+                        traceNumber * 1.71,
+                  ) +
+              0.025 * math.sin(i * 0.83 + traceNumber * 0.47))
+          .clamp(0.78, 1.0),
+  ];
 }
 
 /// [line] drawn whole, or cut into dashes or dots along its length.

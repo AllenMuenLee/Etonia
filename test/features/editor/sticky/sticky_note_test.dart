@@ -344,6 +344,66 @@ void main() {
       expect(controller.documentRevision, 0);
     });
 
+    test('a note is dragged by where it was taken hold of, as one change, '
+        'kept on the page', () {
+      controller.beginStickyPlacement(
+        pointer: 1,
+        position: const InkVector(400, 300),
+        pageBounds: const Rect.fromLTWH(0, 0, 800, 600),
+      );
+      final StickyNoteElement note = controller.endStickyPlacement(1)!;
+      controller.exitStickyEditing();
+      final int revision = controller.documentRevision;
+      expect(
+        controller.beginStickyDrag(
+          pointer: 2,
+          position: const InkVector(420, 310),
+          pageBounds: const Rect.fromLTWH(0, 0, 800, 600),
+        ),
+        isTrue,
+      );
+      controller.updateStickyDrag(2, const InkVector(470, 360));
+      // Shown moving, but not yet a change.
+      expect(controller.stickyNotes.single.center, const InkVector(450, 350));
+      expect(controller.documentRevision, revision);
+      controller.updateStickyDrag(2, const InkVector(5000, 5000));
+      final StickyNoteElement moved = controller.endStickyDrag(2)!;
+      expect(moved.id, note.id);
+      expect(moved.center, const InkVector(680, 510));
+      expect(controller.documentRevision, revision + 1);
+      expect(controller.editingSticky?.id, note.id);
+      expect(controller.undo(), isTrue);
+      expect(controller.stickyNotes.single.center, note.center);
+    });
+
+    test('a cancelled drag puts the note back; off a note, none begins', () {
+      controller.beginStickyPlacement(
+        pointer: 1,
+        position: const InkVector(400, 300),
+        pageBounds: const Rect.fromLTWH(0, 0, 800, 600),
+      );
+      final StickyNoteElement note = controller.endStickyPlacement(1)!;
+      final int revision = controller.documentRevision;
+      expect(
+        controller.beginStickyDrag(
+          pointer: 2,
+          position: const InkVector(20, 20),
+          pageBounds: const Rect.fromLTWH(0, 0, 800, 600),
+        ),
+        isFalse,
+      );
+      controller.beginStickyDrag(
+        pointer: 2,
+        position: const InkVector(400, 300),
+        pageBounds: const Rect.fromLTWH(0, 0, 800, 600),
+      );
+      controller.updateStickyDrag(2, const InkVector(300, 200));
+      controller.cancelStickyDrag(2);
+      expect(controller.stickyNotes.single.center, note.center);
+      expect(controller.documentRevision, revision);
+      expect(controller.isBusy, isFalse);
+    });
+
     test('a stroke into a note is stored in its own coordinates', () {
       final StickyNoteElement note = _note(rotation: math.pi / 2, scale: 2);
       controller.insertStickyNote(note);
@@ -660,8 +720,8 @@ void main() {
       expect(page.toJson().containsKey('stickyNotes'), isFalse);
     });
 
-    test('schema 3 notes still open; the schema is now 4', () {
-      expect(storageSchema, 4);
+    test('schema 3 notes still open; the schema is now 5', () {
+      expect(storageSchema, 5);
       final NoteContent content = NoteContent.fromJson(<String, Object?>{
         'schema': 3,
         'pages': <Object?>[
@@ -734,12 +794,12 @@ void main() {
       expect(page.stickyNotes.last.id, isNot('dup'));
     });
 
-    test('file limits bound the work', () {
+    test('every sticky note on a page loads, however many', () {
       final StoredPage page = StoredPage.fromJson(<String, Object?>{
         'size': 'fit',
         'strokes': <Object?>[],
         'stickyNotes': <Object?>[
-          for (int i = 0; i < _config.maxStickyNotesPerPage + 20; i++)
+          for (int i = 0; i < 520; i++)
             <String, Object?>{
               'id': 'n$i',
               'center': <double>[0, 0],
@@ -747,7 +807,7 @@ void main() {
             },
         ],
       });
-      expect(page.stickyNotes, hasLength(_config.maxStickyNotesPerPage));
+      expect(page.stickyNotes, hasLength(520));
     });
 
     test('a document round trip keeps notes on their page, in order', () {

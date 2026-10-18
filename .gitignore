@@ -66,3 +66,5 @@ app.*.map.json
 .env
 .env.*
 dart_defines*.json
+supabase/.temp/
+supabase/.branches/

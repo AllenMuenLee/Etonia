@@ -407,7 +407,7 @@ void main() {
     });
   }
 
-  test('a large selection is shrunk to fit 2048 pixels', () async {
+  test('a large selection is shrunk to fit 768 pixels', () async {
     final SelectionImage image = await renderer.render(
       SelectionInkSnapshot.fromStrokes(<SnapshotStroke>[
         _line(
@@ -420,13 +420,13 @@ void main() {
     );
 
     // 5044 by 1044 logical pixels.
-    expect(image.width, 2048);
-    expect(image.height, lessThanOrEqualTo(2048));
-    expect(image.scale, closeTo(2048 / 5044, 1e-9));
+    expect(image.width, 768);
+    expect(image.height, lessThanOrEqualTo(768));
+    expect(image.scale, closeTo(768 / 5044, 1e-9));
     expect(image.height, (1044 * image.scale).ceil());
     expect(image.width / image.height, closeTo(5044 / 1044, 0.02));
     final _Decoded pixels = await _decode(image);
-    expect(pixels.width, 2048);
+    expect(pixels.width, 768);
     expect(pixels.at(2500, 500), isSameColorAs(_red));
 
     // Tall selections are limited the same way.
@@ -435,8 +435,8 @@ void main() {
         _line(const InkVector(0, 0), const InkVector(100, 9000)),
       ]),
     );
-    expect(tall.height, 2048);
-    expect(tall.width, lessThan(2048));
+    expect(tall.height, 768);
+    expect(tall.width, lessThan(768));
   });
 
   test('a small selection is drawn at 2x and no more', () async {

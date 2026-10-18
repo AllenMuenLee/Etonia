@@ -24,6 +24,13 @@ jobs:
       - run: dart format --output=none --set-exit-if-changed .
       - run: flutter analyze
       - run: flutter test --exclude-tags golden
+      - uses: denoland/setup-deno@v2
+        with:
+          deno-version: v2.x
+      - name: Check Supabase functions
+        run: deno check --config supabase/functions/deno.json supabase/functions/ai/index.ts supabase/functions/billing/index.ts supabase/functions/store-events/index.ts
+      - name: Test private billing and AI boundary
+        run: deno test --allow-read --allow-env --config supabase/functions/deno.json supabase/tests
 
   goldens:
     name: Golden tests

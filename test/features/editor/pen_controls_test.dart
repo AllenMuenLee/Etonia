@@ -166,8 +166,12 @@ void main() {
     final InkController controller = await pumpEditor(tester);
     await _openPen(tester);
 
-    // Clear of the panel, which opens below the palette across the top.
-    await tester.tapAt(canvasRect(tester).bottomRight - const Offset(40, 40));
+    // Clear of the panel, which opens below the palette across the top, on
+    // the part of the page that is on screen.
+    final Rect shown = canvasRect(tester).intersect(
+      tester.getRect(find.byKey(const ValueKey<String>('page-viewport'))),
+    );
+    await tester.tapAt(shown.bottomRight - const Offset(40, 40));
     await tester.pumpAndSettle();
 
     expect(find.byType(InkColorPicker), findsNothing);

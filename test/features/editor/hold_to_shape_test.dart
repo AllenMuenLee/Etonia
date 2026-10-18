@@ -49,8 +49,12 @@ void main() {
     WidgetTester tester,
   ) async {
     final InkController controller = await pumpEditor(tester);
-    final Offset center = canvasRect(tester).topLeft + const Offset(300, 250);
-    final TestGesture gesture = await _trace(tester, _circle(center, 100));
+    // A 100 unit circle on the page, however large it is on screen.
+    final Offset center = pageToGlobal(tester, const Offset(300, 250));
+    final TestGesture gesture = await _trace(
+      tester,
+      _circle(center, 100 * canvasScale(tester)),
+    );
     expect(controller.strokes, isEmpty);
 
     await _hold(tester);
@@ -68,9 +72,7 @@ void main() {
     expect(shape.source, StrokeSource.derived);
     expect(shape.style.ink, InkPalette.ink);
     expect(shape.points.first, shape.points.last);
-    final InkVector c =
-        InkVector(center.dx, center.dy) -
-        InkVector(canvasRect(tester).left, canvasRect(tester).top);
+    const InkVector c = InkVector(300, 250);
     for (final InkVector p in shape.points) {
       expect((p - c).length, closeTo(100, 6));
     }
@@ -80,17 +82,22 @@ void main() {
     WidgetTester tester,
   ) async {
     final InkController controller = await pumpEditor(tester);
-    final Offset topLeft = canvasRect(tester).topLeft;
-    final Offset center = topLeft + const Offset(300, 250);
-    final TestGesture gesture = await _trace(tester, _circle(center, 100));
+    final Offset center = pageToGlobal(tester, const Offset(300, 250));
+    final TestGesture gesture = await _trace(
+      tester,
+      _circle(center, 100 * canvasScale(tester)),
+    );
     await _hold(tester);
     final ShapeAdjustGesture adjust = controller.activeShape!;
     final InkVector pivot = adjust.pivot;
     final double radius = (adjust.grab - pivot).length;
 
     // Out from the center to twice as far: the circle doubles, no new ink.
-    final Offset pivotOnScreen = topLeft + Offset(pivot.x, pivot.y);
-    final Offset grab = topLeft + Offset(adjust.grab.x, adjust.grab.y);
+    final Offset pivotOnScreen = pageToGlobal(tester, Offset(pivot.x, pivot.y));
+    final Offset grab = pageToGlobal(
+      tester,
+      Offset(adjust.grab.x, adjust.grab.y),
+    );
     await gesture.moveTo(pivotOnScreen + (grab - pivotOnScreen) * 2);
     await tester.pump();
     expect(controller.activeShape!.scale, closeTo(2, 1e-6));
@@ -110,15 +117,16 @@ void main() {
     WidgetTester tester,
   ) async {
     final InkController controller = await pumpEditor(tester);
-    final Offset start = canvasRect(tester).topLeft + const Offset(100, 300);
+    final double scale = canvasScale(tester);
+    final Offset start = pageToGlobal(tester, const Offset(100, 300));
     final TestGesture gesture = await _trace(tester, <Offset>[
-      for (int i = 0; i <= 20; i++) start + Offset(i * 10.0, 0),
+      for (int i = 0; i <= 20; i++) start + Offset(i * 10.0, 0) * scale,
     ]);
     await _hold(tester);
     expect(controller.activeShape!.shape.kind, ShapeKind.line);
 
     // Swing the end a quarter turn down, half as far again.
-    await gesture.moveTo(start + const Offset(0, 300));
+    await gesture.moveTo(start + const Offset(0, 300) * scale);
     await tester.pump();
     await gesture.up();
     await tester.pump();

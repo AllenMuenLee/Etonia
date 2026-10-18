@@ -71,8 +71,8 @@ class RestoreSummary {
   final int notesSkipped;
 }
 
-/// Backs the library up to, and restores it from, a `Greatnote Backup`
-/// folder in Google Drive.
+/// Backs the library up to, and restores it from, an `Etonia` folder in
+/// Google Drive.
 ///
 /// The folder holds `manifest.json` and a `notes` folder. The manifest is
 /// the whole index: every folder and note entry, and for each note the
@@ -91,7 +91,13 @@ class GoogleDriveBackupService {
   }) : state = state ?? InMemoryCloudStateStore(),
        _clock = clock ?? DateTime.now;
 
-  static const String rootFolderName = 'Greatnote Backup';
+  static const String rootFolderName = 'Etonia';
+
+  /// Where older versions kept the backup; a restore still looks there
+  /// when there is none in [rootFolderName].
+  static const List<String> legacyRootFolderNames = <String>[
+    'Greatnote Backup',
+  ];
   static const String manifestName = 'manifest.json';
   static const String notesFolderName = 'notes';
 
@@ -99,6 +105,16 @@ class GoogleDriveBackupService {
   static const int schema = 1;
 
   static const String _lastBackupKey = 'lastBackupAt';
+  static const String _linkedKey = 'driveLinked';
+
+  /// Backups and restores run one at a time, in the order asked for.
+  Future<void> _queue = Future<void>.value();
+
+  Future<T> _exclusive<T>(Future<T> Function() work) {
+    final Future<T> result = _queue.then((_) => work());
+    _queue = result.then<void>((_) {}, onError: (Object _) {});
+    return result;
+  }
 
   final GoogleDriveClient client;
   final NoteRepository repository;
@@ -115,7 +131,31 @@ class GoogleDriveBackupService {
     return millis is int ? DateTime.fromMillisecondsSinceEpoch(millis) : null;
   }
 
+  /// Whether the user has connected Google Drive on this device and not
+  /// disconnected since, so backing up on a schedule may sign back in
+  /// without asking. A device that has backed up before counts.
+  Future<bool> isLinked() async {
+    final Map<String, Object?> values = await state.read();
+    final Object? linked = values[_linkedKey];
+    return linked is bool ? linked : values[_lastBackupKey] is int;
+  }
+
+  Future<void> setLinked(bool linked) {
+    return state.update((Map<String, Object?> values) {
+      values[_linkedKey] = linked;
+    });
+  }
+
   Future<BackupSummary> backUp({
+    ValueChanged<CloudProgress>? onProgress,
+    ImportCancellationToken? cancellation,
+  }) {
+    return _exclusive(
+      () => _backUp(onProgress: onProgress, cancellation: cancellation),
+    );
+  }
+
+  Future<BackupSummary> _backUp({
     ValueChanged<CloudProgress>? onProgress,
     ImportCancellationToken? cancellation,
   }) async {
@@ -304,6 +344,20 @@ class GoogleDriveBackupService {
     RestoreMode mode = RestoreMode.merge,
     ValueChanged<CloudProgress>? onProgress,
     ImportCancellationToken? cancellation,
+  }) {
+    return _exclusive(
+      () => _restore(
+        mode: mode,
+        onProgress: onProgress,
+        cancellation: cancellation,
+      ),
+    );
+  }
+
+  Future<RestoreSummary> _restore({
+    required RestoreMode mode,
+    ValueChanged<CloudProgress>? onProgress,
+    ImportCancellationToken? cancellation,
   }) async {
     void check() {
       if (cancellation?.isCancelled ?? false) {
@@ -320,14 +374,20 @@ class GoogleDriveBackupService {
     );
     await flushPendingSaves?.call();
     const GoogleDriveBackupException missing = GoogleDriveBackupException(
-      'No Greatnote backup was found in your Google Drive',
+      'No Etonia backup was found in your Google Drive',
     );
     _Manifest? manifest;
-    for (final GoogleDriveItem folder in await client.searchFoldersByName(
+    search:
+    for (final String name in <String>[
       rootFolderName,
-    )) {
-      manifest = await _readManifest(folder.id);
-      if (manifest != null) break;
+      ...legacyRootFolderNames,
+    ]) {
+      for (final GoogleDriveItem folder in await client.searchFoldersByName(
+        name,
+      )) {
+        manifest = await _readManifest(folder.id);
+        if (manifest != null) break search;
+      }
     }
     if (manifest == null) throw missing;
     check();
@@ -562,7 +622,7 @@ class GoogleDriveBackupService {
     final Object? version = json['schema'];
     if (version is! int || version > schema) {
       throw const GoogleDriveBackupException(
-        'The backup was made by a newer version of Greatnote',
+        'The backup was made by a newer version of Etonia',
       );
     }
     try {

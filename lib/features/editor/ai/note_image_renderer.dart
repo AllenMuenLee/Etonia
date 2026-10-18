@@ -1,15 +1,13 @@
 import 'dart:math' as math;
+import 'dart:typed_data';
 import 'dart:ui' as ui;
 
-import 'package:flutter/foundation.dart';
-
-import '../ink/ink_painter.dart';
 import '../ink/ink_sample.dart';
 import '../ink/stroke.dart';
 import '../sticky/sticky_note.dart';
-import '../sticky/sticky_note_painter.dart';
 import 'ai_config.dart';
 import 'ink_attachment.dart';
+import 'notation_space.dart';
 import 'selection_image_renderer.dart';
 
 /// An immutable copy of the complete writing surface for one AI request.
@@ -23,7 +21,9 @@ class NoteInkSnapshot {
     this.bitmaps = const <SnapshotBitmap>[],
     this.focusBounds,
     List<StickyNoteElement> stickies = const <StickyNoteElement>[],
+    List<SpaceStroke> aiNotes = const <SpaceStroke>[],
   }) : strokes = List<SnapshotStroke>.unmodifiable(strokes),
+       aiNotes = List<SpaceStroke>.unmodifiable(aiNotes),
        stickies = List<StickyNoteElement>.unmodifiable(stickies),
        background = background.withValues(alpha: 1);
 
@@ -36,6 +36,7 @@ class NoteInkSnapshot {
     ui.Rect? focusBounds,
     List<SnapshotBitmap> bitmaps = const <SnapshotBitmap>[],
     Iterable<StickyNoteElement> stickies = const <StickyNoteElement>[],
+    Iterable<Stroke> aiNotes = const <Stroke>[],
   }) {
     return NoteInkSnapshot(
       strokes: <SnapshotStroke>[
@@ -58,14 +59,25 @@ class NoteInkSnapshot {
         for (final StickyNoteElement note in stickies)
           if (note.isValid) note,
       ],
+      aiNotes: <SpaceStroke>[
+        for (final Stroke stroke in aiNotes)
+          (points: stroke.points, width: stroke.style.width),
+      ],
     );
   }
 
   final List<SnapshotStroke> strokes;
+
+  /// Pictures on the page. Only a page-wide background ([SnapshotBitmap.
+  /// affectsCrop] false), such as a PDF page, needs its bytes: it is read
+  /// for print. Any other picture is taken whole, by its box.
   final List<SnapshotBitmap> bitmaps;
 
   /// The page's sticky notes, in paint order, under [strokes].
   final List<StickyNoteElement> stickies;
+
+  /// Of [strokes], those the assistant wrote and drew.
+  final List<SpaceStroke> aiNotes;
   final ui.Size logicalSize;
   final int revision;
   final ui.Brightness brightness;
@@ -76,24 +88,19 @@ class NoteInkSnapshot {
   final ui.Rect? focusBounds;
 }
 
-/// The exact whole-note PNG and metadata used to place returned notation.
+/// What the model is told about the whole note, in place of a picture of
+/// it, and what returned notation is placed against: the paper's size,
+/// where the selection is on it, the ink there, what is nearby, and where
+/// the paper is blank. Only the selected-ink image is ever sent.
 class NoteImage {
   NoteImage({
-    required this.png,
-    required this.width,
-    required this.height,
-    required this.scale,
     required this.logicalSize,
     required this.revision,
     this.normalizedFocusBounds,
-    this.gridDivisions = 0,
     this.focusInk = const <List<InkVector>>[],
+    this.space,
   });
 
-  final Uint8List png;
-  final int width;
-  final int height;
-  final double scale;
   final ui.Size logicalSize;
   final int revision;
 
@@ -101,16 +108,17 @@ class NoteImage {
   /// reach slightly past 0 or 1 where the crop's padding leaves the paper.
   final ui.Rect? normalizedFocusBounds;
 
-  /// The image carries a labelled grid line every 1/[gridDivisions] of the
-  /// paper, or none when this is 0. See [AiImageConfig.noteGridDivisions].
-  final int gridDivisions;
-
   /// The ink around the selection, as note_normalized polylines cut down
   /// to their ends and corners, so the model can attach to it exactly.
   final List<List<InkVector>> focusInk;
+
+  /// Where the paper is blank, and what is near the selection, as it was
+  /// when this was made: the areas the model is told it may draw in, and
+  /// where a sticky note it asks for goes. Null when it was not measured.
+  final NoteFreeSpace? space;
 }
 
-enum NoteImageFailure { invalidGeometry, tooLarge, encodingFailed }
+enum NoteImageFailure { invalidGeometry, encodingFailed }
 
 class NoteImageException implements Exception {
   const NoteImageException(this.failure);
@@ -120,22 +128,17 @@ class NoteImageException implements Exception {
   String get message => switch (failure) {
     NoteImageFailure.invalidGeometry =>
       'The current note could not be prepared for Notation.',
-    NoteImageFailure.tooLarge =>
-      'The current note is too large to send in Notation mode.',
     NoteImageFailure.encodingFailed =>
       'The current note could not be prepared for Notation.',
   };
 }
 
+/// Describes a note for one request. Nothing of the page is drawn: it is
+/// measured.
 class NoteImageRenderer {
-  const NoteImageRenderer({
-    this.config = const AiImageConfig(),
-    this.debugOnImage,
-  });
+  const NoteImageRenderer({this.config = const AiImageConfig()});
 
   final AiImageConfig config;
-  @visibleForTesting
-  final ValueChanged<ui.Image>? debugOnImage;
 
   Future<NoteImage> render(NoteInkSnapshot snapshot) async {
     final ui.Size size = snapshot.logicalSize;
@@ -158,223 +161,92 @@ class NoteImageRenderer {
       if (!bitmap.bounds.isFinite ||
           bitmap.bounds.isEmpty ||
           !bitmap.rotation.isFinite ||
-          bitmap.bytes.isEmpty) {
+          (!bitmap.affectsCrop && bitmap.bytes.isEmpty)) {
         throw const NoteImageException(NoteImageFailure.invalidGeometry);
       }
     }
-    final double scale = math.min(
-      config.pixelRatio,
-      config.maxDimension / math.max(size.width, size.height),
-    );
-    if (!scale.isFinite || scale < config.minPixelRatio) {
-      throw const NoteImageException(NoteImageFailure.tooLarge);
-    }
-    final int width = (size.width * scale).ceil().clamp(1, config.maxDimension);
-    final int height = (size.height * scale).ceil().clamp(
-      1,
-      config.maxDimension,
-    );
-    final int divisions = config.noteGridDivisions < 2
-        ? 0
-        : config.noteGridDivisions;
-    final List<ui.Image> decoded = <ui.Image>[];
+    final NoteFreeSpace space;
     try {
-      for (final SnapshotBitmap bitmap in snapshot.bitmaps) {
-        decoded.add(await _decodeImage(bitmap.bytes));
-      }
-      return await _renderDecoded(
-        snapshot,
-        scale,
-        width,
-        height,
-        divisions,
-        decoded,
-      );
-    } on NoteImageException {
-      rethrow;
+      space = await _measureSpace(snapshot);
     } on Object {
       throw const NoteImageException(NoteImageFailure.encodingFailed);
-    } finally {
-      for (final ui.Image image in decoded) {
-        image.dispose();
-      }
     }
+    return NoteImage(
+      logicalSize: size,
+      revision: snapshot.revision,
+      normalizedFocusBounds: _normalized(snapshot.focusBounds, size),
+      focusInk: _focusInk(snapshot),
+      space: space,
+    );
   }
 
-  Future<NoteImage> _renderDecoded(
-    NoteInkSnapshot snapshot,
-    double scale,
-    int width,
-    int height,
-    int divisions,
-    List<ui.Image> decoded,
-  ) async {
-    final ui.PictureRecorder recorder = ui.PictureRecorder();
-    final ui.Canvas canvas = ui.Canvas(recorder)
-      ..drawRect(
-        ui.Rect.fromLTWH(0, 0, width.toDouble(), height.toDouble()),
-        ui.Paint()..color = snapshot.background,
-      );
-    if (divisions > 0) {
-      _paintGrid(canvas, width, height, divisions, snapshot.brightness);
-    }
-    canvas.scale(scale);
-    for (int i = 0; i < snapshot.bitmaps.length; i++) {
-      final SnapshotBitmap bitmap = snapshot.bitmaps[i];
-      final ui.Image image = decoded[i];
-      final ui.Rect bounds = bitmap.bounds;
-      canvas.save();
-      canvas
-        ..translate(bounds.center.dx, bounds.center.dy)
-        ..rotate(bitmap.rotation)
-        ..drawImageRect(
-          image,
-          ui.Rect.fromLTWH(
-            0,
-            0,
-            image.width.toDouble(),
-            image.height.toDouble(),
-          ),
-          ui.Rect.fromCenter(
-            center: ui.Offset.zero,
-            width: bounds.width,
-            height: bounds.height,
-          ),
-          ui.Paint()..filterQuality = ui.FilterQuality.medium,
-        );
-      canvas.restore();
-    }
-    for (final StickyNoteElement note in snapshot.stickies) {
-      paintStickyNote(canvas, note);
-    }
-    for (final SnapshotStroke stroke in snapshot.strokes) {
-      final InkVector origin = stroke.points.first;
-      final ui.Path path = ui.Path()..moveTo(origin.x, origin.y);
-      for (int i = 1; i < stroke.points.length; i++) {
-        path.lineTo(stroke.points[i].x, stroke.points[i].y);
+  /// Where the paper in [snapshot] is blank. A page-wide background, such
+  /// as a PDF page, is read pixel by pixel for print; any other picture,
+  /// and every sticky note, takes its whole box.
+  Future<NoteFreeSpace> _measureSpace(NoteInkSnapshot snapshot) async {
+    final List<SpaceBackground> backgrounds = <SpaceBackground>[];
+    final List<ui.Rect> blocks = <ui.Rect>[
+      for (final StickyNoteElement note in snapshot.stickies) note.bounds,
+    ];
+    for (final SnapshotBitmap bitmap in snapshot.bitmaps) {
+      if (bitmap.affectsCrop) {
+        blocks.add(bitmap.rotatedBounds);
+        continue;
       }
-      paintInkStroke(
-        canvas,
-        color: stroke.color,
-        width: stroke.width,
-        path: path,
-        origin: origin,
-        isDot: stroke.isDot,
-        outline: stroke.widths == null
-            ? null
-            : buildInkOutline(stroke.points, stroke.widths!, stroke.width),
-      );
+      final SpaceBackground? background = await _readBackground(bitmap);
+      if (background == null) {
+        // Unreadable print could be anywhere: none of it is blank.
+        blocks.add(bitmap.bounds);
+      } else {
+        backgrounds.add(background);
+      }
     }
-    final ui.Picture picture = recorder.endRecording();
+    return NoteFreeSpace.measure(
+      pageSize: snapshot.logicalSize,
+      strokes: <SpaceStroke>[
+        for (final SnapshotStroke stroke in snapshot.strokes)
+          (
+            points: stroke.points,
+            width:
+                stroke.width *
+                (stroke.widths == null
+                    ? 1
+                    : stroke.widths!.fold<double>(1, math.max)),
+          ),
+      ],
+      blocks: blocks,
+      backgrounds: backgrounds,
+      aiNotes: snapshot.aiNotes,
+      focus: snapshot.focusBounds,
+      config: config.space,
+    );
+  }
+
+  Future<SpaceBackground?> _readBackground(SnapshotBitmap bitmap) async {
+    ui.Codec? codec;
     ui.Image? image;
     try {
-      image = await picture.toImage(width, height);
-      debugOnImage?.call(image);
-      final ByteData? bytes = await image.toByteData(
-        format: ui.ImageByteFormat.png,
-      );
-      if (bytes == null || bytes.lengthInBytes == 0) {
-        throw const NoteImageException(NoteImageFailure.encodingFailed);
+      codec = await ui.instantiateImageCodec(bitmap.bytes);
+      image = (await codec.getNextFrame()).image;
+      final ByteData? pixels = await image.toByteData();
+      if (pixels == null) {
+        return null;
       }
-      return NoteImage(
-        png: bytes.buffer.asUint8List(bytes.offsetInBytes, bytes.lengthInBytes),
-        width: width,
-        height: height,
-        scale: scale,
-        logicalSize: snapshot.logicalSize,
-        revision: snapshot.revision,
-        normalizedFocusBounds: _normalized(
-          snapshot.focusBounds,
-          snapshot.logicalSize,
+      return SpaceBackground(
+        bounds: bitmap.bounds,
+        width: image.width,
+        height: image.height,
+        rgba: pixels.buffer.asUint8List(
+          pixels.offsetInBytes,
+          pixels.lengthInBytes,
         ),
-        gridDivisions: divisions,
-        focusInk: _focusInk(snapshot),
       );
-    } on NoteImageException {
-      rethrow;
     } on Object {
-      throw const NoteImageException(NoteImageFailure.encodingFailed);
+      return null;
     } finally {
       image?.dispose();
-      picture.dispose();
+      codec?.dispose();
     }
-  }
-
-  Future<ui.Image> _decodeImage(Uint8List bytes) async {
-    final ui.Codec codec = await ui.instantiateImageCodec(bytes);
-    try {
-      return (await codec.getNextFrame()).image;
-    } finally {
-      codec.dispose();
-    }
-  }
-
-  /// Faint lines across the paper at every 1/[divisions] of it, and fainter
-  /// ones halfway between, in image pixels and under the ink. Each main
-  /// line is labelled with its note_normalized coordinate: x along the top
-  /// edge, y along the left.
-  void _paintGrid(
-    ui.Canvas canvas,
-    int width,
-    int height,
-    int divisions,
-    ui.Brightness brightness,
-  ) {
-    final ui.Color tone = brightness == ui.Brightness.dark
-        ? const ui.Color(0xFFFFFFFF)
-        : const ui.Color(0xFF000000);
-    final ui.Paint major = ui.Paint()
-      ..color = tone.withValues(alpha: 0.2)
-      ..strokeWidth = 1;
-    final ui.Paint minor = ui.Paint()
-      ..color = tone.withValues(alpha: 0.08)
-      ..strokeWidth = 1;
-    final int steps = divisions * 2;
-    for (int i = 1; i < steps; i++) {
-      final ui.Paint paint = i.isEven ? major : minor;
-      // Centered on a pixel, so each line is one crisp pixel wide.
-      final double x = (width * i / steps).floorToDouble() + 0.5;
-      final double y = (height * i / steps).floorToDouble() + 0.5;
-      canvas
-        ..drawLine(ui.Offset(x, 0), ui.Offset(x, height.toDouble()), paint)
-        ..drawLine(ui.Offset(0, y), ui.Offset(width.toDouble(), y), paint);
-    }
-    final ui.Color label = tone.withValues(alpha: 0.6);
-    for (int i = 1; i < divisions; i++) {
-      final String value = double.parse(
-        (i / divisions).toStringAsFixed(3),
-      ).toString();
-      _paintLabel(
-        canvas,
-        'x$value',
-        ui.Offset((width * i / divisions).floorToDouble() + 3, 2),
-        label,
-      );
-      _paintLabel(
-        canvas,
-        'y$value',
-        ui.Offset(3, (height * i / divisions).floorToDouble() + 2),
-        label,
-      );
-    }
-  }
-
-  void _paintLabel(
-    ui.Canvas canvas,
-    String text,
-    ui.Offset offset,
-    ui.Color color,
-  ) {
-    final ui.ParagraphBuilder builder =
-        ui.ParagraphBuilder(
-            ui.ParagraphStyle(fontSize: config.noteGridLabelSize),
-          )
-          ..pushStyle(ui.TextStyle(color: color))
-          ..addText(text);
-    final ui.Paragraph paragraph = builder.build()
-      ..layout(const ui.ParagraphConstraints(width: double.infinity));
-    canvas.drawParagraph(paragraph, offset);
-    paragraph.dispose();
   }
 
   /// The ink reaching into [NoteInkSnapshot.focusBounds], simplified and

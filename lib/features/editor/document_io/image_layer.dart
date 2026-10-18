@@ -4,6 +4,7 @@ import 'dart:ui' as ui;
 
 import 'package:flutter/material.dart';
 
+import '../ink/ink_canvas.dart';
 import '../ink/ink_controller.dart';
 import '../ink/ink_selection.dart';
 import 'document_models.dart';
@@ -19,12 +20,14 @@ class PageImageLayer extends StatefulWidget {
     required this.readAsset,
     this.maxDecodeDimension = 4096,
     this.cache,
+    this.carry,
   });
 
   final InkController controller;
   final NoteAssetReader readAsset;
   final int maxDecodeDimension;
   final PageImageCache? cache;
+  final SelectionCarry? carry;
 
   @override
   State<PageImageLayer> createState() => _PageImageLayerState();
@@ -58,10 +61,14 @@ class _PageImageLayerState extends State<PageImageLayer> {
       animation: Listenable.merge(<Listenable>[
         widget.controller.completedStrokesListenable,
         widget.controller.selectionListenable,
+        if (widget.carry != null) widget.carry!,
       ]),
       builder: (BuildContext context, Widget? child) {
         final InkSelection? selection = widget.controller.selection;
         final Set<int> selected = selection?.imageIndices.toSet() ?? <int>{};
+        final List<NoteImageElement> foreignImages =
+            widget.carry?.foreignImagesFor(widget.controller) ??
+            const <NoteImageElement>[];
         return Stack(
           fit: StackFit.expand,
           clipBehavior: Clip.hardEdge,
@@ -77,6 +84,14 @@ class _PageImageLayerState extends State<PageImageLayer> {
                       )
                     : widget.controller.images[i],
                 selected: selected.contains(i),
+                cache: _cache,
+                maxDecodeDimension: widget.maxDecodeDimension,
+              ),
+            for (final NoteImageElement element in foreignImages)
+              _PlacedImage(
+                key: ValueKey('foreign-${element.id}'),
+                element: element,
+                selected: true,
                 cache: _cache,
                 maxDecodeDimension: widget.maxDecodeDimension,
               ),

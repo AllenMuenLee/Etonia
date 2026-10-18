@@ -181,13 +181,18 @@ void main() {
       expect(NotationFont.canWrite('café'), isFalse);
       expect(NotationFont.canWrite('日本'), isFalse);
 
-      // "I" at size 20 from (100, 50): its stem runs the full cap height.
+      // "I" at size 20 from (100, 50): its stem runs the full cap height,
+      // with the slight lean and drift of the handwriting treatment.
       final List<List<InkVector>> i = NotationFont.write(
         'I',
         origin: const InkVector(100, 50),
         size: 20,
       );
-      expect(i[1], const <InkVector>[InkVector(104, 50), InkVector(104, 70)]);
+      expect(i[1].first.y, closeTo(50, 0.2));
+      expect(i[1].last.y, closeTo(70, 0.2));
+      expect(i[1].first.x, inInclusiveRange(103.5, 105));
+      expect(i[1].last.x, inInclusiveRange(103.5, 105));
+      expect((i[1].first.x - i[1].last.x).abs(), greaterThan(0.3));
 
       // Wider with more letters, and lines stacked 1.6 sizes apart.
       expect(
@@ -205,7 +210,7 @@ void main() {
         origin: InkVector.zero,
         size: 20,
       );
-      expect(lines[1].first.y - lines[0].first.y, closeTo(32, 1e-9));
+      expect(lines[1].first.y - lines[0].first.y, closeTo(32, 0.5));
       expect(
         () => NotationFont.write('é', origin: InkVector.zero, size: 20),
         throwsArgumentError,
@@ -237,13 +242,22 @@ void main() {
       // The 3 reaches capital height.
       expect(bounds.top, closeTo(150, 1));
       expect(bounds.bottom, closeTo(150 + 30, 1));
-      expect(bounds.right, closeTo(400 + NotationFont.width('x = 3', 30), 1));
+      expect(bounds.right, closeTo(400 + NotationFont.width('x = 3', 30), 2));
       expect(
         traces.every((GeneratedInkTrace t) => t.style.ink.id == 'red'),
         isTrue,
       );
       expect(
         traces.every((GeneratedInkTrace t) => t.style.width == 2.5),
+        isTrue,
+      );
+      expect(
+        traces
+            .where((GeneratedInkTrace t) => t.points.length > 1)
+            .every(
+              (GeneratedInkTrace t) =>
+                  t.widths != null && t.widths!.length == t.points.length,
+            ),
         isTrue,
       );
     });

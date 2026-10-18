@@ -241,8 +241,14 @@ void main() {
     await tester.pumpAndSettle();
     await tester.tap(find.text('Blank note'));
     await tester.pumpAndSettle();
-    // The template comes first; its defaults make a fit-to-screen page.
+    // Name and paper are configured together before the editor opens.
+    expect(find.text('File name'), findsOneWidget);
     expect(find.text('Page size'), findsOneWidget);
+    expect(find.text('Fit to screen'), findsNothing);
+    await tester.enterText(
+      find.byKey(const ValueKey<String>('new-note-name')),
+      'Calculus notes',
+    );
     await tester.tap(find.text('Create'));
     await tester.pumpAndSettle();
     expect(find.byType(EditorScreen), findsOneWidget);
@@ -265,11 +271,12 @@ void main() {
 
     expect(find.byType(LibraryScreen), findsOneWidget);
     final NoteEntry entry = (await repository.list(null)).notes.single;
+    expect(entry.title, 'Calculus notes');
     expect(entry.pageCount, 2);
     expect(entry.modified.isAfter(entry.created), isTrue);
     final NoteContent content = await repository.loadNote(entry.id);
     expect(content.pages.first.strokes, hasLength(1));
-    expect(find.text('Untitled note'), findsOneWidget);
+    expect(find.text('Calculus notes'), findsOneWidget);
   });
 
   testWidgets('a new note is made from the template chosen for it', (
@@ -498,11 +505,20 @@ void main() {
     await _pumpLibrary(tester, _repository());
     expect(find.byTooltip('Import PDF'), findsNothing);
 
+    final Rect button = tester.getRect(find.byTooltip('New note'));
+
     await tester.tap(find.byTooltip('New note'));
     await tester.pumpAndSettle();
     expect(find.text('Blank note'), findsOneWidget);
     expect(find.text('Import PDF'), findsOneWidget);
-    expect(find.text('Import from Goodnotes'), findsOneWidget);
+    expect(find.text('Import editable PDF'), findsOneWidget);
+    final Finder menu = find
+        .ancestor(
+          of: find.widgetWithText(MenuItemButton, 'Blank note'),
+          matching: find.byType(Material),
+        )
+        .first;
+    expect(tester.getRect(menu).right, moreOrLessEquals(button.right));
   });
 
   group('dragging', () {
@@ -949,6 +965,7 @@ void main() {
     await _pumpLibrary(tester, repository);
     for (final Finder target in <Finder>[
       find.byType(TextField),
+      find.byTooltip('Plans & Credits'),
       find.byTooltip('Google Drive'),
       find.byTooltip('Sort'),
       find.byTooltip('Show as list'),

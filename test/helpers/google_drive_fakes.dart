@@ -155,7 +155,7 @@ class FakeGoogleDriveClient implements GoogleDriveClient {
     );
   }
 
-  /// The item at [path] below My Drive, as `Greatnote Backup/notes`, or
+  /// The item at [path] below My Drive, as `Etonia/notes`, or
   /// null.
   GoogleDriveItem? itemAt(String path) {
     String parent = rootId;

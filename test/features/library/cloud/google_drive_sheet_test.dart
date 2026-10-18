@@ -5,6 +5,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:greatnote/app/greatnote_app.dart';
 import 'package:greatnote/app/theme/app_icons.dart';
 import 'package:greatnote/features/editor/document_io/document_importer.dart';
+import 'package:greatnote/features/library/cloud/auto_backup_scheduler.dart';
 import 'package:greatnote/features/library/cloud/cloud_sync_state.dart';
 import 'package:greatnote/features/library/cloud/goodnotes_drive_replicator.dart';
 import 'package:greatnote/features/library/cloud/google_drive_backup_service.dart';
@@ -44,6 +45,18 @@ void main() {
     ValueChanged<String>? onOpenFolder,
   }) async {
     setViewportSize(tester, viewport.size);
+    final AutoBackupScheduler autoBackup = AutoBackupScheduler(
+      backup: GoogleDriveBackupService(
+        client: drive,
+        repository: repository,
+        state: state,
+        clock: () => _now,
+      ),
+      client: drive,
+      library: repository,
+      clock: () => _now,
+    );
+    addTearDown(autoBackup.dispose);
     await tester.pumpWidget(
       GreatnoteApp(
         themeMode: themeMode,
@@ -64,6 +77,7 @@ void main() {
                 importer: DocumentImporter(rasterizer: FakePdfRasterizer()),
                 state: state,
               ),
+              autoBackup: autoBackup,
               onOpenFolder: onOpenFolder,
               clock: () => _now,
             ),
@@ -211,7 +225,9 @@ void main() {
       ).backUp();
       await pumpSheet(tester);
 
-      await tester.tap(button('Restore from backup'));
+      await tester.tap(find.byTooltip('Backup options'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Restore from backup'));
       await tester.pumpAndSettle();
       expect(find.text('Restore from Google Drive?'), findsOneWidget);
       await tester.tap(find.text('Add to library'));
@@ -222,6 +238,26 @@ void main() {
         find.textContaining('Skipped 1 note already here'),
         findsOneWidget,
       );
+    });
+
+    testDrive('automatic backup separates on-off from frequency', (
+      WidgetTester tester,
+    ) async {
+      await drive.signIn();
+      await pumpSheet(tester);
+
+      expect(find.text('Automatic backup'), findsOneWidget);
+      expect(find.text('Frequency'), findsOneWidget);
+      expect(find.text('Every 15 minutes'), findsOneWidget);
+      expect(tester.widget<Switch>(find.byType(Switch)).value, isTrue);
+
+      await tester.tap(find.byType(Switch));
+      await tester.pumpAndSettle();
+
+      expect(tester.widget<Switch>(find.byType(Switch)).value, isFalse);
+      expect(find.text('Frequency'), findsNothing);
+      expect(find.text('Turn on scheduled cloud backups'), findsOneWidget);
+      expect((await state.read())['autoBackupMinutes'], 0);
     });
   });
 
@@ -236,7 +272,7 @@ void main() {
       expect(find.text(noGoodnotesFolderMessage), findsOneWidget);
     });
 
-    testDrive('replicates, summarizes, and shows the folder', (
+    testDrive('replicates and summarizes at the library root', (
       WidgetTester tester,
     ) async {
       await drive.signIn();
@@ -268,14 +304,13 @@ void main() {
       await tester.pumpAndSettle();
 
       expect(
-        find.text('Imported 1 file into GoodNotes. 1 not imported.'),
+        find.text('Imported 1 file into Library. 1 not imported.'),
         findsOneWidget,
       );
       expect(find.text('cover.jpg — Not a notebook or PDF'), findsOneWidget);
-      await tester.tap(button('Show folder'));
-      await tester.pumpAndSettle();
-      expect(opened, isNotNull);
-      expect((await repository.pathTo(opened)).single.name, 'GoodNotes');
+      expect(find.text('Show folder'), findsNothing);
+      expect(opened, isNull);
+      expect((await repository.list(null)).notes.single.title, 'Inbox');
     });
 
     testDrive('with several folders, asks which', (WidgetTester tester) async {
@@ -294,7 +329,7 @@ void main() {
       expect(find.text('My Drive/GoodNotes'), findsOneWidget);
       await tester.tap(find.text('My Drive/Old/Goodnotes'));
       await tester.pumpAndSettle();
-      expect(find.text('Imported 0 files into Goodnotes.'), findsOneWidget);
+      expect(find.text('Imported 0 files into Library.'), findsOneWidget);
     });
   });
 
@@ -314,8 +349,12 @@ void main() {
           expect(tester.takeException(), isNull);
 
           // With progress showing too, the tallest it gets.
+          await tester.ensureVisible(button('Back up library now'));
+          await tester.pumpAndSettle();
           await tester.tap(button('Back up library now'));
           await tester.pump();
+          await tester.pump();
+          await tester.drag(find.byType(ListView), const Offset(0, -600));
           await tester.pump();
           expect(find.byType(LinearProgressIndicator), findsOneWidget);
           expect(tester.takeException(), isNull);
@@ -340,11 +379,22 @@ void main() {
       for (final String label in <String>[
         'Disconnect',
         'Back up library now',
-        'Restore from backup',
         'Import Goodnotes folder from Drive',
       ]) {
         expect(tester.getSize(button(label)).height, greaterThanOrEqualTo(48));
       }
+      final Finder backupOptions = find.ancestor(
+        of: find.byTooltip('Backup options'),
+        matching: find.byType(IconButton),
+      );
+      expect(tester.getSize(backupOptions).height, greaterThanOrEqualTo(48));
+      await tester.tap(backupOptions);
+      await tester.pumpAndSettle();
+      final Finder restore = find.ancestor(
+        of: find.text('Restore from backup'),
+        matching: find.byType(MenuItemButton),
+      );
+      expect(tester.getSize(restore).height, greaterThanOrEqualTo(48));
       semantics.dispose();
     });
   });

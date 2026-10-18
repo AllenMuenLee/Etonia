@@ -4,6 +4,7 @@ import 'dart:ui';
 import 'package:flutter/foundation.dart';
 
 import '../editor/document_io/document_models.dart';
+import '../editor/handwriting/recognized_handwriting.dart';
 import '../editor/ink/ink_controller.dart';
 import '../editor/ink/ink_palette.dart';
 import '../editor/ink/ink_sample.dart';
@@ -17,7 +18,8 @@ import '../editor/sticky/sticky_note.dart';
 /// Schema 3 adds AI notation playbacks and the AI assistant's conversations.
 /// Schema 4 adds sticky notes per page, and highlighter strokes (a `style`
 /// and `opacity` on a stroke; without them a stroke is a pen stroke).
-const int storageSchema = 4;
+/// Schema 5 adds searchable handwriting and its reusable normalized strokes.
+const int storageSchema = 5;
 
 class StorageFormatException implements Exception {
   const StorageFormatException(this.message);
@@ -33,7 +35,7 @@ void checkSchema(Map<String, Object?> json) {
   }
   if (schema > storageSchema) {
     throw StorageFormatException(
-      'Written by a newer version of Greatnote (schema $schema).',
+      'Written by a newer version of Etonia (schema $schema).',
     );
   }
 }
@@ -92,6 +94,123 @@ class StoredPlayback {
   };
 }
 
+/// A recognized word as stored beside the page ink. [strokeIndices] keep the
+/// search entry attached to its source ink; [normalizedStrokes] are a compact
+/// vector copy used only when confidence is high enough for AI notation.
+@immutable
+class StoredRecognizedInkWord {
+  const StoredRecognizedInkWord({
+    required this.text,
+    required this.confidence,
+    required this.strokeIndices,
+    required this.normalizedStrokes,
+    required this.aspectRatio,
+    this.stickyId,
+  });
+
+  final String text;
+  final double? confidence;
+  final List<int> strokeIndices;
+  final List<List<InkVector>> normalizedStrokes;
+  final double aspectRatio;
+  final String? stickyId;
+
+  static StoredRecognizedInkWord? fromJson(
+    Object? raw,
+    List<Stroke> pageStrokes,
+    List<StickyNoteElement> stickyNotes,
+  ) {
+    if (raw is! Map<String, Object?>) return null;
+    final Object? text = raw['text'];
+    final Object? indices = raw['strokeIndices'];
+    final Object? ratio = raw['aspectRatio'];
+    final Object? rawConfidence = raw['confidence'];
+    final Object? rawStickyId = raw['stickyId'];
+    if (rawStickyId != null && rawStickyId is! String) return null;
+    final String? stickyId = rawStickyId as String?;
+    final StickyNoteElement? sticky = stickyId == null
+        ? null
+        : stickyNotes
+              .where((StickyNoteElement note) => note.id == stickyId)
+              .firstOrNull;
+    if (stickyId != null && sticky == null) return null;
+    final int strokeCount = sticky?.strokes.length ?? pageStrokes.length;
+    if (text is! String ||
+        text.trim().isEmpty ||
+        indices is! List ||
+        indices.isEmpty ||
+        ratio is! num ||
+        !ratio.isFinite ||
+        ratio <= 0) {
+      return null;
+    }
+    final List<int> parsedIndices = <int>[];
+    for (final Object? value in indices) {
+      if (value is! int || value < 0 || value >= strokeCount) return null;
+      parsedIndices.add(value);
+    }
+    double? confidence;
+    if (rawConfidence is num &&
+        rawConfidence.isFinite &&
+        rawConfidence >= 0 &&
+        rawConfidence <= 1) {
+      confidence = rawConfidence.toDouble();
+    }
+    final List<List<InkVector>> normalized = <List<InkVector>>[];
+    int points = 0;
+    final Object? rawStrokes = raw['normalizedStrokes'];
+    if (rawStrokes is List) {
+      for (final Object? rawStroke in rawStrokes) {
+        if (rawStroke is! List || rawStroke.length.isOdd) return null;
+        final List<InkVector> stroke = <InkVector>[];
+        for (int i = 0; i + 1 < rawStroke.length; i += 2) {
+          final Object? x = rawStroke[i];
+          final Object? y = rawStroke[i + 1];
+          if (x is! num || y is! num || !x.isFinite || !y.isFinite) {
+            return null;
+          }
+          final InkVector point = InkVector(x.toDouble(), y.toDouble());
+          if (point.x < 0 || point.x > 1 || point.y < 0 || point.y > 1) {
+            return null;
+          }
+          stroke.add(point);
+          points++;
+        }
+        if (stroke.isNotEmpty) normalized.add(stroke);
+      }
+    }
+    // Never trust an oversized or insufficiently confident stored sample.
+    if (confidence == null ||
+        confidence < reusableHandwritingConfidence ||
+        points > RecognizedInkWord.maxReusablePoints) {
+      normalized.clear();
+    }
+    return StoredRecognizedInkWord(
+      text: text.trim(),
+      confidence: confidence,
+      strokeIndices: List<int>.unmodifiable(parsedIndices),
+      normalizedStrokes: List<List<InkVector>>.unmodifiable(normalized),
+      aspectRatio: ratio.toDouble(),
+      stickyId: stickyId,
+    );
+  }
+
+  Map<String, Object?> toJson() => <String, Object?>{
+    'text': text,
+    if (confidence != null) 'confidence': confidence,
+    'strokeIndices': strokeIndices,
+    'aspectRatio': aspectRatio,
+    if (stickyId != null) 'stickyId': stickyId,
+    if (normalizedStrokes.isNotEmpty)
+      'normalizedStrokes': <Object?>[
+        for (final List<InkVector> stroke in normalizedStrokes)
+          <double>[
+            for (final InkVector point in stroke) ...<double>[point.x, point.y],
+          ],
+      ],
+  };
+}
+
 @immutable
 class StoredPage {
   const StoredPage({
@@ -103,6 +222,7 @@ class StoredPage {
     this.images = const <NoteImageElement>[],
     this.playbacks = const <StoredPlayback>[],
     this.stickyNotes = const <StickyNoteElement>[],
+    this.recognizedWords = const <StoredRecognizedInkWord>[],
   });
 
   factory StoredPage.fromJson(Map<String, Object?> json) {
@@ -125,9 +245,13 @@ class StoredPage {
           for (final Object? stroke in rawStrokes)
             ?_strokeFromJson(stroke! as Map<String, Object?>),
         ];
+    final List<StickyNoteElement> stickyNotes = _stickyNotesFromJson(
+      json['stickyNotes'],
+    );
     return StoredPage(
       setup: PageSetup(
-        size: _byName(PageSize.values, json['size'], PageSize.fit),
+        // Legacy `fit` pages become ordinary A4 paper.
+        size: _byName(PageSize.values, json['size'], PageSize.a4Portrait),
         background: _byName(
           PageBackground.values,
           json['background'],
@@ -153,7 +277,7 @@ class StoredPage {
           _imageFromJson(image! as Map<String, Object?>),
       ],
       strokes: strokes,
-      stickyNotes: _stickyNotesFromJson(json['stickyNotes']),
+      stickyNotes: stickyNotes,
       // Unusable strokes are left out, which moves the indices of those
       // after them; playbacks are only kept when none was.
       playbacks: strokes.length == rawStrokes.length
@@ -163,6 +287,13 @@ class StoredPage {
                 ?StoredPlayback.fromJson(playback),
             ]
           : const <StoredPlayback>[],
+      recognizedWords: strokes.length == rawStrokes.length
+          ? <StoredRecognizedInkWord>[
+              for (final Object? word
+                  in (json['recognizedWords'] as List?) ?? <Object?>[])
+                ?StoredRecognizedInkWord.fromJson(word, strokes, stickyNotes),
+            ]
+          : const <StoredRecognizedInkWord>[],
     );
   }
 
@@ -173,6 +304,7 @@ class StoredPage {
   final List<NoteImageElement> images;
   final List<Stroke> strokes;
   final List<StoredPlayback> playbacks;
+  final List<StoredRecognizedInkWord> recognizedWords;
 
   /// In paint order, each with its ink in its own coordinates.
   final List<StickyNoteElement> stickyNotes;
@@ -182,7 +314,6 @@ class StoredPage {
   /// a usable one is repaired: an unknown color or paper keeps its stored
   /// id or falls back to lined, a size outside the configured range is
   /// clamped, a taken id is replaced, and unusable strokes are left out.
-  /// Counts beyond the configured limits are not read.
   static List<StickyNoteElement> _stickyNotesFromJson(
     Object? json, [
     StickyNoteConfig config = const StickyNoteConfig(),
@@ -194,10 +325,6 @@ class StoredPage {
     final Set<String> ids = <String>{};
     int skipped = 0;
     for (final Object? raw in json) {
-      if (notes.length >= config.maxStickyNotesPerPage) {
-        skipped++;
-        continue;
-      }
       final StickyNoteElement? note = _stickyFromJson(raw, config);
       if (note == null) {
         skipped++;
@@ -263,13 +390,9 @@ class StoredPage {
     );
     final double factor = grow > 1 ? grow : shrink;
     final List<Stroke> strokes = <Stroke>[];
-    int points = 0;
     final Object? rawStrokes = json['strokes'];
     if (rawStrokes is List) {
       for (final Object? raw in rawStrokes) {
-        if (strokes.length >= config.maxStrokesPerNote) {
-          break;
-        }
         Stroke? stroke;
         try {
           stroke = strokeFromJson(raw);
@@ -278,10 +401,6 @@ class StoredPage {
         }
         if (stroke == null) {
           continue;
-        }
-        points += stroke.points.length;
-        if (points > config.maxPointsPerNote) {
-          break;
         }
         strokes.add(stroke);
       }
@@ -348,6 +467,11 @@ class StoredPage {
     'strokes': <Object?>[
       for (final Stroke stroke in strokes) strokeToJson(stroke),
     ],
+    if (recognizedWords.isNotEmpty)
+      'recognizedWords': <Object?>[
+        for (final StoredRecognizedInkWord word in recognizedWords)
+          word.toJson(),
+      ],
     if (stickyNotes.isNotEmpty)
       'stickyNotes': <Object?>[
         for (final StickyNoteElement note in stickyNotes) _stickyToJson(note),
@@ -504,6 +628,7 @@ class NoteContent {
           strokes: List<Stroke>.of(page.ink.strokes),
           stickyNotes: List<StickyNoteElement>.of(page.ink.stickyNotes),
           playbacks: _playbacksOf(page.ink),
+          recognizedWords: _recognizedWordsOf(page),
         ),
     ], aiSession: document.currentAiSession);
   }
@@ -558,6 +683,7 @@ class NoteContent {
             extent: page.extent,
             lastFitSize: page.lastFitSize,
             pdfSource: page.pdfSource,
+            recognizedWords: _restoreRecognizedWords(page),
           ),
       ],
     )..aiSession = aiSession;
@@ -579,6 +705,67 @@ class NoteContent {
           kept,
     ];
   }
+
+  static List<StoredRecognizedInkWord> _recognizedWordsOf(NotePage page) {
+    if (page.recognizedWords.isEmpty) {
+      return const <StoredRecognizedInkWord>[];
+    }
+    Map<Stroke, int>? indicesFor(RecognizedInkWord word) {
+      final List<Stroke> strokes;
+      if (word.stickyId == null) {
+        strokes = page.ink.strokes;
+      } else {
+        final StickyNoteElement? sticky = page.ink.stickyNotes
+            .where((StickyNoteElement note) => note.id == word.stickyId)
+            .firstOrNull;
+        if (sticky == null) return null;
+        strokes = sticky.strokes;
+      }
+      return Map<Stroke, int>.identity()..addEntries(<MapEntry<Stroke, int>>[
+        for (int i = 0; i < strokes.length; i++) MapEntry(strokes[i], i),
+      ]);
+    }
+
+    return <StoredRecognizedInkWord>[
+      for (final RecognizedInkWord word in page.recognizedWords)
+        if (indicesFor(word) case final Map<Stroke, int> indices)
+          if (word.sourceStrokes.every(indices.containsKey))
+            StoredRecognizedInkWord(
+              text: word.text,
+              confidence: word.confidence,
+              strokeIndices: <int>[
+                for (final Stroke stroke in word.sourceStrokes)
+                  indices[stroke]!,
+              ],
+              normalizedStrokes: word.normalizedStrokes,
+              aspectRatio: word.aspectRatio,
+              stickyId: word.stickyId,
+            ),
+    ];
+  }
+
+  static List<RecognizedInkWord> _restoreRecognizedWords(StoredPage page) =>
+      <RecognizedInkWord>[
+        for (final StoredRecognizedInkWord word in page.recognizedWords)
+          RecognizedInkWord(
+            text: word.text,
+            confidence: word.confidence,
+            sourceStrokes: <Stroke>[
+              for (final int index in word.strokeIndices)
+                (word.stickyId == null
+                    ? page.strokes
+                    : page.stickyNotes
+                          .firstWhere(
+                            (StickyNoteElement note) =>
+                                note.id == word.stickyId,
+                          )
+                          .strokes)[index],
+            ],
+            normalizedStrokes: word.normalizedStrokes,
+            aspectRatio: word.aspectRatio,
+            stickyId: word.stickyId,
+          ),
+      ];
 
   static StoredPlayback? _storedPlayback(
     NotationPlayback playback,
@@ -646,4 +833,11 @@ class NoteContent {
     'pages': <Object?>[for (final StoredPage page in pages) page.toJson()],
     'ai': ?aiSession,
   };
+
+  /// Text recognized from ink, used by the library index without loading
+  /// stroke geometry during every search.
+  String get searchableText => pages
+      .expand((StoredPage page) => page.recognizedWords)
+      .map((StoredRecognizedInkWord word) => word.text)
+      .join(' ');
 }

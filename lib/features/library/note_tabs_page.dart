@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 
 import '../../app/theme/app_tokens.dart';
+import '../../shared/widgets/ignore_keyboard.dart';
 import 'library_models.dart';
 import 'note_tab_strip.dart';
 import 'open_notes.dart';
@@ -268,7 +269,7 @@ class _TabPage extends StatelessWidget {
                   opacity: active ? 1 : 0,
                   duration: duration,
                   curve: AppMotion.standard,
-                  child: child,
+                  child: IgnoreKeyboard(ignoring: !active, child: child),
                 ),
               ),
             ),

@@ -37,8 +37,7 @@ class GoodnotesPdfRecoverer {
     // This parser is intentionally narrow. Large and unusual files continue
     // through the ordinary PDF import path instead of consuming duplicate
     // memory while probing.
-    if (bytes.lengthInBytes > math.min(config.maxImportPdfBytes, 32 << 20) ||
-        pageSizes.length > 50) {
+    if (bytes.lengthInBytes > 32 << 20 || pageSizes.length > 50) {
       return null;
     }
     final _GoodnotesProbe? probe;

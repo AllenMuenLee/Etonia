@@ -425,6 +425,36 @@ class ActiveStrokePainter extends CustomPainter {
   }
 }
 
+/// Selected strokes and sticky notes from another page, drawn through
+/// [transform] so cached stroke paths are reused without rebuilding.
+class CrossPageSelectionPart {
+  const CrossPageSelectionPart({
+    required this.transform,
+    this.strokes = const <Stroke>[],
+    this.stickies = const <StickyNoteElement>[],
+  });
+
+  final InkTransform transform;
+  final List<Stroke> strokes;
+  final List<StickyNoteElement> stickies;
+}
+
+/// Cross-page selection content and lasso outline mapped into a page's local
+/// coordinates.
+class CrossPageSelectionOverlay {
+  const CrossPageSelectionOverlay({
+    this.parts = const <CrossPageSelectionPart>[],
+    this.frame,
+    this.includesPdf = false,
+    this.lassoLine,
+  });
+
+  final List<CrossPageSelectionPart> parts;
+  final SelectionFrame? frame;
+  final bool includesPdf;
+  final List<Offset>? lassoLine;
+}
+
 /// Paints the selection outline while it is dragged, and the selection: its strokes, its
 /// frame, and its handles. During a move, scale, or rotation the strokes are
 /// drawn through the preview transform from their cached paths, so a pointer
@@ -435,7 +465,16 @@ class SelectionPainter extends CustomPainter {
     required this.brightness,
     required this.color,
     required this.handleColor,
-  }) : super(repaint: controller.selectionListenable);
+    this.crossPageListenable,
+    this.crossPageOverlay,
+  }) : super(
+         repaint: crossPageListenable == null
+             ? controller.selectionListenable
+             : Listenable.merge(<Listenable>[
+                 controller.selectionListenable,
+                 crossPageListenable,
+               ]),
+       );
 
   final InkController controller;
   final Brightness brightness;
@@ -446,11 +485,17 @@ class SelectionPainter extends CustomPainter {
   /// Fills the handles so that ink does not show through them.
   final Color handleColor;
 
+  /// Notifies when another page's selection or lasso changes.
+  final Listenable? crossPageListenable;
+
+  /// Supplies another page's selection or lasso in this page's coordinates.
+  final ValueGetter<CrossPageSelectionOverlay?>? crossPageOverlay;
+
   @override
   void paint(Canvas canvas, Size size) {
     final InkSelection? selection = controller.selection;
+    final SelectionTransformGesture? gesture = controller.activeTransform;
     if (selection != null) {
-      final SelectionTransformGesture? gesture = controller.activeTransform;
       canvas.save();
       if (gesture != null) {
         canvas.transform(_matrix(gesture.transform));
@@ -474,15 +519,44 @@ class SelectionPainter extends CustomPainter {
         );
       }
       canvas.restore();
+    }
+    final CrossPageSelectionOverlay? extra = crossPageOverlay?.call();
+    if (extra != null) {
+      for (final CrossPageSelectionPart part in extra.parts) {
+        canvas.save();
+        canvas.transform(_matrix(part.transform));
+        for (final StickyNoteElement note in part.stickies) {
+          paintStickyNote(canvas, note, config: controller.stickyConfig);
+        }
+        for (final Stroke stroke in part.strokes) {
+          _paintStroke(
+            canvas,
+            style: stroke.style,
+            path: stroke.path,
+            origin: stroke.points.first,
+            isDot: stroke.isDot,
+            brightness: brightness,
+            outline: stroke.outline,
+          );
+        }
+        canvas.restore();
+      }
+    }
+    final SelectionFrame? frame =
+        extra?.frame ??
+        (selection == null ? null : (gesture?.frame ?? selection.frame));
+    if (frame != null) {
       _paintFrame(
         canvas,
-        gesture?.frame ?? selection.frame,
-        handles: !selection.includesPdf,
+        frame,
+        handles: !(selection?.includesPdf ?? extra?.includesPdf ?? false),
       );
     }
     final LassoGesture? lasso = controller.activeLasso;
     if (lasso != null) {
       _paintLasso(canvas, lasso);
+    } else if (extra?.lassoLine != null) {
+      _paintLassoLine(canvas, extra!.lassoLine!);
     }
   }
 
@@ -521,7 +595,6 @@ class SelectionPainter extends CustomPainter {
   /// A dashed outline: the rectangle of a straight drag, or the loop drawn
   /// so far. The loop is left open; no edge is drawn back to its start.
   void _paintLasso(Canvas canvas, LassoGesture lasso) {
-    final SelectionConfig config = controller.selectionConfig;
     final List<Offset> line;
     switch (lasso.shape) {
       case LassoShape.rectangle:
@@ -536,6 +609,14 @@ class SelectionPainter extends CustomPainter {
           _offset(lasso.tip),
         ];
     }
+    _paintLassoLine(canvas, line);
+  }
+
+  void _paintLassoLine(Canvas canvas, List<Offset> line) {
+    if (line.length < 2) {
+      return;
+    }
+    final SelectionConfig config = controller.selectionConfig;
     final Paint paint = Paint()
       ..color = color
       ..style = PaintingStyle.stroke
@@ -608,6 +689,8 @@ class SelectionPainter extends CustomPainter {
     return oldDelegate.controller != controller ||
         oldDelegate.brightness != brightness ||
         oldDelegate.color != color ||
-        oldDelegate.handleColor != handleColor;
+        oldDelegate.handleColor != handleColor ||
+        oldDelegate.crossPageListenable != crossPageListenable ||
+        oldDelegate.crossPageOverlay != crossPageOverlay;
   }
 }

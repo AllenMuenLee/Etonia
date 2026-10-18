@@ -53,8 +53,8 @@ class PenConfig {
 /// sharp the ends of a stroke are, how much stylus pressure changes the
 /// width, and how much the line is stabilized, each off at 0; whether
 /// holding the pen still at the end of a stroke turns it into a shape, on
-/// by default; and whether the pen follows ink it is drawn close alongside,
-/// off by default.
+/// by default; whether scribbling over ink erases it, on by default; and
+/// whether the pen follows ink it is drawn close alongside, off by default.
 @immutable
 class PenSettings {
   const PenSettings({
@@ -67,6 +67,7 @@ class PenSettings {
     this.pressureSensitivity = defaultPressureSensitivity,
     this.stabilization = defaultStabilization,
     this.holdToShape = true,
+    this.scribbleToErase = true,
     this.followStroke = false,
   }) : assert(tipSharpness >= 0 && tipSharpness <= 1),
        assert(pressureSensitivity >= 0 && pressureSensitivity <= 1),
@@ -146,6 +147,10 @@ class PenSettings {
   /// a shape: only for the pen.
   bool get armsHoldToShape => holdToShape && !isHighlighter;
 
+  /// Whether scribbling over ink with the next stroke may erase that ink:
+  /// only for the pen.
+  bool get armsScribbleToErase => scribbleToErase && !isHighlighter;
+
   /// Whether the next stroke is drawn onto ink it passes close alongside:
   /// only for the pen.
   bool get followsStrokes => followStroke && !isHighlighter;
@@ -163,6 +168,10 @@ class PenSettings {
   /// Whether holding the pen still at the end of a stroke turns it into
   /// the shape it was meant to be.
   final bool holdToShape;
+
+  /// Whether a stroke scribbled back and forth over ink erases that ink,
+  /// and is not kept itself.
+  final bool scribbleToErase;
 
   /// Whether the pen is drawn onto a stroke it passes very close
   /// alongside, and eases away from it as it leaves.
@@ -219,6 +228,7 @@ class PenSettings {
     double? pressureSensitivity,
     double? stabilization,
     bool? holdToShape,
+    bool? scribbleToErase,
     bool? followStroke,
   }) {
     return PenSettings(
@@ -231,6 +241,7 @@ class PenSettings {
       pressureSensitivity: pressureSensitivity ?? this.pressureSensitivity,
       stabilization: stabilization ?? this.stabilization,
       holdToShape: holdToShape ?? this.holdToShape,
+      scribbleToErase: scribbleToErase ?? this.scribbleToErase,
       followStroke: followStroke ?? this.followStroke,
     );
   }
@@ -247,6 +258,7 @@ class PenSettings {
         other.pressureSensitivity == pressureSensitivity &&
         other.stabilization == stabilization &&
         other.holdToShape == holdToShape &&
+        other.scribbleToErase == scribbleToErase &&
         other.followStroke == followStroke;
   }
 
@@ -261,6 +273,7 @@ class PenSettings {
     pressureSensitivity,
     stabilization,
     holdToShape,
+    scribbleToErase,
     followStroke,
   );
 }

@@ -17,6 +17,10 @@ import '../../helpers/editor_harness.dart';
 import '../../helpers/pump_app.dart';
 
 const Duration _sampleInterval = Duration(milliseconds: 8);
+const PageSetup _shortPage = PageSetup(
+  size: PageSize.custom,
+  customSize: Size(1000, 500),
+);
 
 Future<NoteDocument> _pumpDocument(
   WidgetTester tester, {
@@ -86,14 +90,14 @@ void main() {
   group('PageGeometry', () {
     const Size viewport = Size(1000, 700);
 
-    test('a fit page is the writing area at scale 1', () {
+    test('the default page is A4 portrait', () {
       final PageGeometry geometry = PageGeometry.of(
         const PageSetup(),
         null,
         viewport,
       );
-      expect(geometry.pageSize, viewport);
-      expect(geometry.scale, 1);
+      expect(geometry.pageSize, PageSize.a4Portrait.fixedSize);
+      expect(geometry.displaySize.width, closeTo(viewport.width, 1e-9));
     });
 
     test('a fixed page is scaled to the width', () {
@@ -127,7 +131,7 @@ void main() {
     });
   });
 
-  testWidgets('the editor opens the canvas at 50% zoom', (
+  testWidgets('the editor opens A4 at its minimum zoom', (
     WidgetTester tester,
   ) async {
     await _pumpDocument(tester);
@@ -135,8 +139,7 @@ void main() {
     final PageViewportState viewport = tester.state<PageViewportState>(
       find.byType(PageViewport),
     );
-    expect(viewport.zoom, 0.5);
-    expect(_scale(tester), 0.5);
+    expect(viewport.zoom, 0.7);
   });
 
   group('grownPageExtent', () {
@@ -329,8 +332,13 @@ void main() {
       kind: PointerDeviceKind.touch,
     );
 
-    await first.moveBy(const Offset(0, -150), timeStamp: _sampleInterval);
-    await second.moveBy(const Offset(0, -150), timeStamp: _sampleInterval * 2);
+    // Both fingers together, so their spread, and the zoom, stay as they
+    // are.
+    const Duration step = Duration(milliseconds: 4);
+    for (int i = 1; i <= 15; i++) {
+      await first.moveBy(const Offset(0, -10), timeStamp: step * (2 * i - 1));
+      await second.moveBy(const Offset(0, -10), timeStamp: step * (2 * i));
+    }
     await tester.pump();
     final PageViewportState viewport = tester.state<PageViewportState>(
       find.byType(PageViewport),
@@ -338,8 +346,8 @@ void main() {
     final double releasedAt = viewport.scrollOffset.dy;
     expect(releasedAt, greaterThan(0));
 
-    await first.up(timeStamp: _sampleInterval * 3);
-    await second.up(timeStamp: _sampleInterval * 3);
+    await first.up(timeStamp: step * 31);
+    await second.up(timeStamp: step * 31);
     await tester.pump(const Duration(milliseconds: 16));
     await tester.pump(const Duration(milliseconds: 120));
 
@@ -361,38 +369,30 @@ void main() {
     );
     expect(panel.width, lessThanOrEqualTo(PagePanel.width));
     expect(find.byKey(const ValueKey<String>('page-preview')), findsOneWidget);
-    final Size fitPreview = tester.getSize(
+    final Size portraitPreview = tester.getSize(
       find.byKey(const ValueKey<String>('page-preview')),
     );
 
-    await _choose(tester, 'page-size-dropdown', 'A4 portrait');
-    expect(document.current.setup.size, PageSize.a4Portrait);
+    await _choose(tester, 'page-size-dropdown', 'A4 landscape');
+    expect(document.current.setup.size, PageSize.a4Landscape);
     // The preview takes the new page's shape.
     final Size a4Preview = tester.getSize(
       find.byKey(const ValueKey<String>('page-preview')),
     );
-    expect(a4Preview.height / a4Preview.width, closeTo(1123 / 794, 0.02));
-    expect(a4Preview, isNot(fitPreview));
+    expect(a4Preview.height / a4Preview.width, closeTo(794 / 1123, 0.02));
+    expect(a4Preview, isNot(portraitPreview));
 
     await _choose(tester, 'page-background-dropdown', 'Lined');
     await _closePanel(tester);
     expect(find.byType(PagePanel), findsNothing);
 
-    expect(document.current.setup.size, PageSize.a4Portrait);
+    expect(document.current.setup.size, PageSize.a4Landscape);
     expect(document.current.setup.background, PageBackground.lined);
     expect(
       find.byKey(const ValueKey<String>('page-background')),
       findsOneWidget,
     );
-    expect(tester.getSize(find.byType(InkCanvas)), const Size(794, 1123));
-    // Scaled to the area's width, taller than the area, so it scrolls.
-    final Rect viewport = tester.getRect(find.byType(PageViewport));
-    expect(canvasRect(tester).width, closeTo(viewport.width, 0.01));
-    expect(canvasRect(tester).height, greaterThan(viewport.height));
-    expect(
-      find.byKey(const ValueKey<String>('page-scroll-indicators')),
-      findsOneWidget,
-    );
+    expect(tester.getSize(find.byType(InkCanvas)), const Size(1123, 794));
   });
 
   testWidgets('pointer positions map to page coordinates when scaled and '
@@ -469,28 +469,11 @@ void main() {
     expect(document.current.ink.strokes, isEmpty);
   });
 
-  testWidgets('on a page that cannot scroll, a second finger is ignored', (
-    WidgetTester tester,
-  ) async {
-    final NoteDocument document = await _pumpDocument(tester);
-    final Offset origin = canvasRect(tester).topLeft + const Offset(100, 100);
-    final TestGesture a = await tester.createGesture(
-      kind: PointerDeviceKind.touch,
-    );
-    await a.down(origin);
-    final TestGesture b = await tester.createGesture(
-      kind: PointerDeviceKind.touch,
-    );
-    await b.down(origin + const Offset(0, 100));
-    await a.moveBy(const Offset(100, 0), timeStamp: _sampleInterval);
-    await a.up(timeStamp: _sampleInterval * 2);
-    await b.up();
-    await tester.pump();
-    expect(document.current.ink.strokes, hasLength(1));
-  });
-
   testWidgets('a mouse wheel scrolls a tall page', (WidgetTester tester) async {
-    await _pumpDocument(tester, setup: const PageSetup(size: PageSize.square));
+    await _pumpDocument(
+      tester,
+      setup: const PageSetup(size: PageSize.a4Portrait),
+    );
     final double top = canvasRect(tester).top;
     final TestPointer mouse = TestPointer(1, PointerDeviceKind.mouse);
     final Offset middle = tester.getCenter(find.byType(PageViewport));
@@ -508,10 +491,12 @@ void main() {
       setup: const PageSetup(size: PageSize.infinite),
     );
     final Rect start = canvasRect(tester);
+    // The page's own size, before the zoom.
+    final Size page = start.size / _scale(tester);
     await _drawLine(
       tester,
-      start.topLeft + const Offset(100, 100),
-      start.topLeft + const Offset(400, 100),
+      pageToGlobal(tester, const Offset(100, 100)),
+      pageToGlobal(tester, const Offset(400, 100)),
     );
     expect(canvasRect(tester).size, start.size);
     expect(document.current.extent, isNull);
@@ -519,13 +504,16 @@ void main() {
     final InkVector before = document.current.ink.strokes.single.points.first;
     await _drawLine(
       tester,
-      start.topLeft + Offset(start.width - 300, 300),
-      start.topLeft + Offset(start.width - 20, 300),
+      pageToGlobal(tester, Offset(page.width - 300, 300)),
+      pageToGlobal(tester, Offset(page.width - 20, 300)),
     );
     await tester.pump();
-    expect(document.current.extent!.width, greaterThan(start.width));
-    expect(document.current.extent!.height, start.height);
-    expect(canvasRect(tester).width, document.current.extent!.width);
+    expect(document.current.extent!.width, greaterThan(page.width));
+    expect(document.current.extent!.height, closeTo(page.height, 1e-6));
+    expect(
+      canvasRect(tester).width / _scale(tester),
+      closeTo(document.current.extent!.width, 1e-6),
+    );
     // Nothing already drawn moved.
     expect(document.current.ink.strokes.first.points.first, before);
   });
@@ -599,7 +587,10 @@ void main() {
   testWidgets('scrolling past the middle makes the next page current', (
     WidgetTester tester,
   ) async {
-    final NoteDocument document = await _pumpDocument(tester);
+    final NoteDocument document = await _pumpDocument(
+      tester,
+      setup: _shortPage,
+    );
     document.addPage();
     document.goTo(0);
     await tester.pumpAndSettle();
@@ -663,6 +654,220 @@ void main() {
     expect(document.currentIndex, 1);
     expect(document.pages[1].ink.strokes, hasLength(1));
     expect(document.pages[0].ink.strokes, hasLength(1));
+  });
+
+  testWidgets('a selection dragged onto another page moves there', (
+    WidgetTester tester,
+  ) async {
+    final NoteDocument document = await _pumpDocument(
+      tester,
+      setup: const PageSetup(size: PageSize.square),
+    );
+    document.addPage();
+    document.goTo(0);
+    await tester.pumpAndSettle();
+    // Scroll so the seam between the pages is in the middle of the area.
+    final Rect area = tester.getRect(find.byType(PageViewport));
+    final TestPointer mouse = TestPointer(1, PointerDeviceKind.mouse);
+    await tester.sendEventToBinding(mouse.hover(area.center));
+    await tester.sendEventToBinding(
+      mouse.scroll(
+        Offset(0, tester.getRect(find.byType(InkCanvas).first).height / 2),
+      ),
+    );
+    await tester.pumpAndSettle();
+    final Rect first = tester.getRect(find.byType(InkCanvas).first);
+    final Rect second = tester.getRect(find.byType(InkCanvas).last);
+    expect(first.bottom, lessThan(area.bottom));
+    expect(second.top, greaterThan(area.top));
+
+    final Offset ink = Offset(first.left + 300, first.bottom - 60);
+    await _drawLine(tester, ink, ink + const Offset(200, 0));
+    await tester.tap(find.byTooltip('Select'));
+    await tester.pumpAndSettle();
+    await _drawLine(
+      tester,
+      ink + const Offset(-50, -40),
+      ink + const Offset(250, 40),
+    );
+    expect(document.pages[0].ink.selection, isNotNull);
+
+    // Grab the stroke and drag it down across the seam.
+    final Offset grab = ink + const Offset(100, 0);
+    final Offset drop = Offset(grab.dx, second.top + 100);
+    final TestGesture gesture = await tester.startGesture(
+      grab,
+      kind: PointerDeviceKind.stylus,
+    );
+    for (int i = 1; i <= 10; i++) {
+      await gesture.moveTo(Offset.lerp(grab, drop, i / 10)!);
+      await tester.pump();
+    }
+    await gesture.up();
+    await tester.pumpAndSettle();
+
+    expect(document.pages[0].ink.strokes, isEmpty);
+    final InkController target = document.pages[1].ink;
+    expect(target.strokes, hasLength(1));
+    expect(target.selection?.count, 1);
+    expect(document.currentIndex, 1);
+    // It is where it was let go, and the view did not move.
+    expect(tester.getRect(find.byType(InkCanvas).last), second);
+    final double scale =
+        second.width / tester.getSize(find.byType(InkCanvas).last).width;
+    final Stroke moved = target.strokes.single;
+    expect(moved.bounds.center.dy, closeTo(100 / scale, 4));
+
+    // Each page takes back its own part in one step.
+    expect(target.undo(), isTrue);
+    expect(target.strokes, isEmpty);
+    expect(target.canUndo, isFalse);
+    expect(document.pages[0].ink.undo(), isTrue);
+    expect(document.pages[0].ink.strokes, hasLength(1));
+  });
+
+  testWidgets('a lasso dragged across pages selects strokes on both pages '
+      'and moves them together', (WidgetTester tester) async {
+    final NoteDocument document = await _pumpDocument(
+      tester,
+      setup: const PageSetup(size: PageSize.square),
+    );
+    document.addPage();
+    document.goTo(0);
+    await tester.pumpAndSettle();
+
+    final Rect area = tester.getRect(find.byType(PageViewport));
+    final TestPointer mouse = TestPointer(1, PointerDeviceKind.mouse);
+    await tester.sendEventToBinding(mouse.hover(area.center));
+    await tester.sendEventToBinding(
+      mouse.scroll(
+        Offset(0, tester.getRect(find.byType(InkCanvas).first).height / 2),
+      ),
+    );
+    await tester.pumpAndSettle();
+    final Rect first = tester.getRect(find.byType(InkCanvas).first);
+    final Rect second = tester.getRect(find.byType(InkCanvas).last);
+
+    final Offset upperInk = Offset(first.left + 300, first.bottom - 50);
+    final Offset lowerInk = Offset(second.left + 300, second.top + 50);
+    await _drawLine(tester, upperInk, upperInk + const Offset(160, 0));
+    await _drawLine(tester, lowerInk, lowerInk + const Offset(160, 0));
+    expect(document.pages[0].ink.strokes, hasLength(1));
+    expect(document.pages[1].ink.strokes, hasLength(1));
+
+    await tester.tap(find.byTooltip('Select'));
+    await tester.pumpAndSettle();
+
+    // Drag a rectangle lasso starting on the first page and ending on the second.
+    await _drawLine(
+      tester,
+      upperInk + const Offset(-40, -40),
+      lowerInk + const Offset(200, 40),
+    );
+    await tester.pump();
+
+    expect(document.pages[0].ink.selection?.count, 1);
+    expect(document.pages[1].ink.selection?.count, 1);
+
+    // Drag the combined selection sideways: both strokes move together,
+    // staying on their respective pages with half above and half below.
+    final Offset grab = upperInk + const Offset(80, 0);
+    final double beforeX0 =
+        document.pages[0].ink.strokes.single.bounds.center.dx;
+    final double beforeX1 =
+        document.pages[1].ink.strokes.single.bounds.center.dx;
+    await _drawLine(tester, grab, grab + const Offset(100, 0));
+    await tester.pump();
+
+    expect(document.pages[0].ink.strokes, hasLength(1));
+    expect(document.pages[1].ink.strokes, hasLength(1));
+    expect(document.pages[0].ink.selection?.count, 1);
+    expect(document.pages[1].ink.selection?.count, 1);
+    expect(
+      document.pages[0].ink.strokes.single.bounds.center.dx,
+      greaterThan(beforeX0 + 50),
+    );
+    expect(
+      document.pages[1].ink.strokes.single.bounds.center.dx,
+      greaterThan(beforeX1 + 50),
+    );
+  });
+
+  testWidgets('a selection released half on the previous page and half below '
+      'stays on both pages without jumping and moves as one unit', (
+    WidgetTester tester,
+  ) async {
+    final NoteDocument document = await _pumpDocument(
+      tester,
+      setup: const PageSetup(size: PageSize.square),
+    );
+    document.addPage();
+    document.goTo(0);
+    await tester.pumpAndSettle();
+
+    final Rect area = tester.getRect(find.byType(PageViewport));
+    final TestPointer mouse = TestPointer(1, PointerDeviceKind.mouse);
+    await tester.sendEventToBinding(mouse.hover(area.center));
+    await tester.sendEventToBinding(
+      mouse.scroll(
+        Offset(0, tester.getRect(find.byType(InkCanvas).first).height / 2),
+      ),
+    );
+    await tester.pumpAndSettle();
+    final Rect first = tester.getRect(find.byType(InkCanvas).first);
+    final Rect second = tester.getRect(find.byType(InkCanvas).last);
+
+    // Draw a tall vertical stroke on the first page above the seam.
+    final Offset strokeTop = Offset(first.left + 350, first.bottom - 140);
+    final Offset strokeBottom = Offset(first.left + 350, first.bottom - 20);
+    await _drawLine(tester, strokeTop, strokeBottom);
+    expect(document.pages[0].ink.strokes, hasLength(1));
+
+    await tester.tap(find.byTooltip('Select'));
+    await tester.pumpAndSettle();
+    await _drawLine(
+      tester,
+      strokeTop + const Offset(-40, -20),
+      strokeBottom + const Offset(40, 20),
+    );
+    expect(document.pages[0].ink.selection?.count, 1);
+
+    // Drag the stroke down by 80px so its top half remains on page 0
+    // (first.bottom - 60) and its bottom half is on page 1 (second.top + 44).
+    final Offset grab = Offset(first.left + 350, first.bottom - 80);
+    final Offset straddleDrop = grab + const Offset(0, 80);
+    final TestGesture drag = await tester.startGesture(
+      grab,
+      kind: PointerDeviceKind.stylus,
+    );
+    for (int i = 1; i <= 8; i++) {
+      await drag.moveTo(Offset.lerp(grab, straddleDrop, i / 8)!);
+      await tester.pump();
+      // The viewport never jumps during cross-page dragging.
+      expect(tester.getRect(find.byType(InkCanvas).first), first);
+      expect(tester.getRect(find.byType(InkCanvas).last), second);
+    }
+    await drag.up();
+    await tester.pumpAndSettle();
+
+    // Both pages hold the straddling stroke and keep it selected together.
+    expect(document.pages[0].ink.strokes, hasLength(1));
+    expect(document.pages[1].ink.strokes, hasLength(1));
+    expect(document.pages[0].ink.selection?.count, 1);
+    expect(document.pages[1].ink.selection?.count, 1);
+
+    // Grabbing the bottom half on page 1 and dragging the straddling selection
+    // further down completely onto page 1 moves both linked copies as one unit
+    // and removes the page 0 copy once it no longer overlaps page 0.
+    final Offset grabOnSecond = Offset(second.left + 350, second.top + 20);
+    final Offset fullDrop = grabOnSecond + const Offset(0, 120);
+    await _drawLine(tester, grabOnSecond, fullDrop);
+    await tester.pumpAndSettle();
+
+    expect(document.pages[0].ink.strokes, isEmpty);
+    expect(document.pages[0].ink.selection, isNull);
+    expect(document.pages[1].ink.strokes, hasLength(1));
+    expect(document.pages[1].ink.selection?.count, 1);
   });
 
   testWidgets('a pointer on one page keeps others from writing elsewhere', (
@@ -767,7 +972,10 @@ void main() {
   testWidgets('with only stylus writing, two fingers pinch to zoom', (
     WidgetTester tester,
   ) async {
-    final NoteDocument document = await _pumpDocument(tester);
+    final NoteDocument document = await _pumpDocument(
+      tester,
+      setup: _shortPage,
+    );
     await onlyStylusWrites(tester);
     final double width = canvasRect(tester).width;
     final Offset middle = tester.getCenter(find.byType(PageViewport));
@@ -837,7 +1045,10 @@ void _pullTests() {
   testWidgets('pulled up past the last page, a page is added after it', (
     WidgetTester tester,
   ) async {
-    final NoteDocument document = await _pumpDocument(tester);
+    final NoteDocument document = await _pumpDocument(
+      tester,
+      setup: _shortPage,
+    );
     final Offset middle = tester.getCenter(find.byType(PageViewport));
     await _pullUp(tester, middle, 200);
 
@@ -852,7 +1063,10 @@ void _pullTests() {
   });
 
   testWidgets('a short pull adds nothing', (WidgetTester tester) async {
-    final NoteDocument document = await _pumpDocument(tester);
+    final NoteDocument document = await _pumpDocument(
+      tester,
+      setup: _shortPage,
+    );
     final Offset middle = tester.getCenter(find.byType(PageViewport));
     await _pullUp(tester, middle, 60);
 
@@ -882,7 +1096,10 @@ void _appendTests() {
   testWidgets('writing low on the last page adds one below, staying put', (
     WidgetTester tester,
   ) async {
-    final NoteDocument document = await _pumpDocument(tester);
+    final NoteDocument document = await _pumpDocument(
+      tester,
+      setup: _shortPage,
+    );
     final Rect before = firstPage(tester);
     final double y = before.top + before.height * 0.85;
     await _drawLine(
@@ -911,7 +1128,10 @@ void _appendTests() {
   testWidgets('writing above three quarters adds nothing', (
     WidgetTester tester,
   ) async {
-    final NoteDocument document = await _pumpDocument(tester);
+    final NoteDocument document = await _pumpDocument(
+      tester,
+      setup: _shortPage,
+    );
     final Rect page = firstPage(tester);
     final double y = page.top + page.height * 0.6;
     await _drawLine(

@@ -6,6 +6,7 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 
 import '../../app/theme/app_tokens.dart';
+import '../../app/theme/app_icons.dart';
 import '../../shared/feedback/app_haptics.dart';
 import '../../shared/layout/breakpoints.dart';
 import '../library/note_content.dart';
@@ -16,11 +17,16 @@ import 'ai/ai_client.dart';
 import 'ai/ai_config.dart';
 import 'ai/ai_notation.dart';
 import 'ai/canvas_text_recognizer.dart';
-import 'ai/gemini_ai_client.dart';
+import 'ai/handwriting_prediction.dart';
+import 'ai/flying_words.dart';
+import 'ai/backend_ai_client.dart';
 import 'ai/ink_attachment.dart';
 import 'ai/note_image_renderer.dart';
 import 'ai/notation_layout.dart';
+import 'ai/notation_space.dart';
 import 'ai/selection_image_renderer.dart';
+import 'handwriting/handwriting_indexer.dart';
+import 'handwriting/recognized_handwriting.dart';
 import 'ink/eraser_settings.dart';
 import 'ink/ink_canvas.dart';
 import 'ink/ink_controller.dart';
@@ -58,6 +64,8 @@ import 'widgets/page_controls.dart';
 import 'widgets/selection_action_bar.dart';
 import 'widgets/tool_palette.dart';
 import 'widgets/writing_surface_frame.dart';
+import '../payment/payment_page.dart';
+import '../payment/subscription_controller.dart';
 
 /// The editor shell: app bar, page, floating tool palette, and the AI
 /// assistant panel.
@@ -104,7 +112,13 @@ class EditorScreen extends StatefulWidget {
     this.textRecognizer = const PlatformCanvasTextRecognizer(),
     this.handwritingRenderer = const HandwritingImageRenderer(),
     this.initialAiActive = false,
+    this.subscription,
   });
+
+  /// The user's plan and AI credits: which models the assistant may use,
+  /// and what each answer costs. Without one, nothing is metered and the
+  /// panel offers no plans.
+  final SubscriptionController? subscription;
 
   /// How writing on the page in AI mode is told apart and read.
   final AiCanvasConfig aiCanvasConfig;
@@ -148,7 +162,8 @@ class EditorScreen extends StatefulWidget {
 
   /// Answers the assistant's requests. Supplied by tests, and by a build
   /// that talks to its own backend; otherwise the screen makes a
-  /// [GeminiAiClient] from [aiApiConfig] and closes it when it goes.
+  /// [BackendAiClient], serving every model through the backend, and
+  /// closes it when it goes.
   final AiClient? aiClient;
 
   /// Used by the client the screen makes. Ignored with an [aiClient].
@@ -248,6 +263,21 @@ class EditorScreenState extends State<EditorScreen> {
   /// read then never reaches the chat.
   int _aiGeneration = 0;
 
+  /// Each batch sees the preceding words after they land in the draft.
+  Future<void> _handwritingQueue = Future<void>.value();
+
+  /// Ordinary pen ink waiting for on-device recognition. This is separate
+  /// from AI-mode handwriting, which remains transient chat input.
+  final List<(Stroke, String?)> _indexingPending = <(Stroke, String?)>[];
+  final Set<Stroke> _knownPageStrokes = Set<Stroke>.identity();
+  Timer? _indexingTimer;
+  int _indexingGeneration = 0;
+
+  HandwritingIndexer get _handwritingIndexer => HandwritingIndexer(
+    recognizer: widget.textRecognizer,
+    renderer: widget.handwritingRenderer,
+  );
+
   ValueNotifier<PenSettings> get _penSettings =>
       widget.penSettings ??
       (_ownedPenSettings ??= ValueNotifier<PenSettings>(
@@ -329,6 +359,9 @@ class EditorScreenState extends State<EditorScreen> {
       widget.stylusOnly ??
       (_ownedStylusOnly ??= ValueNotifier<bool>(InputDefaults.stylusOnly));
 
+  /// Lets a selection be moved from one page onto another.
+  final SelectionCarry _selectionCarry = SelectionCarry();
+
   /// Where on the page Paste is being offered after a hold, if anywhere.
   final ValueNotifier<Offset?> _pastePrompt = ValueNotifier<Offset?>(null);
 
@@ -347,10 +380,9 @@ class EditorScreenState extends State<EditorScreen> {
 
   AiClient? _ownedAiClient;
   late final AiAssistantController _ai = AiAssistantController(
-    client:
-        widget.aiClient ??
-        (_ownedAiClient = GeminiAiClient(config: widget.aiApiConfig)),
+    client: widget.aiClient ?? (_ownedAiClient = BackendAiClient()),
     renderer: widget.selectionImageRenderer,
+    usageGate: widget.subscription,
     captureNote: _captureNote,
     applyNotation: _applyNotation,
     notationEnabled: widget.initialNotationEnabled,
@@ -362,6 +394,11 @@ class EditorScreenState extends State<EditorScreen> {
   /// Keeps the panel's state, its text field and scroll position included,
   /// when it moves between sides and between the two layouts.
   final GlobalKey _aiPanelKey = GlobalKey(debugLabel: 'AI assistant panel');
+  final GlobalKey _aiComposerKey = GlobalKey(debugLabel: 'AI composer');
+
+  /// Handwritten words still flying into the composer.
+  final Map<OverlayEntry, Completer<void>> _flights =
+      <OverlayEntry, Completer<void>>{};
   PdfPageRenderCache? _pdfCache;
   PageImageCache? _imageCache;
   bool _reportedPageShown = false;
@@ -436,8 +473,32 @@ class EditorScreenState extends State<EditorScreen> {
     ink.activeStrokeListenable.addListener(_onActiveInkChanged);
     ink.completedStrokesListenable.addListener(_growToInk);
     ink.completedStrokesListenable.addListener(_appendPageNearEnd);
+    ink.completedStrokesListenable.addListener(_onInkForRecognition);
     ink.addStrokeReplacementListener(_ai.followReplacedStrokes);
+    ink.addStrokeReplacementListener(_followRecognizedStrokes);
+    final List<(Stroke, String?)> locations = _strokeLocations(ink);
+    _knownPageStrokes
+      ..clear()
+      ..addAll(locations.map(((Stroke, String?) value) => value.$1));
     _listenedInk = ink;
+    // Notes saved before schema 5 have no text index. Backfill their pen ink
+    // lazily when a real platform recognizer is available.
+    final NotePage? page = _pageFor(ink);
+    if (page != null &&
+        widget.textRecognizer is PlatformCanvasTextRecognizer &&
+        page.recognizedWords.isEmpty) {
+      _indexingPending.addAll(<(Stroke, String?)>[
+        for (final (Stroke stroke, String? stickyId) in locations)
+          if (!stroke.style.isHighlighter) (stroke, stickyId),
+      ]);
+      if (_indexingPending.isNotEmpty) {
+        _indexingTimer?.cancel();
+        _indexingTimer = Timer(
+          widget.aiCanvasConfig.recognitionDelay,
+          () => _flushHandwritingRecognition(page),
+        );
+      }
+    }
   }
 
   void _detachInk(InkController ink) {
@@ -445,7 +506,102 @@ class EditorScreenState extends State<EditorScreen> {
     ink.activeStrokeListenable.removeListener(_onActiveInkChanged);
     ink.completedStrokesListenable.removeListener(_growToInk);
     ink.completedStrokesListenable.removeListener(_appendPageNearEnd);
+    ink.completedStrokesListenable.removeListener(_onInkForRecognition);
     ink.removeStrokeReplacementListener(_ai.followReplacedStrokes);
+    ink.removeStrokeReplacementListener(_followRecognizedStrokes);
+  }
+
+  NotePage? _pageFor(InkController ink) {
+    for (final NotePage page in _document.pages) {
+      if (identical(page.ink, ink)) return page;
+    }
+    return null;
+  }
+
+  List<(Stroke, String?)> _strokeLocations(InkController ink) =>
+      <(Stroke, String?)>[
+        for (final Stroke stroke in ink.strokes) (stroke, null),
+        for (final StickyNoteElement note in ink.stickyNotes)
+          for (final Stroke stroke in note.strokes) (stroke, note.id),
+      ];
+
+  void _followRecognizedStrokes(Map<Stroke, Stroke> replacements) {
+    final NotePage? page = _pageFor(_inkController);
+    if (page != null) {
+      _document.reconcileRecognizedWords(page, replacements: replacements);
+    }
+  }
+
+  void _onInkForRecognition() {
+    final InkController ink = _inkController;
+    final NotePage? page = _pageFor(ink);
+    if (page == null) return;
+    _document.reconcileRecognizedWords(page);
+    final List<(Stroke, String?)> locations = _strokeLocations(ink);
+    final List<(Stroke, String?)> additions = <(Stroke, String?)>[
+      for (final (Stroke stroke, String? stickyId) in locations)
+        if (!_knownPageStrokes.contains(stroke) &&
+            stroke.source == StrokeSource.input &&
+            !stroke.style.isHighlighter)
+          (stroke, stickyId),
+    ];
+    _knownPageStrokes
+      ..clear()
+      ..addAll(locations.map(((Stroke, String?) value) => value.$1));
+    if (additions.isEmpty) return;
+    _indexingPending.addAll(additions);
+    _indexingTimer?.cancel();
+    _indexingTimer = Timer(
+      widget.aiCanvasConfig.recognitionDelay,
+      () => _flushHandwritingRecognition(page),
+    );
+  }
+
+  void _flushHandwritingRecognition(NotePage page) {
+    _indexingTimer?.cancel();
+    _indexingTimer = null;
+    if (_indexingPending.isEmpty) return;
+    final List<(Stroke, String?)> locations = _strokeLocations(page.ink);
+    final Set<Stroke> present = Set<Stroke>.identity()
+      ..addAll(locations.map(((Stroke, String?) value) => value.$1));
+    final List<(Stroke, String?)> pending = <(Stroke, String?)>[
+      for (final (Stroke stroke, String? stickyId) in _indexingPending)
+        if (present.contains(stroke)) (stroke, stickyId),
+    ];
+    _indexingPending.clear();
+    if (pending.isEmpty) return;
+    final int generation = _indexingGeneration;
+    final String prior = _document.recognizedWords
+        .map((RecognizedInkWord word) => word.text)
+        .join(' ');
+    unawaited(() async {
+      final List<RecognizedInkWord> words = <RecognizedInkWord>[];
+      for (final String? stickyId
+          in pending.map(((Stroke, String?) value) => value.$2).toSet()) {
+        words.addAll(
+          await _handwritingIndexer.recognize(
+            <Stroke>[
+              for (final (Stroke stroke, String? source) in pending)
+                if (source == stickyId) stroke,
+            ],
+            context: HandwritingContext(draft: prior),
+            stickyId: stickyId,
+          ),
+        );
+      }
+      if (!mounted || generation != _indexingGeneration) return;
+      for (final RecognizedInkWord word in words) {
+        final Set<Stroke> stillPresent = Set<Stroke>.identity()
+          ..addAll(
+            _strokeLocations(page.ink)
+                .where(((Stroke, String?) value) => value.$2 == word.stickyId)
+                .map(((Stroke, String?) value) => value.$1),
+          );
+        if (word.sourceStrokes.every(stillPresent.contains)) {
+          _document.addRecognizedWord(page, word);
+        }
+      }
+    }());
   }
 
   /// A page was added, removed, or shown, or its setup changed. Leaving a
@@ -456,13 +612,18 @@ class EditorScreenState extends State<EditorScreen> {
     final InkController? previous = _listenedInk;
     if (!identical(next, previous)) {
       if (previous != null) {
+        final NotePage? previousPage = _pageFor(previous);
+        if (previousPage != null) _flushHandwritingRecognition(previousPage);
         _detachInk(previous);
         final bool stillThere = _document.pages.any(
           (NotePage page) => identical(page.ink, previous),
         );
         if (stillThere) {
-          previous.finalizeActiveGesture();
-          previous.clearSelection();
+          if (!_selectionCarry.sharesSelection(previous, next)) {
+            _selectionCarry.clearSelection(except: next);
+            previous.finalizeActiveGesture();
+            previous.clearSelection();
+          }
           previous.exitStickyEditing();
         }
         next.takeClipboardFrom(previous);
@@ -532,6 +693,7 @@ class EditorScreenState extends State<EditorScreen> {
     _scrolling = true;
     for (final int pointer in pointers) {
       _aiInput.cancel(pointer);
+      _selectionCarry.cancelPointer(pointer);
     }
     for (final NotePage page in _document.pages) {
       for (final int pointer in pointers) {
@@ -554,8 +716,14 @@ class EditorScreenState extends State<EditorScreen> {
   /// its gesture would be cut short.
   void _showPage(int index) {
     final List<NotePage> pages = _document.pages;
+    if (index < 0 || index >= pages.length) {
+      return;
+    }
+    final InkController target = pages[index].ink;
     for (int i = 0; i < pages.length; i++) {
-      if (i != index && pages[i].ink.isBusy) {
+      if (i != index &&
+          pages[i].ink.isBusy &&
+          !_selectionCarry.sharesSelection(pages[i].ink, target)) {
         return;
       }
     }
@@ -644,26 +812,20 @@ class EditorScreenState extends State<EditorScreen> {
           // The same missing-page fallback as the editor: keep the paper.
         }
       }
-      final Map<String, Uint8List> imageAssets = <String, Uint8List>{};
-      for (final NoteImageElement element in controller.images) {
-        try {
-          final Uint8List bytes = imageAssets[element.assetId] ??=
-              (await readAsset(element.assetId))!;
-          bitmaps.add(
-            SnapshotBitmap(
-              bytes: bytes,
-              bounds: Rect.fromCenter(
-                center: Offset(element.center.x, element.center.y),
-                width: element.size.width,
-                height: element.size.height,
-              ),
-              rotation: element.rotation,
-            ),
-          );
-        } on Object {
-          // A missing image does not prevent the remaining note capture.
-        }
-      }
+    }
+    // A picture takes its whole box, so only where it is matters.
+    for (final NoteImageElement element in controller.images) {
+      bitmaps.add(
+        SnapshotBitmap(
+          bytes: Uint8List(0),
+          bounds: Rect.fromCenter(
+            center: Offset(element.center.x, element.center.y),
+            width: element.size.width,
+            height: element.size.height,
+          ),
+          rotation: element.rotation,
+        ),
+      );
     }
     return widget.noteImageRenderer.render(
       NoteInkSnapshot.of(
@@ -675,6 +837,7 @@ class EditorScreenState extends State<EditorScreen> {
         focusBounds: focusBounds,
         bitmaps: bitmaps,
         stickies: controller.stickyNotes,
+        aiNotes: _ai.notationStrokesIn(controller.strokes),
       ),
     );
   }
@@ -687,6 +850,10 @@ class EditorScreenState extends State<EditorScreen> {
         !identical(_notationControllerAtCapture, _inkController) ||
         requestContext.logicalSize != _surfaceSize) {
       return const AiNotationApplication(AiNotationStatus.notAppliedStale);
+    }
+    final AiStickySize? sticky = notation.sticky;
+    if (sticky != null) {
+      return _applyStickyNotation(notation, sticky, requestContext);
     }
     // Drawn over time when the model timed it, unless the user has asked
     // for less motion: then it is the same strokes, shown at once.
@@ -702,17 +869,32 @@ class EditorScreenState extends State<EditorScreen> {
     // Coordinates map through the captured note's size: x * width,
     // y * height, never the screen or the image's pixels.
     final List<GeneratedInkTrace> traces;
+    // The assistant never writes over its own earlier notes.
+    final NotationClearance clearance = NotationClearance(
+      pageSize: requestContext.logicalSize,
+      earlierNotes: <SpaceStroke>[
+        for (final Stroke stroke in _ai.notationStrokesIn(controller.strokes))
+          (points: stroke.points, width: stroke.style.width),
+      ],
+    );
     try {
+      final HandwritingSampleLibrary handwriting = HandwritingSampleLibrary(
+        _document.recognizedWords,
+      );
       traces = timeline == null
           ? layoutNotation(
               notation,
               requestContext.logicalSize,
               snapper: snapper,
+              clearance: clearance,
+              handwriting: handwriting,
             )
           : layoutTimedNotation(
               notation,
               requestContext.logicalSize,
               snapper: snapper,
+              clearance: clearance,
+              handwriting: handwriting,
             );
     } on FormatException {
       return const AiNotationApplication(AiNotationStatus.notAppliedInvalid);
@@ -762,11 +944,120 @@ class EditorScreenState extends State<EditorScreen> {
     };
   }
 
+  /// The paper of the assistant's sticky notes, told apart from the user's
+  /// yellow ones.
+  static const String _aiStickyColor = 'blue';
+
+  /// Adds [notation] on a new sticky note of [size], for a note with no
+  /// room left to draw on. It goes where the request's measured free space
+  /// says it covers least, beside the selection, shrunk if the page is
+  /// too small. It is drawn at once: a sticky note's ink has no playback.
+  AiNotationApplication _applyStickyNotation(
+    AiNotation notation,
+    AiStickySize size,
+    NoteImage requestContext,
+  ) {
+    final InkController controller = _inkController;
+    final Size pageSize = requestContext.logicalSize;
+    final Size wanted = Size(size.width, size.height);
+    final Rect? focus = requestContext.normalizedFocusBounds;
+    // Measured now when the capture was not: the revision is checked, so
+    // the page is as it was.
+    final NoteFreeSpace space =
+        requestContext.space ??
+        NoteFreeSpace.measure(
+          pageSize: pageSize,
+          strokes: <SpaceStroke>[
+            for (final Stroke stroke in controller.strokes)
+              (points: stroke.points, width: stroke.style.width),
+          ],
+          blocks: <Rect>[
+            for (final StickyNoteElement note in controller.stickyNotes)
+              note.bounds,
+          ],
+          focus: focus == null
+              ? null
+              : Rect.fromLTRB(
+                  focus.left * pageSize.width,
+                  focus.top * pageSize.height,
+                  focus.right * pageSize.width,
+                  focus.bottom * pageSize.height,
+                ),
+        );
+    final Rect placed = space.placeSticky(wanted);
+    // Laid out inside the paper's padding, in the note's own units.
+    final double padding = controller.stickyConfig.contentPadding;
+    final Size inner = Size(
+      math.max(1, wanted.width - 2 * padding),
+      math.max(1, wanted.height - 2 * padding),
+    );
+    final List<GeneratedInkTrace> traces;
+    try {
+      final HandwritingSampleLibrary handwriting = HandwritingSampleLibrary(
+        _document.recognizedWords,
+      );
+      traces = <GeneratedInkTrace>[
+        for (final GeneratedInkTrace trace in layoutNotation(
+          notation,
+          inner,
+          handwriting: handwriting,
+        ))
+          GeneratedInkTrace(
+            style: trace.style,
+            points: <InkVector>[
+              for (final InkVector point in trace.points)
+                InkVector(point.x + padding, point.y + padding),
+            ],
+            widths: trace.widths,
+          ),
+      ];
+    } on FormatException {
+      return const AiNotationApplication(AiNotationStatus.notAppliedInvalid);
+    }
+    final List<Stroke>? strokes = controller.generatedStickyStrokes(
+      traces,
+      wanted,
+    );
+    if (strokes == null) {
+      return const AiNotationApplication(AiNotationStatus.notAppliedInvalid);
+    }
+    // Shrunk only on a page too small for it; otherwise exactly its size.
+    final double ratio = placed.width / wanted.width;
+    final double scale = (ratio - 1).abs() < 1e-6 ? 1 : ratio;
+    final AddNotationResult result = controller.addAiStickyNote(
+      note: StickyNoteElement(
+        id: StickyNoteElement.newId(),
+        center: InkVector(placed.center.dx, placed.center.dy),
+        size: wanted * scale,
+        scale: scale,
+        colorId: _aiStickyColor,
+        paper: StickyPaperStyle.blank,
+        strokes: strokes,
+      ),
+      expectedRevision: requestContext.revision,
+      surfaceSize: pageSize,
+    );
+    return switch (result) {
+      AddNotationResult.added || AddNotationResult.addedWithPlayback =>
+        const AiNotationApplication(AiNotationStatus.applied),
+      AddNotationResult.stale => const AiNotationApplication(
+        AiNotationStatus.notAppliedStale,
+      ),
+      AddNotationResult.busy => const AiNotationApplication(
+        AiNotationStatus.notAppliedBusy,
+      ),
+      AddNotationResult.invalid => const AiNotationApplication(
+        AiNotationStatus.notAppliedInvalid,
+      ),
+    };
+  }
+
   /// Pasted ink arrives selected, so pasting switches to the Select tool.
   /// Nothing happens while the clipboard is empty.
   void _paste() {
     if (_inkController.canPaste) {
       _tool.value = EditorTool.select;
+      _selectionCarry.clearSelection(except: _inkController);
       _inkController.paste();
     }
   }
@@ -774,6 +1065,94 @@ class EditorScreenState extends State<EditorScreen> {
   void _undo() {
     _pastePrompt.value = null;
     _inkController.undo();
+  }
+
+  Future<void> _openHandwritingFind() async {
+    final TextEditingController query = TextEditingController();
+    int selected = 0;
+    List<(int, RecognizedInkWord)> matches() {
+      final String needle = query.text.trim().toLowerCase();
+      if (needle.isEmpty) return const <(int, RecognizedInkWord)>[];
+      return <(int, RecognizedInkWord)>[
+        for (int page = 0; page < _document.pages.length; page++)
+          for (final RecognizedInkWord word
+              in _document.pages[page].recognizedWords)
+            if (word.text.toLowerCase().contains(needle)) (page, word),
+      ];
+    }
+
+    void showMatch(List<(int, RecognizedInkWord)> found, int index) {
+      if (found.isEmpty) return;
+      _document.goTo(found[index].$1);
+    }
+
+    await showDialog<void>(
+      context: context,
+      builder: (BuildContext dialogContext) => StatefulBuilder(
+        builder: (BuildContext context, StateSetter update) {
+          final List<(int, RecognizedInkWord)> found = matches();
+          if (selected >= found.length) selected = 0;
+          return AlertDialog(
+            title: const Text('Find handwriting'),
+            content: SizedBox(
+              width: 420,
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: <Widget>[
+                  TextField(
+                    controller: query,
+                    autofocus: true,
+                    textInputAction: TextInputAction.search,
+                    decoration: const InputDecoration(
+                      hintText: 'Type a word or phrase',
+                      prefixIcon: Icon(AppIcons.search),
+                    ),
+                    onChanged: (_) => update(() => selected = 0),
+                    onSubmitted: (_) => showMatch(found, selected),
+                  ),
+                  const SizedBox(height: AppSpacing.sm),
+                  Align(
+                    alignment: Alignment.centerLeft,
+                    child: Text(
+                      query.text.trim().isEmpty
+                          ? 'Search the words recognized from this note.'
+                          : found.isEmpty
+                          ? 'No handwritten text found.'
+                          : '${selected + 1} of ${found.length} — Page ${found[selected].$1 + 1}: ${found[selected].$2.text}',
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            actions: <Widget>[
+              if (found.length > 1)
+                IconButton(
+                  tooltip: 'Previous match',
+                  onPressed: () => update(() {
+                    selected = (selected - 1 + found.length) % found.length;
+                    showMatch(found, selected);
+                  }),
+                  icon: const Icon(Icons.chevron_left),
+                ),
+              if (found.isNotEmpty)
+                IconButton(
+                  tooltip: 'Next match',
+                  onPressed: () => update(() {
+                    selected = (selected + 1) % found.length;
+                    showMatch(found, selected);
+                  }),
+                  icon: const Icon(Icons.chevron_right),
+                ),
+              TextButton(
+                onPressed: () => Navigator.of(dialogContext).pop(),
+                child: const Text('Done'),
+              ),
+            ],
+          );
+        },
+      ),
+    );
+    query.dispose();
   }
 
   void _redo() {
@@ -784,6 +1163,7 @@ class EditorScreenState extends State<EditorScreen> {
   /// Pastes with the copies centered where the pointer was held.
   void _pasteAt(Offset position) {
     _pastePrompt.value = null;
+    _selectionCarry.clearSelection(except: _inkController);
     _inkController.paste(at: InkVector(position.dx, position.dy));
   }
 
@@ -794,7 +1174,7 @@ class EditorScreenState extends State<EditorScreen> {
       return;
     }
     _pdfClipboardGeneration++;
-    if (_inkController.copySelection()) {
+    if (_selectionCarry.copySelection(_inkController)) {
       final InkClipboard? clipboard = _inkController.clipboard;
       if (clipboard != null) widget.onClipboardChanged?.call(clipboard);
     }
@@ -807,7 +1187,7 @@ class EditorScreenState extends State<EditorScreen> {
       return;
     }
     _pdfClipboardGeneration++;
-    if (_inkController.cutSelection()) {
+    if (_selectionCarry.cutSelection(_inkController)) {
       final InkClipboard? clipboard = _inkController.clipboard;
       if (clipboard != null) widget.onClipboardChanged?.call(clipboard);
     }
@@ -972,6 +1352,8 @@ class EditorScreenState extends State<EditorScreen> {
       return;
     }
     _aiGeneration++;
+    // New writing must not wait on a recognition from a previous AI session.
+    _handwritingQueue = Future<void>.value();
     _aiInput.clear();
     _aiActive.value = false;
     _setAiNotesHidden(true);
@@ -1033,31 +1415,161 @@ class EditorScreenState extends State<EditorScreen> {
     InkController page, {
     required bool openPanel,
   }) {
-    unawaited(_readHandwriting(strokes, openPanel: openPanel));
+    final int generation = _aiGeneration;
+    final AiSelectionContext? selectionContext = _ai.context;
+    _handwritingQueue = _handwritingQueue.then((_) async {
+      if (!mounted ||
+          generation != _aiGeneration ||
+          !identical(selectionContext, _ai.context)) {
+        return;
+      }
+      await _readHandwriting(
+        strokes,
+        openPanel: openPanel,
+        generation: generation,
+        selectionContext: selectionContext,
+      );
+    });
   }
 
   Future<void> _readHandwriting(
     List<AiCanvasStroke> strokes, {
     required bool openPanel,
+    required int generation,
+    required AiSelectionContext? selectionContext,
   }) async {
-    final int generation = _aiGeneration;
     final String words;
     try {
       final HandwritingBatch batch = await widget.handwritingRenderer.render(
         strokes,
       );
       if (!mounted || generation != _aiGeneration) return;
-      words = await widget.textRecognizer.recognize(batch);
+      if (!identical(selectionContext, _ai.context)) return;
+      words = await widget.textRecognizer
+          .recognize(
+            batch.withContext(
+              HandwritingContext(
+                draft: _ai.draft,
+                recentMessages: _ai.messages.map((message) => message.text),
+              ),
+            ),
+          )
+          .timeout(const Duration(seconds: 8), onTimeout: () => '');
     } on Object {
       // Nothing read is nothing added.
       return;
     }
-    if (!mounted || generation != _aiGeneration || words.trim().isEmpty) {
+    if (!mounted ||
+        generation != _aiGeneration ||
+        words.trim().isEmpty ||
+        !identical(selectionContext, _ai.context)) {
       return;
     }
-    _ai.appendToDraft(words);
     if (openPanel) {
       _ai.show();
+    }
+    await _flyIntoComposer(words.trim(), strokes, generation, selectionContext);
+  }
+
+  /// Flies [words] from where [strokes] were written into the composer,
+  /// adding them to the draft as they land. Without motion, or with nowhere
+  /// to fly from or to, they are added at once.
+  Future<void> _flyIntoComposer(
+    String words,
+    List<AiCanvasStroke> strokes,
+    int generation,
+    AiSelectionContext? selectionContext,
+  ) async {
+    Rect? from;
+    for (final AiCanvasStroke stroke in strokes) {
+      final Rect? bounds = stroke.screenBounds;
+      if (bounds == null) continue;
+      from = from?.expandToInclude(bounds) ?? bounds;
+    }
+    final OverlayState? overlay = Overlay.maybeOf(context);
+    final RenderObject? overlayBox = overlay?.context.findRenderObject();
+    final Duration duration = AppMotion.resolve(context, AppMotion.flight);
+    if (from == null ||
+        overlay == null ||
+        overlayBox is! RenderBox ||
+        !_ai.isOpen ||
+        duration == Duration.zero) {
+      _ai.appendToDraft(words);
+      return;
+    }
+    final TextStyle style =
+        Theme.of(context).textTheme.bodyMedium ?? const TextStyle();
+    final TextDirection direction = Directionality.of(context);
+    Rect toOverlay(Rect global) => Rect.fromPoints(
+      overlayBox.globalToLocal(global.topLeft),
+      overlayBox.globalToLocal(global.bottomRight),
+    );
+
+    // Where the composer's text ends now, in the overlay.
+    Offset? target() {
+      final RenderObject? field = _aiComposerKey.currentContext
+          ?.findRenderObject();
+      if (!mounted ||
+          !overlayBox.attached ||
+          field is! RenderBox ||
+          !field.attached ||
+          !field.hasSize) {
+        return null;
+      }
+      final Rect box = toOverlay(
+        MatrixUtils.transformRect(
+          field.getTransformTo(null),
+          Offset.zero & field.size,
+        ),
+      );
+      final String draft = _ai.draft.trimRight();
+      final TextPainter painter = TextPainter(
+        text: TextSpan(text: draft.isEmpty ? '' : '$draft ', style: style),
+        textDirection: direction,
+        maxLines: 1,
+      )..layout();
+      const double inset = AppSpacing.md;
+      final double width = math.min(
+        painter.width,
+        math.max(0.0, box.width - 2 * inset),
+      );
+      painter.dispose();
+      return Offset(box.left + inset + width, box.center.dy);
+    }
+
+    late final OverlayEntry entry;
+    entry = OverlayEntry(
+      builder: (BuildContext context) => FlyingWords(
+        text: words,
+        from: toOverlay(from!),
+        target: target,
+        style: style,
+        color: AppColors.of(context).accent,
+        duration: duration,
+        curve: AppMotion.flightCurve,
+        onArrived: () {
+          _landFlight(entry);
+          if (mounted &&
+              generation == _aiGeneration &&
+              identical(selectionContext, _ai.context)) {
+            _ai.appendToDraft(words);
+          }
+        },
+      ),
+    );
+    final Completer<void> landed = Completer<void>();
+    _flights[entry] = landed;
+    overlay.insert(entry);
+    await landed.future;
+  }
+
+  void _landFlight(OverlayEntry entry) {
+    final Completer<void>? landed = _flights.remove(entry);
+    if (landed != null) {
+      entry
+        ..remove()
+        ..dispose();
+      landed.complete();
     }
   }
 
@@ -1290,16 +1802,17 @@ class EditorScreenState extends State<EditorScreen> {
 
   /// The selection, or null while a lasso or a transform is under way.
   InkSelection? _stableSelection() {
-    final InkController controller = _inkController;
-    final bool gesturing =
-        controller.activeLasso != null || controller.activeTransform != null;
-    return gesturing ? null : controller.selection;
+    return _selectionCarry.combinedSelectionFor(_inkController);
   }
 
   void _onSelectionChanged() {
     final InkController controller = _inkController;
-    if (controller.activeLasso == null && controller.activeTransform == null) {
-      _ai.updateCurrentSelection(controller.selection);
+    if (controller.activeLasso == null &&
+        controller.activeTransform == null &&
+        !_selectionCarry.isGesturing) {
+      _ai.updateCurrentSelection(
+        _selectionCarry.combinedSelectionFor(controller),
+      );
     }
   }
 
@@ -1386,6 +1899,7 @@ class EditorScreenState extends State<EditorScreen> {
       }
     });
     _attachInk(_inkController);
+    _selectionCarry.addListener(_onSelectionChanged);
     _document.addListener(_onDocumentChanged);
     _ai.addListener(_onAiChanged);
     _palettePlacement.addListener(_onPalettePlacementChanged);
@@ -1441,6 +1955,7 @@ class EditorScreenState extends State<EditorScreen> {
   @override
   void didUpdateWidget(EditorScreen oldWidget) {
     super.didUpdateWidget(oldWidget);
+    _ai.usageGate = widget.subscription;
     if (oldWidget.palettePlacement != widget.palettePlacement) {
       (oldWidget.palettePlacement ?? _ownedPalettePlacement)?.removeListener(
         _onPalettePlacementChanged,
@@ -1457,6 +1972,11 @@ class EditorScreenState extends State<EditorScreen> {
     }
     if (oldWidget.document != widget.document ||
         oldWidget.inkController != widget.inkController) {
+      _aiGeneration++;
+      _indexingGeneration++;
+      _indexingTimer?.cancel();
+      _indexingPending.clear();
+      _handwritingQueue = Future<void>.value();
       _releaseAiSession();
       _document.removeListener(_onDocumentChanged);
       final NoteDocument? owned = _ownedDocument;
@@ -1473,11 +1993,19 @@ class EditorScreenState extends State<EditorScreen> {
 
   @override
   void dispose() {
+    _indexingGeneration++;
+    _indexingTimer?.cancel();
     final InkController? listened = _listenedInk;
     if (listened != null) {
       _detachInk(listened);
     }
+    _selectionCarry
+      ..removeListener(_onSelectionChanged)
+      ..dispose();
     _releaseAiSession();
+    for (final OverlayEntry entry in List<OverlayEntry>.of(_flights.keys)) {
+      _landFlight(entry);
+    }
     _document.removeListener(_onDocumentChanged);
     _ai.removeListener(_onAiChanged);
     _palettePlacement.removeListener(_onPalettePlacementChanged);
@@ -1560,7 +2088,16 @@ class EditorScreenState extends State<EditorScreen> {
       onClose: _closeAi,
       onNewChat: _useCurrentSelection,
       onAddToContext: _addSelectionToAi,
+      composerKey: _aiComposerKey,
+      onOpenPlans: widget.subscription == null ? null : _openPlans,
     );
+  }
+
+  void _openPlans() {
+    final SubscriptionController? subscription = widget.subscription;
+    if (subscription != null) {
+      showPaymentPage(context, subscription);
+    }
   }
 
   /// The panel over the editor, against [side], above a barrier that
@@ -1623,11 +2160,8 @@ class EditorScreenState extends State<EditorScreen> {
           },
           child: GlassSurface(
             boxShadow: AppShadows.floating(colors),
-            child: Padding(
-              // Keeps the composer above the on-screen keyboard.
-              padding: EdgeInsets.only(
-                bottom: MediaQuery.viewInsetsOf(context).bottom,
-              ),
+            // Keeps the composer above the on-screen keyboard.
+            child: _KeyboardInset(
               child: SafeArea(
                 child: FocusScope(autofocus: true, child: _buildPanel()),
               ),
@@ -1646,7 +2180,14 @@ class EditorScreenState extends State<EditorScreen> {
     AiPanelSide? panelSide,
   ) {
     final AppColors colors = AppColors.of(context);
+    // What the body's SafeArea already keeps clear at the bottom; constant
+    // while the keyboard moves, unlike the padding.
+    final double bottomSafeArea = MediaQuery.viewPaddingOf(context).bottom;
     return Scaffold(
+      // The keyboard only ever serves the assistant's composer, which lifts
+      // itself clear of it. Resizing the body would lay the page out again
+      // on every frame of the keyboard's slide and make it stutter.
+      resizeToAvoidBottomInset: false,
       appBar: EditorAppBar(
         title: widget.title,
         centerTitle: sizeClass == WindowSizeClass.expanded,
@@ -1654,6 +2195,9 @@ class EditorScreenState extends State<EditorScreen> {
         leadingIsBack: widget.onBack != null,
         onTitlePressed: widget.onTitlePressed ?? () {},
         onSettingsPressed: _openSettings,
+        onFindPressed: _document.recognizedWords.isEmpty
+            ? null
+            : _openHandwritingFind,
         tabs: widget.tabs,
         pageControls: PageControls(
           document: _document,
@@ -1665,6 +2209,9 @@ class EditorScreenState extends State<EditorScreen> {
       ),
       body: SafeArea(
         top: false,
+        // The keyboard eats into the bottom padding as it rises; keeping
+        // the view padding instead spares the page a layout on each frame.
+        maintainBottomViewPadding: true,
         child: LayoutBuilder(
           builder: (BuildContext context, BoxConstraints constraints) {
             final Size size = constraints.biggest;
@@ -1701,15 +2248,6 @@ class EditorScreenState extends State<EditorScreen> {
             WidgetsBinding.instance.addPostFrameCallback((_) {
               if (mounted) _focusPdfPages(pages, geometries, pixelRatio);
             });
-            final NotePage currentPage = _document.current;
-            if (currentPage.setup.size == PageSize.fit &&
-                currentPage.lastFitSize != layout.surface.size) {
-              WidgetsBinding.instance.addPostFrameCallback((_) {
-                if (mounted) {
-                  _document.recordFitSize(currentPage, layout.surface.size);
-                }
-              });
-            }
             // The palette floats over the page; the page's own floating
             // bars keep clear of it. In the page area's coordinates.
             final Rect paletteOnPage =
@@ -1775,6 +2313,7 @@ class EditorScreenState extends State<EditorScreen> {
                                       maxDecodeDimension: widget
                                           .documentIoConfig
                                           .maxStoredImageDimension,
+                                      carry: _selectionCarry,
                                     ),
                                   InkCanvas(
                                     controller: page.ink,
@@ -1796,6 +2335,14 @@ class EditorScreenState extends State<EditorScreen> {
                                     pageGrows:
                                         page.setup.size == PageSize.infinite,
                                     aiInput: _aiInput,
+                                    carry: _selectionCarry,
+                                    // The page the selection is on is the
+                                    // current one; the view stays put.
+                                    onSelectionCarried: () => context
+                                        .findAncestorStateOfType<
+                                          PageViewportState
+                                        >()
+                                        ?.touchPage(index),
                                   ),
                                 ],
                               );
@@ -1809,9 +2356,15 @@ class EditorScreenState extends State<EditorScreen> {
                                 children: <Widget>[
                                   SelectionActionBar(
                                     controller: _inkController,
+                                    crossPageListenable: _selectionCarry,
+                                    selectionResolver: _stableSelection,
                                     onAiPressed: _openAi,
                                     onCopy: _copy,
                                     onCut: _cut,
+                                    onDuplicate: () => _selectionCarry
+                                        .duplicateSelection(_inkController),
+                                    onDelete: (_) => _selectionCarry
+                                        .deleteSelection(_inkController),
                                     transform: transform,
                                     obstruction: paletteOnPage,
                                   ),
@@ -1924,7 +2477,10 @@ class EditorScreenState extends State<EditorScreen> {
                                 ),
                               );
                             },
-                        child: _buildPanel(),
+                        child: _KeyboardInset(
+                          consumed: bottomSafeArea,
+                          child: _buildPanel(),
+                        ),
                       ),
                     ),
                   ),
@@ -1951,6 +2507,25 @@ class _PlaybackPresentation implements AiNotationPresentation {
 
   @override
   void finish() => _controller.finishNotationPlayback(_playback);
+}
+
+/// Pads [child] clear of the on-screen keyboard, less the [consumed] bottom
+/// already kept clear above it. It reads the keyboard itself, so only it
+/// and [child] rebuild as the keyboard slides, never the page.
+class _KeyboardInset extends StatelessWidget {
+  const _KeyboardInset({required this.child, this.consumed = 0});
+
+  final Widget child;
+  final double consumed;
+
+  @override
+  Widget build(BuildContext context) {
+    final double keyboard = MediaQuery.viewInsetsOf(context).bottom;
+    return Padding(
+      padding: EdgeInsets.only(bottom: math.max(0, keyboard - consumed)),
+      child: child,
+    );
+  }
 }
 
 /// Where the page and palette sit inside the region the AI panel leaves
