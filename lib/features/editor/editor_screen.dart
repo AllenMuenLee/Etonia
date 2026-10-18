@@ -365,6 +365,10 @@ class EditorScreenState extends State<EditorScreen> {
   /// Where on the page Paste is being offered after a hold, if anywhere.
   final ValueNotifier<Offset?> _pastePrompt = ValueNotifier<Offset?>(null);
 
+  /// The high-confidence handwriting result currently chosen in Find.
+  final ValueNotifier<_HandwritingFindTarget?> _handwritingFindTarget =
+      ValueNotifier<_HandwritingFindTarget?>(null);
+
   NoteDocument? _ownedDocument;
   late NoteDocument _document = _createDocument();
 
@@ -533,6 +537,7 @@ class EditorScreenState extends State<EditorScreen> {
   }
 
   void _onInkForRecognition() {
+    _handwritingFindTarget.value = null;
     final InkController ink = _inkController;
     final NotePage? page = _pageFor(ink);
     if (page == null) return;
@@ -572,6 +577,7 @@ class EditorScreenState extends State<EditorScreen> {
     if (pending.isEmpty) return;
     final int generation = _indexingGeneration;
     final String prior = _document.recognizedWords
+        .where((RecognizedInkWord word) => word.isSearchable)
         .map((RecognizedInkWord word) => word.text)
         .join(' ');
     unawaited(() async {
@@ -1067,92 +1073,17 @@ class EditorScreenState extends State<EditorScreen> {
     _inkController.undo();
   }
 
-  Future<void> _openHandwritingFind() async {
-    final TextEditingController query = TextEditingController();
-    int selected = 0;
-    List<(int, RecognizedInkWord)> matches() {
-      final String needle = query.text.trim().toLowerCase();
-      if (needle.isEmpty) return const <(int, RecognizedInkWord)>[];
-      return <(int, RecognizedInkWord)>[
-        for (int page = 0; page < _document.pages.length; page++)
-          for (final RecognizedInkWord word
-              in _document.pages[page].recognizedWords)
-            if (word.text.toLowerCase().contains(needle)) (page, word),
-      ];
-    }
-
-    void showMatch(List<(int, RecognizedInkWord)> found, int index) {
-      if (found.isEmpty) return;
-      _document.goTo(found[index].$1);
-    }
-
-    await showDialog<void>(
+  Future<void> _openHandwritingFind() {
+    _handwritingFindTarget.value = null;
+    return showDialog<void>(
       context: context,
-      builder: (BuildContext dialogContext) => StatefulBuilder(
-        builder: (BuildContext context, StateSetter update) {
-          final List<(int, RecognizedInkWord)> found = matches();
-          if (selected >= found.length) selected = 0;
-          return AlertDialog(
-            title: const Text('Find handwriting'),
-            content: SizedBox(
-              width: 420,
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                children: <Widget>[
-                  TextField(
-                    controller: query,
-                    autofocus: true,
-                    textInputAction: TextInputAction.search,
-                    decoration: const InputDecoration(
-                      hintText: 'Type a word or phrase',
-                      prefixIcon: Icon(AppIcons.search),
-                    ),
-                    onChanged: (_) => update(() => selected = 0),
-                    onSubmitted: (_) => showMatch(found, selected),
-                  ),
-                  const SizedBox(height: AppSpacing.sm),
-                  Align(
-                    alignment: Alignment.centerLeft,
-                    child: Text(
-                      query.text.trim().isEmpty
-                          ? 'Search the words recognized from this note.'
-                          : found.isEmpty
-                          ? 'No handwritten text found.'
-                          : '${selected + 1} of ${found.length} — Page ${found[selected].$1 + 1}: ${found[selected].$2.text}',
-                    ),
-                  ),
-                ],
-              ),
-            ),
-            actions: <Widget>[
-              if (found.length > 1)
-                IconButton(
-                  tooltip: 'Previous match',
-                  onPressed: () => update(() {
-                    selected = (selected - 1 + found.length) % found.length;
-                    showMatch(found, selected);
-                  }),
-                  icon: const Icon(Icons.chevron_left),
-                ),
-              if (found.isNotEmpty)
-                IconButton(
-                  tooltip: 'Next match',
-                  onPressed: () => update(() {
-                    selected = (selected + 1) % found.length;
-                    showMatch(found, selected);
-                  }),
-                  icon: const Icon(Icons.chevron_right),
-                ),
-              TextButton(
-                onPressed: () => Navigator.of(dialogContext).pop(),
-                child: const Text('Done'),
-              ),
-            ],
-          );
+      builder: (BuildContext context) => _HandwritingFindDialog(
+        document: _document,
+        onTargetChanged: (_HandwritingFindTarget? target) {
+          if (mounted) _handwritingFindTarget.value = target;
         },
       ),
     );
-    query.dispose();
   }
 
   void _redo() {
@@ -1977,6 +1908,7 @@ class EditorScreenState extends State<EditorScreen> {
       _indexingTimer?.cancel();
       _indexingPending.clear();
       _handwritingQueue = Future<void>.value();
+      _handwritingFindTarget.value = null;
       _releaseAiSession();
       _document.removeListener(_onDocumentChanged);
       final NoteDocument? owned = _ownedDocument;
@@ -2025,6 +1957,7 @@ class EditorScreenState extends State<EditorScreen> {
     _eraserSettings.dispose();
     _stickySettings.dispose();
     _pastePrompt.dispose();
+    _handwritingFindTarget.dispose();
     _ownedStylusOnly?.dispose();
     _pdfCache?.clear();
     _imageCache?.clear();
@@ -2195,7 +2128,10 @@ class EditorScreenState extends State<EditorScreen> {
         leadingIsBack: widget.onBack != null,
         onTitlePressed: widget.onTitlePressed ?? () {},
         onSettingsPressed: _openSettings,
-        onFindPressed: _document.recognizedWords.isEmpty
+        onFindPressed:
+            !_document.recognizedWords.any(
+              (RecognizedInkWord word) => word.isSearchable,
+            )
             ? null
             : _openHandwritingFind,
         tabs: widget.tabs,
@@ -2344,6 +2280,39 @@ class EditorScreenState extends State<EditorScreen> {
                                         >()
                                         ?.touchPage(index),
                                   ),
+                                  ValueListenableBuilder<
+                                    _HandwritingFindTarget?
+                                  >(
+                                    valueListenable: _handwritingFindTarget,
+                                    builder:
+                                        (
+                                          BuildContext context,
+                                          _HandwritingFindTarget? target,
+                                          Widget? _,
+                                        ) {
+                                          if (target == null ||
+                                              !identical(target.page, page)) {
+                                            return const SizedBox.shrink();
+                                          }
+                                          return IgnorePointer(
+                                            child: ExcludeSemantics(
+                                              child: CustomPaint(
+                                                key: ValueKey<String>(
+                                                  'handwriting-search-highlight-$index',
+                                                ),
+                                                painter:
+                                                    _HandwritingFindHighlightPainter(
+                                                      page: page,
+                                                      target: target,
+                                                      color: AppColors.of(
+                                                        context,
+                                                      ).accent,
+                                                    ),
+                                              ),
+                                            ),
+                                          );
+                                        },
+                                  ),
                                 ],
                               );
                             },
@@ -2489,6 +2458,193 @@ class EditorScreenState extends State<EditorScreen> {
           },
         ),
       ),
+    );
+  }
+}
+
+class _HandwritingFindTarget {
+  const _HandwritingFindTarget({required this.page, required this.word});
+
+  final NotePage page;
+  final RecognizedInkWord word;
+}
+
+class _HandwritingFindHighlightPainter extends CustomPainter {
+  const _HandwritingFindHighlightPainter({
+    required this.page,
+    required this.target,
+    required this.color,
+  });
+
+  final NotePage page;
+  final _HandwritingFindTarget target;
+  final Color color;
+
+  void _paintHighlight(Canvas canvas, Rect bounds, {double scale = 1}) {
+    if (bounds.isEmpty || !bounds.isFinite) return;
+    final RRect highlight = RRect.fromRectAndRadius(
+      bounds.inflate(4 / scale),
+      Radius.circular(5 / scale),
+    );
+    canvas
+      ..drawRRect(highlight, Paint()..color = color.withValues(alpha: 0.18))
+      ..drawRRect(
+        highlight,
+        Paint()
+          ..color = color.withValues(alpha: 0.95)
+          ..style = PaintingStyle.stroke
+          ..strokeWidth = 2 / scale
+          ..isAntiAlias = true,
+      );
+  }
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final RecognizedInkWord word = target.word;
+    if (!word.isSearchable || !page.recognizedWords.contains(word)) return;
+    if (word.stickyId == null) {
+      _paintHighlight(canvas, word.bounds);
+      return;
+    }
+    final StickyNoteElement? sticky = page.ink.stickyNotes
+        .where((StickyNoteElement note) => note.id == word.stickyId)
+        .firstOrNull;
+    if (sticky == null || !sticky.isValid) return;
+    final Size local = sticky.localSize;
+    canvas
+      ..save()
+      ..translate(sticky.center.x, sticky.center.y)
+      ..rotate(sticky.rotation)
+      ..scale(sticky.scale)
+      ..translate(-local.width / 2, -local.height / 2);
+    _paintHighlight(canvas, word.bounds, scale: sticky.scale);
+    canvas.restore();
+  }
+
+  @override
+  bool shouldRepaint(_HandwritingFindHighlightPainter oldDelegate) =>
+      oldDelegate.page != page ||
+      oldDelegate.target != target ||
+      oldDelegate.color != color;
+}
+
+class _HandwritingFindDialog extends StatefulWidget {
+  const _HandwritingFindDialog({
+    required this.document,
+    required this.onTargetChanged,
+  });
+
+  final NoteDocument document;
+  final ValueChanged<_HandwritingFindTarget?> onTargetChanged;
+
+  @override
+  State<_HandwritingFindDialog> createState() => _HandwritingFindDialogState();
+}
+
+class _HandwritingFindDialogState extends State<_HandwritingFindDialog> {
+  final TextEditingController _query = TextEditingController();
+  int _selected = 0;
+
+  List<(int, RecognizedInkWord)> get _matches {
+    final String needle = _query.text.trim().toLowerCase();
+    if (needle.isEmpty) return const <(int, RecognizedInkWord)>[];
+    return <(int, RecognizedInkWord)>[
+      for (int page = 0; page < widget.document.pages.length; page++)
+        for (final RecognizedInkWord word
+            in widget.document.pages[page].recognizedWords)
+          if (word.isSearchable && word.text.toLowerCase().contains(needle))
+            (page, word),
+    ];
+  }
+
+  void _showMatch(List<(int, RecognizedInkWord)> found, int index) {
+    if (found.isEmpty) {
+      widget.onTargetChanged(null);
+      return;
+    }
+    final (int pageIndex, RecognizedInkWord word) = found[index];
+    widget.document.goTo(pageIndex);
+    widget.onTargetChanged(
+      _HandwritingFindTarget(
+        page: widget.document.pages[pageIndex],
+        word: word,
+      ),
+    );
+  }
+
+  void _onQueryChanged(String _) {
+    setState(() => _selected = 0);
+    _showMatch(_matches, 0);
+  }
+
+  @override
+  void dispose() {
+    _query.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final List<(int, RecognizedInkWord)> found = _matches;
+    final int selected = found.isEmpty ? 0 : _selected % found.length;
+    return AlertDialog(
+      title: const Text('Find handwriting'),
+      content: SizedBox(
+        width: 420,
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: <Widget>[
+            TextField(
+              controller: _query,
+              autofocus: true,
+              textInputAction: TextInputAction.search,
+              decoration: const InputDecoration(
+                hintText: 'Type a word or phrase',
+                prefixIcon: Icon(AppIcons.search),
+              ),
+              onChanged: _onQueryChanged,
+              onSubmitted: (_) => _showMatch(found, selected),
+            ),
+            const SizedBox(height: AppSpacing.sm),
+            Align(
+              alignment: Alignment.centerLeft,
+              child: Text(
+                _query.text.trim().isEmpty
+                    ? 'Search words recognized with at least 90% confidence.'
+                    : found.isEmpty
+                    ? 'No high-confidence handwritten text found.'
+                    : '${selected + 1} of ${found.length} — Page ${found[selected].$1 + 1}: ${found[selected].$2.text}',
+              ),
+            ),
+          ],
+        ),
+      ),
+      actions: <Widget>[
+        if (found.length > 1)
+          IconButton(
+            tooltip: 'Previous match',
+            onPressed: () {
+              final int previous = (selected - 1 + found.length) % found.length;
+              setState(() => _selected = previous);
+              _showMatch(found, previous);
+            },
+            icon: const Icon(Icons.chevron_left),
+          ),
+        if (found.isNotEmpty)
+          IconButton(
+            tooltip: 'Next match',
+            onPressed: () {
+              final int next = (selected + 1) % found.length;
+              setState(() => _selected = next);
+              _showMatch(found, next);
+            },
+            icon: const Icon(Icons.chevron_right),
+          ),
+        TextButton(
+          onPressed: () => Navigator.of(context).pop(),
+          child: const Text('Done'),
+        ),
+      ],
     );
   }
 }

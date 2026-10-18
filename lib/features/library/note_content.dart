@@ -838,6 +838,11 @@ class NoteContent {
   /// stroke geometry during every search.
   String get searchableText => pages
       .expand((StoredPage page) => page.recognizedWords)
+      .where(
+        (StoredRecognizedInkWord word) =>
+            word.confidence != null &&
+            word.confidence! >= searchableHandwritingConfidence,
+      )
       .map((StoredRecognizedInkWord word) => word.text)
       .join(' ');
 }

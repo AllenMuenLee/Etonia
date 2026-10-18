@@ -30,26 +30,30 @@ vector geometry and has negligible model memory cost.
   not treated as handwriting.
 - Existing pre-schema-5 ink is lazily backfilled when its page is opened with
   the real platform recognizer.
-- Every non-empty recognition is stored and searchable, even when no usable
-  confidence value is available.
+- Recognition metadata is retained with its source strokes, but only readings
+  with normalized confidence `>= 0.90` enter search. This prevents ordinary
+  shapes and diagrams from surfacing as text.
 - Library search matches note titles or recognized handwriting without
   loading every note file. `NoteEntry.searchText` is refreshed whenever the
   note is saved.
 - In an open note, the app bar exposes **Find handwriting** after the note has
   recognized text. Typing a word or phrase shows the match count and page;
-  Previous/Next navigate between matching pages.
+  Previous/Next navigate between matching pages. The chosen result is outlined
+  and softly highlighted directly over its source strokes, including ink on a
+  transformed sticky note.
 - A recognized entry remains linked to the strokes that produced it. Erasing
   source ink removes the entry. Page-stroke transforms follow replacement
   strokes, so moving or scaling writing does not lose its search text.
 
 ### Reusable stroke library
 
-- A recognition enters the reusable pool only at confidence `>= 0.82`.
+- A recognition enters the reusable pool only at confidence `>= 0.90`, the
+  same threshold used by search.
 - Apple Vision's normalized candidate confidence is used directly.
 - ML Kit Digital Ink scores are model-specific costs rather than
   probabilities. Android marks only a clearly separated first candidate as
-  high confidence; ambiguous results and bitmap-OCR fallbacks remain
-  searchable but cannot be reused.
+  high confidence; ambiguous results and bitmap-OCR fallbacks are retained as
+  recognition metadata but cannot be searched or reused.
 - Each reusable sample stores the original trace boundaries and point order,
   normalized into a unit box, plus its aspect ratio. At most 4096 points are
   copied for one sample.
@@ -86,8 +90,8 @@ Each stored page may have `recognizedWords`. One entry contains:
 
 Malformed references, coordinates, confidence values, or aspect ratios are
 dropped without preventing the note from opening. A sample read below the
-current confidence threshold keeps its searchable text but discards reusable
-geometry. Older schemas remain readable.
+current confidence threshold keeps its recognition metadata but is excluded
+from search and discards reusable geometry. Older schemas remain readable.
 
 The normalized copy is intentional. The normal note strokes are still the
 source of truth and remain editable; the copy makes the learned handwriting
@@ -113,7 +117,7 @@ or a second model in memory.
 Automated coverage verifies:
 
 - spatial word grouping and detailed confidence propagation;
-- low-confidence searchability without pool admission;
+- rejection of low-confidence readings from search and pool admission;
 - schema-5 JSON and document round trips with live stroke identity restored;
 - library search by handwriting rather than title;
 - bounded pools and random selection of intact variants;

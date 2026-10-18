@@ -7,9 +7,11 @@ import 'package:flutter/foundation.dart';
 import '../ink/ink_sample.dart';
 import '../ink/stroke.dart';
 
-/// The minimum recognizer confidence required before a user's writing may be
-/// reused to draw AI notation. Lower-confidence readings remain searchable.
-const double reusableHandwritingConfidence = 0.82;
+/// The minimum normalized recognizer confidence required for a reading to be
+/// shown in search or reused to draw AI notation. This deliberately rejects
+/// uncertain readings so ordinary diagrams and shapes do not become words.
+const double searchableHandwritingConfidence = 0.90;
+const double reusableHandwritingConfidence = searchableHandwritingConfidence;
 
 /// A searchable reading of a group of page strokes, plus a normalized copy
 /// of their geometry. The copy is deliberately vector-only: fitting it to a
@@ -88,9 +90,11 @@ class RecognizedInkWord {
   /// strokes produced this reading.
   final String? stickyId;
 
+  bool get isSearchable =>
+      confidence != null && confidence! >= searchableHandwritingConfidence;
+
   bool get isReusable =>
-      confidence != null &&
-      confidence! >= reusableHandwritingConfidence &&
+      isSearchable &&
       normalizedStrokes.isNotEmpty &&
       aspectRatio.isFinite &&
       aspectRatio > 0;

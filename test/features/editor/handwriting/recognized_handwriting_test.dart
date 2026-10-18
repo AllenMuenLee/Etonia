@@ -1,10 +1,11 @@
 import 'dart:math' as math;
-import 'dart:ui';
 
+import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:greatnote/features/editor/ai/ai_notation.dart';
 import 'package:greatnote/features/editor/ai/canvas_text_recognizer.dart';
 import 'package:greatnote/features/editor/ai/notation_layout.dart';
+import 'package:greatnote/features/editor/editor_screen.dart';
 import 'package:greatnote/features/editor/handwriting/handwriting_indexer.dart';
 import 'package:greatnote/features/editor/handwriting/recognized_handwriting.dart';
 import 'package:greatnote/features/editor/ink/ink_palette.dart';
@@ -15,6 +16,8 @@ import 'package:greatnote/features/editor/page/note_document.dart';
 import 'package:greatnote/features/editor/sticky/sticky_note.dart';
 import 'package:greatnote/features/library/note_content.dart';
 import 'package:greatnote/features/library/note_repository.dart';
+
+import '../../../helpers/pump_app.dart';
 
 Stroke _stroke(double left, double top, double right, double bottom) =>
     Stroke.fromPoints(
@@ -73,16 +76,27 @@ void main() {
     expect(words.single.normalizedStrokes.single.last, const InkVector(1, 1));
   });
 
-  test('low-confidence recognition is searchable but never reusable', () {
+  test('low-confidence recognition is neither searchable nor reusable', () {
+    final Stroke stroke = _stroke(0, 0, 20, 10);
     final RecognizedInkWord word = RecognizedInkWord.fromStrokes(
       text: 'maybe',
       confidence: 0.5,
-      strokes: <Stroke>[_stroke(0, 0, 20, 10)],
+      strokes: <Stroke>[stroke],
+    );
+    final NoteDocument document = NoteDocument(
+      pages: <NotePage>[
+        NotePage(
+          ink: InkController(strokes: <Stroke>[stroke]),
+          recognizedWords: <RecognizedInkWord>[word],
+        ),
+      ],
     );
 
-    expect(word.text, 'maybe');
+    expect(word.isSearchable, isFalse);
     expect(word.isReusable, isFalse);
     expect(word.normalizedStrokes, isEmpty);
+    expect(NoteContent.fromDocument(document).searchableText, isEmpty);
+    document.dispose();
   });
 
   test(
@@ -105,6 +119,7 @@ void main() {
       final NoteDocument roundTrip = restored.toDocument();
 
       expect(roundTrip.current.recognizedWords.single.text, 'Quadratic');
+      expect(roundTrip.current.recognizedWords.single.isSearchable, isTrue);
       expect(
         roundTrip.current.recognizedWords.single.sourceStrokes.single,
         same(roundTrip.current.ink.strokes.single),
@@ -198,5 +213,54 @@ void main() {
     // prove that separate pool entries were selected instead of averaged.
     expect(first.single.points.last.x, 60);
     expect(second.single.points.last.x, 40);
+  });
+
+  testWidgets('find filters low confidence, highlights, and closes safely', (
+    WidgetTester tester,
+  ) async {
+    final Stroke stroke = _stroke(5, 8, 45, 28);
+    final Stroke lowConfidenceShape = _stroke(60, 8, 90, 38);
+    final NoteDocument document = NoteDocument(
+      pages: <NotePage>[
+        NotePage(
+          ink: InkController(strokes: <Stroke>[stroke, lowConfidenceShape]),
+          recognizedWords: <RecognizedInkWord>[
+            RecognizedInkWord.fromStrokes(
+              text: 'Quadratic',
+              confidence: 0.96,
+              strokes: <Stroke>[stroke],
+            ),
+            RecognizedInkWord.fromStrokes(
+              text: 'Quadratic',
+              confidence: 0.42,
+              strokes: <Stroke>[lowConfidenceShape],
+            ),
+          ],
+        ),
+      ],
+    );
+    addTearDown(document.dispose);
+    await pumpApp(tester, home: EditorScreen(document: document));
+
+    await tester.tap(find.byTooltip('Find handwriting'));
+    await tester.pumpAndSettle();
+    await tester.enterText(find.byType(TextField), 'quadratic');
+    await tester.pump();
+    expect(find.textContaining('1 of 1'), findsOneWidget);
+    expect(
+      find.byKey(const ValueKey<String>('handwriting-search-highlight-0')),
+      findsOneWidget,
+    );
+
+    await tester.tap(find.widgetWithText(TextButton, 'Done'));
+    await tester.pump();
+    expect(tester.takeException(), isNull);
+    await tester.pumpAndSettle();
+    expect(find.text('Find handwriting'), findsNothing);
+    expect(
+      find.byKey(const ValueKey<String>('handwriting-search-highlight-0')),
+      findsOneWidget,
+    );
+    expect(tester.takeException(), isNull);
   });
 }
