@@ -549,7 +549,7 @@ void main() {
     ) async {
       await pumpApp(tester);
 
-      expect(find.byType(PaletteButton), findsNWidgets(5));
+      expect(find.byType(PaletteButton), findsNWidgets(6));
       expect(find.byTooltip('Sticky note'), findsOneWidget);
       expect(
         find.byKey(const ValueKey<String>('palette-surface')),
@@ -559,6 +559,7 @@ void main() {
       expect(find.byTooltip('Pen'), findsOneWidget);
       expect(find.byTooltip('Eraser'), findsOneWidget);
       expect(find.byTooltip('Select'), findsOneWidget);
+      expect(find.byTooltip('Insert image'), findsOneWidget);
       // AI mode replaces the old AI-notes eye, and is there before the page
       // has any AI notes.
       expect(find.byTooltip('Turn on AI'), findsOneWidget);

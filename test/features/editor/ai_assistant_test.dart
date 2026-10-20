@@ -8,6 +8,8 @@ import 'package:greatnote/features/editor/ai/ai_assistant_controller.dart';
 import 'package:greatnote/features/editor/ai/ai_client.dart';
 import 'package:greatnote/features/editor/ai/ai_config.dart';
 import 'package:greatnote/features/editor/editor_screen.dart';
+import 'package:greatnote/features/editor/handwriting/handwriting_calibration.dart';
+import 'package:greatnote/features/editor/handwriting/handwriting_style.dart';
 import 'package:greatnote/features/editor/ink/ink_controller.dart';
 import 'package:greatnote/features/editor/ink/ink_palette.dart';
 import 'package:greatnote/features/editor/ink/ink_sample.dart';
@@ -69,6 +71,7 @@ Future<(InkController, FakeAiClient)> _pumpOpen(
   WidgetTester tester, {
   TestViewport viewport = TestViewport.tabletLandscape,
   ThemeMode themeMode = ThemeMode.light,
+  HandwritingProfileStore? handwritingProfileStore,
 }) async {
   final FakeAiClient client = FakeAiClient();
   final InkController controller = await pumpEditor(
@@ -77,6 +80,7 @@ Future<(InkController, FakeAiClient)> _pumpOpen(
     themeMode: themeMode,
     strokes: _page(),
     aiClient: client,
+    handwritingProfileStore: handwritingProfileStore,
   );
   await _select(tester, controller);
   await _openAi(tester);
@@ -372,6 +376,90 @@ void main() {
   });
 
   group('layout', () {
+    testWidgets(
+      'an unsaved handwriting calibration is offered above the composer',
+      (WidgetTester tester) async {
+        final InMemoryHandwritingProfileStore store =
+            InMemoryHandwritingProfileStore();
+        await _pumpOpen(tester, handwritingProfileStore: store);
+
+        final Finder notice = find.byKey(
+          const ValueKey<String>('handwriting-calibration-notice'),
+        );
+        expect(notice, findsOneWidget);
+        expect(
+          find.text(AiAssistantPanel.handwritingCalibrationNotice),
+          findsOneWidget,
+        );
+        expect(
+          tester.getRect(notice).bottom,
+          lessThanOrEqualTo(tester.getRect(find.byType(TextField)).top),
+        );
+        expect(find.widgetWithText(TextButton, 'Choose'), findsOneWidget);
+        expect(
+          find.widgetWithText(TextButton, "Don't show again"),
+          findsOneWidget,
+        );
+
+        await tester.tap(find.widgetWithText(TextButton, "Don't show again"));
+        await tester.pumpAndSettle();
+
+        expect(notice, findsNothing);
+        expect(store.state?.style, isNull);
+        expect(store.state?.skipped, isFalse);
+        expect(store.state?.chatReminderDismissed, isTrue);
+
+        await tester.pumpWidget(const SizedBox.shrink());
+        await _pumpOpen(tester, handwritingProfileStore: store);
+        expect(notice, findsNothing);
+      },
+    );
+
+    testWidgets('skipping calibration still leaves the little reminder', (
+      WidgetTester tester,
+    ) async {
+      await _pumpOpen(
+        tester,
+        handwritingProfileStore: InMemoryHandwritingProfileStore(
+          const HandwritingCalibrationState(skipped: true),
+        ),
+      );
+
+      expect(
+        find.byKey(const ValueKey<String>('handwriting-calibration-notice')),
+        findsOneWidget,
+      );
+    });
+
+    testWidgets('a saved handwriting calibration needs no reminder', (
+      WidgetTester tester,
+    ) async {
+      final InMemoryHandwritingProfileStore store =
+          InMemoryHandwritingProfileStore(
+            const HandwritingCalibrationState(style: HandwritingStyle.standard),
+          );
+      await _pumpOpen(tester, handwritingProfileStore: store);
+
+      expect(
+        find.byKey(const ValueKey<String>('handwriting-calibration-notice')),
+        findsNothing,
+      );
+    });
+
+    testWidgets('the chat reminder opens handwriting calibration', (
+      WidgetTester tester,
+    ) async {
+      await _pumpOpen(
+        tester,
+        handwritingProfileStore: InMemoryHandwritingProfileStore(),
+      );
+
+      await tester.tap(find.widgetWithText(TextButton, 'Choose'));
+      await tester.pumpAndSettle();
+
+      expect(find.text("Choose the AI's handwriting"), findsOneWidget);
+    });
+
     testWidgets('editor settings hold notation, animation, and panel side', (
       WidgetTester tester,
     ) async {
@@ -584,6 +672,11 @@ void main() {
       expect(config.inlineWidth(600), 320);
       expect(config.inlineWidth(500), 220);
       expect(config.inlineWidth(100), 0);
+      // A width the user dragged to is kept within bounds.
+      expect(config.inlineWidth(1194, preferred: 500), 500);
+      expect(config.inlineWidth(1194, preferred: 100), 280);
+      expect(config.inlineWidth(1194, preferred: 2000), 720);
+      expect(config.inlineWidth(900, preferred: 700), 620);
 
       // Small and short windows, with the panel open, do not overflow.
       await _pumpOpen(tester, viewport: TestViewport.compact);

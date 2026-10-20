@@ -461,7 +461,7 @@ void main() {
     expect(
       (latestParts[0]! as Map<String, Object?>)['text'],
       allOf(
-        contains('You are not shown the whole sheet'),
+        contains('you are not shown the whole sheet'),
         contains('"logical_aspect_ratio":1.5'),
         contains('"focus_bounds":{"left":0.1,"top":0.2,'),
         contains('"note_logical_width":300.0'),
@@ -483,11 +483,7 @@ void main() {
       allOf(
         // Where the selected-ink image lies on the note, and how to map
         // from one to the other.
-        contains(
-          'The selected-ink image is a crop of this note covering '
-          'x 0.1 to 0.4 and y 0.2 to 0.6.',
-        ),
-        contains('at note x = 0.1 + u * 0.3, y = 0.2 + v * 0.4.'),
+        contains('The selected-ink image shows x 0.1 to 0.4, y 0.2 to 0.6.'),
         // It may draw outside that region, but not off the paper.
         contains('inside or outside the selected region'),
         contains('every point must keep 0 < x < 1 and 0 < y < 1'),

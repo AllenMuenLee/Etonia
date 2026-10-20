@@ -80,7 +80,7 @@ void main() {
     final Stroke stroke = _stroke(0, 0, 20, 10);
     final RecognizedInkWord word = RecognizedInkWord.fromStrokes(
       text: 'maybe',
-      confidence: 0.5,
+      confidence: 0.45,
       strokes: <Stroke>[stroke],
     );
     final NoteDocument document = NoteDocument(
@@ -100,12 +100,19 @@ void main() {
   });
 
   test('moderate-confidence recognition is searchable but not reusable', () {
+    final RecognizedInkWord thresholdWord = RecognizedInkWord.fromStrokes(
+      text: 'threshold',
+      confidence: 0.50,
+      strokes: <Stroke>[_stroke(0, 0, 20, 10)],
+    );
     final RecognizedInkWord word = RecognizedInkWord.fromStrokes(
       text: 'visible',
       confidence: 0.76,
       strokes: <Stroke>[_stroke(0, 0, 20, 10)],
     );
 
+    expect(thresholdWord.isSearchable, isTrue);
+    expect(thresholdWord.isReusable, isFalse);
     expect(word.isSearchable, isTrue);
     expect(word.isReusable, isFalse);
     expect(word.normalizedStrokes, isEmpty);

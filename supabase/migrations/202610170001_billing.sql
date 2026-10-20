@@ -17,9 +17,15 @@ insert into billing_private.products values
  ('app_store', 'com.etonia.app.plan.499.monthly', 'starter499', 1, 1200000),
  ('app_store', 'com.etonia.app.plan.1299.monthly', 'pro1299', 2, 5000000),
  ('app_store', 'com.etonia.app.plan.2999.monthly', 'max2999', 3, 15000000),
+ ('app_store', 'com.etonia.app.plan.499.yearly', 'starter499', 1, 14400000),
+ ('app_store', 'com.etonia.app.plan.1299.yearly', 'pro1299', 2, 60000000),
+ ('app_store', 'com.etonia.app.plan.2999.yearly', 'max2999', 3, 180000000),
  ('google_play', 'etonia_plan_499_monthly', 'starter499', 1, 1200000),
  ('google_play', 'etonia_plan_1299_monthly', 'pro1299', 2, 5000000),
- ('google_play', 'etonia_plan_2999_monthly', 'max2999', 3, 15000000);
+ ('google_play', 'etonia_plan_2999_monthly', 'max2999', 3, 15000000),
+ ('google_play', 'etonia_plan_499_yearly', 'starter499', 1, 14400000),
+ ('google_play', 'etonia_plan_1299_yearly', 'pro1299', 2, 60000000),
+ ('google_play', 'etonia_plan_2999_yearly', 'max2999', 3, 180000000);
 
 create table billing_private.subscriptions (
   chain_key text primary key,

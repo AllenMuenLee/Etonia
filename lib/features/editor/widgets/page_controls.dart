@@ -11,14 +11,15 @@ import '../page/page_setup.dart';
 
 /// The page indicator, `current / count`, which opens the page panel, on
 /// wider layouts previous and next beside it, and the round Add button,
-/// whose menu adds a page or inserts an image or a PDF.
+/// whose menu adds a page or inserts a PDF.
 class PageControls extends StatelessWidget {
   const PageControls({
     super.key,
     required this.document,
     required this.showNavigation,
     required this.onOpenPanel,
-    this.onInsertImage,
+    this.onChooseImageFromGallery,
+    this.onTakePhoto,
     this.onInsertPdf,
   });
 
@@ -30,8 +31,8 @@ class PageControls extends StatelessWidget {
 
   final VoidCallback onOpenPanel;
 
-  /// Offered in the Add menu; left out when null.
-  final VoidCallback? onInsertImage;
+  final VoidCallback? onChooseImageFromGallery;
+  final VoidCallback? onTakePhoto;
   final VoidCallback? onInsertPdf;
 
   static String describe(int index, int count) {
@@ -92,7 +93,6 @@ class PageControls extends StatelessWidget {
               ),
             AddMenuButton(
               onAddPage: document.addPage,
-              onInsertImage: onInsertImage,
               onInsertPdf: onInsertPdf,
             ),
           ],
@@ -102,21 +102,58 @@ class PageControls extends StatelessWidget {
   }
 }
 
-/// A round, accent-tinted button whose menu adds a new page, or inserts an
-/// image or a PDF's pages. Tinted rather than filled, so the bar stays
+/// A direct toolbar action for inserting an image, with the source chosen
+/// from its small menu rather than from the page Add menu.
+class ImageMenuButton extends StatelessWidget {
+  const ImageMenuButton({
+    super.key,
+    this.onChooseFromGallery,
+    this.onTakePhoto,
+  });
+
+  final VoidCallback? onChooseFromGallery;
+  final VoidCallback? onTakePhoto;
+
+  @override
+  Widget build(BuildContext context) {
+    final bool enabled = onChooseFromGallery != null || onTakePhoto != null;
+    return MenuAnchor(
+      alignmentOffset: const Offset(0, AppSpacing.xxs),
+      menuChildren: <Widget>[
+        MenuItemButton(
+          leadingIcon: const Icon(AppIcons.insertImage),
+          onPressed: onChooseFromGallery,
+          child: const Text('Choose from gallery'),
+        ),
+        MenuItemButton(
+          leadingIcon: const Icon(AppIcons.camera),
+          onPressed: onTakePhoto,
+          child: const Text('Take photo'),
+        ),
+      ],
+      builder: (BuildContext context, MenuController menu, Widget? child) {
+        return IconButton(
+          key: const ValueKey<String>('insert-image-button'),
+          tooltip: 'Insert image',
+          onPressed: enabled
+              ? () => menu.isOpen ? menu.close() : menu.open()
+              : null,
+          icon: const Icon(AppIcons.insertImage),
+        );
+      },
+    );
+  }
+}
+
+/// A round, accent-tinted button whose menu adds a new page or inserts a
+/// PDF's pages. Tinted rather than filled, so the bar stays
 /// quiet around the page.
 class AddMenuButton extends StatelessWidget {
-  const AddMenuButton({
-    super.key,
-    required this.onAddPage,
-    this.onInsertImage,
-    this.onInsertPdf,
-  });
+  const AddMenuButton({super.key, required this.onAddPage, this.onInsertPdf});
 
   static const double _diameter = 36;
 
   final VoidCallback onAddPage;
-  final VoidCallback? onInsertImage;
   final VoidCallback? onInsertPdf;
 
   @override
@@ -125,11 +162,6 @@ class AddMenuButton extends StatelessWidget {
     return MenuAnchor(
       alignmentOffset: const Offset(0, AppSpacing.xxs),
       menuChildren: <Widget>[
-        MenuItemButton(
-          leadingIcon: const Icon(AppIcons.insertImage),
-          onPressed: onInsertImage,
-          child: const Text('Insert image'),
-        ),
         MenuItemButton(
           leadingIcon: const Icon(AppIcons.pdf),
           onPressed: onInsertPdf,
@@ -140,7 +172,6 @@ class AddMenuButton extends StatelessWidget {
           onPressed: () => _showAddPageDialog(
             context,
             onAddPage: onAddPage,
-            onInsertImage: onInsertImage,
             onInsertPdf: onInsertPdf,
           ),
           child: const Text('Add new page'),
@@ -180,7 +211,6 @@ class AddMenuButton extends StatelessWidget {
 Future<void> _showAddPageDialog(
   BuildContext context, {
   required VoidCallback onAddPage,
-  VoidCallback? onInsertImage,
   VoidCallback? onInsertPdf,
 }) {
   void closeThen(BuildContext dialogContext, VoidCallback action) {
@@ -199,7 +229,7 @@ Future<void> _showAddPageDialog(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: <Widget>[
             Text(
-              'Start with a blank page or add a file from your device.',
+              'Start with a blank page or add a PDF from your device.',
               style: Theme.of(dialogContext).textTheme.bodyMedium,
             ),
             const SizedBox(height: AppSpacing.md),
@@ -215,14 +245,6 @@ Future<void> _showAddPageDialog(
                   : () => closeThen(dialogContext, onInsertPdf),
               icon: const Icon(AppIcons.pdf),
               label: const Text('Browse files for a PDF'),
-            ),
-            const SizedBox(height: AppSpacing.xs),
-            OutlinedButton.icon(
-              onPressed: onInsertImage == null
-                  ? null
-                  : () => closeThen(dialogContext, onInsertImage),
-              icon: const Icon(AppIcons.insertImage),
-              label: const Text('Browse files for an image'),
             ),
           ],
         ),

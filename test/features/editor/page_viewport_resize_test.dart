@@ -80,4 +80,57 @@ void main() {
       expect(current.value, page, reason: '$width');
     }
   });
+
+  testWidgets('a tap on the desk is reported; a tap on a page is not', (
+    WidgetTester tester,
+  ) async {
+    tester.view.physicalSize = const Size(1200, 900);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.reset);
+    int deskTaps = 0;
+    await tester.pumpWidget(
+      Theme(
+        data: AppTheme.light(),
+        child: Directionality(
+          textDirection: TextDirection.ltr,
+          child: Align(
+            alignment: Alignment.topLeft,
+            child: SizedBox(
+              width: 1100,
+              height: 700,
+              child: PageViewport(
+                pages: <PageGeometry>[
+                  PageGeometry.of(_a4, null, const Size(1100, 700)),
+                ],
+                pageKeys: const <Key>[ValueKey<int>(0)],
+                currentPage: 0,
+                minZoom: 0.3,
+                initialZoom: 0.3,
+                onDeskTap: () => deskTaps++,
+                pageBuilder:
+                    (
+                      BuildContext context,
+                      int index,
+                      ValueListenable<Rect> _,
+                    ) => const SizedBox.expand(),
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+    await tester.pump();
+    final Rect page = tester.getRect(
+      find.descendant(
+        of: find.byKey(const ValueKey<int>(0)),
+        matching: find.byType(ColoredBox),
+      ),
+    );
+    expect(page.left, greaterThan(20));
+
+    await tester.tapAt(page.center);
+    expect(deskTaps, 0);
+    await tester.tapAt(Offset(page.left / 2, page.center.dy));
+    expect(deskTaps, 1);
+  });
 }

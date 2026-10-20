@@ -14,10 +14,10 @@ the device use Keychain/secure storage; `subscription.json` retains only the
 preferred model. Existing local credits and debug grants are not imported.
 
 There are no note, PDF, chat, prompt, response, image or embedding tables, and no
-Storage buckets. An AI request forwards the **current prompt and selected PNG
-crop** to a provider in memory. Optional drawing coordinates contain only page
-dimensions and crop bounds. The full note image and previous conversation turns
-are never serialized. Responses are returned to the device and never persisted.
+Storage buckets. An AI request forwards the **current prompt, recent conversation
+text, and selected PNG crop** to a provider in memory. Optional drawing coordinates
+contain only page dimensions and crop bounds. The full note image is never
+serialized. Responses are returned to the device and never persisted.
 Request bodies, provider responses, purchase tokens and errors are not logged.
 Do not enable body capture in a gateway, tracing agent or monitoring integration.
 OpenAI calls explicitly use `store: false`; provider-side retention is governed
@@ -54,6 +54,16 @@ by the provider account's own settings and terms, not by this Supabase code.
    app configuration, **not a claim about current provider pricing**. Rates are
    integer micro-USD per 1,000 tokens: $2/million tokens means `2000`.
    Model routing, rates, output limits and allowed aliases are server-controlled.
+   Two optional fields per model cut the cost of a request:
+   - `reasoningEffort` (`none`, `minimal`, `low`, `medium`, `high`): sent as
+     OpenAI's `reasoning_effort` or Gemini's `thinkingLevel`. Reasoning is
+     billed as output, usually the largest part of a request; `low` is a good
+     start for tutoring. Leave it out for a model that does not reason (or for
+     Claude, which ignores it), or the provider rejects the request.
+   - `cachedInputMicroPerKilo`: the provider's price for cached input. The
+     fixed instructions and answer schema (several thousand tokens) are the
+     same on every request, so providers serve them from cache; without this
+     field, users are billed full price for them.
 6. Generate `PURCHASE_TOKEN_ENCRYPTION_KEY` from 32 cryptographically random bytes
    and base64-encode them. Back it up securely. Rotating it requires re-encrypting
    existing locators; changing it alone makes old subscriptions unreadable.
@@ -127,23 +137,24 @@ cannot execute them or read the private tables. UI status is returned by `billin
   Credits belong to that subscription's current transaction and do not roll over.
 - A database transaction locks the account and reserves its metered balance before
   calling the provider. The output budget is constrained by credits and configured
-  prices, with conservative input/image allowance. One request per account may be
-  in flight. Usage settlement is idempotent, and an old request cannot refund into
+  prices, with conservative input/image allowance. Each request holds only its own
+  worst-case cost, so up to four requests per account may be in flight at once
+  (a pending request stops counting toward that after ten minutes). Usage settlement is idempotent, and an old request cannot refund into
   a new renewal's allowance. Charges are capped at the reserved balance.
 - Unlimited models use no credits but still have output, concurrency and rate
   limits: 30 API calls/minute and 300 AI requests/24 hours per account. These are
   abuse limits in addition to store entitlements, and can be adjusted in migration
   follow-ups. Configure provider/project spending limits as an additional cap.
 - A definitively rejected provider call releases its reservation. A timeout,
-  missing usage report or failed settlement leaves it pending and blocks further
-  requests for that account. **Do not automatically refund or retry an uncertain
+  missing usage report or failed settlement leaves it pending, holding its credits. **Do not automatically refund or retry an uncertain
   provider call.** It may already have incurred cost. Monitor pending requests
   older than two minutes in `billing_private.requests`; after checking provider
   billing, an administrator can settle using `public.ai_settle(user_id, request_id,
   cost_micro_usd, input_tokens, output_tokens, false)` or explicitly release it
   with zero values and `true`. No content is stored for replay.
 - AI currently returns a complete response after accounting; it does not stream
-  partial tokens. Previous chat stays visible locally but is not provider context.
+  partial tokens. Up to 100 recent messages (bounded to 128,000 UTF-8 bytes) are
+  sent as provider context with each request.
 
 ## Validation
 

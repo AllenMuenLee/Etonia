@@ -17,6 +17,7 @@ import 'package:greatnote/features/editor/ink/ink_sample.dart';
 import 'package:greatnote/features/editor/ink/stroke.dart';
 import 'package:greatnote/features/editor/sticky/sticky_note.dart';
 import 'package:greatnote/features/editor/widgets/ai_assistant_panel.dart';
+import 'package:greatnote/features/editor/widgets/palette_button.dart';
 import 'package:greatnote/features/editor/widgets/tool_palette.dart';
 
 import '../../helpers/ai_fakes.dart';
@@ -672,19 +673,45 @@ void main() {
       expect(_aiOn(tester), isTrue);
     });
 
-    testWidgets('switching tools reads what is waiting at once', (
+    testWidgets('other tools wait until the input for the assistant is done', (
       WidgetTester tester,
     ) async {
       final _Editor editor = await _pump(tester);
       editor.recognizer.text = 'now';
       await _turnOnAi(tester);
+      bool penEnabled() =>
+          tester
+              .widget<PaletteButton>(
+                find.ancestor(
+                  of: find.byTooltip('Pen'),
+                  matching: find.byType(PaletteButton),
+                ),
+              )
+              .onPressed !=
+          null;
+      expect(penEnabled(), isTrue);
+
       await _write(tester, _letter(const Offset(300, 300)));
-      await tester.tap(find.byTooltip('Pen'));
       await tester.pump();
+      // Handwriting waits to be read: the AI tool is the only one.
+      expect(penEnabled(), isFalse);
+      await tester.tap(find.byTooltip('Pen'), warnIfMissed: false);
       await tester.pump();
-      expect(editor.recognizer.batches, hasLength(1));
+      expect(editor.recognizer.batches, isEmpty);
+
+      await tester.pump(const Duration(seconds: 2));
       await tester.pumpAndSettle();
       expect(_assistant(tester).draft, 'now');
+      // Unsent words in the composer still hold the other tools back.
+      expect(penEnabled(), isFalse);
+
+      await tester.enterText(find.byType(TextField), '');
+      await tester.pump();
+      expect(penEnabled(), isTrue);
+      await tester.tap(find.byTooltip('Pen'));
+      await tester.pump();
+      // Both on: AI mode and the pen.
+      expect(_aiOn(tester), isTrue);
     });
 
     testWidgets('nothing read adds nothing', (WidgetTester tester) async {

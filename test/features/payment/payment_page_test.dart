@@ -54,26 +54,26 @@ Future<void> _tapButton(WidgetTester tester, SubscriptionPlan plan) async {
 }
 
 void main() {
-  testWidgets('shows all three plans with their prices, credits, and '
+  testWidgets('shows all three plans with their prices, tokens, and '
       'unlimited Haiku & Luna', (WidgetTester tester) async {
     await _pumpPage(tester);
 
-    for (final (SubscriptionPlan plan, String price, String credits)
+    for (final (SubscriptionPlan plan, String price, String tokens)
         in <(SubscriptionPlan, String, String)>[
           (
             SubscriptionPlan.starter499,
             '\$4.99 / month',
-            '\$1.20 AI credits for Sonnet & Sol combined',
+            'AI tokens for Sonnet & Sol combined',
           ),
           (
             SubscriptionPlan.pro1299,
             '\$12.99 / month',
-            '\$5.00 AI credits for Sonnet, Sol, Opus, Argon & Astra combined',
+            'AI tokens for Sonnet, Sol, Opus, Argon & Astra combined',
           ),
           (
             SubscriptionPlan.max2999,
             '\$29.99 / month',
-            '\$15.00 AI credits for all models (Sonnet, Sol, Opus, Argon & '
+            'AI tokens for all models (Sonnet, Sol, Opus, Argon & '
                 'Astra combined)',
           ),
         ]) {
@@ -81,7 +81,14 @@ void main() {
           find.descendant(of: _card(plan), matching: finder);
       expect(inCard(find.text(plan.title)), findsOneWidget);
       expect(inCard(find.text(price)), findsOneWidget);
-      expect(inCard(find.text(credits)), findsOneWidget);
+      expect(inCard(find.text(tokens)), findsOneWidget);
+      expect(
+        inCard(
+          find.byKey(ValueKey<String>('plan-token-comparison-${plan.name}')),
+        ),
+        findsOneWidget,
+      );
+      expect(inCard(find.text(plan.tokenComparisonText)), findsOneWidget);
       expect(inCard(find.text('Unlimited Haiku & Luna')), findsOneWidget);
       expect(inCard(find.text('Subscribe')), findsOneWidget);
     }
@@ -94,7 +101,12 @@ void main() {
       findsOneWidget,
     );
     expect(find.text('No plan'), findsOneWidget);
-    expect(_balance(tester), '\$0.00 / \$0.00');
+    expect(find.text('AI tokens'), findsOneWidget);
+    expect(_balance(tester), '0%');
+    expect(
+      find.byKey(const ValueKey<String>('payment-token-bar')),
+      findsOneWidget,
+    );
     expect(find.text('Restore Purchases'), findsOneWidget);
     expect(
       find.descendant(
@@ -124,9 +136,9 @@ void main() {
 
   for (final (SubscriptionPlan plan, String meter)
       in <(SubscriptionPlan, String)>[
-        (SubscriptionPlan.starter499, '\$1.20 / \$1.20'),
-        (SubscriptionPlan.pro1299, '\$5.00 / \$5.00'),
-        (SubscriptionPlan.max2999, '\$15.00 / \$15.00'),
+        (SubscriptionPlan.starter499, '100%'),
+        (SubscriptionPlan.pro1299, '100%'),
+        (SubscriptionPlan.max2999, '100%'),
       ]) {
     testWidgets('buying ${plan.title} goes pending, then purchased, and '
         'fills the meter', (WidgetTester tester) async {
@@ -221,7 +233,7 @@ void main() {
 
     expect(gateway.restores, 1);
     expect(controller.activePlan, SubscriptionPlan.pro1299);
-    expect(_balance(tester), '\$5.00 / \$5.00');
+    expect(_balance(tester), '100%');
     expect(find.text('Restored your Pro plan.'), findsOneWidget);
     expect(gateway.completed.single.purchaseId, 'earlier');
   });

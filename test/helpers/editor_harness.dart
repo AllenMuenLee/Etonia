@@ -7,6 +7,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:greatnote/features/editor/ai/ai_client.dart';
 import 'package:greatnote/features/editor/ai/selection_image_renderer.dart';
 import 'package:greatnote/features/editor/editor_screen.dart';
+import 'package:greatnote/features/editor/handwriting/handwriting_calibration.dart';
 import 'package:greatnote/features/editor/ink/ink_canvas.dart';
 import 'package:greatnote/features/editor/ink/ink_controller.dart';
 import 'package:greatnote/features/editor/ink/stroke.dart';
@@ -28,6 +29,7 @@ Future<InkController> pumpEditor(
   // Notation sends capture the whole note, which only some tests pump for.
   bool initialNotationEnabled = false,
   SubscriptionController? subscription,
+  HandwritingProfileStore? handwritingProfileStore,
 }) async {
   final InkController controller = InkController(strokes: strokes);
   addTearDown(controller.dispose);
@@ -41,6 +43,7 @@ Future<InkController> pumpEditor(
       selectionImageRenderer: selectionImageRenderer,
       initialNotationEnabled: initialNotationEnabled,
       subscription: subscription,
+      handwritingProfileStore: handwritingProfileStore,
     ),
   );
   return controller;

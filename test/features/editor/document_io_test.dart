@@ -29,6 +29,48 @@ import 'package:greatnote/features/library/shared_note_clipboard.dart';
 import '../../helpers/document_io_fakes.dart';
 import '../../helpers/pump_app.dart';
 
+/// Counts how often the exporter parses the PDF and which pages it renders
+/// through the open document.
+class _OpenOnceRasterizer extends FakePdfRasterizer
+    implements PdfDocumentRasterizer {
+  int opens = 0;
+  bool disposed = false;
+  final List<int> renderedPages = <int>[];
+
+  @override
+  Future<OpenPdf> open(Uint8List bytes) async {
+    opens++;
+    return _CountingOpenPdf(this);
+  }
+}
+
+class _CountingOpenPdf implements OpenPdf {
+  _CountingOpenPdf(this.owner);
+
+  final _OpenOnceRasterizer owner;
+
+  @override
+  Future<Image> renderImage(
+    int pageIndex, {
+    required int pixelWidth,
+    required int pixelHeight,
+  }) {
+    owner.renderedPages.add(pageIndex);
+    final PictureRecorder recorder = PictureRecorder();
+    Canvas(recorder).drawRect(
+      const Rect.fromLTWH(0, 0, 4, 4),
+      Paint()..color = const Color(0xFF336699),
+    );
+    final Picture picture = recorder.endRecording();
+    return picture.toImage(4, 4).whenComplete(picture.dispose);
+  }
+
+  @override
+  Future<void> dispose() async {
+    owner.disposed = true;
+  }
+}
+
 void main() {
   test('schema 2 round-trips PDF, image rotation, and Fit history', () {
     const NoteContent content = NoteContent(<StoredPage>[
@@ -377,6 +419,50 @@ void main() {
     expect(image.decodeImage(stored.bytes)!.width, 10);
   });
 
+  testWidgets('the image tool offers gallery and camera, outside Add', (
+    WidgetTester tester,
+  ) async {
+    final InMemoryNoteRepository repository = InMemoryNoteRepository();
+    addTearDown(repository.dispose);
+    final note = await repository.createNote();
+    final FakeDocumentPicker picker = FakeDocumentPicker();
+    await pumpApp(
+      tester,
+      home: EditorScreen(
+        repository: repository,
+        noteId: note.id,
+        documentPicker: picker,
+      ),
+    );
+
+    await tester.tap(find.byTooltip('Add'));
+    await tester.pumpAndSettle();
+    expect(find.text('Insert PDF'), findsOneWidget);
+    expect(find.text('Insert image'), findsNothing);
+    await tester.tap(find.byTooltip('Add'));
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.byTooltip('Insert image'));
+    await tester.pumpAndSettle();
+    expect(find.text('Choose from gallery'), findsOneWidget);
+    expect(find.text('Take photo'), findsOneWidget);
+
+    await tester.tap(find.text('Choose from gallery'));
+    await tester.pumpAndSettle();
+    expect(picker.imageSources, <DocumentImageSource>[
+      DocumentImageSource.gallery,
+    ]);
+
+    await tester.tap(find.byTooltip('Insert image'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Take photo'));
+    await tester.pumpAndSettle();
+    expect(picker.imageSources, <DocumentImageSource>[
+      DocumentImageSource.gallery,
+      DocumentImageSource.camera,
+    ]);
+  });
+
   test('asset lifecycle copies and deletes with an in-memory note', () async {
     final InMemoryNoteRepository repository = InMemoryNoteRepository();
     addTearDown(repository.dispose);
@@ -469,6 +555,41 @@ void main() {
           repository: repository,
         );
     expect(utf8.decode(bytes.sublist(0, 4)), '%PDF');
+  });
+
+  test('export parses each source PDF once for all of its pages', () async {
+    final InMemoryNoteRepository repository = InMemoryNoteRepository();
+    addTearDown(repository.dispose);
+    final note = await repository.createNote();
+    final String pdfAsset = await repository.storeAsset(
+      note.id,
+      Uint8List.fromList(<int>[1, 2, 3]),
+      kind: NoteAssetKind.pdf,
+      extension: 'pdf',
+    );
+    final _OpenOnceRasterizer rasterizer = _OpenOnceRasterizer();
+    final Uint8List bytes = await PdfExporter(rasterizer: rasterizer).buildPdf(
+      noteId: note.id,
+      title: 'Imported',
+      content: NoteContent(<StoredPage>[
+        for (int i = 0; i < 3; i++)
+          StoredPage(
+            setup: const PageSetup(size: PageSize.letterPortrait),
+            pdfSource: PdfPageSource(
+              assetId: pdfAsset,
+              pageIndex: i,
+              pageSize: const Size(40, 50),
+            ),
+            strokes: const <Stroke>[],
+          ),
+      ]),
+      repository: repository,
+    );
+    expect(utf8.decode(bytes.sublist(0, 4)), '%PDF');
+    expect(rasterizer.opens, 1);
+    expect(rasterizer.renderedPages, <int>[0, 1, 2]);
+    expect(rasterizer.renderCalls, 0);
+    expect(rasterizer.disposed, isTrue);
   });
 
   test('a note with strokes exports, though a stroke holds a Path', () async {

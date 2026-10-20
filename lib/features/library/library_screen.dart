@@ -31,6 +31,7 @@ import 'cloud/goodnotes_drive_replicator.dart';
 import 'cloud/google_drive_backup_service.dart';
 import 'cloud/google_drive_client.dart';
 import 'cloud/google_drive_sheet.dart';
+import 'cloud/google_sign_in_screen.dart';
 import 'file_note_repository.dart';
 import 'library_dialogs.dart';
 import 'library_models.dart';
@@ -41,13 +42,13 @@ import 'note_tabs_page.dart';
 import 'note_thumbnails.dart';
 import 'open_notes.dart';
 import 'shared_note_clipboard.dart';
+import '../../shared/widgets/app_controls.dart';
 import '../../shared/widgets/ignore_keyboard.dart';
 import '../../shared/widgets/processing.dart';
 import '../../shared/widgets/pressable.dart';
 import '../payment/in_app_purchase_gateway.dart';
 import '../payment/payment_models.dart';
 import '../payment/payment_page.dart';
-import '../payment/plans_button.dart';
 import '../payment/subscription_controller.dart';
 
 /// Opens the library on this device, then shows it. With a [repository]
@@ -90,26 +91,21 @@ class _LibraryHomeState extends State<LibraryHome> {
 
   bool _handwritingChecked = false;
 
-  /// Loads the writer's handwriting profile for every note, and offers
-  /// calibration once, on the first launch of the device's library.
+  /// Loads the writer's handwriting profile for every note. The library
+  /// itself asks for sign-in and offers calibration ([LibraryScreen.onboard]).
   void _checkHandwriting(NoteRepository repository) {
-    if (_handwritingChecked ||
-        widget.repository != null ||
-        repository is! FileNoteRepository) {
-      return;
-    }
+    if (_handwritingChecked || !_onDevice(repository)) return;
     _handwritingChecked = true;
-    final HandwritingProfileStore store = handwritingProfileStoreFor(
-      repository,
-    );
-    store.read().then((HandwritingCalibrationState? state) {
-      HandwritingCalibration.current.value = state?.profile;
-      if (state != null || !mounted) return;
-      WidgetsBinding.instance.addPostFrameCallback((Duration _) {
-        if (mounted) showHandwritingCalibration(context, store: store);
-      });
+    handwritingProfileStoreFor(repository).read().then((
+      HandwritingCalibrationState? state,
+    ) {
+      HandwritingCalibration.current.value = state?.style;
     });
   }
+
+  /// Whether [repository] is the device's own library, not one supplied.
+  bool _onDevice(NoteRepository repository) =>
+      widget.repository == null && repository is FileNoteRepository;
 
   @override
   void dispose() {
@@ -128,6 +124,7 @@ class _LibraryHomeState extends State<LibraryHome> {
           return LibraryScreen(
             repository: repository,
             subscription: widget.subscription ?? _subscriptionFor(repository),
+            onboard: _onDevice(repository),
           );
         }
         return Scaffold(
@@ -307,9 +304,15 @@ class LibraryScreen extends StatefulWidget {
     this.googleDriveClient,
     this.cloudStateStore,
     this.subscription,
+    this.onboard = false,
   });
 
   final NoteRepository repository;
+
+  /// On opening, asks someone not signed in to sign in to Google and
+  /// Google Drive first, then offers handwriting calibration if it has
+  /// never been offered.
+  final bool onboard;
   final DateTime Function() clock;
 
   /// Passed to the editor; tests supply one.
@@ -428,6 +431,9 @@ class _LibraryScreenState extends State<LibraryScreen> {
 
   SubscriptionController? _ownedSubscription;
 
+  late HandwritingProfileStore _handwritingProfileStore =
+      handwritingProfileStoreFor(widget.repository);
+
   SubscriptionController get _subscription =>
       widget.subscription ??
       (_ownedSubscription ??= SubscriptionController(
@@ -442,10 +448,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
   Future<void> _openPlans() => showPaymentPage(context, _subscription);
 
   Future<void> _calibrateHandwriting() async {
-    await showHandwritingCalibration(
-      context,
-      store: handwritingProfileStoreFor(widget.repository),
-    );
+    await showHandwritingCalibration(context, store: _handwritingProfileStore);
   }
 
   String get _query => _search.text.trim();
@@ -465,7 +468,25 @@ class _LibraryScreenState extends State<LibraryScreen> {
         .listen(_enqueueSharedDocument);
     WidgetsBinding.instance.addPostFrameCallback((_) {
       _takeInitialSharedDocuments();
+      if (widget.onboard) _onboard();
     });
+  }
+
+  /// Google sign-in first, then handwriting calibration once.
+  Future<void> _onboard() async {
+    GoogleDriveAccount? account = _drive.currentAccount;
+    account ??= await _drive.restoreSession();
+    if (account == null && mounted) {
+      account = await showGoogleSignIn(context, client: _drive);
+    }
+    if (account != null) {
+      // As connecting from the Drive sheet does, so backups may run.
+      await _backup.setLinked(true);
+      await _autoBackup.reschedule();
+    }
+    final HandwritingCalibrationState? state = await _handwritingProfileStore
+        .read();
+    if (state == null && mounted) await _calibrateHandwriting();
   }
 
   @override
@@ -479,6 +500,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
         repository: widget.repository,
         rasterizer: widget.pdfRasterizer,
       );
+      _handwritingProfileStore = handwritingProfileStoreFor(widget.repository);
       _folderId = null;
       _reload();
     }
@@ -598,6 +620,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
       preview: _thumbnails.peek(note, Theme.of(context).brightness),
       aiClient: widget.aiClient,
       subscription: _subscription,
+      handwritingProfileStore: _handwritingProfileStore,
       documentPicker: widget.documentPicker,
       pdfRasterizer: widget.pdfRasterizer,
       exportSink: widget.exportSink,
@@ -1220,6 +1243,8 @@ class _LibraryScreenState extends State<LibraryScreen> {
       libraryOpen: _query.isEmpty && !_inTrash && _folderId == null,
       trashOpen: _showingTrash,
       trashCount: _trashCount,
+      subscription: _subscription,
+      onPlans: _openPlans,
       onOpenTrash: () {
         if (drawer) {
           _scaffold.currentState?.closeDrawer();
@@ -1709,7 +1734,7 @@ class _LibraryBar extends StatelessWidget implements PreferredSizeWidget {
   final VoidCallback onPlans;
 
   /// Opens handwriting calibration, which teaches AI notation the writer's
-  /// letters.
+  /// hand.
   final VoidCallback onCalibrateHandwriting;
 
   /// Whether a dragged item can go into a folder on the path, and moving
@@ -1854,14 +1879,9 @@ class _LibraryBar extends StatelessWidget implements PreferredSizeWidget {
                                   child: const Text('Empty'),
                                 ),
                               if (!compact) ...<Widget>[
-                                SizedBox(width: 240, child: field),
+                                SizedBox(width: 220, child: field),
                                 const SizedBox(width: AppSpacing.xs),
                               ],
-                              PlansButton(
-                                controller: subscription,
-                                onPressed: onPlans,
-                                compact: compact,
-                              ),
                               IconButton(
                                 tooltip: 'Google Drive',
                                 onPressed: onGoogleDrive,
@@ -1877,6 +1897,8 @@ class _LibraryBar extends StatelessWidget implements PreferredSizeWidget {
                                     onSort(choice);
                                   } else if (choice == #calibrate) {
                                     onCalibrateHandwriting();
+                                  } else if (choice == #plans) {
+                                    onPlans();
                                   } else {
                                     onToggleView();
                                   }
@@ -1905,8 +1927,14 @@ class _LibraryBar extends StatelessWidget implements PreferredSizeWidget {
                                     const PopupMenuDivider(),
                                     _menuItem<Object>(
                                       context,
+                                      value: #plans,
+                                      label: 'Plans & AI Credits',
+                                      icon: AppIcons.plans,
+                                    ),
+                                    _menuItem<Object>(
+                                      context,
                                       value: #calibrate,
-                                      label: 'Calibrate handwriting…',
+                                      label: 'AI handwriting…',
                                       icon: AppIcons.pen,
                                     ),
                                   ];
@@ -2884,9 +2912,14 @@ class _FolderSidebar extends StatelessWidget {
     required this.trashCount,
     required this.onOpenTrash,
     required this.onDropInTrash,
+    required this.subscription,
+    required this.onPlans,
   });
 
   static const double width = 280;
+
+  final SubscriptionController subscription;
+  final VoidCallback onPlans;
 
   /// Whether the top level, or Recently Deleted, is shown.
   final bool libraryOpen;
@@ -3052,6 +3085,10 @@ class _FolderSidebar extends StatelessWidget {
             // Recently Deleted, pinned to the bottom corner: deleted notes
             // wait here, and a note dropped here is deleted.
             const Divider(indent: AppSpacing.md, endIndent: AppSpacing.md),
+            _SidebarAiQuotaCard(
+              subscription: subscription,
+              onPlans: onPlans,
+            ),
             Padding(
               padding: const EdgeInsets.all(AppSpacing.xs),
               child: _DropTarget(
@@ -3080,6 +3117,100 @@ class _FolderSidebar extends StatelessWidget {
           ],
         ),
       ),
+    );
+  }
+}
+
+/// The AI Quota card pinned in the sidebar: displays current plan,
+/// remaining token quota, and allows navigating to plans and credits.
+class _SidebarAiQuotaCard extends StatelessWidget {
+  const _SidebarAiQuotaCard({
+    required this.subscription,
+    required this.onPlans,
+  });
+
+  final SubscriptionController subscription;
+  final VoidCallback onPlans;
+
+  @override
+  Widget build(BuildContext context) {
+    return ListenableBuilder(
+      listenable: subscription,
+      builder: (BuildContext context, Widget? _) {
+        final AppColors colors = AppColors.of(context);
+        final TextTheme text = Theme.of(context).textTheme;
+        final SubscriptionPlan? plan = subscription.activePlan;
+        final bool hasTokens =
+            (plan != null || subscription.hasFreeCredit) &&
+            subscription.remainingCreditsMicroUsd > 0;
+        final String planTitle = plan?.title ??
+            (subscription.hasFreeCredit ? 'Free Tier' : 'AI Plans');
+        final String percent = formatTokenPercent(
+          subscription.remainingCreditsMicroUsd,
+          subscription.includedCreditsMicroUsd,
+        );
+
+        return Padding(
+          padding: const EdgeInsets.symmetric(
+            horizontal: AppSpacing.xs,
+            vertical: AppSpacing.xxs,
+          ),
+          child: Material(
+            color: colors.surfaceMuted,
+            borderRadius: BorderRadius.circular(AppRadii.medium),
+            child: Tooltip(
+              message: 'Plans & Credits',
+              child: InkWell(
+                key: const ValueKey<String>('library-plans-button'),
+                borderRadius: BorderRadius.circular(AppRadii.medium),
+                onTap: onPlans,
+                child: Padding(
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: AppSpacing.sm,
+                    vertical: AppSpacing.xs,
+                  ),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  mainAxisSize: MainAxisSize.min,
+                  children: <Widget>[
+                    Row(
+                      children: <Widget>[
+                        Icon(AppIcons.plans, size: 16, color: colors.accent),
+                        const SizedBox(width: AppSpacing.xs),
+                        Expanded(
+                          child: Text(
+                            planTitle,
+                            style: text.labelMedium?.copyWith(
+                              color: colors.textPrimary,
+                              fontWeight: FontWeight.w600,
+                            ),
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                          ),
+                        ),
+                        Text(
+                          hasTokens ? percent : 'Upgrade',
+                          style: text.labelSmall?.copyWith(
+                            color: colors.accent,
+                            fontWeight: FontWeight.w600,
+                          ),
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: AppSpacing.xs),
+                    TokenMeterBar(
+                      key: const ValueKey<String>('library-token-bar'),
+                      fraction: subscription.tokenFraction,
+                      height: 5,
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ),
+        ),
+      );
+      },
     );
   }
 }

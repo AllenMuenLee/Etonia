@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 
 import '../../app/theme/app_icons.dart';
 import '../../app/theme/app_tokens.dart';
+import '../../shared/widgets/app_controls.dart';
 import '../editor/ai/ai_client.dart';
 import 'payment_models.dart';
 import 'subscription_controller.dart';
@@ -36,6 +37,8 @@ class PaymentPage extends StatefulWidget {
 }
 
 class _PaymentPageState extends State<PaymentPage> {
+  BillingCycle _selectedCycle = BillingCycle.monthly;
+
   @override
   void initState() {
     super.initState();
@@ -104,16 +107,6 @@ class _PaymentPageState extends State<PaymentPage> {
                             controller: controller,
                           ),
                         _CreditMeter(controller: controller),
-                        if (controller.backend != null)
-                          Padding(
-                            padding: const EdgeInsets.only(top: AppSpacing.sm),
-                            child: Text(
-                              'AI forwards only your current question and selected image. '
-                              'Notes, PDFs, and chat history are not uploaded or stored in your account.',
-                              style: Theme.of(context).textTheme.bodySmall
-                                  ?.copyWith(color: colors.textSecondary),
-                            ),
-                          ),
                         if (controller.activity !=
                             StoreActivity.idle) ...<Widget>[
                           const SizedBox(height: AppSpacing.sm),
@@ -140,6 +133,28 @@ class _PaymentPageState extends State<PaymentPage> {
                                 'be bought once it is.',
                           ),
                         ],
+                        const SizedBox(height: AppSpacing.md),
+                        Center(
+                          child: ConstrainedBox(
+                            constraints: const BoxConstraints(maxWidth: 320),
+                            child: SegmentedChoice<BillingCycle>(
+                              key: const ValueKey<String>('billing-cycle-toggle'),
+                              options: BillingCycle.values,
+                              selected: _selectedCycle,
+                              keyOf: (BillingCycle cycle) =>
+                                  ValueKey<String>('billing-cycle-${cycle.name}'),
+                              labelOf: (BillingCycle cycle) => switch (cycle) {
+                                BillingCycle.monthly => 'Monthly',
+                                BillingCycle.yearly => 'Yearly · Save 17%',
+                              },
+                              onSelected: (BillingCycle cycle) {
+                                setState(() {
+                                  _selectedCycle = cycle;
+                                });
+                              },
+                            ),
+                          ),
+                        ),
                         const SizedBox(height: AppSpacing.lg),
                         LayoutBuilder(
                           builder: (BuildContext context, BoxConstraints box) {
@@ -149,6 +164,7 @@ class _PaymentPageState extends State<PaymentPage> {
                                 _PlanCard(
                                   plan: plan,
                                   controller: controller,
+                                  cycle: _selectedCycle,
                                   fillHeight:
                                       box.maxWidth >= PaymentPage.columnsFrom,
                                 ),
@@ -180,8 +196,8 @@ class _PaymentPageState extends State<PaymentPage> {
                         ),
                         const SizedBox(height: AppSpacing.sm),
                         Text(
-                          'Plans renew monthly and are billed by '
-                          '${_storeName(context)}. Credits are granted in full '
+                          'Plans renew ${_selectedCycle == BillingCycle.yearly ? 'yearly' : 'monthly'} and are billed by '
+                          '${_storeName(context)}. Tokens are granted in full '
                           'with each renewal and are used only by metered '
                           'models; Haiku and Luna never use them.',
                           style: Theme.of(context).textTheme.bodySmall
@@ -309,7 +325,7 @@ class _PricingHero extends StatelessWidget {
             constraints: const BoxConstraints(maxWidth: 640),
             child: Text(
               'Every plan includes unlimited fast AI. Upgrade for more '
-              'frontier models and a larger monthly credit pool.',
+              'frontier models and a larger monthly token pool.',
               style: text.bodyLarge?.copyWith(color: colors.textSecondary),
               textAlign: TextAlign.center,
             ),
@@ -320,7 +336,7 @@ class _PricingHero extends StatelessWidget {
   }
 }
 
-/// The active plan, the credits left of its allowance, and Restore.
+/// The active plan, the tokens left of its allowance, and Restore.
 class _CreditMeter extends StatelessWidget {
   const _CreditMeter({required this.controller});
 
@@ -333,10 +349,8 @@ class _CreditMeter extends StatelessWidget {
     final SubscriptionPlan? plan = controller.activePlan;
     final int included = controller.includedCreditsMicroUsd;
     final int remaining = controller.remainingCreditsMicroUsd;
-    final double fraction = included == 0
-        ? 0
-        : (remaining / included).clamp(0, 1).toDouble();
-    final String credits = '${formatUsd(remaining)} / ${formatUsd(included)}';
+    final double fraction = controller.tokenFraction;
+    final String tokens = formatTokenPercent(remaining, included);
     return _Card(
       key: const ValueKey<String>('payment-credit-meter'),
       child: Column(
@@ -393,15 +407,16 @@ class _CreditMeter extends StatelessWidget {
             children: <Widget>[
               Expanded(
                 child: Text(
-                  'AI credits',
+                  'AI tokens',
                   style: text.bodyMedium?.copyWith(color: colors.textPrimary),
                 ),
               ),
               Text(
-                credits,
+                tokens,
                 key: const ValueKey<String>('payment-credit-balance'),
                 style: text.titleMedium?.copyWith(
                   color: colors.textPrimary,
+                  fontWeight: FontWeight.w600,
                   fontFeatures: const <FontFeature>[
                     FontFeature.tabularFigures(),
                   ],
@@ -410,23 +425,17 @@ class _CreditMeter extends StatelessWidget {
             ],
           ),
           const SizedBox(height: AppSpacing.xs),
-          Semantics(
-            label: 'AI credits remaining',
-            value: credits,
-            child: ClipRRect(
-              borderRadius: BorderRadius.circular(AppRadii.small),
-              child: LinearProgressIndicator(
-                value: fraction,
-                minHeight: 8,
-                color: colors.accent,
-                backgroundColor: colors.surfaceMuted,
-              ),
-            ),
+          TokenMeterBar(
+            key: const ValueKey<String>('payment-token-bar'),
+            fraction: fraction,
+            height: 14,
+            semanticsLabel: 'AI tokens remaining',
+            semanticsValue: tokens,
           ),
           const SizedBox(height: AppSpacing.xs),
           Text(
             controller.hasFreeCredit
-                ? 'One-time free credit for Haiku, Luna, Sonnet & Sol. '
+                ? 'One-time free tokens for Haiku, Luna, Sonnet & Sol. '
                       'Haiku and Luna are unlimited on every paid plan.'
                 : 'Haiku and Luna are unlimited on every paid plan.',
             style: text.bodySmall?.copyWith(color: colors.textSecondary),
@@ -441,11 +450,13 @@ class _PlanCard extends StatelessWidget {
   const _PlanCard({
     required this.plan,
     required this.controller,
+    required this.cycle,
     required this.fillHeight,
   });
 
   final SubscriptionPlan plan;
   final SubscriptionController controller;
+  final BillingCycle cycle;
 
   /// Whether the card stretches to its neighbours' height, its button at
   /// the bottom.
@@ -513,7 +524,7 @@ class _PlanCard extends StatelessWidget {
             ],
             const SizedBox(height: AppSpacing.xxs),
             Text(
-              controller.priceFor(plan),
+              controller.priceFor(plan, cycle: cycle),
               style: text.headlineSmall?.copyWith(
                 color: colors.textPrimary,
                 fontWeight: FontWeight.w700,
@@ -528,6 +539,48 @@ class _PlanCard extends StatelessWidget {
             Text(
               plan.creditDescription,
               style: text.bodyMedium?.copyWith(color: colors.textPrimary),
+            ),
+            const SizedBox(height: AppSpacing.xs),
+            Container(
+              padding: const EdgeInsets.symmetric(
+                horizontal: AppSpacing.xs,
+                vertical: AppSpacing.xxs + 2,
+              ),
+              decoration: BoxDecoration(
+                color: colors.surfaceMuted,
+                borderRadius: BorderRadius.circular(AppRadii.small),
+                border: Border.all(
+                  color: colors.glassEdge,
+                  width: AppSizes.hairline,
+                ),
+              ),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: <Widget>[
+                  Icon(
+                    AppIcons.plans,
+                    size: 14,
+                    color: plan == SubscriptionPlan.pro1299 ||
+                            plan == SubscriptionPlan.max2999
+                        ? colors.accent
+                        : colors.textSecondary,
+                  ),
+                  const SizedBox(width: AppSpacing.xxs),
+                  Flexible(
+                    child: Text(
+                      plan.tokenComparisonText,
+                      key: ValueKey<String>('plan-token-comparison-${plan.name}'),
+                      style: text.labelMedium?.copyWith(
+                        color: plan == SubscriptionPlan.pro1299 ||
+                                plan == SubscriptionPlan.max2999
+                            ? colors.accent
+                            : colors.textPrimary,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                  ),
+                ],
+              ),
             ),
             const SizedBox(height: AppSpacing.sm),
             Wrap(
@@ -563,7 +616,7 @@ class _PlanCard extends StatelessWidget {
                 child: FilledButton(
                   onPressed: current || busy
                       ? null
-                      : () => controller.purchase(plan),
+                      : () => controller.purchase(plan, cycle: cycle),
                   style: FilledButton.styleFrom(
                     backgroundColor: colors.accent,
                     foregroundColor: colors.onAccent,

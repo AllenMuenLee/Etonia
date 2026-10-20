@@ -148,6 +148,13 @@ class ThumbnailCache {
       if (gone) entry.dispose();
       return gone;
     });
+    final NoteRepository repository = this.repository;
+    final ThumbnailDiskStore? store = repository is ThumbnailDiskStore
+        ? repository as ThumbnailDiskStore
+        : null;
+    if (store != null) {
+      unawaited(store.retainThumbnailNotes(ids));
+    }
   }
 
   void _evict() {
@@ -166,7 +173,7 @@ class ThumbnailCache {
       final String key = entry.key!;
       final ThumbnailStyle style = entry.style!;
       unawaited(
-        _draw(entry.noteId, style)
+        _draw(entry.noteId, key, style)
             .then((ui.Image? image) {
               if (image == null) return;
               // A newer request, or a dropped entry, wants another picture.
@@ -197,7 +204,26 @@ class ThumbnailCache {
     }
   }
 
-  Future<ui.Image?> _draw(String noteId, ThumbnailStyle style) async {
+  Future<ui.Image?> _draw(
+    String noteId,
+    String modifiedKey,
+    ThumbnailStyle style,
+  ) async {
+    final String diskKey = '${modifiedKey}_${style.brightness.name}';
+    final NoteRepository repository = this.repository;
+    final ThumbnailDiskStore? store = repository is ThumbnailDiskStore
+        ? repository as ThumbnailDiskStore
+        : null;
+    if (store != null) {
+      final Uint8List? cached = await store.readThumbnail(noteId, diskKey);
+      if (cached != null) {
+        try {
+          return await _decode(cached, pixelWidth);
+        } on Object {
+          // Corrupt/stale cache entries are replaced by a fresh render.
+        }
+      }
+    }
     final NoteContent content = await repository.loadNote(noteId);
     if (content.pages.isEmpty) return null;
     final StoredPage page = content.pages.first;
@@ -313,7 +339,27 @@ class ThumbnailCache {
     ).paint(canvas, size);
     final ui.Picture picture = recorder.endRecording();
     try {
-      return await picture.toImage(width, height);
+      final ui.Image result = await picture.toImage(width, height);
+      if (store != null) {
+        try {
+          final ByteData? encoded = await result.toByteData(
+            format: ui.ImageByteFormat.png,
+          );
+          if (encoded != null) {
+            await store.writeThumbnail(
+              noteId,
+              diskKey,
+              encoded.buffer.asUint8List(
+                encoded.offsetInBytes,
+                encoded.lengthInBytes,
+              ),
+            );
+          }
+        } on Object {
+          // Disk caching is opportunistic; the in-memory image is valid.
+        }
+      }
+      return result;
     } finally {
       picture.dispose();
       for (final ui.Image part in parts) {

@@ -13,6 +13,24 @@ String formatUsd(int microUsd) {
   return '\$${cents ~/ 100}.${(cents % 100).toString().padLeft(2, '0')}';
 }
 
+/// Remaining token allowance as a whole percentage (`0` to `100`), rounded
+/// down so a partially used pool never reads as `100%`, and a positive
+/// remainder never reads as `0%`.
+int tokenPercent(int remaining, int included) {
+  if (included <= 0 || remaining <= 0) {
+    return 0;
+  }
+  if (remaining >= included) {
+    return 100;
+  }
+  final int pct = (remaining * 100) ~/ included;
+  return pct == 0 ? 1 : pct;
+}
+
+/// Remaining token allowance formatted as `100%`.
+String formatTokenPercent(int remaining, int included) =>
+    '${tokenPercent(remaining, included)}%';
+
 /// How a model is paid for.
 enum AiModelTier {
   /// Included in every plan without limit: Haiku and Luna.
@@ -33,37 +51,58 @@ enum AiModelTier {
   }
 }
 
-/// The three monthly plans.
+/// The billing cycle chosen by the user.
+enum BillingCycle {
+  monthly(label: 'Monthly'),
+  yearly(label: 'Yearly');
+
+  const BillingCycle({required this.label});
+  final String label;
+}
+
+/// The three subscription plans.
 enum SubscriptionPlan {
   starter499(
     title: 'Starter',
     priceLabel: '\$4.99 / month',
+    yearlyPriceLabel: '\$49.99 / year',
     includedCreditsMicroUsd: 1200000,
+    yearlyIncludedCreditsMicroUsd: 14400000,
+    tokenPoolScale: 0.28,
     meteredModels: <AiModelId>{AiModelId.sonnet, AiModelId.sol},
-    creditDescription: '\$1.20 AI credits for Sonnet & Sol combined',
+    creditDescription: 'AI tokens for Sonnet & Sol combined',
   ),
   pro1299(
     title: 'Pro',
     priceLabel: '\$12.99 / month',
+    yearlyPriceLabel: '\$129.99 / year',
     includedCreditsMicroUsd: 5000000,
+    yearlyIncludedCreditsMicroUsd: 60000000,
+    tokenPoolScale: 0.62,
     meteredModels: _allMetered,
     creditDescription:
-        '\$5.00 AI credits for Sonnet, Sol, Opus, Argon & Astra combined',
+        'AI tokens for Sonnet, Sol, Opus, Argon & Astra combined',
   ),
   max2999(
     title: 'Max',
     priceLabel: '\$29.99 / month',
+    yearlyPriceLabel: '\$299.99 / year',
     includedCreditsMicroUsd: 15000000,
+    yearlyIncludedCreditsMicroUsd: 180000000,
+    tokenPoolScale: 1.0,
     meteredModels: _allMetered,
     creditDescription:
-        '\$15.00 AI credits for all models (Sonnet, Sol, Opus, Argon & '
+        'AI tokens for all models (Sonnet, Sol, Opus, Argon & '
         'Astra combined)',
   );
 
   const SubscriptionPlan({
     required this.title,
     required this.priceLabel,
+    required this.yearlyPriceLabel,
     required this.includedCreditsMicroUsd,
+    required this.yearlyIncludedCreditsMicroUsd,
+    required this.tokenPoolScale,
     required this.meteredModels,
     required this.creditDescription,
   });
@@ -80,12 +119,26 @@ enum SubscriptionPlan {
 
   /// Shown when the store has not given a localized price.
   final String priceLabel;
+  final String yearlyPriceLabel;
 
   /// Credits granted on each purchase or renewal, shared by every model in
   /// [meteredModels].
   final int includedCreditsMicroUsd;
+  final int yearlyIncludedCreditsMicroUsd;
+
+  /// Visual scale (`0` to `1`) of this tier's token pool on the plan card bar.
+  final double tokenPoolScale;
   final Set<AiModelId> meteredModels;
   final String creditDescription;
+
+  /// How much more token allowance this plan provides compared to the previous plan.
+  String get tokenComparisonText {
+    return switch (this) {
+      SubscriptionPlan.starter499 => 'Essential AI access',
+      SubscriptionPlan.pro1299 => '4.2× more tokens than Starter',
+      SubscriptionPlan.max2999 => '3× more tokens than Pro (12.5× Starter)',
+    };
+  }
 
   /// Unlimited on every plan.
   Set<AiModelId> get unlimitedModels => const <AiModelId>{
@@ -140,7 +193,9 @@ class AiModelRate {
 class PaymentConfig {
   const PaymentConfig({
     this.androidProductIds = defaultAndroidProductIds,
+    this.androidYearlyProductIds = defaultAndroidYearlyProductIds,
     this.iosProductIds = defaultIosProductIds,
+    this.iosYearlyProductIds = defaultIosYearlyProductIds,
     this.rates = defaultRates,
     this.debugPlan = '',
   });
@@ -161,6 +216,20 @@ class PaymentConfig {
             defaultValue: 'etonia_plan_2999_monthly',
           ),
         },
+        androidYearlyProductIds: const <SubscriptionPlan, String>{
+          SubscriptionPlan.starter499: String.fromEnvironment(
+            'IAP_ANDROID_PLAN_499_YEARLY_ID',
+            defaultValue: 'etonia_plan_499_yearly',
+          ),
+          SubscriptionPlan.pro1299: String.fromEnvironment(
+            'IAP_ANDROID_PLAN_1299_YEARLY_ID',
+            defaultValue: 'etonia_plan_1299_yearly',
+          ),
+          SubscriptionPlan.max2999: String.fromEnvironment(
+            'IAP_ANDROID_PLAN_2999_YEARLY_ID',
+            defaultValue: 'etonia_plan_2999_yearly',
+          ),
+        },
         iosProductIds: const <SubscriptionPlan, String>{
           SubscriptionPlan.starter499: String.fromEnvironment(
             'IAP_IOS_PLAN_499_ID',
@@ -175,6 +244,20 @@ class PaymentConfig {
             defaultValue: 'com.etonia.app.plan.2999.monthly',
           ),
         },
+        iosYearlyProductIds: const <SubscriptionPlan, String>{
+          SubscriptionPlan.starter499: String.fromEnvironment(
+            'IAP_IOS_PLAN_499_YEARLY_ID',
+            defaultValue: 'com.etonia.app.plan.499.yearly',
+          ),
+          SubscriptionPlan.pro1299: String.fromEnvironment(
+            'IAP_IOS_PLAN_1299_YEARLY_ID',
+            defaultValue: 'com.etonia.app.plan.1299.yearly',
+          ),
+          SubscriptionPlan.max2999: String.fromEnvironment(
+            'IAP_IOS_PLAN_2999_YEARLY_ID',
+            defaultValue: 'com.etonia.app.plan.2999.yearly',
+          ),
+        },
         debugPlan: const String.fromEnvironment('IAP_DEBUG_PLAN'),
       );
 
@@ -185,11 +268,25 @@ class PaymentConfig {
         SubscriptionPlan.max2999: 'etonia_plan_2999_monthly',
       };
 
+  static const Map<SubscriptionPlan, String> defaultAndroidYearlyProductIds =
+      <SubscriptionPlan, String>{
+        SubscriptionPlan.starter499: 'etonia_plan_499_yearly',
+        SubscriptionPlan.pro1299: 'etonia_plan_1299_yearly',
+        SubscriptionPlan.max2999: 'etonia_plan_2999_yearly',
+      };
+
   static const Map<SubscriptionPlan, String> defaultIosProductIds =
       <SubscriptionPlan, String>{
         SubscriptionPlan.starter499: 'com.etonia.app.plan.499.monthly',
         SubscriptionPlan.pro1299: 'com.etonia.app.plan.1299.monthly',
         SubscriptionPlan.max2999: 'com.etonia.app.plan.2999.monthly',
+      };
+
+  static const Map<SubscriptionPlan, String> defaultIosYearlyProductIds =
+      <SubscriptionPlan, String>{
+        SubscriptionPlan.starter499: 'com.etonia.app.plan.499.yearly',
+        SubscriptionPlan.pro1299: 'com.etonia.app.plan.1299.yearly',
+        SubscriptionPlan.max2999: 'com.etonia.app.plan.2999.yearly',
       };
 
   /// List prices per million tokens, as micro-dollars per thousand.
@@ -212,7 +309,9 @@ class PaymentConfig {
       };
 
   final Map<SubscriptionPlan, String> androidProductIds;
+  final Map<SubscriptionPlan, String> androidYearlyProductIds;
   final Map<SubscriptionPlan, String> iosProductIds;
+  final Map<SubscriptionPlan, String> iosYearlyProductIds;
   final Map<AiModelId, AiModelRate> rates;
 
   /// A plan's enum name, such as `pro1299`, granted on launch to a debug
@@ -233,11 +332,25 @@ class PaymentConfig {
     return null;
   }
 
-  /// The store's product IDs for the platform the app runs on.
-  Map<SubscriptionPlan, String> productIdsFor(TargetPlatform platform) {
-    return platform == TargetPlatform.iOS || platform == TargetPlatform.macOS
-        ? iosProductIds
-        : androidProductIds;
+  /// The store's product IDs for the platform and billing cycle.
+  Map<SubscriptionPlan, String> productIdsFor(
+    TargetPlatform platform, {
+    BillingCycle cycle = BillingCycle.monthly,
+  }) {
+    final bool isApple =
+        platform == TargetPlatform.iOS || platform == TargetPlatform.macOS;
+    if (cycle == BillingCycle.yearly) {
+      return isApple ? iosYearlyProductIds : androidYearlyProductIds;
+    }
+    return isApple ? iosProductIds : androidProductIds;
+  }
+
+  /// All known store product IDs across both monthly and yearly cycles.
+  Set<String> allProductIdsFor(TargetPlatform platform) {
+    return <String>{
+      ...productIdsFor(platform, cycle: BillingCycle.monthly).values,
+      ...productIdsFor(platform, cycle: BillingCycle.yearly).values,
+    };
   }
 
   /// What an answer from [model] costs.

@@ -6,6 +6,7 @@ import '../ink/ink_palette.dart';
 import '../ink/ink_sample.dart';
 import '../ink/stroke.dart';
 import '../handwriting/handwriting_calibration.dart';
+import '../handwriting/handwriting_style.dart';
 import '../handwriting/recognized_handwriting.dart';
 import 'ai_config.dart';
 import 'ai_notation.dart';
@@ -197,7 +198,13 @@ List<GeneratedInkTrace> _layoutItem(
       case AiNotationGraph():
         _graph(item, size, config, add);
       case AiNotationPlot():
-        _plot(item, size, config, add);
+        _plot(
+          item,
+          size,
+          config,
+          add,
+          handwriting?.calibration ?? HandwritingStyle.standard,
+        );
       case AiNotationPath():
         final List<InkVector> points = <InkVector>[...item.points.map(page)];
         addStyled(
@@ -231,37 +238,149 @@ List<GeneratedInkTrace> _layoutItem(
   return traces;
 }
 
-/// Writes text from high-confidence user samples where an exact word is in
-/// the pool, and from the built-in vector alphabet everywhere else. A sample
-/// is only translated and independently scaled; distinct pen strokes are
-/// never averaged or joined, preserving legibility and stroke order.
+/// Writes text in the writer's hand: as their own samples of the exact
+/// words when the note has a high-confidence sample of every word, or else
+/// in the font shaped by their calibrated [HandwritingStyle] (the built-in
+/// one without calibration). A sentence that switches between the two
+/// reads worse than either, so it never does. A sample is translated,
+/// scaled, and lightly smoothed; distinct pen strokes are never averaged or
+/// joined, preserving legibility and stroke order.
+///
+/// Either way the text is kept inside the box the built-in hand would
+/// fill, which is what the assistant planned for, so a wider or taller
+/// hand cannot push it off the paper or onto other notes.
 List<List<InkVector>> _writeNotationText(
   String text, {
   required InkVector origin,
   required double size,
   HandwritingSampleLibrary? handwriting,
 }) {
-  if (handwriting == null) {
-    return NotationFont.write(text, origin: origin, size: size);
-  }
   final RegExp parts = RegExp(
     r"\s+|[\p{L}\p{M}\p{N}]+(?:['’][\p{L}\p{M}\p{N}]+)*|.",
     unicode: true,
   );
-  final List<String> tokens = parts
-      .allMatches(text)
-      .map((RegExpMatch match) => match.group(0)!)
-      .toList();
-  final HandwritingProfile? calibration = handwriting.calibration;
-  if (!tokens.any(
-    (String token) =>
-        handwriting.variantsFor(token) > 0 ||
-        (calibration?.canWriteAny(token) ?? false),
-  )) {
-    return NotationFont.write(text, origin: origin, size: size);
+  final List<String> words = <String>[
+    for (final RegExpMatch match in parts.allMatches(text))
+      if (match.group(0)!.trim().isNotEmpty) match.group(0)!,
+  ];
+  if (handwriting != null &&
+      words.isNotEmpty &&
+      words.every((String word) => handwriting.variantsFor(word) > 0)) {
+    return _fitted(
+      beautifyHandwriting(
+        _writeFromSamples(
+          text,
+          parts,
+          origin: origin,
+          size: size,
+          handwriting: handwriting,
+        ),
+        spacing: math.max(0.5, size * 0.035),
+      ),
+      text,
+      origin: origin,
+      size: size,
+    );
   }
+  return _writeStyled(
+    text,
+    origin: origin,
+    size: size,
+    style: handwriting?.calibration ?? HandwritingStyle.standard,
+  );
+}
+
+/// [text] in the font shaped by [style], kept inside the box it would
+/// fill in the built-in hand.
+List<List<InkVector>> _writeStyled(
+  String text, {
+  required InkVector origin,
+  required double size,
+  required HandwritingStyle style,
+}) {
+  final List<List<InkVector>> written = NotationFont.write(
+    text,
+    origin: origin,
+    size: size,
+    style: style,
+  );
+  return style == HandwritingStyle.standard
+      ? written
+      : _fitted(written, text, origin: origin, size: size);
+}
+
+/// [strokes] that write [text], shrunk and moved as little as needed to
+/// lie inside the box [NotationFont] gives it: [NotationFont.width] wide
+/// from [origin], from a little above [origin] down to the deepest
+/// descender.
+List<List<InkVector>> _fitted(
+  List<List<InkVector>> strokes,
+  String text, {
+  required InkVector origin,
+  required double size,
+}) {
+  double left = double.infinity;
+  double top = double.infinity;
+  double right = double.negativeInfinity;
+  double bottom = double.negativeInfinity;
+  for (final List<InkVector> stroke in strokes) {
+    for (final InkVector p in stroke) {
+      left = math.min(left, p.x);
+      top = math.min(top, p.y);
+      right = math.max(right, p.x);
+      bottom = math.max(bottom, p.y);
+    }
+  }
+  if (!left.isFinite) return strokes;
+  final Rect box = Rect.fromLTRB(
+    origin.x,
+    origin.y - size * 0.1,
+    origin.x + math.max(NotationFont.width(text, size), size * 0.2),
+    origin.y + NotationFont.height(text, size),
+  );
+  if (left >= box.left &&
+      right <= box.right &&
+      top >= box.top &&
+      bottom <= box.bottom) {
+    return strokes;
+  }
+  final double scale = math.min(
+    1,
+    math.min(
+      box.width / math.max(right - left, 1e-9),
+      box.height / math.max(bottom - top, 1e-9),
+    ),
+  );
+  InkVector scaled(InkVector p) => origin + (p - origin) * scale;
+  final InkVector low = scaled(InkVector(left, top));
+  final InkVector high = scaled(InkVector(right, bottom));
+  double dx = 0;
+  double dy = 0;
+  if (high.x > box.right) dx = box.right - high.x;
+  if (low.x + dx < box.left) dx = box.left - low.x;
+  if (high.y > box.bottom) dy = box.bottom - high.y;
+  if (low.y + dy < box.top) dy = box.top - low.y;
+  return <List<InkVector>>[
+    for (final List<InkVector> stroke in strokes)
+      <InkVector>[
+        for (final InkVector p in stroke) scaled(p) + InkVector(dx, dy),
+      ],
+  ];
+}
+
+/// [text] from the note's own samples of its words; [_writeNotationText]
+/// has checked that every word has one.
+List<List<InkVector>> _writeFromSamples(
+  String text,
+  RegExp parts, {
+  required InkVector origin,
+  required double size,
+  required HandwritingSampleLibrary handwriting,
+}) {
   final double wordSpace =
-      calibration?.wordSpace ?? HandwritingProfile.defaultWordSpace;
+      (HandwritingStyle.standard.wordSpacing +
+          2 * HandwritingStyle.letterSpacing) /
+      NotationFont.capHeight;
   final List<List<InkVector>> output = <List<InkVector>>[];
   final List<String> lines = text.split('\n');
   for (int row = 0; row < lines.length; row++) {
@@ -275,41 +394,7 @@ List<List<InkVector>> _writeNotationText(
         continue;
       }
       final RecognizedInkWord? sample = handwriting.choose(piece);
-      if (sample == null) {
-        // The note's own sample first, then the calibrated word, then the
-        // word built from calibrated letters; the built-in font fills in
-        // any character calibration never saw.
-        final CalibratedGlyph? word = calibration?.chooseWord(piece);
-        if (word != null) {
-          output.addAll(word.place(InkVector(x, y), size));
-          x += word.width * size;
-          continue;
-        }
-        if (calibration == null || !calibration.canWriteAny(piece)) {
-          output.addAll(
-            NotationFont.write(piece, origin: InkVector(x, y), size: size),
-          );
-          x += NotationFont.width(piece, size);
-          continue;
-        }
-        bool first = true;
-        for (final int rune in piece.runes) {
-          final String char = String.fromCharCode(rune);
-          if (!first) x += calibration.letterGap * size;
-          first = false;
-          final CalibratedGlyph? glyph = calibration.chooseGlyph(char);
-          if (glyph != null) {
-            output.addAll(glyph.place(InkVector(x, y), size));
-            x += glyph.width * size;
-          } else if (NotationFont.canWrite(char)) {
-            output.addAll(
-              NotationFont.write(char, origin: InkVector(x, y), size: size),
-            );
-            x += NotationFont.width(char, size);
-          }
-        }
-        continue;
-      }
+      if (sample == null) continue;
       final double width = sample.aspectRatio * size;
       output.addAll(<List<InkVector>>[
         for (final List<InkVector> stroke in sample.normalizedStrokes)
@@ -745,6 +830,7 @@ void _plot(
   Size size,
   AiNotationConfig config,
   void Function(List<InkVector> line, [StrokeStyle? style]) add,
+  HandwritingStyle hand,
 ) {
   final Rect box = Rect.fromLTRB(
     plot.left * size.width,
@@ -833,10 +919,11 @@ void _plot(
         math.max(margin, size.height - margin - textHeight),
       ),
     );
-    for (final List<InkVector> line in NotationFont.write(
+    for (final List<InkVector> line in _writeStyled(
       text,
       origin: kept,
       size: textSize,
+      style: hand,
     )) {
       add(line, style);
     }

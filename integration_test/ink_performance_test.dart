@@ -18,6 +18,7 @@ import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:greatnote/app/greatnote_app.dart';
+import 'package:greatnote/features/editor/ai/canvas_text_recognizer.dart';
 import 'package:greatnote/features/editor/editor_screen.dart';
 import 'package:greatnote/features/editor/ink/eraser_settings.dart';
 import 'package:greatnote/features/editor/ink/ink_canvas.dart';
@@ -25,6 +26,7 @@ import 'package:greatnote/features/editor/ink/ink_controller.dart';
 import 'package:greatnote/features/editor/ink/ink_notation.dart';
 import 'package:greatnote/features/editor/ink/ink_palette.dart';
 import 'package:greatnote/features/editor/ink/ink_sample.dart';
+import 'package:greatnote/features/editor/ink/pen_settings.dart';
 import 'package:greatnote/features/editor/ink/selection_transform.dart';
 import 'package:greatnote/features/editor/ink/stroke.dart';
 import 'package:integration_test/integration_test.dart';
@@ -43,6 +45,13 @@ const int _pagePointsPerStroke = 60;
 const int _eraseSamples = 8 * _sampleRate;
 const int _lassoSamples = 6 * _sampleRate;
 const int _transformSamples = 6 * _sampleRate;
+
+class _NoopTextRecognizer implements CanvasTextRecognizer {
+  const _NoopTextRecognizer();
+
+  @override
+  Future<String> recognize(HandwritingBatch batch) async => '';
+}
 
 /// A page of [_pageRows] x [_pageStrokesPerRow] short, curly strokes, like
 /// lines of handwriting, filling a canvas of [size].
@@ -105,9 +114,20 @@ void main() {
 
   testWidgets('long high-rate strokes', (WidgetTester tester) async {
     final InkController controller = InkController();
+    final ValueNotifier<PenSettings> penSettings = ValueNotifier<PenSettings>(
+      PenSettings.defaults().copyWith(scribbleToErase: false),
+    );
     addTearDown(controller.dispose);
+    addTearDown(penSettings.dispose);
     await tester.pumpWidget(
-      GreatnoteApp(home: EditorScreen(inkController: controller)),
+      GreatnoteApp(
+        home: EditorScreen(
+          inkController: controller,
+          enableNativeInk: false,
+          penSettings: penSettings,
+          textRecognizer: const _NoopTextRecognizer(),
+        ),
+      ),
     );
     await tester.pumpAndSettle();
 
@@ -151,14 +171,18 @@ void main() {
       WidgetTester tester,
     ) async {
       // The canvas size is only known once the editor is laid out.
-      await tester.pumpWidget(const GreatnoteApp(home: EditorScreen()));
+      await tester.pumpWidget(
+        const GreatnoteApp(home: EditorScreen(enableNativeInk: false)),
+      );
       await tester.pumpAndSettle();
       final Size size = tester.getSize(find.byType(InkCanvas));
       final List<Stroke> page = _page(size);
       final InkController controller = InkController(strokes: page);
       addTearDown(controller.dispose);
       await tester.pumpWidget(
-        GreatnoteApp(home: EditorScreen(inkController: controller)),
+        GreatnoteApp(
+          home: EditorScreen(inkController: controller, enableNativeInk: false),
+        ),
       );
       await tester.pumpAndSettle();
 
@@ -217,14 +241,18 @@ void main() {
     WidgetTester tester,
   ) async {
     // The canvas size is only known once the editor is laid out.
-    await tester.pumpWidget(const GreatnoteApp(home: EditorScreen()));
+    await tester.pumpWidget(
+      const GreatnoteApp(home: EditorScreen(enableNativeInk: false)),
+    );
     await tester.pumpAndSettle();
     final Size size = tester.getSize(find.byType(InkCanvas));
     final List<Stroke> page = _page(size);
     final InkController controller = InkController(strokes: page);
     addTearDown(controller.dispose);
     await tester.pumpWidget(
-      GreatnoteApp(home: EditorScreen(inkController: controller)),
+      GreatnoteApp(
+        home: EditorScreen(inkController: controller, enableNativeInk: false),
+      ),
     );
     await tester.pumpAndSettle();
     await tester.tap(find.byTooltip('Select'));
@@ -331,7 +359,9 @@ void main() {
   testWidgets('near-limit AI notation looping and forced finish', (
     WidgetTester tester,
   ) async {
-    await tester.pumpWidget(const GreatnoteApp(home: EditorScreen()));
+    await tester.pumpWidget(
+      const GreatnoteApp(home: EditorScreen(enableNativeInk: false)),
+    );
     await tester.pumpAndSettle();
     final Size size = tester.getSize(find.byType(InkCanvas));
     final List<Stroke> page = _page(size);
@@ -339,7 +369,9 @@ void main() {
     final InkController controller = InkController(strokes: page);
     addTearDown(controller.dispose);
     await tester.pumpWidget(
-      GreatnoteApp(home: EditorScreen(inkController: controller)),
+      GreatnoteApp(
+        home: EditorScreen(inkController: controller, enableNativeInk: false),
+      ),
     );
     await tester.pumpAndSettle();
 

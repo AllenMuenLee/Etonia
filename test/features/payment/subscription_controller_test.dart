@@ -69,13 +69,14 @@ void main() {
         AiModelId.argon,
         AiModelId.astra,
       });
-      expect(plan.creditsLabel, '\$1.20 left');
+      expect(plan.creditsLabel, '100% tokens');
+      expect(plan.tokenFraction, 1.0);
     });
 
     for (final (SubscriptionPlan tier, int credits, String label)
         in <(SubscriptionPlan, int, String)>[
-          (SubscriptionPlan.pro1299, 5000000, '\$5.00 left'),
-          (SubscriptionPlan.max2999, 15000000, '\$15.00 left'),
+          (SubscriptionPlan.pro1299, 5000000, '100% tokens'),
+          (SubscriptionPlan.max2999, 15000000, '100% tokens'),
         ]) {
       test('${tier.title}: unlimited Haiku and Luna, $label across all five '
           'metered models', () async {
@@ -130,6 +131,10 @@ void main() {
       expect(formatUsd(1200000), '\$1.20');
       expect(formatUsd(1199999), '\$1.19');
       expect(formatUsd(15000000), '\$15.00');
+      expect(formatTokenPercent(1200000, 1200000), '100%');
+      expect(formatTokenPercent(1199999, 1200000), '99%');
+      expect(formatTokenPercent(1, 15000000), '1%');
+      expect(formatTokenPercent(0, 15000000), '0%');
     });
 
     test('spent credits stop metered models but never Haiku or Luna', () async {

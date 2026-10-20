@@ -37,12 +37,17 @@ class AiAssistantPanel extends StatefulWidget {
     this.config = const AiLayoutConfig(),
     this.composerKey,
     this.onOpenPlans,
+    this.showHandwritingCalibrationNotice = false,
+    this.onCalibrateHandwriting,
+    this.onDismissHandwritingCalibrationNotice,
   });
 
   static const String title = 'AI assistant';
   static const String emptyState =
       'Choose a quick action or ask a question about the selected ink.';
   static const String composerHint = 'Ask about the selected ink';
+  static const String handwritingCalibrationNotice =
+      'Choose a handwriting for AI notes, or make your own.';
 
   /// Shown in place of the selection when AI mode is on with nothing chosen
   /// yet.
@@ -74,6 +79,12 @@ class AiAssistantPanel extends StatefulWidget {
 
   /// Opens the plans and credits page. Without it, nothing offers to.
   final VoidCallback? onOpenPlans;
+
+  /// Whether to offer calibration just above the composer. The editor owns
+  /// the persisted choice, while the panel only presents it.
+  final bool showHandwritingCalibrationNotice;
+  final VoidCallback? onCalibrateHandwriting;
+  final VoidCallback? onDismissHandwritingCalibrationNotice;
 
   @override
   State<AiAssistantPanel> createState() => _AiAssistantPanelState();
@@ -347,6 +358,31 @@ class _AiAssistantPanelState extends State<AiAssistantPanel> {
                     ],
                   ),
                 ),
+                if (widget.showHandwritingCalibrationNotice)
+                  Padding(
+                    key: const ValueKey<String>(
+                      'handwriting-calibration-notice',
+                    ),
+                    padding: const EdgeInsets.fromLTRB(
+                      AppSpacing.md,
+                      AppSpacing.xs,
+                      AppSpacing.md,
+                      0,
+                    ),
+                    child: _Notice(
+                      message: AiAssistantPanel.handwritingCalibrationNotice,
+                      actionLabel: 'Choose',
+                      onAction: widget.onCalibrateHandwriting,
+                      extraActions: <(String, VoidCallback)>[
+                        if (widget.onDismissHandwritingCalibrationNotice !=
+                            null)
+                          (
+                            "Don't show again",
+                            widget.onDismissHandwritingCalibrationNotice!,
+                          ),
+                      ],
+                    ),
+                  ),
                 _Composer(
                   fieldKey: widget.composerKey,
                   text: _text,
@@ -521,7 +557,11 @@ class _Header extends StatelessWidget {
             ),
           ),
           if (gate != null && openPlans != null)
-            _CreditsPill(label: gate.creditsLabel, onPressed: openPlans),
+            _CreditsPill(
+              label: gate.creditsLabel,
+              fraction: gate.tokenFraction,
+              onPressed: openPlans,
+            ),
           CompactIconButton(
             tooltip: 'Close AI assistant',
             onPressed: onClose,
@@ -533,23 +573,30 @@ class _Header extends StatelessWidget {
   }
 }
 
-/// The credits left, or Upgrade; opens the plans.
+/// The tokens left with a lit bar, or Upgrade; opens the plans.
 class _CreditsPill extends StatelessWidget {
-  const _CreditsPill({required this.label, required this.onPressed});
+  const _CreditsPill({
+    required this.label,
+    required this.fraction,
+    required this.onPressed,
+  });
 
   final String label;
+  final double fraction;
   final VoidCallback onPressed;
 
   @override
   Widget build(BuildContext context) {
     final AppColors colors = AppColors.of(context);
+    final bool dark = Theme.of(context).brightness == Brightness.dark;
     final bool upgrade = label == 'Upgrade';
     final Color foreground = upgrade ? colors.onAccent : colors.textPrimary;
+    final Color baseSurface = AppGlass.muted(colors);
     return Tooltip(
       message: 'Plans & Credits',
       child: Semantics(
         button: true,
-        label: upgrade ? 'Upgrade plan' : 'AI credits, $label',
+        label: upgrade ? 'Upgrade plan' : 'AI tokens, $label',
         excludeSemantics: true,
         child: InkWell(
           key: const ValueKey<String>('ai-credits-pill'),
@@ -563,22 +610,86 @@ class _CreditsPill extends StatelessWidget {
             child: Center(
               widthFactor: 1,
               child: DecoratedBox(
-                decoration: ShapeDecoration(
-                  shape: const StadiumBorder(),
-                  color: upgrade ? colors.accent : AppGlass.muted(colors),
+                decoration: BoxDecoration(
+                  borderRadius: BorderRadius.circular(999),
+                  color: upgrade ? colors.accent : null,
+                  gradient: upgrade
+                      ? null
+                      : LinearGradient(
+                          begin: Alignment.topLeft,
+                          end: Alignment.bottomRight,
+                          colors: <Color>[
+                            Color.alphaBlend(
+                              Colors.white.withValues(
+                                alpha: dark ? 0.08 : 0.55,
+                              ),
+                              baseSurface,
+                            ),
+                            baseSurface,
+                            Color.alphaBlend(
+                              colors.shadow.withValues(
+                                alpha: dark ? 0.18 : 0.05,
+                              ),
+                              baseSurface,
+                            ),
+                          ],
+                          stops: const <double>[0.0, 0.52, 1.0],
+                        ),
+                  border: upgrade
+                      ? null
+                      : Border.all(
+                          color: colors.glassEdge,
+                          width: AppSizes.hairline,
+                        ),
+                  boxShadow: <BoxShadow>[
+                    BoxShadow(
+                      color: (upgrade ? colors.accent : colors.shadow)
+                          .withValues(alpha: upgrade ? 0.24 : 0.07),
+                      blurRadius: upgrade ? 10 : 6,
+                      offset: const Offset(0, 2),
+                    ),
+                  ],
                 ),
                 child: Padding(
-                  padding: const EdgeInsets.symmetric(
+                  padding: EdgeInsets.symmetric(
                     horizontal: AppSpacing.sm,
-                    vertical: AppSpacing.xxs + 2,
+                    vertical: upgrade ? AppSpacing.xxs + 2 : AppSpacing.xxs + 1,
                   ),
-                  child: Text(
-                    label,
-                    style: Theme.of(context).textTheme.labelMedium?.copyWith(
-                      color: foreground,
-                      fontWeight: FontWeight.w600,
-                    ),
-                  ),
+                  child: upgrade
+                      ? Text(
+                          label,
+                          style: Theme.of(context).textTheme.labelMedium
+                              ?.copyWith(
+                                color: foreground,
+                                fontWeight: FontWeight.w600,
+                              ),
+                        )
+                      : IntrinsicWidth(
+                          child: Column(
+                            mainAxisSize: MainAxisSize.min,
+                            crossAxisAlignment: CrossAxisAlignment.stretch,
+                            children: <Widget>[
+                              Text(
+                                label,
+                                textAlign: TextAlign.center,
+                                style: Theme.of(context).textTheme.labelSmall
+                                    ?.copyWith(
+                                      color: foreground,
+                                      fontWeight: FontWeight.w600,
+                                      fontFeatures: const <FontFeature>[
+                                        FontFeature.tabularFigures(),
+                                      ],
+                                    ),
+                              ),
+                              const SizedBox(height: 3),
+                              TokenMeterBar(
+                                key: const ValueKey<String>('ai-token-bar'),
+                                fraction: fraction,
+                                height: 6,
+                              ),
+                            ],
+                          ),
+                        ),
                 ),
               ),
             ),

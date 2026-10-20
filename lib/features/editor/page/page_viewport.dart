@@ -61,6 +61,7 @@ class PageViewport extends StatefulWidget {
     required this.pageBuilder,
     this.overlayBuilder,
     this.onPageTouched,
+    this.onDeskTap,
     this.onVisiblePageChanged,
     this.onScrollStart,
     this.onScrollEnd,
@@ -129,6 +130,10 @@ class PageViewport extends StatefulWidget {
   overlayBuilder;
 
   final ValueChanged<int>? onPageTouched;
+
+  /// A tap, by pen or finger, on the desk around the pages rather than on
+  /// a page.
+  final VoidCallback? onDeskTap;
   final ValueChanged<int>? onVisiblePageChanged;
   final ValueChanged<Set<int>>? onScrollStart;
   final VoidCallback? onScrollEnd;
@@ -584,9 +589,31 @@ class PageViewportState extends State<PageViewport>
         // otherwise each page is a sheet of its own on the background.
         final bool coversArea =
             widget.pages.length == 1 &&
-            layout.size.width >= viewport.width &&
-            layout.size.height >= viewport.height &&
-            widget.pages.single.displaySize.width >= viewport.width;
+            layout.rects.single.width >= viewport.width &&
+            layout.rects.single.height >= viewport.height;
+        final bool isDark = Theme.of(context).brightness == Brightness.dark;
+        final Color deskColor = Color.lerp(
+          colors.background,
+          colors.shadow,
+          isDark ? 0.16 : 0.025,
+        )!;
+        final Color borderColor = Color.lerp(
+          colors.divider,
+          colors.shadow,
+          isDark ? 0.25 : 0.10,
+        )!;
+        final List<BoxShadow> sheetShadows = <BoxShadow>[
+          BoxShadow(
+            color: colors.shadow.withValues(alpha: isDark ? 0.35 : 0.07),
+            blurRadius: 3,
+            offset: const Offset(0, 1),
+          ),
+          BoxShadow(
+            color: colors.shadow.withValues(alpha: isDark ? 0.30 : 0.06),
+            blurRadius: 10,
+            offset: const Offset(0, 3),
+          ),
+        ];
         final List<Widget> sheets = <Widget>[];
         final List<Widget> pages = <Widget>[];
         final List<Widget> edges = <Widget>[];
@@ -605,7 +632,7 @@ class PageViewportState extends State<PageViewport>
                 child: DecoratedBox(
                   decoration: BoxDecoration(
                     color: colors.writingSurface,
-                    boxShadow: AppShadows.paper(colors),
+                    boxShadow: sheetShadows,
                   ),
                 ),
               ),
@@ -617,7 +644,7 @@ class PageViewportState extends State<PageViewport>
                   child: DecoratedBox(
                     decoration: BoxDecoration(
                       border: Border.all(
-                        color: colors.divider,
+                        color: borderColor,
                         width: AppSizes.hairline,
                       ),
                     ),
@@ -666,7 +693,14 @@ class PageViewportState extends State<PageViewport>
             child: Stack(
               fit: StackFit.expand,
               children: <Widget>[
-                if (!coversArea) ColoredBox(color: colors.background),
+                if (!coversArea) ColoredBox(color: deskColor),
+                // Below the pages, so only a tap that misses them lands.
+                if (widget.onDeskTap != null)
+                  GestureDetector(
+                    key: const ValueKey<String>('page-desk'),
+                    behavior: HitTestBehavior.opaque,
+                    onTap: widget.onDeskTap,
+                  ),
                 ...sheets,
                 ...pages,
                 ...edges,

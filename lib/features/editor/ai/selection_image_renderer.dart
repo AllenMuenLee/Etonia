@@ -528,13 +528,34 @@ class SelectionImageRenderer {
   /// Draws [snapshot]. Throws a [SelectionImageException] when it cannot be
   /// drawn.
   Future<SelectionImage> render(SelectionInkSnapshot snapshot) async {
-    final SelectionImageLayout layout = this.layout(snapshot);
+    SelectionImageLayout layout = this.layout(snapshot);
     final List<ui.Image> decoded = <ui.Image>[];
     try {
       for (final SnapshotBitmap bitmap in snapshot.bitmaps) {
         decoded.add(await _decodeImage(bitmap.bytes));
       }
-      return await _renderDecoded(snapshot, layout, decoded);
+      while (true) {
+        final SelectionImage image = await _renderDecoded(
+          snapshot,
+          layout,
+          decoded,
+        );
+        if (image.png.lengthInBytes <= config.maxPngBytes) {
+          return image;
+        }
+        // Too many bytes for the backend: smaller, never lossy.
+        final double scale = layout.scale * 0.75;
+        if (scale < config.minPixelRatio) {
+          throw const SelectionImageException(SelectionImageFailure.tooLarge);
+        }
+        final ui.Rect bounds = layout.logicalBounds;
+        layout = SelectionImageLayout(
+          logicalBounds: bounds,
+          scale: scale,
+          width: _pixels(bounds.width * scale),
+          height: _pixels(bounds.height * scale),
+        );
+      }
     } on SelectionImageException {
       rethrow;
     } on Object {
@@ -586,7 +607,7 @@ class SelectionImageRenderer {
             width: bitmap.bounds.width,
             height: bitmap.bounds.height,
           ),
-          ui.Paint()..filterQuality = ui.FilterQuality.medium,
+          ui.Paint()..filterQuality = ui.FilterQuality.high,
         );
       canvas.restore();
     }

@@ -28,6 +28,8 @@
 	<true/>
 	<key>NSPhotoLibraryUsageDescription</key>
 	<string>Choose an image to place in a note.</string>
+	<key>NSCameraUsageDescription</key>
+	<string>Take a photo to place in a note.</string>
 	<key>NSMicrophoneUsageDescription</key>
 	<string>Use your voice to dictate a prompt for the AI assistant.</string>
 	<key>NSSpeechRecognitionUsageDescription</key>

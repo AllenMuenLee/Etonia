@@ -2,10 +2,11 @@ import 'package:flutter/material.dart';
 
 import '../../app/theme/app_icons.dart';
 import '../../app/theme/app_tokens.dart';
+import '../../shared/widgets/app_controls.dart';
 import 'payment_models.dart';
 import 'subscription_controller.dart';
 
-/// The Plans & Credits pill in the library's top bar: the credits left on
+/// The Plans & Credits pill in the library's top bar: the tokens left on
 /// the active plan, or what to do without one. Opens [onPressed].
 class PlansButton extends StatelessWidget {
   const PlansButton({
@@ -26,13 +27,13 @@ class PlansButton extends StatelessWidget {
     final SubscriptionPlan? plan = controller.activePlan;
     if (plan == null) {
       return controller.hasFreeCredit && controller.remainingCreditsMicroUsd > 0
-          ? 'Free · ${formatUsd(controller.remainingCreditsMicroUsd)}'
+          ? 'Free · ${formatTokenPercent(controller.remainingCreditsMicroUsd, controller.includedCreditsMicroUsd)}'
           : 'Plans';
     }
     if (controller.remainingCreditsMicroUsd <= 0) {
       return '${plan.title} · Upgrade';
     }
-    return '${plan.title} · ${formatUsd(controller.remainingCreditsMicroUsd)}';
+    return '${plan.title} · ${formatTokenPercent(controller.remainingCreditsMicroUsd, controller.includedCreditsMicroUsd)}';
   }
 
   @override
@@ -41,7 +42,11 @@ class PlansButton extends StatelessWidget {
       listenable: controller,
       builder: (BuildContext context, Widget? _) {
         final AppColors colors = AppColors.of(context);
+        final bool dark = Theme.of(context).brightness == Brightness.dark;
         final String label = labelFor(controller);
+        final bool hasTokens =
+            (controller.activePlan != null || controller.hasFreeCredit) &&
+            controller.remainingCreditsMicroUsd > 0;
         if (compact) {
           return IconButton(
             key: const ValueKey<String>('library-plans-button'),
@@ -50,6 +55,7 @@ class PlansButton extends StatelessWidget {
             icon: Semantics(label: label, child: const Icon(AppIcons.plans)),
           );
         }
+        final Color baseSurface = AppGlass.muted(colors);
         return Tooltip(
           message: 'Plans & Credits',
           child: Semantics(
@@ -68,10 +74,45 @@ class PlansButton extends StatelessWidget {
                 child: Center(
                   widthFactor: 1,
                   child: DecoratedBox(
-                    decoration: ShapeDecoration(
-                      shape: const StadiumBorder(),
-                      color: AppGlass.muted(colors),
-                    ),
+                    decoration: hasTokens
+                        ? BoxDecoration(
+                            borderRadius: BorderRadius.circular(999),
+                            gradient: LinearGradient(
+                              begin: Alignment.topLeft,
+                              end: Alignment.bottomRight,
+                              colors: <Color>[
+                                Color.alphaBlend(
+                                  Colors.white.withValues(
+                                    alpha: dark ? 0.08 : 0.55,
+                                  ),
+                                  baseSurface,
+                                ),
+                                baseSurface,
+                                Color.alphaBlend(
+                                  colors.shadow.withValues(
+                                    alpha: dark ? 0.18 : 0.05,
+                                  ),
+                                  baseSurface,
+                                ),
+                              ],
+                              stops: const <double>[0.0, 0.52, 1.0],
+                            ),
+                            border: Border.all(
+                              color: colors.glassEdge,
+                              width: AppSizes.hairline,
+                            ),
+                            boxShadow: <BoxShadow>[
+                              BoxShadow(
+                                color: colors.shadow.withValues(alpha: 0.07),
+                                blurRadius: 6,
+                                offset: const Offset(0, 2),
+                              ),
+                            ],
+                          )
+                        : ShapeDecoration(
+                            shape: const StadiumBorder(),
+                            color: baseSurface,
+                          ),
                     child: Padding(
                       padding: const EdgeInsets.symmetric(
                         horizontal: AppSpacing.sm,
@@ -91,6 +132,15 @@ class PlansButton extends StatelessWidget {
                             style: Theme.of(context).textTheme.labelLarge
                                 ?.copyWith(color: colors.textPrimary),
                           ),
+                          if (hasTokens) ...<Widget>[
+                            const SizedBox(width: AppSpacing.xs),
+                            TokenMeterBar(
+                              key: const ValueKey<String>('library-token-bar'),
+                              fraction: controller.tokenFraction,
+                              width: 36,
+                              height: 7,
+                            ),
+                          ],
                         ],
                       ),
                     ),

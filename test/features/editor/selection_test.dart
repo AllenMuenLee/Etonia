@@ -179,7 +179,7 @@ bool _isSelected(WidgetTester tester, String label) {
   );
 }
 
-/// The action bar: the box around Copy, Cut, and AI.
+/// The action bar: the box around Copy, Cut, Duplicate, and AI.
 /// The writing area the page is shown in, which the actions stay inside.
 Rect _surface(WidgetTester tester) =>
     tester.getRect(find.byKey(const ValueKey<String>('page-viewport')));
@@ -941,7 +941,7 @@ void main() {
     );
   });
 
-  testWidgets('Copy and Cut act on the selection without touching the page', (
+  testWidgets('selection actions work without leaking into the page', (
     WidgetTester tester,
   ) async {
     final SemanticsHandle handle = tester.ensureSemantics();
@@ -949,7 +949,7 @@ void main() {
     final List<Stroke> before = List<Stroke>.of(controller.strokes);
     await _selectPair(tester, controller);
     final InkSelection selection = controller.selection!;
-    for (final String label in <String>['Copy', 'Cut']) {
+    for (final String label in <String>['Copy', 'Cut', 'Duplicate']) {
       expect(
         tester.getSemantics(find.bySemanticsLabel(label)),
         isSemantics(
@@ -982,18 +982,28 @@ void main() {
     expect(controller.selection, same(selection));
     expect(controller.canPaste, isFalse);
 
+    await tester.tap(find.byTooltip('Duplicate'));
+    await tester.pumpAndSettle();
+
+    expect(controller.strokes, hasLength(before.length + 2));
+    expect(
+      controller.strokes[before.length].points.first,
+      before[0].points.first + const InkVector(24, 24),
+    );
+    expect(controller.selection!.indices, <int>[3, 4]);
+    expect(controller.canPaste, isFalse);
+
     await tester.tap(find.byTooltip('Copy'));
     await tester.pumpAndSettle();
 
     expect(controller.canPaste, isTrue);
-    expect(controller.strokes, before);
-    expect(controller.selection, same(selection));
+    expect(controller.strokes, hasLength(before.length + 2));
     expect(find.byTooltip('Copy'), findsOneWidget);
 
     await tester.tap(find.byTooltip('Cut'));
     await tester.pumpAndSettle();
 
-    expect(controller.strokes.single, same(before[2]));
+    expect(controller.strokes, before);
     expect(controller.selection, isNull);
     expect(controller.clipboard!.strokes.length, 2);
     expect(find.byTooltip('Cut'), findsNothing);
@@ -1001,39 +1011,48 @@ void main() {
     handle.dispose();
   });
 
-  testWidgets('Copy and Cut can be reached and pressed from the keyboard', (
-    WidgetTester tester,
-  ) async {
-    final InkController controller = await pumpEditor(tester, strokes: _page());
-    await _selectPair(tester, controller);
+  testWidgets(
+    'selection actions can be reached and pressed from the keyboard',
+    (WidgetTester tester) async {
+      final InkController controller = await pumpEditor(
+        tester,
+        strokes: _page(),
+      );
+      await _selectPair(tester, controller);
 
-    bool focused(String tooltip) {
-      final BuildContext? context = FocusManager.instance.primaryFocus?.context;
-      bool found = false;
-      context?.visitAncestorElements((Element ancestor) {
-        found =
-            ancestor.widget is Tooltip &&
-            (ancestor.widget as Tooltip).message == tooltip;
-        return !found;
-      });
-      return found;
-    }
+      bool focused(String tooltip) {
+        final BuildContext? context =
+            FocusManager.instance.primaryFocus?.context;
+        bool found = false;
+        context?.visitAncestorElements((Element ancestor) {
+          found =
+              ancestor.widget is Tooltip &&
+              (ancestor.widget as Tooltip).message == tooltip;
+          return !found;
+        });
+        return found;
+      }
 
-    for (int i = 0; i < 12 && !focused('Copy'); i++) {
+      for (int i = 0; i < 12 && !focused('Copy'); i++) {
+        await tester.sendKeyEvent(LogicalKeyboardKey.tab);
+        await tester.pump();
+      }
+      expect(focused('Copy'), isTrue);
       await tester.sendKeyEvent(LogicalKeyboardKey.tab);
       await tester.pump();
-    }
-    expect(focused('Copy'), isTrue);
-    await tester.sendKeyEvent(LogicalKeyboardKey.tab);
-    await tester.pump();
-    expect(focused('Cut'), isTrue);
+      expect(focused('Cut'), isTrue);
+      await tester.sendKeyEvent(LogicalKeyboardKey.tab);
+      await tester.pump();
+      expect(focused('Duplicate'), isTrue);
 
-    await tester.sendKeyEvent(LogicalKeyboardKey.enter);
-    await tester.pumpAndSettle();
+      await tester.sendKeyEvent(LogicalKeyboardKey.enter);
+      await tester.pumpAndSettle();
 
-    expect(controller.strokes.length, 1);
-    expect(controller.canPaste, isTrue);
-  });
+      expect(controller.strokes.length, 5);
+      expect(controller.selection!.indices, <int>[3, 4]);
+      expect(controller.canPaste, isFalse);
+    },
+  );
 
   testWidgets('the tap that dismisses the options starts no lasso or move', (
     WidgetTester tester,
@@ -1578,8 +1597,8 @@ void main() {
       expect(bar.top, greaterThanOrEqualTo(canvas.top), reason: place.key);
       expect(bar.right, lessThanOrEqualTo(canvas.right), reason: place.key);
       expect(bar.bottom, lessThanOrEqualTo(canvas.bottom), reason: place.key);
-      // All three buttons are whole, so each can be pressed.
-      expect(bar.size, const Size(152, 56), reason: place.key);
+      // All four buttons are whole, so each can be pressed.
+      expect(bar.size, const Size(200, 56), reason: place.key);
       await tester.tap(find.byTooltip('Copy'));
       expect(controller.canPaste, isTrue, reason: place.key);
       expect(tester.takeException(), isNull, reason: place.key);
@@ -1738,7 +1757,8 @@ void main() {
     );
     expect(find.bySemanticsLabel('Copy'), findsOneWidget);
     expect(find.bySemanticsLabel('Cut'), findsOneWidget);
-    // The frame and its handles are decoration: the summary and its three
+    expect(find.bySemanticsLabel('Duplicate'), findsOneWidget);
+    // The frame and its handles are decoration: the summary and its action
     // buttons are all the page exposes.
     expect(
       tester

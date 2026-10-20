@@ -6,12 +6,12 @@ import 'package:flutter/foundation.dart';
 
 import '../ink/ink_sample.dart';
 import '../ink/stroke.dart';
-import 'handwriting_calibration.dart';
+import 'handwriting_style.dart';
 
 /// The minimum normalized recognizer confidence required for a reading to be
 /// shown in search. Uncertain readings remain metadata rather than becoming
 /// searchable words.
-const double searchableHandwritingConfidence = 0.75;
+const double searchableHandwritingConfidence = 0.50;
 
 /// Reuse stays stricter than search because a false positive here would make
 /// AI notation draw the wrong source strokes as text.
@@ -169,9 +169,9 @@ class HandwritingSampleLibrary {
   final math.Random _random;
   final int maxVariantsPerText;
 
-  /// Letters and words from the writer's calibration, shared by every note.
-  /// Used where the note itself has no sample of a word.
-  final HandwritingProfile? calibration;
+  /// The writer's hand from calibration, shared by every note. Text the
+  /// note has no samples for is written in it.
+  final HandwritingStyle? calibration;
 
   final Map<String, List<RecognizedInkWord>> _samples =
       <String, List<RecognizedInkWord>>{};
@@ -182,7 +182,7 @@ class HandwritingSampleLibrary {
 
   int variantsFor(String text) => _samples[canonical(text)]?.length ?? 0;
 
-  bool get isEmpty => _samples.isEmpty && (calibration?.isEmpty ?? true);
+  bool get isEmpty => _samples.isEmpty && calibration == null;
 
   RecognizedInkWord? choose(String text) {
     final List<RecognizedInkWord>? variants = _samples[canonical(text)];

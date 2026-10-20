@@ -184,7 +184,7 @@ void main() {
         (messages[3]! as Map<String, Object?>)['content']! as List<Object?>;
     expect(
       (last[0]! as Map<String, Object?>)['text'],
-      contains('You are not shown the whole sheet'),
+      contains('you are not shown the whole sheet'),
     );
     expect(
       (last[0]! as Map<String, Object?>)['text'],

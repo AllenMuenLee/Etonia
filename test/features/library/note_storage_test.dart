@@ -505,6 +505,52 @@ void main() {
       _expectSameContent(await second.loadNote(note.id), _sample());
     });
 
+    test('overlapping large and small writes land in call order', () async {
+      final FileNoteRepository repository = await FileNoteRepository.open(
+        directory,
+      );
+      addTearDown(repository.dispose);
+      final NoteEntry note = await repository.createNote(title: 'Busy');
+      // Large enough to be encoded on a background isolate.
+      final NoteContent large = NoteContent(<StoredPage>[
+        StoredPage(
+          setup: const PageSetup(
+            size: PageSize.a4Portrait,
+            background: PageBackground.blank,
+          ),
+          strokes: <Stroke>[
+            for (int i = 0; i < 20000; i++)
+              _stroke(InkPalette.ink, 2, <InkVector>[
+                InkVector(i % 500, i / 40),
+                InkVector(i % 500 + 3, i / 40 + 1),
+              ]),
+          ],
+        ),
+      ]);
+      final NoteContent small = _sample();
+
+      // The slow write is still encoding when the fast one is asked for;
+      // the newer content must still be what ends up on disk. writeContent
+      // is called directly, bypassing saveNote's own queue, on purpose.
+      // ignore: invalid_use_of_protected_member
+      final Future<void> first = repository.writeContent(note.id, large);
+      // ignore: invalid_use_of_protected_member
+      final Future<void> second = repository.writeContent(note.id, small);
+      await Future.wait(<Future<void>>[first, second]);
+      _expectSameContent(await repository.loadNote(note.id), small);
+
+      await repository.saveNote(note.id, large);
+      final NoteContent reread = await repository.loadNote(note.id);
+      expect(reread.pages.single.strokes, hasLength(20000));
+      final List<String> leftovers = <String>[
+        await for (final FileSystemEntity entity in directory.list(
+          recursive: true,
+        ))
+          if (entity.path.endsWith('.tmp')) entity.path,
+      ];
+      expect(leftovers, isEmpty);
+    });
+
     test('a corrupt note fails alone', () async {
       final FileNoteRepository repository = await FileNoteRepository.open(
         directory,

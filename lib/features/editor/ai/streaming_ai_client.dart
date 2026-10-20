@@ -47,12 +47,9 @@ String aiNoteMetadata(NoteImage note) {
   final double width = note.logicalSize.width;
   final double height = note.logicalSize.height;
   final StringBuffer text = StringBuffer(
-    'The note is a sheet of paper ${n(width)} x ${n(height)} logical '
-    'units. You are not shown the whole sheet: only the selected-ink '
-    'image, and the coordinates below. Note coordinates are '
-    'note_normalized: x = 0 is the left edge of the paper and x = 1 the '
-    'right edge; y = 0 is the top edge and y = 1 the bottom edge. One '
-    'logical unit is 1/${n(width)} of x and 1/${n(height)} of y.',
+    'The paper is ${n(width)} x ${n(height)} logical units; you are not '
+    'shown the whole sheet, only the selected-ink image and the '
+    'coordinates below.',
   );
   final bounds = note.normalizedFocusBounds;
   Object? focus;
@@ -64,12 +61,8 @@ String aiNoteMetadata(NoteImage note) {
       'bottom': double.parse(n(bounds.bottom)),
     };
     text.write(
-      ' The selected-ink image is a crop of this note covering '
-      'x ${n(bounds.left)} to ${n(bounds.right)} and '
-      'y ${n(bounds.top)} to ${n(bounds.bottom)}. A point u of the way '
-      'across and v of the way down the selected-ink image is at note '
-      'x = ${n(bounds.left)} + u * ${n(bounds.width)}, '
-      'y = ${n(bounds.top)} + v * ${n(bounds.height)}.',
+      ' The selected-ink image shows x ${n(bounds.left)} to '
+      '${n(bounds.right)}, y ${n(bounds.top)} to ${n(bounds.bottom)}.',
     );
   }
   List<Object?>? ink;
@@ -83,21 +76,11 @@ String aiNoteMetadata(NoteImage note) {
         ],
     ];
     text.write(
-      ' selected_ink in the metadata is the user\'s ink in and around the '
-      'selected region, measured exactly: one polyline per pen stroke, as '
-      '[x, y] note coordinates, reduced to its ends and corners, so each '
-      'straight side of a shape is the segment between two consecutive '
-      'points. A triangle drawn in one stroke, for example, is its three '
-      'corners with the first repeated at the end. Whenever your drawing '
-      'connects to this ink, such as a lead or wire to a component, a '
-      'pin, a line completing a shape, or an arrow or leader line to a '
-      'part, take the touching point from selected_ink, not from the '
-      'image: use a listed point for a corner or an end, or interpolate '
-      'between two consecutive points for a place along a side (a third '
-      'of the way down a side from (x1, y1) to (x2, y2) is '
-      'x1 + (x2 - x1) / 3, y1 + (y2 - y1) / 3). Start or end your line '
-      'exactly there, so it touches the ink without a gap or overlap, '
-      'and run it away from the shape, outward.',
+      ' selected_ink: the user\'s ink near the selection, exactly, one '
+      'polyline per stroke as [x, y] note coordinates reduced to ends and '
+      'corners. Where your drawing connects to this ink, take the touching '
+      'point from selected_ink (a listed point, or interpolated along a '
+      'side), not the image, and run your line outward from exactly there.',
     );
   }
   final NoteFreeSpace? space = note.space;
@@ -114,12 +97,8 @@ String aiNoteMetadata(NoteImage note) {
         ],
     ];
     text.write(
-      ' nearby_content in the metadata is what else is on the paper near '
-      'the selected region, nearest first: one [left, top, right, bottom] '
-      'box in note coordinates round each group of writing, drawing, '
-      'picture, sticky note, or print. You cannot see what they hold. '
-      'Never draw over them, and point to one only when the user asks '
-      'about it.',
+      ' nearby_content: [left, top, right, bottom] boxes round other '
+      'content near the selection, nearest first. You cannot see them.',
     );
   }
   List<Object?>? yourNotes;
@@ -135,20 +114,16 @@ String aiNoteMetadata(NoteImage note) {
         ],
     ];
     text.write(
-      ' your_notes in the metadata is what you, the assistant, have already '
-      'written and drawn on this note: one [left, top, right, bottom] box in '
-      'note coordinates round each group of it. Never write or draw over '
-      'them, and never write a label or answer again where one of yours '
-      'already says it: add only what is new, in blank space. The app moves '
-      'any text of yours that would land on them.',
+      ' your_notes: boxes round what you already drew here. Never write or '
+      'draw over them or repeat what they say; add only what is new.',
     );
   }
   List<Object?>? freeAreas;
   if (space == null) {
     text.write(
       ' You may draw anywhere on the paper, inside or outside the selected '
-      'region: every point must keep 0 < x < 1 and 0 < y < 1, with a margin '
-      'of at least the stroke width from each edge.',
+      'region: every point must keep 0 < x < 1 and 0 < y < 1, a stroke '
+      'width from each edge.',
     );
   } else if (space.hasRoom) {
     freeAreas = <Object?>[
@@ -161,28 +136,18 @@ String aiNoteMetadata(NoteImage note) {
         },
     ];
     text.write(
-      ' The app has measured where the paper is blank, keeping clear of '
-      'all ink, pictures, sticky notes, and print. free_areas in the '
-      'metadata lists those blank areas, best first: nearest the selected '
-      'region and biggest. Each is a box, or an L made of two boxes that '
-      'meet at a corner. Every box gives its note coordinates and its size '
-      'in logical units, width_units by height_units. ${_describeAreas(space, note, n)} '
-      'Put every new drawing and every piece of writing inside one of '
-      'these areas, sized to fit the box it goes in: work out each text\'s '
-      'width and height from its size, and each plot\'s or shape\'s box, in '
-      'logical units, and check they fit. In an L, you can put a drawing in '
-      'one box and its words in the other. Only marks on the user\'s own '
-      'ink go outside them: a circle, underline, check, or cross on it, and '
-      'the far end of a leader line or arrow to it. If what you need to '
-      'draw does not fit in any area, even made smaller, draw it on a '
-      'sticky note instead. $_stickyHowTo',
+      ' free_areas: blank space is provided, best first, each a box or an '
+      'L of two boxes, with note coordinates and size in logical units '
+      '(width_units x height_units). ${_describeAreas(space, note, n)} '
+      'Decide if the annotation needs a separate blank space, or you can '
+      'annotate on the user\'s content. The coordinates match the grid '
+      'marked on the note image. $_stickyHowTo',
     );
   } else {
     text.write(
-      ' The app has measured the paper, and no blank area on it is big '
-      'enough to draw or write in: do not draw on the paper. When a drawing '
-      'or a handwritten answer would help, draw it on a sticky note '
-      'instead. $_stickyHowTo',
+      ' No blank space is provided: annotate on the user\'s content, or use '
+      'a sticky note. The coordinates match the grid marked on the note '
+      'image. $_stickyHowTo',
     );
   }
   text.write(
@@ -194,17 +159,11 @@ String aiNoteMetadata(NoteImage note) {
 
 /// How the model asks for a sticky note.
 const String _stickyHowTo =
-    'To draw on a sticky note, give notation a sticky object with its '
-    'width and height in logical units (width 120 to 640, height 90 to '
-    '480), just big enough for what you draw with a little margin, and set '
-    'coordinate_space to "sticky_normalized". Every coordinate in that '
-    'notation is then measured over the sticky note, not the paper: x = 0 '
-    'is its left edge and x = 1 its right, y = 0 its top and y = 1 its '
-    'bottom, so one logical unit is 1/width of x and 1/height of y. Keep '
-    'every mark a little inside 0 and 1. The app sticks the note on the '
-    'page beside the selected region. Everything in that notation goes on '
-    'the sticky note: it cannot also mark the paper. A notation without '
-    'sticky is drawn on the paper, with coordinate_space "note_normalized".';
+    'For a sticky note, give notation a sticky object {width, height} in '
+    'logical units (width 120 to 640, height 90 to 480), just big enough, '
+    'and coordinate_space "sticky_normalized": every coordinate is then 0 '
+    'to 1 over the note, kept a little inside. The app places it beside '
+    'the selection; that notation cannot also mark the paper.';
 
 /// [box] as the model is told it: note coordinates and logical size.
 Map<String, Object?> _box(

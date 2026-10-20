@@ -23,9 +23,11 @@ class HandwritingIndexer {
   }) async {
     final List<RecognizedInkWord> words = <RecognizedInkWord>[];
     for (final List<Stroke> group in splitIntoWordGroups(strokes)) {
-      final HandwritingBatch rendered = await renderer.render(
-        _canvasStrokes(group),
-      );
+      final List<AiCanvasStroke> canvasStrokes = _canvasStrokes(group);
+      final HandwritingBatch rendered =
+          recognizer is PlatformCanvasTextRecognizer
+          ? renderer.vectors(canvasStrokes)
+          : await renderer.render(canvasStrokes);
       final List<RecognizedTextSegment> readings = await recognizeTextSegments(
         recognizer,
         context == null ? rendered : rendered.withContext(context),

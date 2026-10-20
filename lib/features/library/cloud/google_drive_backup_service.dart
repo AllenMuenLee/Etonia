@@ -10,6 +10,44 @@ import '../note_repository.dart';
 import 'cloud_sync_state.dart';
 import 'google_drive_client.dart';
 
+Map<String, Object> _encodeAndHashJson(Map<String, Object?> json) {
+  final Uint8List bytes = Uint8List.fromList(utf8.encode(jsonEncode(json)));
+  return <String, Object>{
+    'bytes': bytes,
+    'hash': sha256.convert(bytes).toString(),
+  };
+}
+
+String _hashBytes(Uint8List bytes) => sha256.convert(bytes).toString();
+
+bool _largeBackupJson(Object? root) {
+  const int threshold = 512 * 1024;
+  int estimate = 0;
+  final List<Object?> pending = <Object?>[root];
+  while (pending.isNotEmpty && estimate < threshold) {
+    final Object? value = pending.removeLast();
+    switch (value) {
+      case final String text:
+        estimate += text.length * 2 + 2;
+      case num _ || bool _ || null:
+        estimate += 16;
+      case final List<Object?> values:
+        estimate += values.length;
+        pending.addAll(values);
+      case final Map<Object?, Object?> values:
+        estimate += values.length * 2;
+        for (final MapEntry<Object?, Object?> entry in values.entries) {
+          pending
+            ..add(entry.key)
+            ..add(entry.value);
+        }
+      default:
+        estimate += 32;
+    }
+  }
+  return estimate >= threshold;
+}
+
 /// A backup cannot be made or read back as asked.
 class GoogleDriveBackupException implements Exception {
   const GoogleDriveBackupException(this.message);
@@ -40,11 +78,20 @@ class BackupSummary {
     required this.noteCount,
     required this.uploadedFiles,
     required this.unchangedFiles,
+    this.deletedCount = 0,
+    this.movedToDeleted = 0,
   });
 
   final DateTime exportedAt;
   final int folderCount;
   final int noteCount;
+
+  /// Notes backed up from Recently Deleted.
+  final int deletedCount;
+
+  /// Notes in the backup that were not on this device, now kept in its
+  /// Recently Deleted, and so in the backup's.
+  final int movedToDeleted;
 
   /// Note contents and assets sent this time.
   final int uploadedFiles;
@@ -60,6 +107,7 @@ class RestoreSummary {
     required this.foldersCreated,
     required this.notesRestored,
     required this.notesSkipped,
+    this.deletedRestored = 0,
   });
 
   /// When the restored backup was made.
@@ -69,6 +117,9 @@ class RestoreSummary {
 
   /// Notes left out by a merge, as their title was already in the folder.
   final int notesSkipped;
+
+  /// Notes from the backup's Recently Deleted put in this device's.
+  final int deletedRestored;
 }
 
 /// Backs the library up to, and restores it from, an `Etonia` folder in
@@ -81,6 +132,13 @@ class RestoreSummary {
 /// manifest is replaced last, so a backup that stops part way leaves the
 /// previous one whole. A file whose hash is in the previous manifest is
 /// not sent again.
+///
+/// Recently Deleted is backed up too, as the manifest's `trash`. A note in
+/// the backup that is not on this device is not dropped from it: it is
+/// brought into Recently Deleted here, and so stays in the backup's, until
+/// it is deleted for good from Recently Deleted. Only a note this device
+/// backed up or restored before and no longer has anywhere leaves the
+/// backup.
 class GoogleDriveBackupService {
   GoogleDriveBackupService({
     required this.client,
@@ -106,6 +164,11 @@ class GoogleDriveBackupService {
 
   static const String _lastBackupKey = 'lastBackupAt';
   static const String _linkedKey = 'driveLinked';
+
+  /// The ids of the notes, in the library or Recently Deleted, that the
+  /// last backup from here or restore to here had. One of them gone since
+  /// was deleted for good.
+  static const String _knownNotesKey = 'backedUpNoteIds';
 
   /// Backups and restores run one at a time, in the order asked for.
   Future<void> _queue = Future<void>.value();
@@ -175,11 +238,8 @@ class GoogleDriveBackupService {
     await flushPendingSaves?.call();
     // Reads wait for queued saves, so what is read is what was written.
     final List<Folder> folders = await repository.allFolders();
-    final List<NoteEntry> notes = await _allNotes(folders);
-    final Map<String, List<NoteAsset>> assets = <String, List<NoteAsset>>{
-      for (final NoteEntry note in notes)
-        note.id: await repository.listAssets(note.id),
-    };
+    List<NoteEntry> notes = await _allNotes(folders);
+    List<NoteEntry> deleted = await repository.trash();
     check();
 
     final GoogleDriveItem root = await client.ensureFolder(
@@ -192,8 +252,70 @@ class GoogleDriveBackupService {
     final _Manifest? previous = await _readManifest(root.id);
     check();
 
+    // Notes in the backup that are not here go to Recently Deleted rather
+    // than out of the backup, unless this device had them and has since
+    // deleted them for good.
+    int moved = 0;
+    if (previous != null) {
+      final Set<String> known = await _knownNotes();
+      final Set<String> here = <String>{
+        for (final NoteEntry note in notes) note.id,
+        for (final NoteEntry note in deleted) note.id,
+      };
+      for (final _NoteRecord record in previous.allNotes) {
+        if (here.contains(record.entry.id) || known.contains(record.entry.id)) {
+          continue;
+        }
+        check();
+        onProgress?.call(
+          CloudProgress(
+            phase: 'Preparing backup',
+            completedItems: 0,
+            totalItems: 0,
+            currentName: record.entry.title,
+          ),
+        );
+        final _DownloadedNote note;
+        try {
+          note = await _downloadNote(record);
+        } on GoogleDriveBackupException {
+          // Missing or damaged in Drive: there is nothing left to keep.
+          continue;
+        }
+        final bool folderHere = folders.any(
+          (Folder folder) => folder.id == record.entry.folderId,
+        );
+        await _createNote(
+          note,
+          folderId: folderHere ? record.entry.folderId : null,
+          deleted: record.entry.deleted ?? _clock(),
+        );
+        moved++;
+      }
+      if (moved > 0) {
+        notes = await _allNotes(folders);
+        deleted = await repository.trash();
+      }
+    }
+    final Map<String, List<NoteAsset>> assets = <String, List<NoteAsset>>{
+      for (final NoteEntry note in <NoteEntry>[...notes, ...deleted])
+        note.id: await repository.listAssets(note.id),
+    };
+    check();
+
+    // Files already in Drive, by hash, whichever note they were sent for.
+    final Map<String, String> sent = <String, String>{
+      for (final _NoteRecord record
+          in previous?.allNotes ?? const <_NoteRecord>[]) ...<String, String>{
+        record.contentHash: record.contentFileId,
+        for (final _AssetRecord asset in record.assets.values)
+          asset.hash: asset.fileId,
+      },
+    };
+
     final int total =
         notes.length +
+        deleted.length +
         assets.values.fold<int>(0, (int sum, List<NoteAsset> list) {
           return sum + list.length;
         }) +
@@ -210,22 +332,25 @@ class GoogleDriveBackupService {
       ),
     );
 
-    final List<Map<String, Object?>> noteRecords = <Map<String, Object?>>[];
-    for (final NoteEntry note in notes) {
+    Future<Map<String, Object?>> backUpNote(NoteEntry note) async {
       check();
       report(note.title);
       final NoteContent content = await repository.loadNote(note.id);
-      final Uint8List contentBytes = Uint8List.fromList(
-        utf8.encode(jsonEncode(content.toJson())),
-      );
-      final String contentHash = sha256.convert(contentBytes).toString();
-      final _NoteRecord? before = previous?.notes[note.id];
-      String contentFileId;
-      if (before != null && before.contentHash == contentHash) {
-        contentFileId = before.contentFileId;
+      final Map<String, Object?> json = content.toJson();
+      final Map<String, Object> encoded = _largeBackupJson(json)
+          ? await compute(
+              _encodeAndHashJson,
+              json,
+              debugLabel: 'backup.encodeAndHash',
+            )
+          : _encodeAndHashJson(json);
+      final Uint8List contentBytes = encoded['bytes']! as Uint8List;
+      final String contentHash = encoded['hash']! as String;
+      String? contentFileId = sent[contentHash];
+      if (contentFileId != null) {
         unchanged++;
       } else {
-        contentFileId = (await client.uploadFile(
+        contentFileId = sent[contentHash] = (await client.uploadFile(
           parentId: notesFolder.id,
           name: '${note.id}-${contentHash.substring(0, 16)}.json',
           bytes: contentBytes,
@@ -243,14 +368,18 @@ class GoogleDriveBackupService {
           note.id,
           asset.id,
         );
-        final String hash = sha256.convert(data.bytes).toString();
-        final _AssetRecord? old = before?.assets[asset.id];
-        String fileId;
-        if (old != null && old.hash == hash) {
-          fileId = old.fileId;
+        final String hash = data.bytes.length >= 512 * 1024
+            ? await compute(
+                _hashBytes,
+                data.bytes,
+                debugLabel: 'backup.assetHash',
+              )
+            : sha256.convert(data.bytes).toString();
+        String? fileId = sent[hash];
+        if (fileId != null) {
           unchanged++;
         } else {
-          fileId = (await client.uploadFile(
+          fileId = sent[hash] = (await client.uploadFile(
             parentId: notesFolder.id,
             name:
                 '${note.id}-${asset.id}-${hash.substring(0, 16)}'
@@ -271,14 +400,21 @@ class GoogleDriveBackupService {
         });
         done++;
       }
-      noteRecords.add(<String, Object?>{
+      return <String, Object?>{
         'entry': note.toJson(),
         'contentHash': contentHash,
         'contentSize': contentBytes.length,
         'contentFileId': contentFileId,
         'assets': assetRecords,
-      });
+      };
     }
+
+    final List<Map<String, Object?>> noteRecords = <Map<String, Object?>>[
+      for (final NoteEntry note in notes) await backUpNote(note),
+    ];
+    final List<Map<String, Object?>> trashRecords = <Map<String, Object?>>[
+      for (final NoteEntry note in deleted) await backUpNote(note),
+    ];
     check();
 
     report(manifestName);
@@ -293,6 +429,7 @@ class GoogleDriveBackupService {
         for (final Folder folder in folders) folder.toJson(),
       ],
       'notes': noteRecords,
+      'trash': trashRecords,
     };
     await client.uploadFile(
       parentId: root.id,
@@ -307,7 +444,10 @@ class GoogleDriveBackupService {
     // What no snapshot refers to any more, left by an older backup or by
     // one that was stopped, goes to the trash.
     final Set<String> keep = <String>{
-      for (final Map<String, Object?> note in noteRecords) ...<String>[
+      for (final Map<String, Object?> note in <Map<String, Object?>>[
+        ...noteRecords,
+        ...trashRecords,
+      ]) ...<String>[
         note['contentFileId']! as String,
         for (final Object? asset in note['assets']! as List)
           (asset! as Map<String, Object?>)['fileId']! as String,
@@ -327,6 +467,10 @@ class GoogleDriveBackupService {
 
     await state.update((Map<String, Object?> values) {
       values[_lastBackupKey] = exportedAt.millisecondsSinceEpoch;
+      values[_knownNotesKey] = <String>[
+        for (final NoteEntry note in notes) note.id,
+        for (final NoteEntry note in deleted) note.id,
+      ];
     });
     return BackupSummary(
       exportedAt: exportedAt,
@@ -334,6 +478,8 @@ class GoogleDriveBackupService {
       noteCount: notes.length,
       uploadedFiles: uploaded,
       unchangedFiles: unchanged,
+      deletedCount: deleted.length,
+      movedToDeleted: moved,
     );
   }
 
@@ -392,9 +538,10 @@ class GoogleDriveBackupService {
     if (manifest == null) throw missing;
     check();
 
+    final List<_NoteRecord> records = manifest.allNotes;
     final int total =
-        manifest.notes.length +
-        manifest.notes.values.fold<int>(0, (int sum, _NoteRecord note) {
+        records.length +
+        records.fold<int>(0, (int sum, _NoteRecord note) {
           return sum + note.assets.length;
         }) +
         1;
@@ -408,37 +555,16 @@ class GoogleDriveBackupService {
       ),
     );
 
-    final List<_DownloadedNote> downloaded = <_DownloadedNote>[];
-    for (final _NoteRecord record in manifest.notes.values) {
-      check();
-      report('Downloading backup', record.entry.title);
-      final Uint8List contentBytes = await _download(
-        record.contentFileId,
-        record.contentHash,
-        record.entry.title,
+    final Map<String, _DownloadedNote> downloaded = <String, _DownloadedNote>{};
+    for (final _NoteRecord record in records) {
+      downloaded[record.entry.id] = await _downloadNote(
+        record,
+        onFile: (String name) {
+          check();
+          report('Downloading backup', name);
+        },
+        onFileDone: () => done++,
       );
-      final Map<String, Object?> json;
-      try {
-        json = jsonDecode(utf8.decode(contentBytes)) as Map<String, Object?>;
-        NoteContent.fromJson(json);
-      } on Object {
-        throw GoogleDriveBackupException(
-          'The backup of "${record.entry.title}" could not be read',
-        );
-      }
-      done++;
-      final Map<String, Uint8List> assetBytes = <String, Uint8List>{};
-      for (final _AssetRecord asset in record.assets.values) {
-        check();
-        report('Downloading backup', asset.fileName ?? record.entry.title);
-        assetBytes[asset.id] = await _download(
-          asset.fileId,
-          asset.hash,
-          record.entry.title,
-        );
-        done++;
-      }
-      downloaded.add(_DownloadedNote(record, json, assetBytes));
     }
     check();
 
@@ -448,19 +574,130 @@ class GoogleDriveBackupService {
       downloaded,
       mode: mode,
     );
+    // Restored under new ids: the backup's are not to be brought back as
+    // missing from here.
+    final Set<String> known = await _knownNotes();
+    await state.update((Map<String, Object?> values) {
+      values[_knownNotesKey] = <String>[
+        ...known,
+        for (final _NoteRecord record in records)
+          if (!known.contains(record.entry.id)) record.entry.id,
+      ];
+    });
     done++;
     report('Restoring library', null);
     return summary;
   }
 
+  /// The ids under [_knownNotesKey].
+  Future<Set<String>> _knownNotes() async {
+    final Object? ids = (await state.read())[_knownNotesKey];
+    return <String>{
+      if (ids is List)
+        for (final Object? id in ids)
+          if (id is String) id,
+    };
+  }
+
+  /// Downloads the content and assets of [record], checked against their
+  /// hashes. [onFile] is told the name of each file before it is
+  /// downloaded, and [onFileDone] after.
+  Future<_DownloadedNote> _downloadNote(
+    _NoteRecord record, {
+    ValueChanged<String>? onFile,
+    VoidCallback? onFileDone,
+  }) async {
+    onFile?.call(record.entry.title);
+    final Uint8List contentBytes = await _download(
+      record.contentFileId,
+      record.contentHash,
+      record.entry.title,
+    );
+    final Map<String, Object?> json;
+    try {
+      json = jsonDecode(utf8.decode(contentBytes)) as Map<String, Object?>;
+      NoteContent.fromJson(json);
+    } on Object {
+      throw GoogleDriveBackupException(
+        'The backup of "${record.entry.title}" could not be read',
+      );
+    }
+    onFileDone?.call();
+    final Map<String, Uint8List> assetBytes = <String, Uint8List>{};
+    for (final _AssetRecord asset in record.assets.values) {
+      onFile?.call(asset.fileName ?? record.entry.title);
+      assetBytes[asset.id] = await _download(
+        asset.fileId,
+        asset.hash,
+        record.entry.title,
+      );
+      onFileDone?.call();
+    }
+    return _DownloadedNote(record, json, assetBytes);
+  }
+
+  /// Makes a note in the library from [note], in [folderId], and moves it
+  /// to Recently Deleted when it was [deleted] then. Nothing is left of it
+  /// if that fails part way.
+  Future<NoteEntry> _createNote(
+    _DownloadedNote note, {
+    required String? folderId,
+    DateTime? deleted,
+  }) async {
+    final NoteEntry created = await repository.createNote(
+      title: note.record.entry.title,
+      folderId: folderId,
+    );
+    try {
+      final Map<String, String> assetIds = <String, String>{};
+      for (final _AssetRecord asset in note.record.assets.values) {
+        assetIds[asset.id] = await repository.storeAsset(
+          created.id,
+          note.assets[asset.id]!,
+          kind: asset.kind,
+          extension: asset.extension,
+          fileName: asset.fileName,
+        );
+      }
+      await repository.saveNote(
+        created.id,
+        NoteContent.fromJson(remapAssetIds(note.content, assetIds)),
+      );
+      if (deleted != null) {
+        await repository.deleteNote(created.id, at: deleted);
+      }
+    } on Object {
+      await _removeNote(created.id);
+      rethrow;
+    }
+    return created;
+  }
+
+  /// Deletes the note [id] for good, wherever it is.
+  Future<void> _removeNote(String id) async {
+    try {
+      await repository.deleteNote(id);
+    } on Object {
+      // Already in Recently Deleted.
+    }
+    try {
+      await repository.deleteForever(id);
+    } on Object {
+      // Already gone.
+    }
+  }
+
   Future<RestoreSummary> _apply(
     _Manifest manifest,
-    List<_DownloadedNote> notes, {
+    Map<String, _DownloadedNote> notes, {
     required RestoreMode mode,
   }) async {
     final bool merge = mode == RestoreMode.merge;
     final List<Folder> existingFolders = await repository.allFolders();
     final FolderListing previousTop = await repository.list(null);
+    final List<NoteEntry> previousTrash = merge
+        ? await repository.trash()
+        : const <NoteEntry>[];
     // The titles already in each folder, before anything is added.
     final Map<String?, Set<String>> titles = <String?, Set<String>>{};
     if (merge) {
@@ -480,6 +717,7 @@ class GoogleDriveBackupService {
     final List<String> createdNotes = <String>[];
     int restored = 0;
     int skipped = 0;
+    int deletedRestored = 0;
     try {
       for (final Folder folder in _parentsFirst(manifest.folders)) {
         // A folder whose parent is not in the backup goes at the top.
@@ -508,8 +746,8 @@ class GoogleDriveBackupService {
         folderIds[folder.id] = created.id;
       }
 
-      for (final _DownloadedNote note in notes) {
-        final NoteEntry entry = note.record.entry;
+      for (final _NoteRecord record in manifest.notes.values) {
+        final NoteEntry entry = record.entry;
         final String? folderId = entry.folderId == null
             ? null
             : folderIds[entry.folderId];
@@ -517,35 +755,35 @@ class GoogleDriveBackupService {
           skipped++;
           continue;
         }
-        final NoteEntry created = await repository.createNote(
-          title: entry.title,
-          folderId: folderId,
-        );
-        createdNotes.add(created.id);
-        final Map<String, String> assetIds = <String, String>{};
-        for (final _AssetRecord asset in note.record.assets.values) {
-          assetIds[asset.id] = await repository.storeAsset(
-            created.id,
-            note.assets[asset.id]!,
-            kind: asset.kind,
-            extension: asset.extension,
-            fileName: asset.fileName,
-          );
-        }
-        await repository.saveNote(
-          created.id,
-          NoteContent.fromJson(remapAssetIds(note.content, assetIds)),
+        createdNotes.add(
+          (await _createNote(notes[entry.id]!, folderId: folderId)).id,
         );
         restored++;
       }
+
+      // Recently Deleted, leaving out what is already in this device's.
+      for (final _NoteRecord record in manifest.trash.values) {
+        final NoteEntry entry = record.entry;
+        if (merge &&
+            previousTrash.any(
+              (NoteEntry note) =>
+                  note.id == entry.id ||
+                  (note.title == entry.title && note.deleted == entry.deleted),
+            )) {
+          continue;
+        }
+        createdNotes.add(
+          (await _createNote(
+            notes[entry.id]!,
+            folderId: folderIds[entry.folderId],
+            deleted: entry.deleted ?? _clock(),
+          )).id,
+        );
+        deletedRestored++;
+      }
     } on Object {
       for (final String id in createdNotes.reversed) {
-        try {
-          await repository.deleteNote(id);
-          await repository.deleteForever(id);
-        } on Object {
-          // Already gone.
-        }
+        await _removeNote(id);
       }
       for (final String id in createdFolders.reversed) {
         try {
@@ -570,6 +808,7 @@ class GoogleDriveBackupService {
       foldersCreated: createdFolders.length,
       notesRestored: restored,
       notesSkipped: skipped,
+      deletedRestored: deletedRestored,
     );
   }
 
@@ -695,9 +934,17 @@ class _Manifest {
     required this.exportedAt,
     required this.folders,
     required this.notes,
+    required this.trash,
   });
 
   factory _Manifest.fromJson(String fileId, Map<String, Object?> json) {
+    Map<String, _NoteRecord> records(Object? list) => <String, _NoteRecord>{
+      for (final Object? raw in (list as List?) ?? <Object?>[])
+        if (_NoteRecord.fromJson(raw! as Map<String, Object?>)
+            case final _NoteRecord note)
+          note.entry.id: note,
+    };
+
     return _Manifest(
       fileId: fileId,
       exportedAt: DateTime.parse(json['exportedAt']! as String).toLocal(),
@@ -705,12 +952,9 @@ class _Manifest {
         for (final Object? folder in (json['folders'] as List?) ?? <Object?>[])
           Folder.fromJson(folder! as Map<String, Object?>),
       ],
-      notes: <String, _NoteRecord>{
-        for (final Object? raw in (json['notes'] as List?) ?? <Object?>[])
-          if (_NoteRecord.fromJson(raw! as Map<String, Object?>)
-              case final _NoteRecord note)
-            note.entry.id: note,
-      },
+      notes: records(json['notes']),
+      // Older backups have none.
+      trash: records(json['trash']),
     );
   }
 
@@ -718,6 +962,15 @@ class _Manifest {
   final DateTime exportedAt;
   final List<Folder> folders;
   final Map<String, _NoteRecord> notes;
+
+  /// Recently Deleted.
+  final Map<String, _NoteRecord> trash;
+
+  /// [notes], then [trash].
+  List<_NoteRecord> get allNotes => <_NoteRecord>[
+    ...notes.values,
+    ...trash.values,
+  ];
 }
 
 class _NoteRecord {

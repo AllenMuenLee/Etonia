@@ -13,7 +13,7 @@ import 'package:greatnote/features/editor/ai/streaming_ai_client.dart';
 
 void main() {
   test(
-    'only current prompt and selected crop are sent; history and full note never leave',
+    'conversation history, current prompt, and selected crop are sent but the full note is not',
     () async {
       Map<String, Object?>? sent;
       final client = BackendAiClient(
@@ -46,9 +46,14 @@ void main() {
       );
       expect(result, isA<AiSuccess>());
       expect(sent!['prompt'], 'CURRENT QUESTION');
+      expect(sent!['history'], <Map<String, String>>[
+        <String, String>{'role': 'user', 'content': 'OLD PRIVATE QUESTION'},
+        <String, String>{'role': 'assistant', 'content': 'OLD PRIVATE ANSWER'},
+      ]);
       expect(sent!['selectedImage'], base64Encode([1, 2, 3]));
       final encoded = jsonEncode(sent);
-      expect(encoded, isNot(contains('OLD PRIVATE')));
+      expect(encoded, contains('OLD PRIVATE QUESTION'));
+      expect(encoded, contains('OLD PRIVATE ANSWER'));
       expect(
         encoded,
         isNot(contains(base64Encode(utf8.encode('FULL PRIVATE NOTE')))),
@@ -59,7 +64,9 @@ void main() {
           'requestId',
           'model',
           'prompt',
+          'history',
           'systemInstruction',
+          'noteMetadata',
           'selectedImage',
           'notationContext',
           'responseSchema',
@@ -78,8 +85,82 @@ void main() {
       expect(sent!['requestId'], matches(RegExp(r'^[a-f0-9-]{36}$')));
     },
   );
-  test('with Notation on, the note goes as coordinates in the instruction, '
-      'and the selection is kept to the paper', () async {
+  test('history keeps only the last three complete turns', () async {
+    Map<String, Object?>? sent;
+    final client = BackendAiClient(
+      invoke: (_, body) async {
+        sent = body;
+        return {
+          'answer': '{"version":2,"message":"answer","notation":null}',
+          'usage': {'inputTokens': 10, 'outputTokens': 20},
+        };
+      },
+    );
+    await client.send(
+      AiRequest(
+        systemInstruction: '',
+        imagePng: Uint8List.fromList([1]),
+        messages: <AiMessage>[
+          for (int turn = 0; turn < 51; turn++) ...<AiMessage>[
+            AiMessage.user('question $turn'),
+            AiMessage.model('answer $turn'),
+          ],
+          const AiMessage.user('current'),
+        ],
+      ),
+    );
+
+    final history = sent!['history']! as List<Map<String, String>>;
+    expect(history, hasLength(6));
+    expect(history.first, {'role': 'user', 'content': 'question 48'});
+    expect(history.last, {'role': 'assistant', 'content': 'answer 50'});
+  });
+  test('history is compacted: older turns are excerpts, quick actions their '
+      'labels, and only the latest answer stays nearly whole', () async {
+    Map<String, Object?>? sent;
+    final client = BackendAiClient(
+      invoke: (_, body) async {
+        sent = body;
+        return {
+          'answer': '{"version":2,"message":"answer","notation":null}',
+          'usage': {'inputTokens': 10, 'outputTokens': 20},
+        };
+      },
+    );
+    final String longAnswer = List<String>.filled(400, 'word').join(' ');
+    await client.send(
+      AiRequest(
+        systemInstruction: '',
+        imagePng: Uint8List.fromList([1]),
+        messages: <AiMessage>[
+          AiMessage.user(
+            List<String>.filled(200, 'prompt').join(' '),
+            label: 'Explain this',
+          ),
+          AiMessage.model('$longAnswer\n\n$longAnswer'),
+          const AiMessage.user('Why?'),
+          AiMessage.model(longAnswer),
+          const AiMessage.user('current'),
+        ],
+      ),
+    );
+
+    final history = sent!['history']! as List<Map<String, String>>;
+    expect(history, hasLength(4));
+    // A quick action goes as its label.
+    expect(history[0]['content'], 'Explain this');
+    // An older answer is a short, one-line excerpt.
+    expect(history[1]['content']!.length, lessThanOrEqualTo(302));
+    expect(history[1]['content'], endsWith('…'));
+    expect(history[1]['content'], isNot(contains('\n')));
+    expect(history[2]['content'], 'Why?');
+    // The latest answer is kept up to 2000 characters.
+    expect(history[3]['content']!.length, greaterThan(1900));
+    expect(history[3]['content']!.length, lessThanOrEqualTo(2002));
+  });
+
+  test('with Notation on, the note goes as coordinates apart from the fixed '
+      'instruction, and the selection is kept to the paper', () async {
     Map<String, Object?>? sent;
     final client = BackendAiClient(
       invoke: (_, body) async {
@@ -111,11 +192,10 @@ void main() {
       ),
     );
 
-    expect(
-      sent!['systemInstruction'],
-      'public instructions\n\n${aiNoteMetadata(note)}',
-    );
-    expect(sent!['systemInstruction'], contains('"free_areas"'));
+    // The fixed instruction alone, so providers can cache it.
+    expect(sent!['systemInstruction'], 'public instructions');
+    expect(sent!['noteMetadata'], aiNoteMetadata(note));
+    expect(sent!['noteMetadata'], contains('"free_areas"'));
     expect(sent!['notationContext'], {
       'width': 480.0,
       'height': 480.0,
@@ -176,4 +256,39 @@ void main() {
       expect(calls, 1);
     },
   );
+
+  test('a first question sends no history field', () async {
+    Map<String, Object?>? sent;
+    final client = BackendAiClient(
+      invoke: (_, body) async {
+        sent = body;
+        return {
+          'answer': '{"version":2,"message":"answer","notation":null}',
+          'usage': {'inputTokens': 10, 'outputTokens': 20},
+        };
+      },
+    );
+    await client.send(
+      AiRequest(
+        systemInstruction: '',
+        imagePng: Uint8List.fromList([1]),
+        messages: const [AiMessage.user('first')],
+      ),
+    );
+    expect(sent!.containsKey('history'), isFalse);
+  });
+
+  test('a request the backend rejects is reported as rejected', () async {
+    final client = BackendAiClient(
+      invoke: (_, _) async => throw const BackendFailure('rejected'),
+    );
+    final result = await client.send(
+      AiRequest(
+        systemInstruction: '',
+        imagePng: Uint8List(0),
+        messages: const [AiMessage.user('question')],
+      ),
+    );
+    expect((result as AiError).failure.kind, AiFailureKind.rejected);
+  });
 }

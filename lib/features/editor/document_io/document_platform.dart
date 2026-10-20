@@ -4,7 +4,7 @@ import 'dart:ui' as ui;
 
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/services.dart';
-import 'package:image/image.dart' as image;
+import 'package:image_picker/image_picker.dart' as image_picker;
 import 'package:pdfrx/pdfrx.dart' as pdfrx;
 import 'package:share_plus/share_plus.dart';
 
@@ -15,12 +15,14 @@ class PickedDocument {
   final Uint8List bytes;
 }
 
+enum DocumentImageSource { gallery, camera }
+
 abstract interface class DocumentPicker {
   Future<PickedDocument?> pickPdf();
 
   /// A PDF exported from Goodnotes or a native `.goodnotes` notebook.
   Future<PickedDocument?> pickGoodnotes();
-  Future<PickedDocument?> pickImage();
+  Future<PickedDocument?> pickImage(DocumentImageSource source);
 }
 
 class SystemDocumentPicker implements DocumentPicker {
@@ -36,7 +38,18 @@ class SystemDocumentPicker implements DocumentPicker {
   Future<PickedDocument?> pickGoodnotes() => _pick(FileType.any, null);
 
   @override
-  Future<PickedDocument?> pickImage() => _pick(FileType.image, null);
+  Future<PickedDocument?> pickImage(DocumentImageSource source) async {
+    final image_picker.XFile? file = await image_picker.ImagePicker().pickImage(
+      source: switch (source) {
+        DocumentImageSource.gallery => image_picker.ImageSource.gallery,
+        DocumentImageSource.camera => image_picker.ImageSource.camera,
+      },
+    );
+    if (file == null) {
+      return null;
+    }
+    return PickedDocument(name: file.name, bytes: await file.readAsBytes());
+  }
 
   Future<PickedDocument?> _pick(FileType type, List<String>? extensions) async {
     final PlatformFile? file = await FilePicker.pickFile(
@@ -189,18 +202,22 @@ class PdfrxRasterizer
       if (rendered == null) {
         throw StateError('The PDF page could not be rendered.');
       }
-      final image.Image decoded = image.Image.fromBytes(
-        width: rendered.width,
-        height: rendered.height,
-        bytes: rendered.pixels.buffer,
-        bytesOffset: rendered.pixels.offsetInBytes,
-        order: image.ChannelOrder.bgra,
-      );
-      return RasterizedPdfPage(
-        png: Uint8List.fromList(image.encodePng(decoded)),
-        pixelWidth: rendered.width,
-        pixelHeight: rendered.height,
-      );
+      final ui.Image engineImage = await rendered.createImage();
+      try {
+        final ByteData? png = await engineImage.toByteData(
+          format: ui.ImageByteFormat.png,
+        );
+        if (png == null) {
+          throw StateError('The PDF page could not be encoded.');
+        }
+        return RasterizedPdfPage(
+          png: png.buffer.asUint8List(png.offsetInBytes, png.lengthInBytes),
+          pixelWidth: rendered.width,
+          pixelHeight: rendered.height,
+        );
+      } finally {
+        engineImage.dispose();
+      }
     } finally {
       rendered?.dispose();
       await document.dispose();

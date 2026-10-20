@@ -132,8 +132,8 @@ void main() {
       expect(controller.accessFor(AiModelId.haiku), AiModelAccess.metered);
       expect(controller.accessFor(AiModelId.sol), AiModelAccess.metered);
       expect(controller.accessFor(AiModelId.opus), AiModelAccess.noPlan);
-      expect(controller.creditsLabel, '\$0.50 left');
-      expect(PlansButton.labelFor(controller), 'Free · \$0.50');
+      expect(controller.creditsLabel, '100% tokens');
+      expect(PlansButton.labelFor(controller), 'Free · 100%');
 
       backend.result = const SubscriptionState(freeCreditMicroUsd: 500000);
       await controller.refresh();

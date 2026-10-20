@@ -17,6 +17,35 @@ Map<String, Object?> _decodeNoteJson(String encoded) {
   return decoded;
 }
 
+String _encodeNoteJson(Map<String, Object?> json) => jsonEncode(json);
+
+bool _largeJsonValue(Object? root, {int threshold = 512 * 1024}) {
+  int estimate = 0;
+  final List<Object?> pending = <Object?>[root];
+  while (pending.isNotEmpty && estimate < threshold) {
+    final Object? value = pending.removeLast();
+    switch (value) {
+      case final String text:
+        estimate += text.length * 2 + 2;
+      case num _ || bool _ || null:
+        estimate += 16;
+      case final List<Object?> values:
+        estimate += values.length;
+        pending.addAll(values);
+      case final Map<Object?, Object?> values:
+        estimate += values.length * 2;
+        for (final MapEntry<Object?, Object?> entry in values.entries) {
+          pending
+            ..add(entry.key)
+            ..add(entry.value);
+        }
+      default:
+        estimate += 32;
+    }
+  }
+  return estimate >= threshold;
+}
+
 /// Stores the library under one directory: `library.json`, the index of
 /// folders and notes, and `notes/<id>.json`, one file of pages and ink per
 /// note.
@@ -25,7 +54,8 @@ Map<String, Object?> _decodeNoteJson(String encoded) {
 /// the old one, so a crash leaves either the old file or the new one, never
 /// half of one. A note whose file cannot be read fails to open with a
 /// [StorageFormatException]; the rest of the library is unaffected.
-class FileNoteRepository extends IndexedNoteRepository {
+class FileNoteRepository extends IndexedNoteRepository
+    implements ThumbnailDiskStore {
   FileNoteRepository._(
     this.directory, {
     super.clock,
@@ -42,6 +72,7 @@ class FileNoteRepository extends IndexedNoteRepository {
     String Function()? newId,
   }) async {
     await Directory('${directory.path}/notes').create(recursive: true);
+    await Directory('${directory.path}/thumbnails').create(recursive: true);
     final File index = File('${directory.path}/$_indexName');
     List<Folder> folders = const <Folder>[];
     List<NoteEntry> notes = const <NoteEntry>[];
@@ -82,12 +113,17 @@ class FileNoteRepository extends IndexedNoteRepository {
   static const String _indexName = 'library.json';
 
   final Directory directory;
+  final Map<String, Future<void>> _contentWrites = <String, Future<void>>{};
 
   File _noteFile(String id) => File('${directory.path}/notes/$id.json');
   Directory _assetDirectory(String id) =>
       Directory('${directory.path}/notes/$id.assets');
   File _assetManifest(String id) =>
       File('${_assetDirectory(id).path}/manifest.json');
+  Directory _thumbnailDirectory(String id) =>
+      Directory('${directory.path}/thumbnails/$id');
+  File _thumbnailFile(String id, String key) =>
+      File('${_thumbnailDirectory(id).path}/$key.png');
 
   @override
   Future<void> writeIndex() {
@@ -137,7 +173,31 @@ class FileNoteRepository extends IndexedNoteRepository {
 
   @override
   Future<void> writeContent(String id, NoteContent content) {
-    return _writeAtomically(_noteFile(id), jsonEncode(content.toJson()));
+    final Map<String, Object?> json = content.toJson();
+    final Future<void> previous = _contentWrites[id] ?? Future<void>.value();
+    final Future<void> writing = previous.catchError((Object _) {}).then((
+      _,
+    ) async {
+      final String encoded = _largeJsonValue(json)
+          ? await compute(_encodeNoteJson, json, debugLabel: 'note.jsonEncode')
+          : jsonEncode(json);
+      await _writeAtomically(_noteFile(id), encoded);
+      await deleteThumbnails(id);
+    });
+    _contentWrites[id] = writing;
+    void release() {
+      if (identical(_contentWrites[id], writing)) {
+        _contentWrites.remove(id);
+      }
+    }
+
+    writing.then<void>(
+      (_) => release(),
+      onError: (Object _, StackTrace stack) {
+        release();
+      },
+    );
+    return writing;
   }
 
   @override
@@ -149,6 +209,50 @@ class FileNoteRepository extends IndexedNoteRepository {
     final Directory assets = _assetDirectory(id);
     if (await assets.exists()) {
       await assets.delete(recursive: true);
+    }
+    await deleteThumbnails(id);
+  }
+
+  @override
+  Future<Uint8List?> readThumbnail(String noteId, String key) async {
+    final File file = _thumbnailFile(noteId, key);
+    return await file.exists() ? file.readAsBytes() : null;
+  }
+
+  @override
+  Future<void> writeThumbnail(String noteId, String key, Uint8List png) async {
+    final Directory directory = _thumbnailDirectory(noteId);
+    await directory.create(recursive: true);
+    final File file = _thumbnailFile(noteId, key);
+    final File temporary = File('${file.path}.tmp');
+    await temporary.writeAsBytes(png, flush: true);
+    await temporary.rename(file.path);
+    for (final FileSystemEntity entity in directory.listSync()) {
+      if (entity is File && entity.path != file.path) {
+        await entity.delete();
+      }
+    }
+  }
+
+  @override
+  Future<void> deleteThumbnails(String noteId) async {
+    final Directory directory = _thumbnailDirectory(noteId);
+    if (await directory.exists()) {
+      await directory.delete(recursive: true);
+    }
+  }
+
+  @override
+  Future<void> retainThumbnailNotes(Set<String> noteIds) async {
+    final Directory root = Directory('${directory.path}/thumbnails');
+    if (!await root.exists()) return;
+    await for (final FileSystemEntity entity in root.list()) {
+      if (entity is Directory) {
+        final String id = entity.uri.pathSegments
+            .where((String part) => part.isNotEmpty)
+            .last;
+        if (!noteIds.contains(id)) await entity.delete(recursive: true);
+      }
     }
   }
 

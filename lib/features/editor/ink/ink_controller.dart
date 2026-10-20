@@ -18,6 +18,7 @@ import 'selection_transform.dart';
 import 'shape_recognizer.dart';
 import 'smoothing_config.dart';
 import 'stroke.dart';
+import 'stroke_spatial_index.dart';
 import 'stroke_follower.dart';
 import '../document_io/document_models.dart';
 import '../sticky/sticky_note.dart';
@@ -82,6 +83,9 @@ class InkController {
   final List<ValueChanged<Map<Stroke, Stroke>>> _replacementListeners =
       <ValueChanged<Map<Stroke, Stroke>>>[];
   List<Stroke> _strokes;
+  StrokeSpatialIndex? _strokeIndex;
+  final Map<String, (List<Stroke>, StrokeSpatialIndex)> _stickyStrokeIndices =
+      <String, (List<Stroke>, StrokeSpatialIndex)>{};
   List<NoteImageElement> _images;
 
   /// The page's sticky notes, in paint order: above images, below page ink.
@@ -461,6 +465,8 @@ class InkController {
   }
 
   void _revisionBumped() {
+    _strokeIndex = null;
+    _stickyStrokeIndices.clear();
     _documentRevision++;
     _revisionChanged.notify();
   }
@@ -686,6 +692,9 @@ class InkController {
       strokes,
       config: config,
       skip: _hidden.contains,
+      candidateIndices: identical(strokes, _strokes)
+          ? _index.query(stroke.bounds)
+          : null,
     );
   }
 
@@ -1264,8 +1273,20 @@ class InkController {
       outline,
       tolerance: selectionConfig.geometryTolerance,
     );
+    final Rect lassoBounds = Rect.fromLTRB(
+      region.left,
+      region.top,
+      region.right,
+      region.bottom,
+    ).inflate(region.tolerance);
     final List<int> indices = <int>[
-      for (final int index in selectStrokes(_strokes, region).indices)
+      for (final int index in selectStrokes(
+        _strokes,
+        region,
+        candidateIndices: region.isEmpty
+            ? const <int>[]
+            : _index.query(lassoBounds),
+      ).indices)
         if (!_hidden.contains(_strokes[index])) index,
     ];
     final List<int> imageIndices = selectImages(_images, region);
@@ -2650,10 +2671,12 @@ class InkController {
         note.toLocal(from),
         note.toLocal(to),
         erase.radius / note.scale,
+        spatialIndex: _stickyIndexFor(note),
       );
       if (result != null) {
         _stickies = List<StickyNoteElement>.of(_stickies)
           ..[index] = note.copyWith(strokes: result);
+        _stickyStrokeIndices.remove(note.id);
         erase._changedInk = true;
         _completedChanged.notify();
       }
@@ -2668,6 +2691,7 @@ class InkController {
     );
     if (result != null) {
       _strokes = result;
+      _strokeIndex = null;
       // Cut-off pieces of notation ink stay put, as ordinary ink.
       _syncPlaybacks();
       erase._changedInk = true;
@@ -2682,8 +2706,9 @@ class InkController {
     EraseGesture erase,
     InkVector from,
     InkVector to,
-    double radius,
-  ) {
+    double radius, {
+    StrokeSpatialIndex? spatialIndex,
+  }) {
     // The box around the capsule. Stroke bounds already include half the
     // stroke width, so a stroke that fails this test is out of reach.
     final double left = math.min(from.x, to.x) - radius;
@@ -2691,13 +2716,27 @@ class InkController {
     final double top = math.min(from.y, to.y) - radius;
     final double bottom = math.max(from.y, to.y) + radius;
 
+    final StrokeSpatialIndex? index =
+        spatialIndex ?? (identical(strokes, _strokes) ? _index : null);
+    final Iterable<int>? candidates = index?.query(
+      Rect.fromLTRB(left, top, right, bottom),
+    );
+    final Iterator<int>? candidate = candidates?.iterator;
+    bool hasCandidate = candidate?.moveNext() ?? false;
+
     // Stays null, and the collection untouched, until a stroke changes.
     List<Stroke>? result;
     for (int i = 0; i < strokes.length; i++) {
       final Stroke stroke = strokes[i];
       final Rect bounds = stroke.bounds;
       List<Stroke>? replacement;
-      if (!_hidden.contains(stroke) &&
+      final bool shouldTest =
+          candidate == null || (hasCandidate && candidate.current == i);
+      if (candidate != null && shouldTest) {
+        hasCandidate = candidate.moveNext();
+      }
+      if (shouldTest &&
+          !_hidden.contains(stroke) &&
           bounds.left <= right &&
           bounds.right >= left &&
           bounds.top <= bottom &&
@@ -2711,6 +2750,28 @@ class InkController {
       }
     }
     return result;
+  }
+
+  /// The index of [_strokes], rebuilt whenever the collection is replaced or
+  /// grows in place, so it never answers with stale document indices.
+  StrokeSpatialIndex get _index {
+    final StrokeSpatialIndex? index = _strokeIndex;
+    if (index != null && index.indexes(_strokes)) {
+      return index;
+    }
+    return _strokeIndex = StrokeSpatialIndex(_strokes);
+  }
+
+  StrokeSpatialIndex _stickyIndexFor(StickyNoteElement note) {
+    final cached = _stickyStrokeIndices[note.id];
+    if (cached != null &&
+        identical(cached.$1, note.strokes) &&
+        cached.$2.indexes(note.strokes)) {
+      return cached.$2;
+    }
+    final StrokeSpatialIndex index = StrokeSpatialIndex(note.strokes);
+    _stickyStrokeIndices[note.id] = (note.strokes, index);
+    return index;
   }
 
   /// What is left of [stroke] after the eraser sweeps from [from] to [to]:

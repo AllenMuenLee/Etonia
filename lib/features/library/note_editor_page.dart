@@ -10,6 +10,7 @@ import '../../shared/layout/breakpoints.dart';
 import '../editor/ai/ai_assistant_controller.dart';
 import '../editor/ai/ai_client.dart';
 import '../editor/editor_screen.dart';
+import '../editor/handwriting/handwriting_calibration.dart';
 import '../editor/ink/pen_settings.dart';
 import '../editor/widgets/tool_palette.dart';
 import '../editor/document_io/document_io_config.dart';
@@ -43,6 +44,7 @@ class NoteEditorPage extends StatefulWidget {
     this.saveDelay = const Duration(milliseconds: 800),
     this.aiClient,
     this.subscription,
+    this.handwritingProfileStore,
     this.documentPicker = const SystemDocumentPicker(),
     this.pdfRasterizer = const PdfrxRasterizer(),
     this.exportSink = const SystemExportSink(),
@@ -85,6 +87,9 @@ class NoteEditorPage extends StatefulWidget {
 
   /// Passed to the editor, to meter its AI.
   final SubscriptionController? subscription;
+
+  /// Passed to the editor for the chat's calibration reminder.
+  final HandwritingProfileStore? handwritingProfileStore;
   final DocumentPicker documentPicker;
   final PdfRasterizer pdfRasterizer;
   final ExportSink exportSink;
@@ -374,6 +379,7 @@ class _NoteEditorPageState extends State<NoteEditorPage> {
         tabs: widget.tabsBuilder?.call(_rename),
         aiClient: widget.aiClient,
         subscription: widget.subscription,
+        handwritingProfileStore: widget.handwritingProfileStore,
         repository: widget.repository,
         noteId: widget.note.id,
         documentPicker: widget.documentPicker,

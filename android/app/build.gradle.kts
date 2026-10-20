@@ -45,6 +45,8 @@ flutter {
 }
 
 dependencies {
+    implementation("androidx.graphics:graphics-core:1.0.4")
+    implementation("androidx.input:input-motionprediction:1.0.0")
     // On-device recognition for handwriting written in AI mode. Digital ink
     // reads the strokes themselves; its language model is downloaded on
     // first use. Until then, text recognition, whose Latin model is

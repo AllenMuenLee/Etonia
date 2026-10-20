@@ -6,432 +6,420 @@ import 'package:flutter/foundation.dart';
 
 import '../ai/notation_font.dart';
 import '../ink/ink_sample.dart';
+import 'glyph_builder.dart';
+import 'hand_features.dart';
+import 'hand_glyphs.dart';
+import 'handwriting_fonts.dart';
+import 'handwriting_style.dart';
+import 'stroke_runs.dart';
 
-/// What the writer copies during calibration. Together the lines contain
-/// every lowercase and capital letter, every digit, and the punctuation the
-/// notation font can write, so each one can be learned at least once.
-const List<String> calibrationLines = <String>[
-  "Six grumpy wizards judged the quacking bovine's fluffy hat.",
-  '"QUICK, HIDE!" yelled the frog. "SIX VEXED ZEBRAS WANT MY PB&J FOR GOULASH!"',
-  "Oh no - my cat owes me \$1,250.47 (+ 6% tip) & 89 naps @ 3:00; it's 1/2 off* #rude?",
+/// The pages of boxes the writer fills to make a font of their own, each a
+/// few rows of letters, one box for each. The [keyLetters], on the first
+/// page, must be written: the rest of the alphabet is built from their
+/// strokes. Any of the others may be written too, to be used as written;
+/// digits left out are written in the built-in font.
+const List<List<String>> customFontPages = <List<String>>[
+  <String>['abefgik', 'nostw', 'AER'],
+  <String>['cdhjlmp', 'qruvxyz'],
+  <String>['BCDFGHIJ', 'KLMNOPQS', 'TUVWXYZ'],
+  <String>['01234', '56789'],
 ];
 
-/// One step of calibration: a short phrase written on one ruled line, with
-/// a remark to keep the writer company.
-@immutable
-class CalibrationChunk {
-  const CalibrationChunk(this.text, this.quip);
+/// Whether [page] of [customFontPages] may be left empty.
+bool customFontPageOptional(int page) => page > 0;
 
-  final String text;
-  final String quip;
+/// How far the built-in hand moves towards the traits measured from the
+/// writer's letters, for what they did not write out: all the way would
+/// copy their slips as faithfully as their style.
+const double calibrationMix = 0.8;
 
-  /// The words of [text], as they should be separated on the page.
-  List<String> get words => text.split(' ');
-}
+/// How wide a box is, in line heights.
+const double calibrationCell = 1.5;
 
-/// [calibrationLines], cut into phrases short enough for one ruled line on
-/// a phone.
-const List<CalibrationChunk> calibrationChunks = <CalibrationChunk>[
-  CalibrationChunk('Six grumpy wizards', 'A bad day at the magic academy.'),
-  CalibrationChunk('judged the quacking', 'The talent show has begun.'),
-  CalibrationChunk("bovine's fluffy hat.", 'Harsh, but fair.'),
-  CalibrationChunk('"QUICK, HIDE!" yelled', 'Capitals: please shout.'),
-  CalibrationChunk('the frog.', 'Easy one. You earned it.'),
-  CalibrationChunk('"SIX VEXED ZEBRAS', 'Still shouting.'),
-  CalibrationChunk('WANT MY PB&J', 'They have no manners.'),
-  CalibrationChunk('FOR GOULASH!"', 'A bold recipe.'),
-  CalibrationChunk('Oh no - my cat', 'Meanwhile, at home…'),
-  CalibrationChunk('owes me \$1,250.47', 'Itemised, of course.'),
-  CalibrationChunk('(+ 6% tip) & 89 naps', 'Naps are not refundable.'),
-  CalibrationChunk("@ 3:00; it's 1/2 off*", '*Terms and cats apply.'),
-  CalibrationChunk('#rude?', 'Last one. Very #rude.'),
-];
+/// How far apart rows of boxes are, in line heights.
+const double calibrationRowGap = 2.2;
 
-/// One handwritten form of a character or word, in writing units: the top
-/// of a capital is y = 0, the baseline is y = 1, and x starts at the form's
-/// left edge. Writing it [size] tall is a translation and a uniform scale.
-@immutable
-class CalibratedGlyph {
-  CalibratedGlyph({
-    required this.width,
-    required Iterable<List<InkVector>> strokes,
-  }) : strokes = List<List<InkVector>>.unmodifiable(
-         strokes.map(List<InkVector>.unmodifiable),
-       );
+/// Where a pad's boxes are: each row's baseline from the pad's top, how
+/// tall an ascender would stand above it, where the first box starts, and
+/// how wide each box is.
+typedef CalibrationRuling = ({
+  List<double> baselines,
+  double lineHeight,
+  double left,
+  double cellWidth,
+});
 
-  /// Left to right, in writing units.
-  final double width;
+/// The ruling of a page of [rows] rows in the pad's ruled units (see
+/// [CalibrationDraft]): a line height of 1, the first box's left edge at
+/// x = 0 and the first baseline at y = 0.
+CalibrationRuling ruledUnits(int rows) => (
+  baselines: <double>[for (int i = 0; i < rows; i++) i * calibrationRowGap],
+  lineHeight: 1,
+  left: 0,
+  cellWidth: calibrationCell,
+);
 
-  /// Pen strokes in the order they were written.
-  final List<List<InkVector>> strokes;
-
-  /// Strokes written with the top-left of a capital at [origin], [size]
-  /// tall.
-  List<List<InkVector>> place(InkVector origin, double size) =>
-      <List<InkVector>>[
-        for (final List<InkVector> stroke in strokes)
-          <InkVector>[
-            for (final InkVector point in stroke)
-              InkVector(origin.x + point.x * size, origin.y + point.y * size),
-          ],
-      ];
-
-  Map<String, Object?> toJson() => <String, Object?>{
-    'w': _round(width),
-    's': <List<double>>[
-      for (final List<InkVector> stroke in strokes)
-        <double>[
-          for (final InkVector point in stroke) ...<double>[
-            _round(point.x),
-            _round(point.y),
-          ],
-        ],
-    ],
-  };
-
-  static CalibratedGlyph? fromJson(Object? json) {
-    if (json is! Map) return null;
-    final Object? width = json['w'];
-    final Object? strokes = json['s'];
-    if (width is! num || !width.isFinite || width < 0 || strokes is! List) {
-      return null;
-    }
-    final List<List<InkVector>> parsed = <List<InkVector>>[];
-    for (final Object? stroke in strokes) {
-      if (stroke is! List || stroke.isEmpty || stroke.length.isOdd) {
-        return null;
-      }
-      final List<InkVector> points = <InkVector>[];
-      for (int i = 0; i < stroke.length; i += 2) {
-        final Object? x = stroke[i];
-        final Object? y = stroke[i + 1];
-        if (x is! num || y is! num || !x.isFinite || !y.isFinite) return null;
-        points.add(InkVector(x.toDouble(), y.toDouble()));
-      }
-      parsed.add(points);
-    }
-    if (parsed.isEmpty) return null;
-    return CalibratedGlyph(width: width.toDouble(), strokes: parsed);
-  }
-
-  static double _round(double value) => (value * 10000).roundToDouble() / 10000;
-}
-
-/// The writer's own letters and words, learned from calibration. Generated
-/// text uses them in place of the built-in font.
-class HandwritingProfile {
-  HandwritingProfile({
-    Map<String, List<CalibratedGlyph>> glyphs =
-        const <String, List<CalibratedGlyph>>{},
-    Map<String, List<CalibratedGlyph>> words =
-        const <String, List<CalibratedGlyph>>{},
-    this.letterGap = defaultLetterGap,
-    this.wordSpace = defaultWordSpace,
-    math.Random? random,
-  }) : glyphs = _bounded(glyphs),
-       words = _bounded(words),
-       _random = random ?? math.Random();
-
-  /// Writing units between letters and words when calibration measured
-  /// none.
-  static const double defaultLetterGap = 0.12;
-  static const double defaultWordSpace = 0.34;
-
-  /// Distinct variants kept for one character or word.
-  static const int maxVariants = 12;
-
-  final Map<String, List<CalibratedGlyph>> glyphs;
-  final Map<String, List<CalibratedGlyph>> words;
-  final double letterGap;
-  final double wordSpace;
-  final math.Random _random;
-
-  bool get isEmpty => glyphs.isEmpty && words.isEmpty;
-
-  bool hasGlyph(String char) => glyphs[char]?.isNotEmpty ?? false;
-
-  /// Whether any part of [text] can be written in the writer's hand.
-  bool canWriteAny(String text) =>
-      (words[text]?.isNotEmpty ?? false) ||
-      text.runes.any((int rune) => hasGlyph(String.fromCharCode(rune)));
-
-  CalibratedGlyph? chooseGlyph(String char) => _choose(glyphs[char]);
-
-  CalibratedGlyph? chooseWord(String word) => _choose(words[word]);
-
-  CalibratedGlyph? _choose(List<CalibratedGlyph>? variants) =>
-      variants == null || variants.isEmpty
-      ? null
-      : variants[_random.nextInt(variants.length)];
-
-  /// This profile with [other]'s samples added, keeping at most
-  /// [maxVariants] of each. Measured spacing comes from [other].
-  HandwritingProfile mergedWith(HandwritingProfile other) {
-    Map<String, List<CalibratedGlyph>> merge(
-      Map<String, List<CalibratedGlyph>> a,
-      Map<String, List<CalibratedGlyph>> b,
-    ) => <String, List<CalibratedGlyph>>{
-      for (final String key in <String>{...a.keys, ...b.keys})
-        key: <CalibratedGlyph>[...?b[key], ...?a[key]],
-    };
-    return HandwritingProfile(
-      glyphs: merge(glyphs, other.glyphs),
-      words: merge(words, other.words),
-      letterGap: other.letterGap,
-      wordSpace: other.wordSpace,
-      random: _random,
-    );
-  }
-
-  Map<String, Object?> toJson() => <String, Object?>{
-    'version': 1,
-    'letterGap': letterGap,
-    'wordSpace': wordSpace,
-    'glyphs': _samplesToJson(glyphs),
-    'words': _samplesToJson(words),
-  };
-
-  /// Reads a saved profile. Malformed samples are dropped; a profile that
-  /// cannot be read at all is null.
-  static HandwritingProfile? fromJson(Object? json, {math.Random? random}) {
-    if (json is! Map || json['version'] != 1) return null;
-    double spacing(Object? value, double fallback) =>
-        value is num && value.isFinite && value >= 0 && value < 4
-        ? value.toDouble()
-        : fallback;
-    return HandwritingProfile(
-      glyphs: _samplesFromJson(json['glyphs']),
-      words: _samplesFromJson(json['words']),
-      letterGap: spacing(json['letterGap'], defaultLetterGap),
-      wordSpace: spacing(json['wordSpace'], defaultWordSpace),
-      random: random,
-    );
-  }
-
-  static Map<String, Object?> _samplesToJson(
-    Map<String, List<CalibratedGlyph>> samples,
-  ) => <String, Object?>{
-    for (final MapEntry<String, List<CalibratedGlyph>> entry in samples.entries)
-      entry.key: <Object?>[
-        for (final CalibratedGlyph glyph in entry.value) glyph.toJson(),
-      ],
-  };
-
-  static Map<String, List<CalibratedGlyph>> _samplesFromJson(Object? json) {
-    if (json is! Map) return const <String, List<CalibratedGlyph>>{};
-    final Map<String, List<CalibratedGlyph>> samples =
-        <String, List<CalibratedGlyph>>{};
-    for (final MapEntry<Object?, Object?> entry in json.entries) {
-      final Object? key = entry.key;
-      final Object? variants = entry.value;
-      if (key is! String || key.isEmpty || variants is! List) continue;
-      final List<CalibratedGlyph> parsed = <CalibratedGlyph>[
-        for (final Object? variant in variants)
-          ?CalibratedGlyph.fromJson(variant),
-      ];
-      if (parsed.isNotEmpty) samples[key] = parsed;
-    }
-    return samples;
-  }
-
-  static Map<String, List<CalibratedGlyph>> _bounded(
-    Map<String, List<CalibratedGlyph>> samples,
-  ) => Map<String, List<CalibratedGlyph>>.unmodifiable(<
-    String,
-    List<CalibratedGlyph>
-  >{
-    for (final MapEntry<String, List<CalibratedGlyph>> entry in samples.entries)
-      if (entry.value.isNotEmpty)
-        entry.key: List<CalibratedGlyph>.unmodifiable(
-          entry.value.take(maxVariants),
-        ),
-  });
-}
-
-/// What one calibration step learned.
+/// What reading the letters found.
 @immutable
 class CalibrationReading {
-  const CalibrationReading({
-    required this.profile,
-    required this.wordsFound,
-    required this.wordsExpected,
-    required this.lettersLearned,
-  });
+  const CalibrationReading({this.missing = const <String>[], this.style});
 
-  /// The samples from this step alone.
-  final HandwritingProfile profile;
-  final int wordsFound;
-  final int wordsExpected;
+  /// Letters with nothing written in their boxes.
+  final List<String> missing;
 
-  /// How many characters were cut cleanly from their words.
-  final int lettersLearned;
+  /// The writer's own font; null unless every key letter was written.
+  final HandwritingStyle? style;
 
-  /// Whether the ink split into as many words as the phrase has. Otherwise
-  /// nothing was learned, because words cannot be matched to their text.
-  bool get wordsMatched => wordsFound == wordsExpected;
+  bool get complete => missing.isEmpty && style != null;
 }
 
-/// Learns letters and words from [strokes] written for [chunk] on a ruled
-/// line whose capital line is at [capTop] and whose baseline is
-/// [lineHeight] below it.
+/// The strokes in each box of a page whose rows hold [rows], ruled by
+/// [ruling]: by row, then by column.
 ///
-/// Words are found at clear horizontal gaps. Within a word, strokes whose
-/// horizontal extents overlap form one mark, so an i-dot or t-cross stays
-/// with its letter. With one mark per character the pairing is direct.
-/// Joined-up letters are cut where the pen bottoms out between them,
-/// choosing the places that best match each letter's expected width; a word
-/// whose cuts cannot be placed plausibly is kept whole rather than cut at a
-/// guess.
-CalibrationReading readCalibration(
-  CalibrationChunk chunk,
-  List<List<InkVector>> strokes, {
-  required double capTop,
-  required double lineHeight,
-}) {
-  final List<String> expected = chunk.words;
-  final List<List<List<InkVector>>> wordInk = _splitWords(strokes);
-  if (wordInk.length != expected.length) {
-    return CalibrationReading(
-      profile: HandwritingProfile(),
-      wordsFound: wordInk.length,
-      wordsExpected: expected.length,
-      lettersLearned: 0,
-    );
-  }
-
-  // Cut letters first: letters of a known height then locate the writer's
-  // actual capital line and baseline, which the guides only suggest.
-  final List<List<_Mark>?> letters = <List<_Mark>?>[
-    for (int i = 0; i < expected.length; i++)
-      _cutLetters(expected[i], wordInk[i]),
+/// A row's ink is first split into letters, each running from its leftmost
+/// end to its rightmost, where nothing overlaps it. When there are as many
+/// letters as boxes, they go to the boxes in order, left to right, so a row
+/// that drifts left or right of its boxes still gives each letter its own
+/// strokes. Otherwise a stroke belongs to the box its middle is in, so a
+/// tail or a dot that strays over an edge stays with its letter; ink
+/// outside every box is left out.
+List<List<List<List<InkVector>>>> calibrationCells(
+  List<List<InkVector>> strokes,
+  CalibrationRuling ruling,
+  List<String> rows,
+) {
+  final List<List<List<List<InkVector>>>> cells = <List<List<List<InkVector>>>>[
+    for (final String row in rows)
+      <List<List<InkVector>>>[
+        for (int c = 0; c < row.length; c++) <List<InkVector>>[],
+      ],
   ];
-  final List<double> tops = <double>[];
-  final List<double> bottoms = <double>[];
-  for (int i = 0; i < expected.length; i++) {
-    final List<_Mark>? marks = letters[i];
-    if (marks == null) continue;
-    for (final _Mark mark in marks) {
-      // Letters cut from joined writing have approximate bounds.
-      if (!mark.joined && _capHeightChars.contains(mark.char)) {
-        tops.add(mark.bounds.top);
-        bottoms.add(mark.bounds.bottom);
+  final List<List<List<InkVector>>> byRow = <List<List<InkVector>>>[
+    for (int i = 0; i < rows.length; i++) <List<InkVector>>[],
+  ];
+  for (final List<InkVector> stroke in strokes) {
+    if (stroke.isEmpty) continue;
+    final _Bounds bounds = _Bounds.of(<List<InkVector>>[stroke]);
+    int row = 0;
+    double nearest = double.infinity;
+    for (int i = 0; i < rows.length; i++) {
+      // Measured from the middle of a letter on that line, so the dot of
+      // an i stays in its row.
+      final double away =
+          (bounds.centerY - (ruling.baselines[i] - ruling.lineHeight * 0.45))
+              .abs();
+      if (away < nearest) {
+        nearest = away;
+        row = i;
       }
     }
+    byRow[row].add(stroke);
   }
-  double top = capTop;
-  double height = lineHeight;
-  if (tops.isNotEmpty) {
-    final double measuredTop = _median(tops);
-    final double measuredHeight = _median(bottoms) - measuredTop;
-    // Implausible measurements (a stray scribble) keep the guides.
-    if (measuredHeight > lineHeight * 0.3 && measuredHeight < lineHeight * 3) {
-      top = measuredTop;
-      height = measuredHeight;
-    }
-  }
-
-  CalibratedGlyph normalize(
-    List<List<InkVector>> ink,
-    double left,
-    double right,
-  ) => CalibratedGlyph(
-    width: (right - left) / height,
-    strokes: <List<InkVector>>[
-      for (final List<InkVector> stroke in ink)
-        <InkVector>[
-          for (final InkVector point in stroke)
-            InkVector((point.x - left) / height, (point.y - top) / height),
-        ],
-    ],
-  );
-
-  final Map<String, List<CalibratedGlyph>> glyphs =
-      <String, List<CalibratedGlyph>>{};
-  final Map<String, List<CalibratedGlyph>> words =
-      <String, List<CalibratedGlyph>>{};
-  final List<double> letterGaps = <double>[];
-  final List<double> wordGaps = <double>[];
-  int learned = 0;
-  for (int i = 0; i < expected.length; i++) {
-    final List<_Mark>? marks = letters[i];
-    if (i > 0) {
-      wordGaps.add(
-        (_Bounds.of(wordInk[i]).left - _Bounds.of(wordInk[i - 1]).right) /
-            height,
-      );
-    }
-    if (marks == null) {
-      // Kept whole, but only when the token is a plain word: punctuation
-      // stuck to it could not be separated again.
-      if (_plainWord.hasMatch(expected[i])) {
-        final _Bounds bounds = _Bounds.of(wordInk[i]);
-        words
-            .putIfAbsent(expected[i], () => <CalibratedGlyph>[])
-            .add(normalize(wordInk[i], bounds.left, bounds.right));
+  for (int r = 0; r < rows.length; r++) {
+    final List<List<List<InkVector>>> letters = _letters(
+      byRow[r],
+      ruling.lineHeight * 0.15,
+    );
+    if (letters.length == rows[r].length) {
+      for (int c = 0; c < letters.length; c++) {
+        cells[r][c].addAll(letters[c]);
       }
       continue;
     }
-    for (int m = 0; m < marks.length; m++) {
-      final _Mark mark = marks[m];
-      glyphs
-          .putIfAbsent(mark.char, () => <CalibratedGlyph>[])
-          .add(normalize(mark.strokes, mark.bounds.left, mark.bounds.right));
-      learned++;
-      if (m > 0) {
-        // Letters cut from one joined stroke touch: their gap is none.
-        letterGaps.add(
-          mark.joined && mark.group == marks[m - 1].group
-              ? 0
-              : (mark.bounds.left - marks[m - 1].bounds.right) / height,
-        );
+    for (final List<InkVector> stroke in byRow[r]) {
+      final _Bounds bounds = _Bounds.of(<List<InkVector>>[stroke]);
+      final int column = ((bounds.centerX - ruling.left) / ruling.cellWidth)
+          .floor();
+      if (column < 0 || column >= rows[r].length) continue;
+      cells[r][column].add(stroke);
+    }
+  }
+  return cells;
+}
+
+/// [strokes] gathered into letters, left to right: strokes whose spans
+/// across the line overlap, or come within [gap] of each other, are one
+/// letter, from its leftmost end to its rightmost. Each letter's strokes
+/// stay in the order they were written.
+List<List<List<InkVector>>> _letters(
+  List<List<InkVector>> strokes,
+  double gap,
+) {
+  final List<int> order = <int>[for (int i = 0; i < strokes.length; i++) i];
+  final List<_Bounds> bounds = <_Bounds>[
+    for (final List<InkVector> stroke in strokes)
+      _Bounds.of(<List<InkVector>>[stroke]),
+  ];
+  order.sort((int a, int b) => bounds[a].left.compareTo(bounds[b].left));
+  final List<List<int>> letters = <List<int>>[];
+  double right = double.negativeInfinity;
+  for (final int i in order) {
+    if (letters.isEmpty || bounds[i].left > right + gap) {
+      letters.add(<int>[]);
+      right = bounds[i].right;
+    } else {
+      right = math.max(right, bounds[i].right);
+    }
+    letters.last.add(i);
+  }
+  return <List<List<InkVector>>>[
+    for (final List<int> letter in letters)
+      <List<InkVector>>[for (final int i in letter..sort()) strokes[i]],
+  ];
+}
+
+/// The letters still to be written on [page] of [customFontPages], whose
+/// ink, in ruled units, is [strokes].
+List<String> missingLetters(int page, List<List<InkVector>> strokes) {
+  final List<String> rows = customFontPages[page];
+  final List<List<List<List<InkVector>>>> cells = calibrationCells(
+    strokes,
+    ruledUnits(rows.length),
+    rows,
+  );
+  return <String>[
+    for (int r = 0; r < rows.length; r++)
+      for (int c = 0; c < rows[r].length; c++)
+        if (cells[r][c].isEmpty) rows[r][c],
+  ];
+}
+
+/// Makes the writer's own font from [pages], the ink on each page of
+/// [customFontPages] in ruled units. Each box holds a known letter, so
+/// nothing is sent to a recognizer. Every letter is kept as written,
+/// smoothed, and scaled so that the writer's capitals are the font's; the
+/// letters they left out are built from the strokes of those they wrote
+/// ([buildMissingGlyphs]). What is not a letter, such as punctuation, or a
+/// digit left out, is written in the built-in font shaped by the traits
+/// measured from their letters.
+CalibrationReading readCustomFont(List<List<List<InkVector>>> pages) {
+  final List<String> missing = <String>[
+    for (int p = 0; p < customFontPages.length; p++)
+      if (!customFontPageOptional(p))
+        ...missingLetters(
+          p,
+          p < pages.length ? pages[p] : const <List<InkVector>>[],
+        ),
+  ];
+  if (missing.isNotEmpty) return CalibrationReading(missing: missing);
+
+  final List<_Sample> samples = <_Sample>[];
+  for (int p = 0; p < customFontPages.length && p < pages.length; p++) {
+    final List<String> rows = customFontPages[p];
+    final CalibrationRuling ruling = ruledUnits(rows.length);
+    final List<List<List<List<InkVector>>>> cells = calibrationCells(
+      pages[p],
+      ruling,
+      rows,
+    );
+    for (int r = 0; r < rows.length; r++) {
+      final double rule = ruling.baselines[r];
+      // Where this row's letters sit: the feet of those without a tail,
+      // where they are near the line.
+      final List<double> feet = <double>[
+        for (int c = 0; c < rows[r].length; c++)
+          if (!_tails.contains(rows[r][c]) && cells[r][c].isNotEmpty)
+            if ((_Bounds.of(cells[r][c]).bottom - rule).abs() < 0.4)
+              _Bounds.of(cells[r][c]).bottom,
+      ];
+      final double baseline = feet.isEmpty ? rule : _median(feet);
+      for (int c = 0; c < rows[r].length; c++) {
+        if (cells[r][c].isEmpty) continue;
+        samples.add(_Sample(rows[r][c], cells[r][c], baseline));
       }
     }
-    // The word inside any punctuation, kept whole as well, so common words
-    // keep their natural joins and spacing.
-    for (final RegExpMatch match in _wordCore.allMatches(expected[i])) {
-      final List<_Mark> core = marks.sublist(match.start, match.end);
-      if (core.length < 2) continue;
-      words
-          .putIfAbsent(match.group(0)!, () => <CalibratedGlyph>[])
-          .add(
-            normalize(
-              <List<InkVector>>[for (final _Mark mark in core) ...mark.strokes],
-              core.first.bounds.left,
-              core.last.bounds.right,
-            ),
-          );
-    }
-  }
-  double spacing(List<double> gaps, double fallback, double max) {
-    final List<double> plausible = gaps
-        .where((double gap) => gap >= 0 && gap < max)
-        .toList();
-    return plausible.isEmpty ? fallback : _median(plausible);
   }
 
+  // How tall the writer's capitals are, which the font's are made.
+  List<double> heights(String letters) => <double>[
+    for (final _Sample s in samples)
+      if (letters.contains(s.letter))
+        if (s.baseline - s.bounds.top > 0.2 && s.baseline - s.bounds.top < 2.5)
+          s.baseline - s.bounds.top,
+  ];
+  final List<double> capitals = heights('ABCDEFGHIKLMNOPRSTUVWXYZ');
+  final List<double> ascenders = heights('bdfhklt');
+  final double capHeight = capitals.isNotEmpty
+      ? _median(capitals)
+      : ascenders.isNotEmpty
+      ? _median(ascenders)
+      : 1;
+  final double unit = capHeight / NotationFont.capHeight;
+
+  final Map<String, HandGlyph> glyphs = <String, HandGlyph>{};
+  for (final _Sample s in samples) {
+    final List<List<InkVector>> smooth = beautifyHandwriting(
+      s.strokes,
+      spacing: unit * 0.4,
+    );
+    final _Bounds bounds = _Bounds.of(smooth);
+    glyphs[s.letter] = HandGlyph(bounds.width / unit, <List<InkVector>>[
+      for (final List<InkVector> stroke in smooth)
+        <InkVector>[
+          for (final InkVector p in stroke)
+            InkVector(
+              (p.x - bounds.left) / unit,
+              NotationFont.capHeight + (p.y - s.baseline) / unit,
+            ),
+        ],
+    ]);
+  }
+
+  // Measured at the size of a pad, as its thresholds expect.
+  final HandwritingStyle measured = _measure(<_Sample>[
+    for (final _Sample s in samples)
+      if (handLetters.contains(s.letter)) s.scaled(_padScale),
+  ], _padScale);
+  glyphs.addAll(buildMissingGlyphs(glyphs, slant: measured.slant));
+
   return CalibrationReading(
-    profile: HandwritingProfile(
-      glyphs: glyphs,
-      words: words,
-      letterGap: spacing(letterGaps, HandwritingProfile.defaultLetterGap, 1),
-      wordSpace: spacing(wordGaps, HandwritingProfile.defaultWordSpace, 2),
-    ),
-    wordsFound: wordInk.length,
-    wordsExpected: expected.length,
-    lettersLearned: learned,
+    style: HandwritingStyle.standard
+        .mix(measured, calibrationMix)
+        .clamped()
+        .withGlyphs(HandGlyphs.rounded(glyphs)),
   );
 }
 
-/// Characters whose top meets the capital line and whose bottom sits on the
-/// baseline, in most hands.
-const Set<String> _capHeightChars = <String>{
-  'A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I', 'K', 'L', 'M', 'N', 'O', //
-  'P', 'R', 'S', 'T', 'U', 'V', 'W', 'X', 'Y', 'Z', //
-  '0', '1', '2', '3', '4', '5', '6', '7', '8', '9',
-};
+/// About how many pixels a line height is on a pad.
+const double _padScale = 60;
 
-final RegExp _plainWord = RegExp(r'^[\p{L}\p{M}\p{N}]+$', unicode: true);
-final RegExp _wordCore = RegExp(r'[\p{L}\p{M}\p{N}]+', unicode: true);
+/// Letters that hang below the line, so do not show where it is.
+const String _tails = 'gjpqyQJ';
+
+/// One letter as written in its box.
+class _Sample {
+  _Sample(this.letter, this.strokes, this.baseline)
+    : bounds = _Bounds.of(strokes);
+
+  final String letter;
+  final List<List<InkVector>> strokes;
+
+  /// This sample [factor] times as large.
+  _Sample scaled(double factor) => _Sample(letter, <List<InkVector>>[
+    for (final List<InkVector> stroke in strokes)
+      <InkVector>[for (final InkVector p in stroke) p * factor],
+  ], baseline * factor);
+
+  /// Where the letter sits.
+  final double baseline;
+  final _Bounds bounds;
+}
+
+/// The hand that wrote [samples].
+///
+/// None of the letters has an ascender, so their own x-height sets the
+/// scale: the writer's letters are laid in the font's grid as tall as the
+/// font's, upright, and measured there against the font's.
+HandwritingStyle _measure(List<_Sample> samples, double lineHeight) {
+  const HandwritingStyle standard = HandwritingStyle.standard;
+  final List<double> xHeights = <double>[
+    for (final _Sample s in samples)
+      if ('agpw'.contains(s.letter))
+        if (s.baseline - s.bounds.top > lineHeight * 0.15 &&
+            s.baseline - s.bounds.top < lineHeight * 2.5)
+          s.baseline - s.bounds.top,
+  ];
+  final double xHeight = xHeights.isEmpty
+      ? lineHeight * 0.55
+      : _median(xHeights);
+  final double unit = xHeight / (standard.xHeight * NotationFont.capHeight);
+
+  final double slant =
+      _slant(<List<InkVector>>[
+        for (final _Sample s in samples)
+          if ('ipag'.contains(s.letter)) ...s.strokes,
+      ]) ??
+      standard.slant;
+
+  // Each letter upright, in the font's grid: its left edge at x = 0 and
+  // its baseline at y = 10.
+  final Map<String, List<List<List<InkVector>>>> grid =
+      <String, List<List<List<InkVector>>>>{};
+  for (final _Sample s in samples) {
+    final List<List<InkVector>> upright = <List<InkVector>>[
+      for (final List<InkVector> stroke in s.strokes)
+        <InkVector>[
+          for (final InkVector p in stroke)
+            InkVector(p.x - slant * (s.baseline - p.y), p.y),
+        ],
+    ];
+    final double left = _Bounds.of(upright).left;
+    (grid[s.letter] ??= <List<List<InkVector>>>[]).add(<List<InkVector>>[
+      for (final List<InkVector> stroke in upright)
+        <InkVector>[
+          for (final InkVector p in stroke)
+            InkVector(
+              (p.x - left) / unit,
+              NotationFont.capHeight + (p.y - s.baseline) / unit,
+            ),
+        ],
+    ]);
+  }
+
+  // Width against the font's, from the w alone: the other letters are
+  // mostly bowl, and how round the bowls are is the bowls' to say, not
+  // counted twice.
+  final List<double> widths = <double>[
+    for (final String letter in <String>['w'])
+      for (final List<List<InkVector>> sample
+          in grid[letter] ?? const <List<List<InkVector>>>[])
+        _Bounds.of(sample).width / NotationFont.glyphWidth(letter)!,
+  ];
+  // Depth of the descenders against the font's.
+  final List<double> depths = <double>[
+    for (final String letter in <String>['g', 'p'])
+      for (final List<List<InkVector>> sample
+          in grid[letter] ?? const <List<List<InkVector>>>[])
+        (_Bounds.of(sample).bottom - NotationFont.capHeight) /
+            (NotationFont.glyphSpan(letter)!.bottom * NotationFont.capHeight -
+                NotationFont.capHeight),
+  ];
+
+  return HandwritingStyle(
+    slant: slant,
+    widthScale: widths.isEmpty ? standard.widthScale : _median(widths),
+    descenderScale: depths.isEmpty ? standard.descenderScale : _median(depths),
+    features: HandFeatures.measure(grid),
+  ).clamped();
+}
+
+/// The lean of the near-vertical strokes in [strokes], weighted by length:
+/// how far right the pen moves per unit it rises. Null with too little to
+/// tell.
+double? _slant(List<List<InkVector>> strokes) {
+  final List<(double, double)> leans = <(double, double)>[];
+  double total = 0;
+  for (final List<InkVector> stroke in strokes) {
+    final List<InkVector> even = resampled(stroke, 3);
+    for (int i = 1; i < even.length; i++) {
+      final InkVector step = even[i] - even[i - 1];
+      if (step.y.abs() < 1e-6 || step.x.abs() > step.y.abs() * 0.8) continue;
+      // Up or down, a forward lean has x and y moving opposite ways.
+      leans.add((-step.x / step.y, step.length));
+      total += step.length;
+    }
+  }
+  if (total == 0) return null;
+  leans.sort(((double, double) a, (double, double) b) => a.$1.compareTo(b.$1));
+  double running = 0;
+  for (final (double lean, double weight) in leans) {
+    running += weight;
+    if (running >= total / 2) return lean;
+  }
+  return leans.last.$1;
+}
+
+/// [strokes] of the writer's own hand, tidied a little for writing it back:
+/// each stroke is resampled evenly, [spacing] apart, and smoothed so that
+/// the jitter of the pen is gone while the shape, its ends, and the
+/// strokes' order stay as written. A dot stays a dot.
+List<List<InkVector>> beautifyHandwriting(
+  List<List<InkVector>> strokes, {
+  required double spacing,
+}) => <List<InkVector>>[
+  for (final List<InkVector> stroke in strokes)
+    smoothedPoints(resampled(stroke, spacing)),
+];
 
 @immutable
 class _Bounds {
@@ -461,409 +449,7 @@ class _Bounds {
   double get width => right - left;
   double get height => bottom - top;
   double get centerX => (left + right) / 2;
-}
-
-class _Mark {
-  _Mark(this.char, this.strokes, {required this.group, this.joined = false})
-    : bounds = _Bounds.of(strokes);
-
-  final String char;
-  final List<List<InkVector>> strokes;
-  final _Bounds bounds;
-
-  /// The separate mark of ink this letter came from.
-  final int group;
-
-  /// Cut from ink shared with neighbouring letters.
-  final bool joined;
-}
-
-/// Splits ink into words at clear horizontal gaps, in left-to-right order.
-List<List<List<InkVector>>> _splitWords(List<List<InkVector>> strokes) {
-  final List<List<InkVector>> ordered =
-      strokes.where((List<InkVector> stroke) => stroke.isNotEmpty).toList()
-        ..sort(
-          (List<InkVector> a, List<InkVector> b) => _Bounds.of(
-            <List<InkVector>>[a],
-          ).left.compareTo(_Bounds.of(<List<InkVector>>[b]).left),
-        );
-  if (ordered.isEmpty) return const <List<List<InkVector>>>[];
-  final double height = _Bounds.of(ordered).height;
-  final double gap = math.max(12, height * 0.35);
-  final List<List<List<InkVector>>> words = <List<List<InkVector>>>[];
-  List<List<InkVector>> current = <List<InkVector>>[];
-  double right = double.negativeInfinity;
-  for (final List<InkVector> stroke in ordered) {
-    final _Bounds bounds = _Bounds.of(<List<InkVector>>[stroke]);
-    if (current.isNotEmpty && bounds.left > right + gap) {
-      words.add(current);
-      current = <List<InkVector>>[];
-      right = double.negativeInfinity;
-    }
-    current.add(stroke);
-    right = math.max(right, bounds.right);
-  }
-  words.add(current);
-  // Restore writing order inside each word.
-  return <List<List<InkVector>>>[
-    for (final List<List<InkVector>> word in words)
-      <List<InkVector>>[
-        for (final List<InkVector> stroke in strokes)
-          if (word.contains(stroke)) stroke,
-      ],
-  ];
-}
-
-/// [word]'s ink cut into one mark per character, or null when the marks
-/// and characters cannot be paired with confidence.
-List<_Mark>? _cutLetters(String word, List<List<InkVector>> ink) {
-  final List<String> chars = <String>[
-    for (final int rune in word.runes) String.fromCharCode(rune),
-  ];
-  final List<List<List<InkVector>>> marks = _mergeQuoteTicks(
-    chars,
-    _marksOf(ink),
-  );
-  if (marks.length == chars.length) {
-    return <_Mark>[
-      for (int i = 0; i < chars.length; i++)
-        _Mark(chars[i], marks[i], group: i),
-    ];
-  }
-  if (marks.length > chars.length) return null;
-  // Fewer marks than characters: some letters are joined. Decide how many
-  // letters each mark holds, then cut the marks holding several.
-  final List<int>? runs = _assignRuns(chars, marks);
-  if (runs == null) return null;
-  final List<_Mark> cut = <_Mark>[];
-  int next = 0;
-  for (int m = 0; m < marks.length; m++) {
-    final List<String> run = chars.sublist(next, next + runs[m]);
-    next += runs[m];
-    if (run.length == 1) {
-      cut.add(_Mark(run.single, marks[m], group: m));
-      continue;
-    }
-    final List<List<List<InkVector>>>? pieces = _splitJoined(marks[m], run);
-    if (pieces == null) return null;
-    for (int j = 0; j < run.length; j++) {
-      cut.add(_Mark(run[j], pieces[j], group: m, joined: true));
-    }
-  }
-  return cut;
-}
-
-/// A double quote is two ticks side by side: at either end of a word, two
-/// short marks in its upper half are joined into one.
-List<List<List<InkVector>>> _mergeQuoteTicks(
-  List<String> chars,
-  List<List<List<InkVector>>> marks,
-) {
-  if (marks.length < 2) return marks;
-  final _Bounds word = _Bounds.of(<List<InkVector>>[
-    for (final List<List<InkVector>> mark in marks) ...mark,
-  ]);
-  bool tick(List<List<InkVector>> mark) {
-    final _Bounds bounds = _Bounds.of(mark);
-    return bounds.height < word.height * 0.5 &&
-        bounds.bottom < word.top + word.height * 0.6;
-  }
-
-  final List<List<List<InkVector>>> merged = List<List<List<InkVector>>>.of(
-    marks,
-  );
-  if (chars.first == '"' && tick(merged[0]) && tick(merged[1])) {
-    merged.replaceRange(0, 2, <List<List<InkVector>>>[
-      <List<InkVector>>[...merged[0], ...merged[1]],
-    ]);
-  }
-  final int last = merged.length - 1;
-  if (chars.length > 1 &&
-      chars.last == '"' &&
-      last >= 1 &&
-      tick(merged[last]) &&
-      tick(merged[last - 1])) {
-    merged.replaceRange(last - 1, last + 1, <List<List<InkVector>>>[
-      <List<InkVector>>[...merged[last - 1], ...merged[last]],
-    ]);
-  }
-  return merged;
-}
-
-/// The relative width a character usually takes, from the built-in font.
-double _expectedWidth(String char) =>
-    (NotationFont.glyphWidth(char) ?? 5) + NotationFont.spacing;
-
-/// How many consecutive characters each mark holds, chosen so that each
-/// mark's share of the word's width best matches its letters' share.
-List<int>? _assignRuns(List<String> chars, List<List<List<InkVector>>> marks) {
-  final int markCount = marks.length;
-  final int charCount = chars.length;
-  final List<double> widths = <double>[
-    for (final List<List<InkVector>> mark in marks)
-      math.max(_Bounds.of(mark).width, 1),
-  ];
-  final double totalWidth = widths.fold<double>(
-    0,
-    (double a, double b) => a + b,
-  );
-  final List<double> prefix = <double>[0];
-  for (final String char in chars) {
-    prefix.add(prefix.last + _expectedWidth(char));
-  }
-  final double totalExpected = prefix.last;
-  final List<List<double>> best = <List<double>>[
-    for (int m = 0; m <= markCount; m++)
-      List<double>.filled(charCount + 1, double.infinity),
-  ];
-  final List<List<int>> from = <List<int>>[
-    for (int m = 0; m <= markCount; m++) List<int>.filled(charCount + 1, -1),
-  ];
-  best[0][0] = 0;
-  for (int m = 1; m <= markCount; m++) {
-    for (int c = m; c <= charCount - (markCount - m); c++) {
-      for (int a = m - 1; a < c; a++) {
-        if (best[m - 1][a] == double.infinity) continue;
-        final double share = widths[m - 1] / totalWidth;
-        final double expected = (prefix[c] - prefix[a]) / totalExpected;
-        final double cost =
-            best[m - 1][a] + (share - expected) * (share - expected);
-        if (cost < best[m][c]) {
-          best[m][c] = cost;
-          from[m][c] = a;
-        }
-      }
-    }
-  }
-  if (best[markCount][charCount] == double.infinity) return null;
-  final List<int> runs = List<int>.filled(markCount, 0);
-  int c = charCount;
-  for (int m = markCount; m > 0; m--) {
-    final int a = from[m][c];
-    runs[m - 1] = c - a;
-    c = a;
-  }
-  return runs;
-}
-
-/// A candidate place to cut joined writing.
-typedef _Cut = ({int index, double x, bool lift});
-
-/// One joined mark cut into [chars].length letters, or null when no
-/// plausible set of cuts exists.
-///
-/// Small strokes (dots and cross-bars) are set aside. The rest are read as
-/// one pen path; candidate cuts are pen lifts and the points where the path
-/// bottoms out in the lower part of the mark, which is where connecting
-/// strokes leave one letter for the next. The cuts chosen are those closest
-/// to where the letters' expected widths put the boundaries, in pen order
-/// and moving rightwards; each must land within half a letter of its
-/// expected place. Small strokes then join the letter beneath them.
-List<List<List<InkVector>>>? _splitJoined(
-  List<List<InkVector>> strokes,
-  List<String> chars,
-) {
-  final _Bounds bounds = _Bounds.of(strokes);
-  final double accentSize = bounds.height * 0.35;
-  final List<List<InkVector>> spine = <List<InkVector>>[];
-  final List<List<InkVector>> accents = <List<InkVector>>[];
-  for (final List<InkVector> stroke in strokes) {
-    final _Bounds own = _Bounds.of(<List<InkVector>>[stroke]);
-    (math.max(own.width, own.height) < accentSize ? accents : spine).add(
-      stroke,
-    );
-  }
-  if (spine.isEmpty) return null;
-
-  final List<InkVector> path = <InkVector>[];
-  final Set<int> strokeStarts = <int>{};
-  for (final List<InkVector> stroke in spine) {
-    if (path.isNotEmpty) strokeStarts.add(path.length);
-    path.addAll(stroke);
-  }
-  int strokeOf(int index) =>
-      strokeStarts.where((int start) => start <= index).length;
-
-  final List<_Cut> candidates = <_Cut>[];
-  final double lowerPart = bounds.top + bounds.height * 0.4;
-  for (int i = 1; i < path.length - 1; i++) {
-    if (strokeStarts.contains(i)) {
-      candidates.add((
-        index: i,
-        x: (path[i - 1].x + path[i].x) / 2,
-        lift: true,
-      ));
-      continue;
-    }
-    // The lowest point of a dip within its own stroke: y grows downwards.
-    final InkVector point = path[i];
-    if (point.y < lowerPart) continue;
-    final int stroke = strokeOf(i);
-    bool lowest = true;
-    for (
-      int j = math.max(0, i - 3);
-      j <= math.min(path.length - 1, i + 3);
-      j++
-    ) {
-      if (j == i || strokeOf(j) != stroke) continue;
-      if (path[j].y > point.y || (path[j].y == point.y && j < i)) {
-        lowest = false;
-        break;
-      }
-    }
-    // A dip at a stroke's own end is not between letters.
-    final bool atEnd = strokeStarts.contains(i + 1) || i == path.length - 1;
-    if (lowest && !atEnd) candidates.add((index: i, x: point.x, lift: false));
-  }
-  final int cuts = chars.length - 1;
-  if (candidates.length < cuts) return null;
-
-  final double width = math.max(bounds.width, 1);
-  final List<double> letterWidths = <double>[
-    for (final String char in chars) _expectedWidth(char),
-  ];
-  final double sum = letterWidths.fold<double>(
-    0,
-    (double a, double b) => a + b,
-  );
-  final List<double> expectedX = <double>[];
-  double running = 0;
-  for (int j = 0; j < cuts; j++) {
-    running += letterWidths[j];
-    expectedX.add(bounds.left + width * running / sum);
-  }
-
-  // best[j][c]: lowest cost with cut j at candidate c.
-  final int count = candidates.length;
-  final List<List<double>> best = <List<double>>[
-    for (int j = 0; j < cuts; j++) List<double>.filled(count, double.infinity),
-  ];
-  final List<List<int>> previous = <List<int>>[
-    for (int j = 0; j < cuts; j++) List<int>.filled(count, -1),
-  ];
-  double cost(int j, int c) {
-    final double d = (candidates[c].x - expectedX[j]) / width;
-    return d * d;
-  }
-
-  for (int c = 0; c < count; c++) {
-    best[0][c] = cost(0, c);
-  }
-  for (int j = 1; j < cuts; j++) {
-    for (int c = 0; c < count; c++) {
-      for (int p = 0; p < c; p++) {
-        if (best[j - 1][p] == double.infinity) continue;
-        if (candidates[c].x <= candidates[p].x) continue;
-        final double total = best[j - 1][p] + cost(j, c);
-        if (total < best[j][c]) {
-          best[j][c] = total;
-          previous[j][c] = p;
-        }
-      }
-    }
-  }
-  int chosen = -1;
-  for (int c = 0; c < count; c++) {
-    if (best[cuts - 1][c] == double.infinity) continue;
-    if (chosen < 0 || best[cuts - 1][c] < best[cuts - 1][chosen]) chosen = c;
-  }
-  if (chosen < 0) return null;
-  final List<_Cut> picked = List<_Cut>.filled(cuts, candidates[chosen]);
-  for (int j = cuts - 1; j >= 0; j--) {
-    picked[j] = candidates[chosen];
-    chosen = previous[j][chosen];
-  }
-  final double tolerance = width / chars.length * 0.5;
-  for (int j = 0; j < cuts; j++) {
-    if ((picked[j].x - expectedX[j]).abs() > tolerance) return null;
-  }
-
-  // Cut the path. A dip is shared by the letters either side of it; a pen
-  // lift needs no shared point.
-  final List<List<List<InkVector>>> pieces = <List<List<InkVector>>>[];
-  final List<(double, double)> spans = <(double, double)>[];
-  int start = 0;
-  double left = bounds.left;
-  for (int j = 0; j <= cuts; j++) {
-    final _Cut? cut = j < cuts ? picked[j] : null;
-    final int end = cut == null
-        ? path.length
-        : (cut.lift ? cut.index : cut.index + 1);
-    final List<List<InkVector>> piece = <List<InkVector>>[<InkVector>[]];
-    for (int i = start; i < end; i++) {
-      if (strokeStarts.contains(i) && i != start) piece.add(<InkVector>[]);
-      piece.last.add(path[i]);
-    }
-    pieces.add(<List<InkVector>>[
-      for (final List<InkVector> stroke in piece)
-        if (stroke.isNotEmpty) stroke,
-    ]);
-    final double right = cut?.x ?? bounds.right;
-    spans.add((left, right));
-    left = right;
-    if (cut != null) start = cut.index;
-  }
-  if (pieces.any((List<List<InkVector>> piece) => piece.isEmpty)) return null;
-  for (final List<InkVector> accent in accents) {
-    final double x = _Bounds.of(<List<InkVector>>[accent]).centerX;
-    int nearest = 0;
-    double distance = double.infinity;
-    for (int j = 0; j < spans.length; j++) {
-      final (double from, double to) = spans[j];
-      final double d = x < from ? from - x : (x > to ? x - to : 0);
-      if (d < distance) {
-        distance = d;
-        nearest = j;
-      }
-    }
-    pieces[nearest].add(accent);
-  }
-  return pieces;
-}
-
-/// Groups strokes whose horizontal extents overlap, left to right. A small
-/// stroke over another (a dot or a cross-bar) joins it.
-List<List<List<InkVector>>> _marksOf(List<List<InkVector>> ink) {
-  final List<(List<InkVector>, _Bounds)> ordered =
-      <(List<InkVector>, _Bounds)>[
-        for (final List<InkVector> stroke in ink)
-          (stroke, _Bounds.of(<List<InkVector>>[stroke])),
-      ]..sort(
-        ((List<InkVector>, _Bounds) a, (List<InkVector>, _Bounds) b) =>
-            a.$2.left.compareTo(b.$2.left),
-      );
-  final List<List<List<InkVector>>> marks = <List<List<InkVector>>>[];
-  final List<_Bounds> extents = <_Bounds>[];
-  for (final (List<InkVector> stroke, _Bounds bounds) in ordered) {
-    if (marks.isNotEmpty) {
-      final _Bounds last = extents.last;
-      final double overlap =
-          math.min(last.right, bounds.right) - math.max(last.left, bounds.left);
-      final double narrower = math.max(math.min(last.width, bounds.width), 1);
-      final bool insideLast =
-          bounds.centerX >= last.left && bounds.centerX <= last.right;
-      if (overlap / narrower >= 0.5 || (bounds.width < 4 && insideLast)) {
-        marks.last.add(stroke);
-        extents.last = _Bounds(
-          math.min(last.left, bounds.left),
-          math.min(last.top, bounds.top),
-          math.max(last.right, bounds.right),
-          math.max(last.bottom, bounds.bottom),
-        );
-        continue;
-      }
-    }
-    marks.add(<List<InkVector>>[stroke]);
-    extents.add(bounds);
-  }
-  // Keep each mark's strokes in the order they were written.
-  return <List<List<InkVector>>>[
-    for (final List<List<InkVector>> mark in marks)
-      <List<InkVector>>[
-        for (final List<InkVector> stroke in ink)
-          if (mark.contains(stroke)) stroke,
-      ],
-  ];
+  double get centerY => (top + bottom) / 2;
 }
 
 double _median(List<double> values) {
@@ -874,38 +460,130 @@ double _median(List<double> values) {
       : (sorted[middle - 1] + sorted[middle]) / 2;
 }
 
-/// Where the profile is kept, and whether the writer has been asked.
+/// Where the writer's hand is kept, and whether they have been asked.
 abstract class HandwritingProfileStore {
   /// The saved state, or null when calibration has never been offered.
   Future<HandwritingCalibrationState?> read();
 
   Future<void> write(HandwritingCalibrationState state);
+
+  /// The letters as far as they were written before calibration was left:
+  /// the ink on each page of [customFontPages], in the pad's ruled units
+  /// (see [CalibrationDraft]), or empty.
+  Future<List<List<List<InkVector>>>> readDraft();
+
+  /// Keeps [pages] until calibration is finished; empty forgets them.
+  Future<void> writeDraft(List<List<List<InkVector>>> pages);
 }
 
-/// A profile and whether calibration was finished or skipped.
+/// Ink on the calibration pad, measured so it survives the pad changing
+/// size: x in line heights from the first box's left edge, y in line
+/// heights below the first baseline.
+abstract final class CalibrationDraft {
+  static List<List<InkVector>> encode(
+    List<List<InkVector>> strokes, {
+    required CalibrationRuling ruling,
+  }) => <List<InkVector>>[
+    for (final List<InkVector> stroke in strokes)
+      <InkVector>[
+        for (final InkVector p in stroke)
+          InkVector(
+            (p.x - ruling.left) / ruling.lineHeight,
+            (p.y - ruling.baselines.first) / ruling.lineHeight,
+          ),
+      ],
+  ];
+
+  static List<List<InkVector>> decode(
+    List<List<InkVector>> strokes, {
+    required CalibrationRuling ruling,
+  }) => <List<InkVector>>[
+    for (final List<InkVector> stroke in strokes)
+      <InkVector>[
+        for (final InkVector p in stroke)
+          InkVector(
+            ruling.left + p.x * ruling.lineHeight,
+            ruling.baselines.first + p.y * ruling.lineHeight,
+          ),
+      ],
+  ];
+
+  static Object toJson(List<List<InkVector>> strokes) => <List<double>>[
+    for (final List<InkVector> stroke in strokes)
+      <double>[
+        for (final InkVector p in stroke) ...<double>[p.x, p.y],
+      ],
+  ];
+
+  static Object pagesToJson(List<List<List<InkVector>>> pages) => <Object>[
+    for (final List<List<InkVector>> page in pages) toJson(page),
+  ];
+
+  static List<List<List<InkVector>>> pagesFromJson(Object? json) {
+    if (json is! List) return const <List<List<InkVector>>>[];
+    return <List<List<InkVector>>>[
+      for (final Object? page in json) fromJson(page),
+    ];
+  }
+
+  static List<List<InkVector>> fromJson(Object? json) {
+    if (json is! List) return const <List<InkVector>>[];
+    return <List<InkVector>>[
+      for (final Object? stroke in json)
+        if (stroke is List && stroke.length >= 2)
+          <InkVector>[
+            for (int i = 0; i + 1 < stroke.length; i += 2)
+              InkVector(
+                (stroke[i] as num).toDouble(),
+                (stroke[i + 1] as num).toDouble(),
+              ),
+          ],
+    ];
+  }
+}
+
+/// The writer's hand and their choices around calibration prompts.
 @immutable
 class HandwritingCalibrationState {
-  const HandwritingCalibrationState({this.profile, this.skipped = false});
+  const HandwritingCalibrationState({
+    this.style,
+    this.font,
+    this.skipped = false,
+    this.chatReminderDismissed = false,
+  });
 
-  final HandwritingProfile? profile;
+  final HandwritingStyle? style;
+
+  /// Which of the fonts [style] is; null when nothing was chosen.
+  final HandwritingFont? font;
 
   /// The writer chose not to calibrate; they are not asked again at
   /// startup.
   final bool skipped;
 
+  /// The writer permanently dismissed the small reminder in the chat.
+  final bool chatReminderDismissed;
+
   Map<String, Object?> toJson() => <String, Object?>{
     'skipped': skipped,
-    if (profile != null) 'profile': profile!.toJson(),
+    if (font != null) 'font': font!.name,
+    if (chatReminderDismissed) 'chatReminderDismissed': true,
+    if (style != null) 'style': style!.toJson(),
   };
 
-  static HandwritingCalibrationState fromJson(Map<String, Object?> json) =>
-      HandwritingCalibrationState(
-        profile: HandwritingProfile.fromJson(json['profile']),
-        skipped: json['skipped'] == true,
-      );
+  /// A preset font is written as it is now, not as it was when chosen.
+  static HandwritingCalibrationState fromJson(Map<String, Object?> json) {
+    final HandwritingFont? font = HandwritingFont.byName(json['font']);
+    return HandwritingCalibrationState(
+      style: font?.style ?? HandwritingStyle.fromJson(json['style']),
+      font: font,
+      skipped: json['skipped'] == true,
+      chatReminderDismissed: json['chatReminderDismissed'] == true,
+    );
+  }
 }
 
-/// Keeps the profile in one JSON file, written atomically.
+/// Keeps the writer's hand in one JSON file, written atomically.
 class FileHandwritingProfileStore implements HandwritingProfileStore {
   FileHandwritingProfileStore(this.file);
 
@@ -916,9 +594,24 @@ class FileHandwritingProfileStore implements HandwritingProfileStore {
     try {
       if (!await file.exists()) return null;
       final Object? json = jsonDecode(await file.readAsString());
-      return json is Map<String, Object?>
-          ? HandwritingCalibrationState.fromJson(json)
-          : const HandwritingCalibrationState();
+      if (json is! Map<String, Object?>) {
+        return const HandwritingCalibrationState();
+      }
+      // Calibrated glyph by glyph, as long ago: offered again, once, since
+      // those glyphs are no longer used.
+      if (json.containsKey('profile')) return null;
+      // A hand measured from a few letters, before there were fonts to
+      // choose from: offered again, once, to choose one.
+      if (json['style'] != null &&
+          HandwritingFont.byName(json['font']) == null) {
+        return null;
+      }
+      // A font of the writer's own that can no longer be read.
+      if (json['font'] == HandwritingFont.custom.name &&
+          HandwritingStyle.fromJson(json['style'])?.glyphs == null) {
+        return null;
+      }
+      return HandwritingCalibrationState.fromJson(json);
     } on Object {
       // A damaged file counts as asked, so startup is not interrupted again;
       // calibration stays available from the library menu.
@@ -927,15 +620,59 @@ class FileHandwritingProfileStore implements HandwritingProfileStore {
   }
 
   @override
-  Future<void> write(HandwritingCalibrationState state) async {
-    await file.parent.create(recursive: true);
-    final File temporary = File('${file.path}.tmp');
-    await temporary.writeAsString(jsonEncode(state.toJson()), flush: true);
-    await temporary.rename(file.path);
+  Future<void> write(HandwritingCalibrationState state) =>
+      _queued(() => _writeAtomically(file, jsonEncode(state.toJson())));
+
+  /// Beside the hand, so half-written letters outlive the app. Named for
+  /// the key letters, so letters left half-written in the boxes of an
+  /// older calibration are not put in its boxes.
+  File get _draftFile => File('${file.path}.key.draft');
+
+  @override
+  Future<List<List<List<InkVector>>>> readDraft() async {
+    try {
+      if (!await _draftFile.exists()) {
+        return const <List<List<InkVector>>>[];
+      }
+      return CalibrationDraft.pagesFromJson(
+        jsonDecode(await _draftFile.readAsString()),
+      );
+    } on Object {
+      return const <List<List<InkVector>>>[];
+    }
+  }
+
+  @override
+  Future<void> writeDraft(List<List<List<InkVector>>> pages) =>
+      _queued(() async {
+        if (pages.every((List<List<InkVector>> page) => page.isEmpty)) {
+          if (await _draftFile.exists()) await _draftFile.delete();
+          return;
+        }
+        await _writeAtomically(
+          _draftFile,
+          jsonEncode(CalibrationDraft.pagesToJson(pages)),
+        );
+      });
+
+  /// Writes run one at a time, so two never share a temporary file.
+  Future<void> _last = Future<void>.value();
+
+  Future<void> _queued(Future<void> Function() write) {
+    final Future<void> next = _last.then((void _) => write());
+    _last = next.catchError((Object _) {});
+    return next;
+  }
+
+  static Future<void> _writeAtomically(File target, String contents) async {
+    await target.parent.create(recursive: true);
+    final File temporary = File('${target.path}.tmp');
+    await temporary.writeAsString(contents, flush: true);
+    await temporary.rename(target.path);
   }
 }
 
-/// Keeps the profile in memory, for tests and harnesses.
+/// Keeps the writer's hand in memory, for tests and harnesses.
 class InMemoryHandwritingProfileStore implements HandwritingProfileStore {
   InMemoryHandwritingProfileStore([this.state]);
 
@@ -948,11 +685,26 @@ class InMemoryHandwritingProfileStore implements HandwritingProfileStore {
   Future<void> write(HandwritingCalibrationState state) async {
     this.state = state;
   }
+
+  List<List<List<InkVector>>> draft = const <List<List<InkVector>>>[];
+
+  @override
+  Future<List<List<List<InkVector>>>> readDraft() async => draft;
+
+  @override
+  Future<void> writeDraft(List<List<List<InkVector>>> pages) async {
+    draft = pages.every((List<List<InkVector>> page) => page.isEmpty)
+        ? const <List<List<InkVector>>>[]
+        : <List<List<InkVector>>>[
+            for (final List<List<InkVector>> page in pages)
+              List<List<InkVector>>.of(page),
+          ];
+  }
 }
 
-/// The writer's profile for the running app. Every note's AI notation reads
+/// The writer's hand for the running app. Every note's AI notation reads
 /// it, so it lives outside any single note.
 abstract final class HandwritingCalibration {
-  static final ValueNotifier<HandwritingProfile?> current =
-      ValueNotifier<HandwritingProfile?>(null);
+  static final ValueNotifier<HandwritingStyle?> current =
+      ValueNotifier<HandwritingStyle?>(null);
 }

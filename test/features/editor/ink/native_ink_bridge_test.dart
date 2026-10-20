@@ -1,3 +1,4 @@
+import 'dart:ui';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:greatnote/features/editor/ink/native_ink_bridge.dart';
 
@@ -38,5 +39,30 @@ void main() {
 
     expect(packet.kind, NativeInkKind.invertedStylus);
     expect(packet.samples.single.pressure, isNull);
+  });
+
+  test('serializes exclusionRects in NativeInkSurface.toMap', () {
+    const NativeInkSurface surface = NativeInkSurface(
+      id: 3,
+      size: Size(100, 200),
+      origin: Offset(10, 20),
+      xBasis: Offset(1, 0),
+      yBasis: Offset(0, 1),
+      enabled: true,
+      previewEnabled: true,
+      color: Color(0xFF000000),
+      width: 2.0,
+      pressureSensitivity: 0.5,
+      exclusionRects: <Rect>[
+        Rect.fromLTWH(0, 0, 50, 40),
+        Rect.fromLTWH(10, 15, 30, 25),
+      ],
+    );
+
+    final Map<String, Object> map = surface.toMap();
+    expect(map['surfaceId'], 3);
+    expect(map['enabled'], true);
+    expect(map['previewEnabled'], true);
+    expect(map['exclusionRects'], <double>[0, 0, 50, 40, 10, 15, 40, 40]);
   });
 }

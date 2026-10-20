@@ -545,8 +545,10 @@ that point, and pressing Select again opens its options, which hold Paste
 too.
 
 A selection gets a frame with a handle at each corner and a rotation handle
-above its top edge, and a small bar with Copy, Cut, and AI, which ends level
-with the frame's top-right corner. A pointer going down
+above its top edge, and a small bar with Copy, Cut, Duplicate, and AI, which
+ends level with the frame's top-right corner. Duplicate places an independent
+copy one paste offset away and selects it without replacing the clipboard. A
+pointer going down
 does one thing, chosen in `SelectionFrame.hitTest`:
 
 1. on a handle, within `handleHitRadius`: the nearest one, with ties going
@@ -915,12 +917,12 @@ IDs, token rates, and output limits come from the server's `AI_MODEL_CONFIG`, wi
 an example in `supabase/model-config.example.json`. The selected alias is a local
 preference; the client cannot choose an arbitrary provider URL, price, or balance.
 
-Each AI request temporarily forwards only the current question and the selected
-PNG crop. Notation also sends numeric page dimensions and crop bounds, so returned
-marks can be placed on the page. Full note images, PDFs, and earlier chat messages
-are never sent to Supabase. No prompt, image, answer, or conversation is persisted
-or logged by the backend. Existing chat remains visible locally but is not sent
-as context. Responses currently arrive in full after server-side accounting.
+Each AI request temporarily forwards the current question, recent messages in that
+selection's AI conversation, and the selected PNG crop. Notation also sends numeric
+page dimensions and crop bounds, so returned marks can be placed on the page. Full
+note images and PDFs are never sent to Supabase. No prompt, image, answer, or
+conversation is persisted or logged by the backend. Responses currently arrive in
+full after server-side accounting.
 
 ### Plans and credits
 
@@ -960,8 +962,9 @@ The sizes and limits live in `AiLayoutConfig`, `AiImageConfig`, and
 | `previewMaxHeight` | 160 px | tallest the selection preview gets |
 | `composerMaxLines` | 4 | lines the message field grows to before it scrolls |
 | `padding` | 12 px | background kept around the ink in the image |
-| `pixelRatio` | 2 | physical pixels per logical pixel, at most |
-| `maxDimension` | 2048 px | longest side of the image |
+| `pixelRatio` | 3 | physical pixels per logical pixel, at most |
+| `maxDimension` | 2048 px | longest side of the image (lossless PNG) |
+| `maxPngBytes` | 3.5 MB | larger PNGs are redrawn smaller, within the backend's limit |
 | `minPixelRatio` | 0.05 | a selection needing a smaller ratio is refused |
 | `maxLabelRunes` | 80 | longest notation description |
 | `maxItems` | 48 | most texts, plots, graphs, paths, and strokes in one response |

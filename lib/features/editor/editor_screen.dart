@@ -4,6 +4,7 @@ import 'dart:isolate';
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/scheduler.dart';
 
 import '../../app/theme/app_tokens.dart';
 import '../../app/theme/app_icons.dart';
@@ -26,6 +27,7 @@ import 'ai/notation_layout.dart';
 import 'ai/notation_space.dart';
 import 'ai/selection_image_renderer.dart';
 import 'handwriting/handwriting_calibration.dart';
+import 'handwriting/handwriting_calibration_screen.dart';
 import 'handwriting/handwriting_indexer.dart';
 import 'handwriting/recognized_handwriting.dart';
 import 'ink/eraser_settings.dart';
@@ -105,6 +107,7 @@ class EditorScreen extends StatefulWidget {
     this.exportSink = const SystemExportSink(),
     this.onClipboardChanged,
     this.stylusOnly,
+    this.enableNativeInk = true,
     this.penSettings,
     this.palettePlacement,
     this.initialNotationEnabled = true,
@@ -114,6 +117,7 @@ class EditorScreen extends StatefulWidget {
     this.handwritingRenderer = const HandwritingImageRenderer(),
     this.initialAiActive = false,
     this.subscription,
+    this.handwritingProfileStore,
   });
 
   /// The user's plan and AI credits: which models the assistant may use,
@@ -121,11 +125,16 @@ class EditorScreen extends StatefulWidget {
   /// panel offers no plans.
   final SubscriptionController? subscription;
 
+  /// Persists handwriting calibration and whether its chat reminder was
+  /// dismissed. Without a store (as in lightweight editor embeds), the
+  /// reminder is not shown.
+  final HandwritingProfileStore? handwritingProfileStore;
+
   /// How writing on the page in AI mode is told apart and read.
   final AiCanvasConfig aiCanvasConfig;
 
-  /// Reads handwriting written on the page in AI mode into the chat, on the
-  /// device. Tests supply a fake.
+  /// Reads handwriting, on the device: the page's pen ink for search, and
+  /// writing in AI mode into the chat as plain text. Tests supply a fake.
   final CanvasTextRecognizer textRecognizer;
 
   /// Draws that handwriting for [textRecognizer].
@@ -201,6 +210,11 @@ class EditorScreen extends StatefulWidget {
   /// starting at [InputDefaults.stylusOnly] (on).
   final ValueNotifier<bool>? stylusOnly;
 
+  /// Whether the platform stylus bridge owns real stylus events. Performance
+  /// tests disable it because their framework-injected stylus events never
+  /// pass through the host platform's motion-event observer.
+  final bool enableNativeInk;
+
   /// The pen, shared from outside so its settings follow the user from
   /// note to note; otherwise the screen owns one with the defaults.
   final ValueNotifier<PenSettings>? penSettings;
@@ -267,6 +281,15 @@ class EditorScreenState extends State<EditorScreen> {
   /// Each batch sees the preceding words after they land in the draft.
   Future<void> _handwritingQueue = Future<void>.value();
 
+  /// Handwriting batches written for the assistant and not yet read.
+  int _handwritingReads = 0;
+
+  /// Whether input for the assistant is under way: handwriting waiting or
+  /// being read, or the open chat's composer holding unsent text.
+  /// While it is, the AI tool is the only one on; once it is sent or
+  /// cleared, another tool can be chosen with AI mode still on.
+  final ValueNotifier<bool> _aiInputPending = ValueNotifier<bool>(false);
+
   /// Ordinary pen ink waiting for on-device recognition. This is separate
   /// from AI-mode handwriting, which remains transient chat input.
   final List<(Stroke, String?)> _indexingPending = <(Stroke, String?)>[];
@@ -301,6 +324,22 @@ class EditorScreenState extends State<EditorScreen> {
 
   /// The region the palette was last laid out in, which a drag snaps to.
   Rect _paletteRegion = Rect.zero;
+  _EditorLayout? _lastLayout;
+
+  List<Rect> _nativeExclusionRects() {
+    final _EditorLayout? layout = _lastLayout;
+    if (layout == null) return const <Rect>[];
+    final Size paletteSize = ToolPalette.sizeFor(layout.paletteAxis);
+    final Rect paletteRect = layout.paletteOrigin & paletteSize;
+    final Rect historyRect = layout.history;
+    final double topMargin = layout.surface.top;
+    return <Rect>[
+      paletteRect,
+      historyRect,
+      if (topMargin > 0) Rect.fromLTWH(0, 0, layout.surface.right, topMargin),
+    ];
+  }
+
   late final ValueNotifier<EraserSettings> _eraserSettings =
       ValueNotifier<EraserSettings>(
         EraserSettings.defaults(widget.eraserConfig),
@@ -400,6 +439,18 @@ class EditorScreenState extends State<EditorScreen> {
   /// when it moves between sides and between the two layouts.
   final GlobalKey _aiPanelKey = GlobalKey(debugLabel: 'AI assistant panel');
   final GlobalKey _aiComposerKey = GlobalKey(debugLabel: 'AI composer');
+
+  /// Width the user dragged the panel beside the editor to, or null for
+  /// the configured default.
+  double? _aiPanelWidth;
+
+  /// Whether the panel's edge is being dragged, so it follows the finger
+  /// instead of animating to each new width.
+  bool _resizingAiPanel = false;
+
+  bool _showHandwritingCalibrationNotice = false;
+  HandwritingCalibrationState? _handwritingCalibrationState;
+  int _handwritingCalibrationLoad = 0;
 
   /// Handwritten words still flying into the composer.
   final Map<OverlayEntry, Completer<void>> _flights =
@@ -1351,19 +1402,51 @@ class EditorScreenState extends State<EditorScreen> {
   }) {
     final int generation = _aiGeneration;
     final AiSelectionContext? selectionContext = _ai.context;
+    _handwritingReads++;
+    _updateAiInputPending();
     _handwritingQueue = _handwritingQueue.then((_) async {
-      if (!mounted ||
-          generation != _aiGeneration ||
-          !identical(selectionContext, _ai.context)) {
-        return;
+      try {
+        if (!mounted ||
+            generation != _aiGeneration ||
+            !identical(selectionContext, _ai.context)) {
+          return;
+        }
+        await _readHandwriting(
+          strokes,
+          openPanel: openPanel,
+          generation: generation,
+          selectionContext: selectionContext,
+        );
+      } finally {
+        _handwritingReads--;
+        if (mounted) _updateAiInputPending();
       }
-      await _readHandwriting(
-        strokes,
-        openPanel: openPanel,
-        generation: generation,
-        selectionContext: selectionContext,
-      );
     });
+  }
+
+  /// Works out [_aiInputPending]. As input begins, the AI tool is taken up
+  /// again if another tool was on beside AI mode.
+  void _updateAiInputPending() {
+    if (SchedulerBinding.instance.schedulerPhase ==
+        SchedulerPhase.persistentCallbacks) {
+      // Never change the palette while the tree is being built.
+      SchedulerBinding.instance.addPostFrameCallback((Duration _) {
+        if (mounted) _updateAiInputPending();
+      });
+      return;
+    }
+    final bool pending =
+        _aiActive.value &&
+        (!_aiInput.isEmpty ||
+            _handwritingReads > 0 ||
+            (_ai.isOpen && _ai.hasDraft.value));
+    if (pending == _aiInputPending.value) {
+      return;
+    }
+    _aiInputPending.value = pending;
+    if (pending && _tool.value != EditorTool.ai) {
+      _tool.value = EditorTool.ai;
+    }
   }
 
   Future<void> _readHandwriting(
@@ -1374,12 +1457,13 @@ class EditorScreenState extends State<EditorScreen> {
   }) async {
     final String words;
     try {
-      final HandwritingBatch batch = await widget.handwritingRenderer.render(
-        strokes,
-      );
+      final HandwritingBatch batch =
+          widget.textRecognizer is PlatformCanvasTextRecognizer
+          ? widget.handwritingRenderer.vectors(strokes)
+          : await widget.handwritingRenderer.render(strokes);
       if (!mounted || generation != _aiGeneration) return;
       if (!identical(selectionContext, _ai.context)) return;
-      words = await widget.textRecognizer
+      final String recognized = await widget.textRecognizer
           .recognize(
             batch.withContext(
               HandwritingContext(
@@ -1389,6 +1473,7 @@ class EditorScreenState extends State<EditorScreen> {
             ),
           )
           .timeout(const Duration(seconds: 8), onTimeout: () => '');
+      words = recognized;
     } on Object {
       // Nothing read is nothing added.
       return;
@@ -1668,24 +1753,24 @@ class EditorScreenState extends State<EditorScreen> {
     }
   }
 
-  Future<void> _insertImage() async {
+  Future<void> _insertImage(DocumentImageSource source) async {
     _documentIoPending++;
     try {
-      final PickedDocument? picked = await widget.documentPicker.pickImage();
+      final PickedDocument? picked = await widget.documentPicker.pickImage(
+        source,
+      );
       if (picked == null || !mounted) return;
-      try {
-        await _importer.insertImage(
-          repository: widget.repository!,
-          noteId: widget.noteId!,
-          controller: _inkController,
-          picked: picked,
-          visiblePage: Offset.zero & _surfaceSize,
-        );
-        _tool.value = EditorTool.select;
-        AppHaptics.success();
-      } on Object catch (error) {
-        _showIoError(error);
-      }
+      await _importer.insertImage(
+        repository: widget.repository!,
+        noteId: widget.noteId!,
+        controller: _inkController,
+        picked: picked,
+        visiblePage: Offset.zero & _surfaceSize,
+      );
+      _tool.value = EditorTool.select;
+      AppHaptics.success();
+    } on Object catch (error) {
+      if (mounted) _showIoError(error);
     } finally {
       _documentIoPending--;
     }
@@ -1839,7 +1924,12 @@ class EditorScreenState extends State<EditorScreen> {
     _palettePlacement.addListener(_onPalettePlacementChanged);
     _tool.addListener(AppHaptics.toolSwitch);
     _tool.addListener(_onToolChanged);
+    _aiInput.addListener(_updateAiInputPending);
+    _aiActive.addListener(_updateAiInputPending);
+    _ai.hasDraft.addListener(_updateAiInputPending);
+    _ai.placement.addListener(_updateAiInputPending);
     _adoptAiSession();
+    _loadHandwritingCalibrationNotice();
     if (_aiActive.value) {
       _tool.value = EditorTool.ai;
     } else {
@@ -1890,6 +1980,9 @@ class EditorScreenState extends State<EditorScreen> {
   void didUpdateWidget(EditorScreen oldWidget) {
     super.didUpdateWidget(oldWidget);
     _ai.usageGate = widget.subscription;
+    if (oldWidget.handwritingProfileStore != widget.handwritingProfileStore) {
+      _loadHandwritingCalibrationNotice();
+    }
     if (oldWidget.palettePlacement != widget.palettePlacement) {
       (oldWidget.palettePlacement ?? _ownedPalettePlacement)?.removeListener(
         _onPalettePlacementChanged,
@@ -1943,6 +2036,10 @@ class EditorScreenState extends State<EditorScreen> {
     }
     _document.removeListener(_onDocumentChanged);
     _ai.removeListener(_onAiChanged);
+    _ai.hasDraft.removeListener(_updateAiInputPending);
+    _ai.placement.removeListener(_updateAiInputPending);
+    _aiInput.removeListener(_updateAiInputPending);
+    _aiActive.removeListener(_updateAiInputPending);
     _palettePlacement.removeListener(_onPalettePlacementChanged);
     _ai.dispose();
     _ownedAiClient?.close();
@@ -1954,6 +2051,7 @@ class EditorScreenState extends State<EditorScreen> {
       ..dispose();
     _aiInput.dispose();
     _aiActive.dispose();
+    _aiInputPending.dispose();
     _ownedPenSettings?.dispose();
     _ownedPalettePlacement?.dispose();
     _paletteDragCenter.dispose();
@@ -2026,13 +2124,80 @@ class EditorScreenState extends State<EditorScreen> {
       onAddToContext: _addSelectionToAi,
       composerKey: _aiComposerKey,
       onOpenPlans: widget.subscription == null ? null : _openPlans,
+      showHandwritingCalibrationNotice: _showHandwritingCalibrationNotice,
+      onCalibrateHandwriting: _calibrateHandwritingFromChat,
+      onDismissHandwritingCalibrationNotice:
+          _dismissHandwritingCalibrationNotice,
     );
+  }
+
+  Future<void> _loadHandwritingCalibrationNotice() async {
+    final int load = ++_handwritingCalibrationLoad;
+    final HandwritingProfileStore? store = widget.handwritingProfileStore;
+    final HandwritingCalibrationState? state = await store?.read();
+    if (!mounted || load != _handwritingCalibrationLoad) return;
+    _handwritingCalibrationState = state;
+    final bool show =
+        store != null &&
+        state?.style == null &&
+        !(state?.chatReminderDismissed ?? false);
+    if (_showHandwritingCalibrationNotice != show) {
+      setState(() => _showHandwritingCalibrationNotice = show);
+    }
+  }
+
+  Future<void> _calibrateHandwritingFromChat() async {
+    final HandwritingProfileStore? store = widget.handwritingProfileStore;
+    if (store == null) return;
+    await showHandwritingCalibration(context, store: store);
+    if (mounted) await _loadHandwritingCalibrationNotice();
+  }
+
+  Future<void> _dismissHandwritingCalibrationNotice() async {
+    final HandwritingProfileStore? store = widget.handwritingProfileStore;
+    if (store == null) return;
+    ++_handwritingCalibrationLoad;
+    final HandwritingCalibrationState? previous = _handwritingCalibrationState;
+    final HandwritingCalibrationState dismissed = HandwritingCalibrationState(
+      style: previous?.style,
+      font: previous?.font,
+      skipped: previous?.skipped ?? false,
+      chatReminderDismissed: true,
+    );
+    _handwritingCalibrationState = dismissed;
+    setState(() => _showHandwritingCalibrationNotice = false);
+    try {
+      await store.write(dismissed);
+    } on Object {
+      if (!mounted) return;
+      _handwritingCalibrationState = previous;
+      setState(() => _showHandwritingCalibrationNotice = true);
+      ScaffoldMessenger.maybeOf(context)?.showSnackBar(
+        const SnackBar(content: Text("Couldn't save that preference.")),
+      );
+    }
   }
 
   void _openPlans() {
     final SubscriptionController? subscription = widget.subscription;
     if (subscription != null) {
       showPaymentPage(context, subscription);
+    }
+  }
+
+  /// Widens the panel beside the editor by [delta], within what the config
+  /// allows and what an editor [available] pixels wide can spare.
+  void _resizeAiPanel(double delta, double available) {
+    final AiLayoutConfig config = widget.aiLayoutConfig;
+    final double widest = math.max(
+      config.minPanelWidth,
+      math.min(config.maxPanelWidth, available - config.minEditorWidth),
+    );
+    final double width = ((_aiPanelWidth ?? config.panelWidth) + delta)
+        .clamp(config.minPanelWidth, widest)
+        .toDouble();
+    if (width != _aiPanelWidth) {
+      setState(() => _aiPanelWidth = width);
     }
   }
 
@@ -2139,7 +2304,6 @@ class EditorScreenState extends State<EditorScreen> {
           document: _document,
           showNavigation: sizeClass != WindowSizeClass.compact,
           onOpenPanel: _openPagePanel,
-          onInsertImage: _canUseDocumentIo ? _insertImage : null,
           onInsertPdf: _canUseDocumentIo ? _insertPdf : null,
         ),
       ),
@@ -2153,7 +2317,10 @@ class EditorScreenState extends State<EditorScreen> {
             final Size size = constraints.biggest;
             final double panelWidth = panelSide == null
                 ? 0
-                : widget.aiLayoutConfig.inlineWidth(size.width);
+                : widget.aiLayoutConfig.inlineWidth(
+                    size.width,
+                    preferred: _aiPanelWidth,
+                  );
             // What the panel leaves for the page and the palette.
             final Rect region = Rect.fromLTWH(
               panelSide == AiPanelSide.left ? panelWidth : 0,
@@ -2167,6 +2334,7 @@ class EditorScreenState extends State<EditorScreen> {
               region,
               _palettePlacement.value,
             );
+            _lastLayout = layout;
             final List<NotePage> pages = _document.pages;
             final List<PageGeometry> geometries = <PageGeometry>[
               for (final NotePage page in pages)
@@ -2208,6 +2376,7 @@ class EditorScreenState extends State<EditorScreen> {
                         currentPage: _document.currentIndex,
                         initialZoom: EditorScreen.openingZoom,
                         onPageTouched: _showPage,
+                        onDeskTap: _selectionCarry.clearSelection,
                         onVisiblePageChanged: _showPage,
                         onScrollStart: _onScrollStart,
                         onScrollEnd: _onScrollEnd,
@@ -2253,6 +2422,8 @@ class EditorScreenState extends State<EditorScreen> {
                                     ),
                                   InkCanvas(
                                     controller: page.ink,
+                                    visible: visible,
+                                    enableNativeInk: widget.enableNativeInk,
                                     tool: _tool,
                                     penSettings: _penSettings,
                                     eraserSettings: _eraserSettings,
@@ -2272,6 +2443,7 @@ class EditorScreenState extends State<EditorScreen> {
                                         page.setup.size == PageSize.infinite,
                                     aiInput: _aiInput,
                                     carry: _selectionCarry,
+                                    exclusionRects: _nativeExclusionRects,
                                     // The page the selection is on is the
                                     // current one; the view stays put.
                                     onSelectionCarried: () => context
@@ -2388,6 +2560,7 @@ class EditorScreenState extends State<EditorScreen> {
                     onPaste: _paste,
                     aiActive: _aiActive,
                     onToggleAi: _toggleAiMode,
+                    toolsLocked: _aiInputPending,
                     penConfig: widget.penConfig,
                     eraserConfig: widget.eraserConfig,
                     controller: _paletteController,
@@ -2395,12 +2568,20 @@ class EditorScreenState extends State<EditorScreen> {
                     onStickySettingsChanged: _onStickySettingsChanged,
                     stickyTargetLabel: () =>
                         _inkController.editingSticky?.label,
+                    onChooseImageFromGallery: _canUseDocumentIo
+                        ? () => _insertImage(DocumentImageSource.gallery)
+                        : null,
+                    onTakePhoto: _canUseDocumentIo
+                        ? () => _insertImage(DocumentImageSource.camera)
+                        : null,
                   ),
                 ),
                 if (panelSide != null)
                   AnimatedPositioned(
                     key: const ValueKey<String>('ai-panel-beside'),
-                    duration: AppMotion.resolve(context, AppMotion.medium),
+                    duration: _resizingAiPanel
+                        ? Duration.zero
+                        : AppMotion.resolve(context, AppMotion.medium),
                     curve: AppMotion.standard,
                     top: 0,
                     bottom: 0,
@@ -2446,9 +2627,34 @@ class EditorScreenState extends State<EditorScreen> {
                                 ),
                               );
                             },
-                        child: _KeyboardInset(
-                          consumed: bottomSafeArea,
-                          child: _buildPanel(),
+                        child: Stack(
+                          children: <Widget>[
+                            Positioned.fill(
+                              child: _KeyboardInset(
+                                consumed: bottomSafeArea,
+                                child: _buildPanel(),
+                              ),
+                            ),
+                            Positioned(
+                              top: 0,
+                              bottom: 0,
+                              left: panelSide == AiPanelSide.right ? 0 : null,
+                              right: panelSide == AiPanelSide.left ? 0 : null,
+                              child: _PanelResizeHandle(
+                                active: _resizingAiPanel,
+                                onDragStart: () => setState(() {
+                                  _resizingAiPanel = true;
+                                  _aiPanelWidth = panelWidth;
+                                }),
+                                onDragUpdate: (double dx) => _resizeAiPanel(
+                                  panelSide == AiPanelSide.right ? -dx : dx,
+                                  size.width,
+                                ),
+                                onDragEnd: () =>
+                                    setState(() => _resizingAiPanel = false),
+                              ),
+                            ),
+                          ],
                         ),
                       ),
                     ),
@@ -2456,6 +2662,68 @@ class EditorScreenState extends State<EditorScreen> {
               ],
             );
           },
+        ),
+      ),
+    );
+  }
+}
+
+/// The strip along the AI panel's inner edge that resizes it when dragged.
+class _PanelResizeHandle extends StatefulWidget {
+  const _PanelResizeHandle({
+    required this.active,
+    required this.onDragStart,
+    required this.onDragUpdate,
+    required this.onDragEnd,
+  });
+
+  /// Whether it is being dragged.
+  final bool active;
+  final VoidCallback onDragStart;
+
+  /// Called with how far the pointer moved to the right.
+  final ValueChanged<double> onDragUpdate;
+  final VoidCallback onDragEnd;
+
+  static const double width = 12;
+
+  @override
+  State<_PanelResizeHandle> createState() => _PanelResizeHandleState();
+}
+
+class _PanelResizeHandleState extends State<_PanelResizeHandle> {
+  bool _hovered = false;
+
+  @override
+  Widget build(BuildContext context) {
+    final AppColors colors = AppColors.of(context);
+    return MouseRegion(
+      cursor: SystemMouseCursors.resizeColumn,
+      onEnter: (_) => setState(() => _hovered = true),
+      onExit: (_) => setState(() => _hovered = false),
+      child: GestureDetector(
+        behavior: HitTestBehavior.opaque,
+        onHorizontalDragStart: (_) => widget.onDragStart(),
+        onHorizontalDragUpdate: (DragUpdateDetails details) =>
+            widget.onDragUpdate(details.delta.dx),
+        onHorizontalDragEnd: (_) => widget.onDragEnd(),
+        onHorizontalDragCancel: widget.onDragEnd,
+        child: SizedBox(
+          width: _PanelResizeHandle.width,
+          child: Center(
+            child: AnimatedContainer(
+              duration: AppMotion.resolve(context, AppMotion.fast),
+              // Always faintly there, since touch screens can't hover.
+              width: _hovered || widget.active ? 4 : 3,
+              height: 40,
+              decoration: BoxDecoration(
+                color: widget.active
+                    ? colors.accent
+                    : (_hovered ? colors.textSecondary : colors.divider),
+                borderRadius: BorderRadius.circular(2),
+              ),
+            ),
+          ),
         ),
       ),
     );
@@ -2610,7 +2878,7 @@ class _HandwritingFindDialogState extends State<_HandwritingFindDialog> {
               alignment: Alignment.centerLeft,
               child: Text(
                 _query.text.trim().isEmpty
-                    ? 'Search words recognized with at least 75% confidence.'
+                    ? 'Search words recognized with at least ${(searchableHandwritingConfidence * 100).round()}% confidence.'
                     : found.isEmpty
                     ? 'No high-confidence handwritten text found.'
                     : '${selected + 1} of ${found.length} — Page ${found[selected].$1 + 1}: ${found[selected].$2.text}',

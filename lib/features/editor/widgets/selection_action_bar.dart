@@ -14,7 +14,8 @@ import '../ink/selection_transform.dart';
 import '../page/page_viewport.dart';
 import 'palette_button.dart';
 
-/// Copy, Cut, and AI for the current selection, floating beside its frame.
+/// Copy, Cut, Duplicate, and AI for the current selection, floating beside
+/// its frame.
 ///
 /// Fills its parent, which must be the page, or the viewport showing it
 /// through [transform], and places the bar above the frame when there is
@@ -184,15 +185,16 @@ class _SelectionActionBarState extends State<SelectionActionBar> {
               onPressed: widget.onCut ?? widget.controller.cutSelection,
               child: const Icon(AppIcons.cut),
             ),
-            // A sticky note is removed as a whole only from here: the
-            // eraser never takes its paper.
-            if (selection.stickyCount > 0) ...<Widget>[
+            if (!selection.includesPdf)
               PaletteButton(
                 tooltip: 'Duplicate',
                 onPressed:
                     widget.onDuplicate ?? widget.controller.duplicateSelection,
                 child: const Icon(AppIcons.duplicate),
               ),
+            // A sticky note is removed as a whole only from here: the
+            // eraser never takes its paper.
+            if (selection.stickyCount > 0) ...<Widget>[
               PaletteButton(
                 tooltip: 'Delete',
                 onPressed: () {

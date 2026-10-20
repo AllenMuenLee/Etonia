@@ -74,7 +74,19 @@ class HandwritingImageRenderer {
 
   final AiCanvasConfig config;
 
-  Future<HandwritingBatch> render(List<AiCanvasStroke> strokes) async {
+  /// Prepares only vector geometry for native recognizers. No picture,
+  /// GPU image, readback, or PNG encoder is touched on the Dart UI isolate.
+  HandwritingBatch vectors(List<AiCanvasStroke> strokes) {
+    final (ui.Rect bounds, ui.Size pixels) = _layout(strokes);
+    return HandwritingBatch(
+      strokes: strokes,
+      png: Uint8List(0),
+      pixelSize: pixels,
+      logicalBounds: bounds,
+    );
+  }
+
+  (ui.Rect, ui.Size) _layout(List<AiCanvasStroke> strokes) {
     ui.Rect? union;
     for (final AiCanvasStroke stroke in strokes) {
       if (stroke.points.isEmpty) continue;
@@ -90,8 +102,20 @@ class HandwritingImageRenderer {
             config.minRecognitionScale,
             config.maxRecognitionScale,
           );
-    final int width = math.max(1, (bounds.width * scale).ceil());
-    final int height = math.max(1, (bounds.height * scale).ceil());
+    return (
+      bounds,
+      ui.Size(
+        math.max(1, (bounds.width * scale).ceil()).toDouble(),
+        math.max(1, (bounds.height * scale).ceil()).toDouble(),
+      ),
+    );
+  }
+
+  Future<HandwritingBatch> render(List<AiCanvasStroke> strokes) async {
+    final (ui.Rect bounds, ui.Size pixels) = _layout(strokes);
+    final int width = pixels.width.round();
+    final int height = pixels.height.round();
+    final double scale = width / math.max(bounds.width, 1 / width);
     final ui.PictureRecorder recorder = ui.PictureRecorder();
     final ui.Canvas canvas = ui.Canvas(recorder)
       ..drawRect(
@@ -179,7 +203,7 @@ class PlatformCanvasTextRecognizer implements DetailedCanvasTextRecognizer {
       final Object? response = await channel.invokeMethod<Object?>(
         'recognize',
         <String, Object?>{
-          'png': batch.png,
+          if (batch.png.isNotEmpty) 'png': batch.png,
           'width': batch.pixelSize.width.round(),
           'height': batch.pixelSize.height.round(),
           // The area the strokes were written in, in their own units.

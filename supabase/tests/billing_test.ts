@@ -106,10 +106,10 @@ Deno.test("Postgres billing: permissions, ownership, renewals, expiry and atomic
         "select public.billing_state($1) state",
         [user],
       )).rows[0].state;
-    const reserve = (id = req1, model = "sol") =>
+    const reserve = (id = req1, model = "sol", max: number | null = null) =>
       db.query(
-        "select public.ai_reserve($1,$2,$3)",
-        [user, id, model],
+        "select public.ai_reserve($1,$2,$3,$4)",
+        [user, id, model, max],
       );
     const settle = (id = req1, release = false) =>
       db.query(
@@ -135,21 +135,39 @@ Deno.test("Postgres billing: permissions, ownership, renewals, expiry and atomic
     await apply(snapshot());
     assert.equal((await state()).plan, "pro1299");
     assert.equal((await state()).remainingCreditsMicroUsd, 5000000);
-    await reserve();
-    assert.equal((await state()).remainingCreditsMicroUsd, 0);
-    await assert.rejects(() => reserve(req2), /request_in_progress/);
+    // Requests run alongside each other, each holding only its own cap.
+    await reserve(req1, "sol", 1000000);
+    await reserve(req2, "sol", 1000000);
+    assert.equal((await state()).remainingCreditsMicroUsd, 3000000);
     await settle();
-    assert.equal((await state()).remainingCreditsMicroUsd, 4900000);
+    assert.equal((await state()).remainingCreditsMicroUsd, 3900000);
     await settle();
+    assert.equal((await state()).remainingCreditsMicroUsd, 3900000);
+    await settle(req2, true);
     assert.equal((await state()).remainingCreditsMicroUsd, 4900000);
     await apply(snapshot());
     assert.equal((await state()).remainingCreditsMicroUsd, 4900000);
     await assert.rejects(() => reserve(), /request_in_progress/);
+    await assert.rejects(() => reserve(crypto.randomUUID(), "sol", 0), /rejected/);
+    // At most four at once; one stuck pending for ten minutes stops counting
+    // toward that, though it keeps its hold for an administrator.
+    const running = [1, 2, 3, 4].map(() => crypto.randomUUID());
+    for (const id of running) await reserve(id, "sol", 1000);
+    await assert.rejects(() => reserve(crypto.randomUUID(), "sol", 1000), /request_in_progress/);
+    await db.exec(`reset role; update billing_private.requests
+      set created_at = now() - interval '11 minutes' where request_id = '${running[0]}';
+      set role service_role`);
+    const after = crypto.randomUUID();
+    await reserve(after, "sol", 1000);
+    for (const id of [...running.slice(1), after]) await settle(id, true);
+    assert.equal((await state()).remainingCreditsMicroUsd, 4899000);
     await assert.rejects(() => apply(snapshot(), other), /purchase_owner/);
-    await reserve(req2);
+    const last = crypto.randomUUID();
+    await reserve(last); // Without a cap, the whole balance is held.
+    assert.equal((await state()).remainingCreditsMicroUsd, 0);
     await apply(snapshot("renewal"));
     assert.equal((await state()).remainingCreditsMicroUsd, 5000000);
-    await settle(req2, true); // Old request must never add credits to a new grant.
+    await settle(last, true); // Old request must never add credits to a new grant.
     assert.equal((await state()).remainingCreditsMicroUsd, 5000000);
     await apply(snapshot("renewal", false));
     assert.equal((await state()).activePlan, null);

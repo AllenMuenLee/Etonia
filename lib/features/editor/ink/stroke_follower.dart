@@ -20,7 +20,8 @@ class StrokeFollower {
     required this.captureRadius,
     required this.releaseRadius,
   }) : assert(captureRadius > 0),
-       assert(releaseRadius > captureRadius) {
+       assert(releaseRadius > captureRadius),
+       _cellSize = math.max(64, releaseRadius * 4) {
     for (final List<InkVector> points in strokes) {
       if (points.length < 2) {
         continue;
@@ -37,6 +38,7 @@ class StrokeFollower {
       _reach.add(
         Rect.fromLTRB(left, top, right, bottom).inflate(releaseRadius),
       );
+      _indexLine(_lines.length - 1, _reach.last);
     }
   }
 
@@ -55,6 +57,9 @@ class StrokeFollower {
 
   final List<List<InkVector>> _lines = <List<InkVector>>[];
   final List<Rect> _reach = <Rect>[];
+  final double _cellSize;
+  final Map<(int, int), List<int>> _cells = <(int, int), List<int>>{};
+  final List<int> _overflow = <int>[];
 
   InkVector _pull = InkVector.zero;
   bool _following = false;
@@ -137,7 +142,12 @@ class StrokeFollower {
   _Nearest? _nearest(InkVector p) {
     _Nearest? best;
     final Offset at = Offset(p.x, p.y);
-    for (int s = 0; s < _lines.length; s++) {
+    final Set<int> nearby = <int>{
+      ..._overflow,
+      ...?_cells[(_cell(p.x), _cell(p.y))],
+    };
+    final List<int> ordered = nearby.toList()..sort();
+    for (final int s in ordered) {
       if (!_reach[s].contains(at)) {
         continue;
       }
@@ -159,6 +169,24 @@ class StrokeFollower {
       }
     }
     return best;
+  }
+
+  int _cell(double coordinate) => (coordinate / _cellSize).floor();
+
+  void _indexLine(int index, Rect bounds) {
+    final int left = _cell(bounds.left);
+    final int right = _cell(bounds.right);
+    final int top = _cell(bounds.top);
+    final int bottom = _cell(bounds.bottom);
+    if ((right - left + 1) * (bottom - top + 1) > 256) {
+      _overflow.add(index);
+      return;
+    }
+    for (int y = top; y <= bottom; y++) {
+      for (int x = left; x <= right; x++) {
+        (_cells[(x, y)] ??= <int>[]).add(index);
+      }
+    }
   }
 
   static double _smoothstep(double edge0, double edge1, double x) {

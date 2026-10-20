@@ -73,36 +73,88 @@ vector geometry and has negligible model memory cost.
   Trace topology and order are not averaged, joined, inferred, or regenerated.
   This avoids corrupting legibility when two samples have different pen lifts
   or point counts.
-- Words without an eligible exact-case sample continue to use
-  `NotationFont`. A single generated text item may therefore mix learned
-  words and built-in glyphs while preserving spaces and line breaks.
+- Note samples are used only when every word of a text item has one;
+  otherwise the whole item is written in `NotationFont`, in the writer's
+  calibrated style. A text item never switches hands mid-way.
 - Both immediate and timed AI notation, including notation written on an AI
   sticky note, use the same sample pool.
 
 ### Handwriting calibration
 
 - On the first launch of the device library, a full-screen calibration asks
-  the writer to copy three silly lines, 13 short phrases on one ruled line
-  each. Together they contain a–z, A–Z, 0–9 and
-  `. , ! ? ' " - : ; ( ) & $ % # @ / + *`. It can be skipped and is offered
-  again from the library's Sort menu ("Calibrate handwriting…").
-- The text is known, so no recognizer runs. Ink is split into words at
-  clear gaps; a phrase whose word count does not match is rejected with a
-  hint (leave more room / keep words together) or can be skipped.
-- Within a word, strokes with overlapping horizontal extents form one mark
-  (i-dots, t-crosses, colons). A word becomes letters only when it has
-  exactly one mark per character (two for `"`). Joined-up words are kept
-  whole, never cut at guessed boundaries.
-- Samples are normalized to writing units: the capital line is y = 0 and
-  the baseline is y = 1, measured from the writer's own capitals and digits
-  when present and otherwise from the guides. Letter gap and word space are
-  measured too.
-- The profile is global (`handwriting_profile.json` beside the library) and
-  shared by every note. AI notation tries, for each word: a note sample, a
-  calibrated whole word, then calibrated letters, with `NotationFont` for
-  any character not calibrated.
-- `&`, `$`, and `@` are calibrated but the notation parser still rejects
-  text the built-in font cannot write, so they are not yet produced.
+  the writer to copy one sentence, "goodnotes ain't good, freenotes ain't
+  free, so we got both.", onto three ruled lines (one per line of
+  `calibrationLines`, short enough for a phone). The screen never scrolls:
+  the pad fills the height left and the lines shrink to fit it. Only a
+  stylus writes on the pad; a finger or palm leaves no ink and shows "Use
+  your pen to write here". The pen's eraser end, its side button, or the
+  Eraser button erases whole strokes; Undo steps back through writing,
+  erasing, and Clear. What is written is kept as a draft beside the
+  profile (`handwriting_profile.json.draft`, in line-height units so it
+  survives rotation) until Save or Skip, so leaving or the app closing
+  loses nothing. The saved hand lives in the device library's folder,
+  which does not depend on the signed-in account. It can be skipped and is
+  offered again from the library's Sort menu ("Calibrate handwriting…").
+- The text is known, so no recognizer runs. Each stroke belongs to the
+  ruled line it sits on, and each line's ink is split into words at clear
+  gaps. A line whose word count does not match is rejected with a hint
+  (leave more room / keep words together).
+- No letters or strokes are stored. Calibration measures a
+  `HandwritingStyle`, the traits of the hand, in `NotationFont`'s grid:
+  slant (weighted median lean of near-vertical strokes), x-height (from
+  "so" and "we" against the ascender words), width against the font, word
+  spacing, the g's tail (depth, how far it hooks, whether it loops back
+  up), loop roundness (closed o-sized strokes), the tilt of cross-strokes,
+  and how far words wander off the line and vary in size. Each word's
+  baseline is the median of its strokes' valleys in its lower half, so
+  descenders, dots, and t-bars do not move it.
+- Two traits are curves rather than numbers, each a degree-10 polynomial
+  fitted by least squares with a penalty growing as the fourth power of
+  each term's order, so they follow the hand and not its tremor, and held
+  to a few swings (`limited`), so they can never ring into a wiggle:
+  - `lineProfile` (`StrokeProfile`): how straight lines develop along
+    their length — how far they stray from the chord at each point, as a
+    share of their length, read along `canonicalLine`. s(1 − s) times a
+    Chebyshev series, so a line's ends stay put. Lines are found by
+    `straightRuns`, the same detector the style uses on the font.
+  - `curveProfile` (`CurveProfile`): how tightly curves bend by the way
+    they face — the log of the radius against the font's, as a polynomial
+    in the bend's outward normal (cos θ, sin θ), so it goes round without
+    a seam and reads the same whichever way the pen went. Every curved
+    point counts (`bends`); nothing is cut out of a stroke. Drawing it
+    (`withCurves`) scales each curved step and keeps every turn, so curves
+    tighten or loosen without new corners.
+  Each is measured against the calibration sentence written by the font
+  in the hand's other traits (`_writtenUpright`), so what a wider o or a
+  looped g already explains is not added twice.
+- The measured style is mixed 80 % of the way from the built-in style
+  (`calibrationMix`) and clamped to legible ranges, then previewed: the
+  writer sees the assistant writing in it and saves or tries again.
+- The style is global (`handwriting_profile.json` beside the library, JSON
+  `version: 3`) and shared by every note. A file from the letter-by-letter
+  calibration, or a version 2 style measured before the line and curve
+  profiles, is ignored and calibration is offered once more.
+- AI notation, plot labels included, writes in `NotationFont` shaped by the
+  style. The result is fitted inside the box the built-in hand would fill
+  (`NotationFont.width` × `NotationFont.height`, from a little above the
+  origin), which is what the assistant planned for, so a wider or taller
+  hand cannot run off the paper and get the whole notation refused.
+
+### Built-in hand
+
+- `NotationFont`'s letters come from EMS Readability (SIL OFL 1.1), a
+  single-line font, converted by `tool/build_notation_glyphs.py` into
+  `notation_glyphs.dart`. The converter normalizes the font's own metrics
+  to the grid (x-height y = 3.8, descenders to y = 13), narrows it a
+  little, turns its outlined dots and commas into pen marks, and builds a
+  single-storey g from q. Mathematics it lacks (≤ ≥ ≠ ≈ √ π θ Δ ∞ → ← ✓)
+  stays hand-drawn.
+- `HandwritingStyle.standard` gives it an easy forward slant, a hooked g,
+  a slight bow to its lines, and slight per-letter drift and size, derived
+  from the text so a note lays out the same every time. Nothing is added
+  as sampled noise: each letter's lines take the profile a little more or
+  less strongly, smoothly, so no line is drawn with saw teeth (the old
+  per-segment sine wobble aliased into them).
 
 ## Persistence format
 

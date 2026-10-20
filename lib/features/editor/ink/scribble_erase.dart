@@ -99,6 +99,7 @@ abstract final class ScribbleErase {
     List<Stroke> strokes, {
     ScribbleConfig config = const ScribbleConfig(),
     bool Function(Stroke stroke)? skip,
+    Iterable<int>? candidateIndices,
   }) {
     if (scribble.isDot ||
         scribble.style.isHighlighter ||
@@ -108,7 +109,8 @@ abstract final class ScribbleErase {
     final Rect area = scribble.bounds;
     final List<InkVector> path = scribble.points;
     final List<int> result = <int>[];
-    for (int i = 0; i < strokes.length; i++) {
+    for (final int i
+        in candidateIndices ?? Iterable<int>.generate(strokes.length)) {
       final Stroke stroke = strokes[i];
       if (skip?.call(stroke) ?? false) {
         continue;

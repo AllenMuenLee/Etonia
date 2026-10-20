@@ -26,11 +26,16 @@ class StrokeSelectionResult {
 /// Finds the [strokes] whose rendered ink overlaps [region]. A stroke whose
 /// cached bounds miss the region's bounds is rejected without its points
 /// being read.
-StrokeSelectionResult selectStrokes(List<Stroke> strokes, LassoRegion region) {
+StrokeSelectionResult selectStrokes(
+  List<Stroke> strokes,
+  LassoRegion region, {
+  Iterable<int>? candidateIndices,
+}) {
   final List<int> indices = <int>[];
   int candidates = 0;
   if (!region.isEmpty) {
-    for (int i = 0; i < strokes.length; i++) {
+    for (final int i
+        in candidateIndices ?? Iterable<int>.generate(strokes.length)) {
       final Stroke stroke = strokes[i];
       final Rect bounds = stroke.bounds;
       if (!region.overlapsBounds(

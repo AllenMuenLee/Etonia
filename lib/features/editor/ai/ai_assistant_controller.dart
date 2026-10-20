@@ -12,6 +12,7 @@ import 'ai_config.dart';
 import 'ai_notation.dart';
 import 'ai_usage_gate.dart';
 import 'note_image_renderer.dart';
+import 'selection_grid.dart';
 import 'selection_image_renderer.dart';
 
 typedef AiNoteCapture = Future<NoteImage> Function();
@@ -216,7 +217,17 @@ class AiAssistantController extends ChangeNotifier {
   final _SessionNotifier _session = _SessionNotifier();
 
   /// The composer's unsent text. Kept here so it outlives the panel.
-  String draft = '';
+  String get draft => _draft;
+  String _draft = '';
+  set draft(String value) {
+    _draft = value;
+    if (!_disposed) _hasDraft.value = value.trim().isNotEmpty;
+  }
+
+  /// Whether [draft] holds anything but blanks, for those who need to know
+  /// as soon as it changes, typing included.
+  ValueListenable<bool> get hasDraft => _hasDraft;
+  final ValueNotifier<bool> _hasDraft = ValueNotifier<bool>(false);
 
   /// Fires when something [toJson] saves has changed: a message was added
   /// or settled, or a conversation's ink grew. Never while an answer
@@ -614,6 +625,17 @@ class AiAssistantController extends ChangeNotifier {
         return;
       }
     }
+    // With notation, the model is sent one picture: the selection with a
+    // coordinate grid, numbered in a margin round it.
+    final Uint8List imagePng = noteImage == null
+        ? image.png
+        : await const SelectionGridRenderer().render(
+            image,
+            noteImage.logicalSize,
+          );
+    if (_disposed || token != conversation.requestToken) {
+      return;
+    }
     final AiRequest request;
     final AiResult result;
     try {
@@ -623,7 +645,7 @@ class AiAssistantController extends ChangeNotifier {
             notationEnabled: notationAuthorized,
             animationEnabled: animationAuthorized,
           ),
-          imagePng: image.png,
+          imagePng: imagePng,
           messages: conversation.messages,
           noteImage: noteImage,
           notationEnabled: notationAuthorized,
@@ -934,6 +956,7 @@ class AiAssistantController extends ChangeNotifier {
       conversation.requestToken++;
     }
     _placement.dispose();
+    _hasDraft.dispose();
     _session.dispose();
     super.dispose();
   }

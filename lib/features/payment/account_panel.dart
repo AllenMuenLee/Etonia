@@ -152,7 +152,7 @@ class _AccountPanelState extends State<AccountPanel> {
               ),
               const SizedBox(height: AppSpacing.xxs),
               Text(
-                'Your notes, PDFs, and chat history stay on your device.',
+                'Your notes and PDFs stay on your device. AI conversation text is sent only when you ask the assistant.',
                 style: text.bodySmall?.copyWith(color: colors.textSecondary),
               ),
               if (_message != null) ...<Widget>[

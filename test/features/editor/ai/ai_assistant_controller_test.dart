@@ -947,7 +947,7 @@ void main() {
       expect(client.requests.single.noteImage, same(note));
       expect(
         client.requests.single.systemInstruction,
-        contains('Notation is enabled'),
+        contains('Notation is on'),
       );
       client.answerResponse(
         AiAssistantResponse(

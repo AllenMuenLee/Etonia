@@ -43,8 +43,11 @@ abstract mixin class AiUsageGate implements Listenable {
   /// Charges an answer from [model] that took [usage].
   void recordUsage(AiModelId model, AiTokenUsage usage);
 
-  /// A few words for the credits pill: `$1.20 left`, or `Upgrade`.
+  /// A few words for the token pill: `100% tokens`, or `Upgrade`.
   String get creditsLabel;
+
+  /// Fraction (`0.0` to `1.0`) of the active token allowance remaining.
+  double get tokenFraction => 0;
 
   /// The model last picked, remembered across launches.
   AiModelId? get preferredModel;

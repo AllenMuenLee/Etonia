@@ -216,6 +216,14 @@ void main() {
           )
           as Map<String, Object?>;
 
+  /// The titles of the notes in the manifest's [list].
+  List<String> titlesIn(String list) => <String>[
+    for (final Object? record in manifest()[list]! as List<Object?>)
+      ((record! as Map<String, Object?>)['entry']!
+              as Map<String, Object?>)['title']!
+          as String,
+  ]..sort();
+
   group('backup', () {
     test('uploads every folder, note, page, stroke, and asset', () async {
       final InMemoryNoteRepository repository = _repository();
@@ -334,6 +342,98 @@ void main() {
       // The old content went to the trash; four files are still referred to.
       final GoogleDriveItem notes = drive.itemAt('Etonia/notes')!;
       expect(drive.childrenOf(notes.id), hasLength(4));
+    });
+
+    test('backs up Recently Deleted apart from the library', () async {
+      final InMemoryNoteRepository repository = _repository();
+      await _seed(repository);
+      final NoteEntry groceries = (await repository.search(
+        'Groceries',
+      )).notes.single;
+      await repository.deleteNote(groceries.id);
+
+      final BackupSummary summary = await service(repository).backUp();
+
+      expect(summary.noteCount, 1);
+      expect(summary.deletedCount, 1);
+      expect(titlesIn('notes'), <String>['Lecture 1']);
+      expect(titlesIn('trash'), <String>['Groceries']);
+    });
+
+    test('a note in the backup but not here moves to Recently Deleted, '
+        'here and in the backup', () async {
+      final InMemoryNoteRepository original = _repository();
+      await _seed(original);
+      await service(original).backUp();
+      final GoogleDriveItem files = drive.itemAt('Etonia/notes')!;
+      final Set<String> assetFiles = <String>{
+        for (final GoogleDriveItem item in drive.childrenOf(files.id))
+          if (!item.name.endsWith('.json')) item.id,
+      };
+      drive.uploads.clear();
+
+      // Another device, which never had them.
+      final InMemoryNoteRepository other = _repository();
+      final BackupSummary summary = await service(
+        other,
+        state: InMemoryCloudStateStore(),
+      ).backUp();
+
+      expect(summary.movedToDeleted, 2);
+      expect(summary.noteCount, 0);
+      expect(summary.deletedCount, 2);
+      expect((await other.list(null)).notes, isEmpty);
+      final List<NoteEntry> trash = await other.trash();
+      expect(
+        trash.map((NoteEntry n) => n.title),
+        unorderedEquals(<String>['Groceries', 'Lecture 1']),
+      );
+      for (final NoteEntry note in trash) {
+        expect(note.deleted, DateTime(2026, 10, 16, 9, 30));
+      }
+      // Ink and assets came with them.
+      await other.restoreNote(trash.first.id);
+      await other.restoreNote(trash.last.id);
+      final Map<String, Object?> restored = await _describe(other);
+      final Map<String, Object?> expected = await _describe(original);
+      expect(
+        (restored['notes']! as Map<String, Object?>).values,
+        unorderedEquals((expected['notes']! as Map<String, Object?>).values),
+      );
+      expect(titlesIn('notes'), isEmpty);
+      expect(titlesIn('trash'), <String>['Groceries', 'Lecture 1']);
+      // The assets were already in Drive, so they were not sent again.
+      expect(
+        drive.uploads.where((String name) => !name.endsWith('.json')),
+        isEmpty,
+      );
+      expect(
+        drive.childrenOf(files.id).map((GoogleDriveItem item) => item.id),
+        containsAll(assetFiles),
+      );
+    });
+
+    test('a note deleted for good leaves the backup', () async {
+      final InMemoryNoteRepository repository = _repository();
+      await _seed(repository);
+      final GoogleDriveBackupService backup = service(repository);
+      await backup.backUp();
+      final NoteEntry groceries = (await repository.search(
+        'Groceries',
+      )).notes.single;
+      await repository.deleteNote(groceries.id);
+      await backup.backUp();
+      expect(titlesIn('trash'), <String>['Groceries']);
+
+      await repository.deleteForever(groceries.id);
+      final BackupSummary summary = await backup.backUp();
+
+      expect(summary.movedToDeleted, 0);
+      expect(await repository.trash(), isEmpty);
+      expect(titlesIn('notes'), <String>['Lecture 1']);
+      expect(titlesIn('trash'), isEmpty);
+      // Its content went to the Drive trash; Lecture 1's three files stay.
+      expect(drive.childrenOf(drive.itemAt('Etonia/notes')!.id), hasLength(3));
     });
 
     test('cancelling leaves no manifest pointing at half a backup', () async {
@@ -470,6 +570,40 @@ void main() {
       expect((await other.trash()).map((NoteEntry n) => n.title), <String>[
         'Old note',
       ]);
+    });
+
+    test('puts Recently Deleted back in Recently Deleted', () async {
+      final InMemoryNoteRepository original = _repository();
+      await _seed(original);
+      final NoteEntry groceries = (await original.search(
+        'Groceries',
+      )).notes.single;
+      await original.deleteNote(groceries.id, at: DateTime(2026, 10, 1));
+      await service(original).backUp();
+
+      final InMemoryNoteRepository fresh = _repository();
+      final InMemoryCloudStateStore state = InMemoryCloudStateStore();
+      final RestoreSummary summary = await service(
+        fresh,
+        state: state,
+      ).restore();
+
+      expect(summary.notesRestored, 1);
+      expect(summary.deletedRestored, 1);
+      final NoteEntry deleted = (await fresh.trash()).single;
+      expect(deleted.title, 'Groceries');
+      expect(deleted.deleted, DateTime(2026, 10, 1));
+
+      // Merging again adds no second copy.
+      final RestoreSummary again = await service(fresh, state: state).restore();
+      expect(again.deletedRestored, 0);
+      expect(await fresh.trash(), hasLength(1));
+
+      // What was restored is what is here: the next backup moves nothing.
+      final BackupSummary backup = await service(fresh, state: state).backUp();
+      expect(backup.movedToDeleted, 0);
+      expect(titlesIn('notes'), <String>['Lecture 1']);
+      expect(titlesIn('trash'), <String>['Groceries']);
     });
 
     test('a damaged file stops the restore before anything changes', () async {

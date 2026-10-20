@@ -44,6 +44,14 @@ final class NativeInkChannel: NSObject {
       }
       surfaces[surface.id] = surface
       attachIfNeeded()
+      // Leaving the pen hides a stroke still in progress at once; the rest of
+      // its gesture is swallowed rather than starting a new one.
+      if !surface.enabled || !surface.previewEnabled {
+        if let stroke = active, stroke.surface.id == surface.id {
+          stroke.previewSuppressed = true
+        }
+        overlay?.clear()
+      }
       result(true)
     case "unregisterSurface":
       if let values = call.arguments as? [String: Any],
@@ -54,12 +62,21 @@ final class NativeInkChannel: NSObject {
       }
       result(nil)
     case "finishPreview":
-      if let values = call.arguments as? [String: Any],
-        let pointer = (values["pointer"] as? NSNumber)?.intValue
-      {
-        if active?.pointer == pointer { active?.previewSuppressed = true }
-        overlay?.finish(pointer: pointer)
+      if let values = call.arguments as? [String: Any] {
+        let pointer = (values["pointer"] as? NSNumber)?.intValue ?? values["pointer"] as? Int
+        if let pointer, active?.pointer == pointer { active?.previewSuppressed = true }
+        if let pointer {
+          overlay?.finish(pointer: pointer)
+        } else {
+          overlay?.clear()
+        }
+      } else {
+        overlay?.clear()
       }
+      result(nil)
+    case "clearAllPreviews":
+      active = nil
+      overlay?.clear()
       result(nil)
     default:
       result(FlutterMethodNotImplemented)
@@ -104,7 +121,7 @@ final class NativeInkChannel: NSObject {
         .filter({ $0.enabled && $0.contains(global) })
         .max(by: { $0.id < $1.id })
       else { return }
-      let pointer = touch.hash
+      let pointer = touch.hash & 0x7FFF_FFFF
       active = ActiveStroke(surface: surface, pointer: pointer)
       let actual = actualTouches(touch, event: event, coalesced: false)
       if surface.previewEnabled {
@@ -280,6 +297,7 @@ private struct InkSurface {
   let color: UIColor
   let strokeWidth: CGFloat
   let pressureSensitivity: CGFloat
+  let exclusionRects: [CGRect]
 
   var scale: CGFloat {
     (hypot(xBasis.x, xBasis.y) + hypot(yBasis.x, yBasis.y)) / 2
@@ -312,6 +330,22 @@ private struct InkSurface {
     color = UIColor(red: red, green: green, blue: blue, alpha: alpha)
     self.strokeWidth = strokeWidth
     self.pressureSensitivity = pressureSensitivity
+
+    if let rectsData = values["exclusionRects"] as? [NSNumber] {
+      var rects: [CGRect] = []
+      var i = 0
+      while i + 3 < rectsData.count {
+        let left = CGFloat(rectsData[i].doubleValue)
+        let top = CGFloat(rectsData[i + 1].doubleValue)
+        let right = CGFloat(rectsData[i + 2].doubleValue)
+        let bottom = CGFloat(rectsData[i + 3].doubleValue)
+        rects.append(CGRect(x: left, y: top, width: max(0, right - left), height: max(0, bottom - top)))
+        i += 4
+      }
+      self.exclusionRects = rects
+    } else {
+      self.exclusionRects = []
+    }
   }
 
   func local(_ global: CGPoint) -> CGPoint? {
@@ -326,6 +360,9 @@ private struct InkSurface {
   }
 
   func contains(_ global: CGPoint) -> Bool {
+    for rect in exclusionRects {
+      if rect.contains(global) { return false }
+    }
     guard let point = local(global) else { return false }
     return point.x >= 0 && point.y >= 0 && point.x <= size.width && point.y <= size.height
   }
@@ -348,6 +385,10 @@ private final class NativeInkOverlay: UIView {
     isOpaque = false
     contentMode = .redraw
     accessibilityElementsHidden = true
+    if #available(iOS 15.0, *) {
+      layer.preferredFrameRateRange = CAFrameRateRange(
+        minimum: 80, maximum: 120, preferred: 120)
+    }
   }
 
   required init?(coder: NSCoder) { nil }
@@ -355,11 +396,12 @@ private final class NativeInkOverlay: UIView {
   func begin(
     pointer: Int, actual: [PreviewPoint], predicted: [PreviewPoint], surface: InkSurface
   ) {
+    let oldDirty = dirtyBounds(self.actual + self.predicted, surface: self.surface)
     self.pointer = pointer
     self.actual = actual
     self.predicted = predicted
     self.surface = surface
-    setNeedsDisplay()
+    setNeedsDisplay(oldDirty.union(dirtyBounds(actual + predicted, surface: surface)))
   }
 
   func append(
@@ -370,6 +412,8 @@ private final class NativeInkOverlay: UIView {
       begin(pointer: pointer, actual: incoming, predicted: predicted, surface: surface)
       return
     }
+    let replacedPrediction = dirtyBounds(predicted, surface: self.surface)
+    let previousLast = actual.last
     if incoming.first == actual.last {
       actual.append(contentsOf: incoming.dropFirst())
     } else {
@@ -377,16 +421,27 @@ private final class NativeInkOverlay: UIView {
     }
     self.predicted = predicted
     self.surface = surface
-    setNeedsDisplay()
+    var changed = incoming
+    if let previousLast { changed.insert(previousLast, at: 0) }
+    let dirty = replacedPrediction
+      .union(dirtyBounds(changed, surface: surface))
+      .union(dirtyBounds(predicted, surface: surface))
+    if !dirty.isNull && !dirty.isEmpty { setNeedsDisplay(dirty) }
   }
 
-  func finish(pointer: Int) {
-    guard self.pointer == pointer else { return }
+  func clear() {
+    let dirty = dirtyBounds(actual + predicted, surface: surface)
     self.pointer = nil
     actual.removeAll(keepingCapacity: true)
     predicted.removeAll(keepingCapacity: true)
     surface = nil
-    setNeedsDisplay()
+    if !dirty.isNull && !dirty.isEmpty { setNeedsDisplay(dirty) }
+  }
+
+  func finish(pointer: Int) {
+    if self.pointer == nil || self.pointer == pointer {
+      clear()
+    }
   }
 
   override func draw(_ rect: CGRect) {
@@ -407,7 +462,15 @@ private final class NativeInkOverlay: UIView {
     for index in 1..<points.count {
       let before = points[index - 1]
       let current = points[index]
-      context.setLineWidth(lineWidth((before.pressure + current.pressure) / 2, surface: surface))
+      let width = lineWidth((before.pressure + current.pressure) / 2, surface: surface)
+      let segmentBounds = CGRect(
+        x: min(before.point.x, current.point.x),
+        y: min(before.point.y, current.point.y),
+        width: abs(current.point.x - before.point.x),
+        height: abs(current.point.y - before.point.y)
+      ).insetBy(dx: -width, dy: -width)
+      if !segmentBounds.intersects(rect) { continue }
+      context.setLineWidth(width)
       context.move(to: before.point)
       context.addLine(to: current.point)
       context.strokePath()
@@ -417,5 +480,16 @@ private final class NativeInkOverlay: UIView {
   private func lineWidth(_ pressure: Double, surface: InkSurface) -> CGFloat {
     let factor = 1 + surface.pressureSensitivity * 0.75 * CGFloat(2 * pressure - 1)
     return max(0.5, surface.strokeWidth * surface.scale * factor)
+  }
+
+  private func dirtyBounds(_ points: [PreviewPoint], surface: InkSurface?) -> CGRect {
+    guard let surface, let first = points.first else { return .null }
+    var bounds = CGRect(origin: first.point, size: .zero)
+    var widest = lineWidth(first.pressure, surface: surface)
+    for point in points.dropFirst() {
+      bounds = bounds.union(CGRect(origin: point.point, size: .zero))
+      widest = max(widest, lineWidth(point.pressure, surface: surface))
+    }
+    return bounds.insetBy(dx: -widest, dy: -widest)
   }
 }

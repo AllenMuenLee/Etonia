@@ -102,10 +102,11 @@ class SubscriptionController extends ChangeNotifier with AiUsageGate {
   Future<void> _saving = Future<void>.value();
 
   bool? _storeAvailable;
-  final Map<SubscriptionPlan, StoreProduct> _products =
-      <SubscriptionPlan, StoreProduct>{};
+  final Map<String, StoreProduct> _products =
+      <String, StoreProduct>{};
   StoreActivity _activity = StoreActivity.idle;
   SubscriptionPlan? _pendingPlan;
+  BillingCycle _pendingCycle = BillingCycle.monthly;
   String? _errorMessage;
   String? _notice;
 
@@ -148,25 +149,48 @@ class SubscriptionController extends ChangeNotifier with AiUsageGate {
 
   /// The store's product for [plan], with its localized price, once
   /// loaded.
-  StoreProduct? productFor(SubscriptionPlan plan) => _products[plan];
-
-  /// The price to show for [plan]: the store's, or the configured one.
-  String priceFor(SubscriptionPlan plan) {
-    final StoreProduct? product = _products[plan];
-    return product == null ? plan.priceLabel : '${product.price} / month';
+  StoreProduct? productFor(
+    SubscriptionPlan plan, {
+    BillingCycle cycle = BillingCycle.monthly,
+  }) {
+    final String? productId =
+        config.productIdsFor(platform, cycle: cycle)[plan];
+    return productId == null ? null : _products[productId];
   }
 
-  Map<SubscriptionPlan, String> get _productIds =>
-      config.productIdsFor(platform);
+  /// The price to show for [plan]: the store's, or the configured one.
+  String priceFor(
+    SubscriptionPlan plan, {
+    BillingCycle cycle = BillingCycle.monthly,
+  }) {
+    final StoreProduct? product = productFor(plan, cycle: cycle);
+    if (product == null) {
+      return cycle == BillingCycle.yearly
+          ? plan.yearlyPriceLabel
+          : plan.priceLabel;
+    }
+    return cycle == BillingCycle.yearly
+        ? '${product.price} / year'
+        : '${product.price} / month';
+  }
 
   SubscriptionPlan? planForProduct(String productId) {
-    for (final MapEntry<SubscriptionPlan, String> entry
-        in _productIds.entries) {
-      if (entry.value == productId) {
-        return entry.key;
+    for (final BillingCycle cycle in BillingCycle.values) {
+      final Map<SubscriptionPlan, String> ids =
+          config.productIdsFor(platform, cycle: cycle);
+      for (final MapEntry<SubscriptionPlan, String> entry in ids.entries) {
+        if (entry.value == productId) {
+          return entry.key;
+        }
       }
     }
     return null;
+  }
+
+  bool isYearlyProduct(String productId) {
+    return config
+        .productIdsFor(platform, cycle: BillingCycle.yearly)
+        .containsValue(productId);
   }
 
   /// Reads what was saved. A debug grant from [PaymentConfig.debugPlan]
@@ -272,7 +296,7 @@ class SubscriptionController extends ChangeNotifier with AiUsageGate {
     final bool available = await gateway.isAvailable();
     List<StoreProduct> products = const <StoreProduct>[];
     if (available) {
-      products = await gateway.queryProducts(_productIds.values.toSet());
+      products = await gateway.queryProducts(config.allProductIdsFor(platform));
     }
     if (_disposed) {
       return;
@@ -280,10 +304,7 @@ class SubscriptionController extends ChangeNotifier with AiUsageGate {
     _storeAvailable = available;
     _products.clear();
     for (final StoreProduct product in products) {
-      final SubscriptionPlan? plan = planForProduct(product.id);
-      if (plan != null) {
-        _products[plan] = product;
-      }
+      _products[product.id] = product;
     }
     if (_activity == StoreActivity.loading) {
       _activity = StoreActivity.idle;
@@ -293,7 +314,10 @@ class SubscriptionController extends ChangeNotifier with AiUsageGate {
 
   /// Starts buying [plan]. Its credits arrive when the store says it has
   /// been bought.
-  Future<void> purchase(SubscriptionPlan plan) async {
+  Future<void> purchase(
+    SubscriptionPlan plan, {
+    BillingCycle cycle = BillingCycle.monthly,
+  }) async {
     if (backend != null &&
         (!backend!.isConfigured || backend!.userId == null)) {
       _errorMessage = 'Sign in before subscribing.';
@@ -302,7 +326,7 @@ class SubscriptionController extends ChangeNotifier with AiUsageGate {
     }
     this.gateway?.accountId = backend?.userId;
     final InAppPurchaseGateway? gateway = this.gateway;
-    final StoreProduct? product = _products[plan];
+    final StoreProduct? product = productFor(plan, cycle: cycle);
     _errorMessage = null;
     _notice = null;
     if (gateway == null || product == null) {
@@ -313,6 +337,7 @@ class SubscriptionController extends ChangeNotifier with AiUsageGate {
     }
     _activity = StoreActivity.purchasing;
     _pendingPlan = plan;
+    _pendingCycle = cycle;
     _notify();
     try {
       await gateway.buySubscription(product);
@@ -414,7 +439,8 @@ class SubscriptionController extends ChangeNotifier with AiUsageGate {
     }
     if (best != null && bestPlan != null) {
       final bool restored = best.status == StorePurchaseStatus.restored;
-      activate(bestPlan, purchaseId: best.purchaseId);
+      final bool isYearly = isYearlyProduct(best.productId);
+      activate(bestPlan, purchaseId: best.purchaseId, isYearly: isYearly);
       _activity = StoreActivity.idle;
       _pendingPlan = null;
       _errorMessage = null;
@@ -437,22 +463,32 @@ class SubscriptionController extends ChangeNotifier with AiUsageGate {
   /// Makes [plan] the active one and grants its credits, unless
   /// [purchaseId] is the purchase whose credits were already granted, as
   /// when the same subscription is restored again.
-  void activate(SubscriptionPlan plan, {String? purchaseId}) {
+  void activate(
+    SubscriptionPlan plan, {
+    String? purchaseId,
+    bool isYearly = false,
+  }) {
     if (backend != null) return;
     final bool alreadyGranted =
         purchaseId != null &&
         purchaseId == _state.grantedPurchaseId &&
         plan == _state.activePlan;
     if (!alreadyGranted) {
-      _grant(plan, purchaseId: purchaseId);
+      _grant(plan, purchaseId: purchaseId, isYearly: isYearly);
     }
     _notify();
   }
 
-  void _grant(SubscriptionPlan plan, {String? purchaseId}) {
+  void _grant(
+    SubscriptionPlan plan, {
+    String? purchaseId,
+    bool isYearly = false,
+  }) {
     _state = SubscriptionState(
       activePlan: plan,
-      remainingCreditsMicroUsd: plan.includedCreditsMicroUsd,
+      remainingCreditsMicroUsd: isYearly
+          ? plan.yearlyIncludedCreditsMicroUsd
+          : plan.includedCreditsMicroUsd,
       preferredModel: _state.preferredModel,
       grantedPurchaseId: purchaseId ?? _state.grantedPurchaseId,
     );
@@ -504,12 +540,21 @@ class SubscriptionController extends ChangeNotifier with AiUsageGate {
   }
 
   @override
+  double get tokenFraction {
+    final int included = includedCreditsMicroUsd;
+    if (included <= 0) {
+      return 0;
+    }
+    return (_state.remainingCreditsMicroUsd / included).clamp(0.0, 1.0);
+  }
+
+  @override
   String get creditsLabel {
     if ((activePlan == null && !hasFreeCredit) ||
         _state.remainingCreditsMicroUsd <= 0) {
       return 'Upgrade';
     }
-    return '${formatUsd(_state.remainingCreditsMicroUsd)} left';
+    return '${formatTokenPercent(_state.remainingCreditsMicroUsd, includedCreditsMicroUsd)} tokens';
   }
 
   @override

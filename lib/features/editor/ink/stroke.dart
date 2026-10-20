@@ -346,6 +346,13 @@ class ActiveStroke {
       _distances.add(0);
       _pressureFactors.add(dynamics.pressureFactor(_pressure));
       _widths.add(_pressureFactors.last * dynamics.taperAt(0, _taperLength));
+      _outline = Path()
+        ..addOval(
+          Rect.fromCircle(
+            center: Offset(origin.x, origin.y),
+            radius: style.width * _widths.first / 2,
+          ),
+        );
     }
   }
 
@@ -403,7 +410,7 @@ class ActiveStroke {
     if (dynamics.isNone) {
       return null;
     }
-    return _outline ??= buildInkOutline(_points, _widths, style.width);
+    return _outline;
   }
 
   /// Returns whether the rendered geometry changed.
@@ -456,14 +463,42 @@ class ActiveStroke {
     _path.lineTo(point.x, point.y);
     _extent.add(point);
     if (!dynamics.isNone) {
+      final InkVector before = _points[_points.length - 2];
       _distances.add(_length);
       _pressureFactors.add(dynamics.pressureFactor(_pressure));
       _widths.add(
         _pressureFactors.last * dynamics.taperAt(_length, _taperLength),
       );
-      _outline = null;
+      _appendOutlineSegment(before, point);
     }
     return true;
+  }
+
+  /// Adds only the geometry introduced by the newest point. Active ink is
+  /// transient, so keeping the previous round end cap as a round join is
+  /// both visually stable and makes each accepted sample O(1). [finish]
+  /// still gives the immutable stroke the canonical [buildInkOutline]
+  /// geometry (including its exact wedges and tapered tail).
+  void _appendOutlineSegment(InkVector a, InkVector b) {
+    final Path outline = _outline!;
+    final InkVector delta = b - a;
+    final double segmentLength = delta.length;
+    final double rb = style.width * _widths.last / 2;
+    if (segmentLength > 0) {
+      final InkVector normal = delta.perpendicular * (1 / segmentLength);
+      final double ra = style.width * _widths[_widths.length - 2] / 2;
+      final InkVector p0 = a - normal * ra;
+      final InkVector p1 = b - normal * rb;
+      final InkVector p2 = b + normal * rb;
+      final InkVector p3 = a + normal * ra;
+      outline
+        ..moveTo(p0.x, p0.y)
+        ..lineTo(p1.x, p1.y)
+        ..lineTo(p2.x, p2.y)
+        ..lineTo(p3.x, p3.y)
+        ..close();
+    }
+    outline.addOval(Rect.fromCircle(center: Offset(b.x, b.y), radius: rb));
   }
 }
 

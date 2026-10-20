@@ -83,6 +83,7 @@ class NativeInkSurface {
     required this.color,
     required this.width,
     required this.pressureSensitivity,
+    this.exclusionRects = const <Rect>[],
   });
 
   final int id;
@@ -95,23 +96,34 @@ class NativeInkSurface {
   final Color color;
   final double width;
   final double pressureSensitivity;
+  final List<Rect> exclusionRects;
 
-  Map<String, Object> toMap() => <String, Object>{
-    'surfaceId': id,
-    'width': size.width,
-    'height': size.height,
-    'originX': origin.dx,
-    'originY': origin.dy,
-    'xx': xBasis.dx,
-    'xy': xBasis.dy,
-    'yx': yBasis.dx,
-    'yy': yBasis.dy,
-    'enabled': enabled,
-    'previewEnabled': previewEnabled,
-    'color': color.toARGB32(),
-    'strokeWidth': width,
-    'pressureSensitivity': pressureSensitivity,
-  };
+  Map<String, Object> toMap() {
+    final Map<String, Object> map = <String, Object>{
+      'surfaceId': id,
+      'width': size.width,
+      'height': size.height,
+      'originX': origin.dx,
+      'originY': origin.dy,
+      'xx': xBasis.dx,
+      'xy': xBasis.dy,
+      'yx': yBasis.dx,
+      'yy': yBasis.dy,
+      'enabled': enabled,
+      'previewEnabled': previewEnabled,
+      'color': color.toARGB32(),
+      'strokeWidth': width,
+      'pressureSensitivity': pressureSensitivity,
+    };
+    if (exclusionRects.isNotEmpty) {
+      final List<double> rects = <double>[];
+      for (final Rect rect in exclusionRects) {
+        rects.addAll(<double>[rect.left, rect.top, rect.right, rect.bottom]);
+      }
+      map['exclusionRects'] = rects;
+    }
+    return map;
+  }
 }
 
 typedef NativeInkPacketHandler = void Function(NativeInkPacket packet);
@@ -211,6 +223,20 @@ class NativeInkBridge {
       _platformMissing = true;
     } on PlatformException catch (error) {
       debugPrint('Could not finish native ink preview: ${error.message}');
+    }
+  }
+
+  /// Clears any transient native ink preview across all surfaces immediately.
+  Future<void> clearAllPreviews() async {
+    if (_platformMissing) {
+      return;
+    }
+    try {
+      await _channel.invokeMethod<void>('clearAllPreviews');
+    } on MissingPluginException {
+      _platformMissing = true;
+    } on PlatformException catch (error) {
+      debugPrint('Could not clear native ink previews: ${error.message}');
     }
   }
 

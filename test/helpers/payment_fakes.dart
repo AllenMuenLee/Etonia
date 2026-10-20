@@ -13,20 +13,31 @@ class FakeInAppPurchaseGateway implements InAppPurchaseGateway {
   FakeInAppPurchaseGateway({
     this.available = true,
     Map<SubscriptionPlan, String>? prices,
+    Map<SubscriptionPlan, String>? yearlyPrices,
   }) : prices =
            prices ??
            const <SubscriptionPlan, String>{
              SubscriptionPlan.starter499: '\$4.99',
              SubscriptionPlan.pro1299: '\$12.99',
              SubscriptionPlan.max2999: '\$29.99',
+           },
+       yearlyPrices =
+           yearlyPrices ??
+           const <SubscriptionPlan, String>{
+             SubscriptionPlan.starter499: '\$49.99',
+             SubscriptionPlan.pro1299: '\$129.99',
+             SubscriptionPlan.max2999: '\$299.99',
            };
 
   bool available;
   final Map<SubscriptionPlan, String> prices;
+  final Map<SubscriptionPlan, String> yearlyPrices;
 
   /// The product IDs the store answers to; Android's by default.
   Map<SubscriptionPlan, String> productIds =
       PaymentConfig.defaultAndroidProductIds;
+  Map<SubscriptionPlan, String> yearlyProductIds =
+      PaymentConfig.defaultAndroidYearlyProductIds;
 
   final StreamController<List<StorePurchaseUpdate>> _updates =
       StreamController<List<StorePurchaseUpdate>>.broadcast();
@@ -56,6 +67,13 @@ class FakeInAppPurchaseGateway implements InAppPurchaseGateway {
             id: entry.value,
             title: entry.key.title,
             price: prices[entry.key]!,
+          ),
+      for (final MapEntry<SubscriptionPlan, String> entry in yearlyProductIds.entries)
+        if (ids.contains(entry.value))
+          StoreProduct(
+            id: entry.value,
+            title: '${entry.key.title} Annual',
+            price: yearlyPrices[entry.key]!,
           ),
     ];
   }

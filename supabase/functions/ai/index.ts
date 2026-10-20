@@ -15,6 +15,7 @@ import {
   outputBudget,
   providerAnswer,
   providerRequest,
+  reservationCap,
   stepMessage,
   twoStep,
   validateInput,
@@ -36,10 +37,12 @@ Deno.serve(endpoint(async (req) => {
   );
   // Live store verification fails closed, including renewals, refunds and expiry.
   await reconcile(db, user);
+  const two = twoStep(model, input);
   const reservation = await rpc(db, "ai_reserve", {
     p_user: user,
     p_request: input.requestId,
     p_model: input.model,
+    p_max: reservationCap(model, input, two),
   });
   const settle = (cost: number, tokensIn = 0, tokensOut = 0, release = false) =>
     rpc(db, "ai_settle", {
@@ -83,7 +86,6 @@ Deno.serve(endpoint(async (req) => {
   };
   try {
     const maxOutput = outputBudget(model, input, reservation.reserved, reservation.unlimited);
-    const two = twoStep(model, input);
     const started = Date.now();
     const first = await ask(
       providerRequest(model, input, maxOutput, key, two ? { step: "text" } : undefined),
@@ -96,6 +98,8 @@ Deno.serve(endpoint(async (req) => {
     }
     let tokensIn = first.result.input;
     let tokensOut = first.result.output;
+    let cached = first.result.cached;
+    let cacheWrites = first.result.cacheWrites;
     let answer = first.result.answer;
     if (two && typeof answer === "string" && answer) {
       // Step 2: the notation, following the explanation. Its failure costs
@@ -104,7 +108,11 @@ Deno.serve(endpoint(async (req) => {
       try {
         message = stepMessage(answer);
       } catch (error) {
-        await settle(costOf(model, tokensIn, tokensOut), tokensIn, tokensOut);
+        await settle(
+          costOf(model, tokensIn, tokensOut, cached, cacheWrites),
+          tokensIn,
+          tokensOut,
+        );
         settled = true;
         throw error;
       }
@@ -119,6 +127,8 @@ Deno.serve(endpoint(async (req) => {
         if (second.result) {
           tokensIn += second.result.input;
           tokensOut += second.result.output;
+          cached += second.result.cached;
+          cacheWrites += second.result.cacheWrites;
           notationAnswer = second.result.answer;
         }
       } catch {
@@ -127,7 +137,7 @@ Deno.serve(endpoint(async (req) => {
       }
       answer = combineSteps(message, notationAnswer);
     }
-    const cost = costOf(model, tokensIn, tokensOut);
+    const cost = costOf(model, tokensIn, tokensOut, cached, cacheWrites);
     await settle(cost, tokensIn, tokensOut);
     settled = true;
     if (typeof answer !== "string" || !answer) throw new Failure("server", 503);

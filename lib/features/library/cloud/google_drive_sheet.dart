@@ -207,10 +207,15 @@ class _GoogleDriveSheetState extends State<GoogleDriveSheet> {
       if (!mounted) return;
       setState(() => _lastBackup = summary.exportedAt);
       _show(
-        'Backed up ${_count(summary.noteCount, 'note')} and '
-        '${_count(summary.folderCount, 'folder')}. '
-        '${summary.uploadedFiles} uploaded, '
-        '${summary.unchangedFiles} already up to date.',
+        <String>[
+          'Backed up ${_count(summary.noteCount, 'note')} and '
+              '${_count(summary.folderCount, 'folder')}. '
+              '${summary.uploadedFiles} uploaded, '
+              '${summary.unchangedFiles} already up to date.',
+          if (summary.movedToDeleted > 0)
+            '${_count(summary.movedToDeleted, 'note')} in the backup but not '
+                'on this device moved to Recently Deleted.',
+        ].join(' '),
       );
     });
   }
@@ -257,6 +262,9 @@ class _GoogleDriveSheetState extends State<GoogleDriveSheet> {
               'of ${formatModified(summary.exportedAt, widget.clock())}.',
           if (summary.notesSkipped > 0)
             'Skipped ${_count(summary.notesSkipped, 'note')} already here.',
+          if (summary.deletedRestored > 0)
+            '${_count(summary.deletedRestored, 'note')} put back in Recently '
+                'Deleted.',
         ].join(' '),
       );
     });

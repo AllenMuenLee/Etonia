@@ -1,8 +1,8 @@
 import 'dart:collection';
 import 'dart:math' as math;
-import 'dart:typed_data';
 
 import 'package:flutter/widgets.dart';
+import 'package:flutter/foundation.dart';
 
 import '../../../app/theme/app_tokens.dart';
 import 'ink_controller.dart';
@@ -77,16 +77,19 @@ class StickyNotesPainter extends CustomPainter {
     required this.controller,
     required this.accent,
     this.config = const StickyNoteConfig(),
+    this.visible,
   }) : super(
          repaint: Listenable.merge(<Listenable>[
            controller.completedStrokesListenable,
            controller.stickyEditingListenable,
+           ?visible,
          ]),
        );
 
   final InkController controller;
   final Color accent;
   final StickyNoteConfig config;
+  final ValueListenable<Rect>? visible;
 
   @override
   void paint(Canvas canvas, Size size) {
@@ -97,6 +100,7 @@ class StickyNotesPainter extends CustomPainter {
     final List<int> selected =
         controller.selection?.stickyIndices ?? const <int>[];
     final String? editing = controller.editingSticky?.id;
+    final Rect? viewport = visible?.value.inflate(16);
     int next = 0;
     for (int i = 0; i < notes.length; i++) {
       if (next < selected.length && selected[next] == i) {
@@ -104,6 +108,9 @@ class StickyNotesPainter extends CustomPainter {
         continue;
       }
       final StickyNoteElement note = notes[i];
+      if (viewport != null && !note.bounds.overlaps(viewport)) {
+        continue;
+      }
       paintStickyNote(canvas, note, config: config);
       if (note.id == editing) {
         paintStickyEditingOutline(canvas, note, accent, config);
@@ -115,7 +122,8 @@ class StickyNotesPainter extends CustomPainter {
   bool shouldRepaint(StickyNotesPainter oldDelegate) {
     return oldDelegate.controller != controller ||
         oldDelegate.accent != accent ||
-        oldDelegate.config != config;
+        oldDelegate.config != config ||
+        oldDelegate.visible != visible;
   }
 }
 
@@ -150,22 +158,28 @@ void paintStickyEditingOutline(
 /// Repaints only when the collection, the set of selected strokes, or the
 /// playback's strokes change hands; never for a playback frame.
 class CompletedStrokesPainter extends CustomPainter {
-  CompletedStrokesPainter({required this.controller, required this.brightness})
-    : super(
-        repaint: Listenable.merge(<Listenable>[
-          controller.completedStrokesListenable,
-          controller.notationPlaybackListenable,
-        ]),
-      );
+  CompletedStrokesPainter({
+    required this.controller,
+    required this.brightness,
+    this.visible,
+  }) : super(
+         repaint: Listenable.merge(<Listenable>[
+           controller.completedStrokesListenable,
+           controller.notationPlaybackListenable,
+           ?visible,
+         ]),
+       );
 
   final InkController controller;
   final Brightness brightness;
+  final ValueListenable<Rect>? visible;
 
   @override
   void paint(Canvas canvas, Size size) {
     final List<Stroke> strokes = controller.strokes;
     final List<int> selected = controller.selection?.indices ?? const <int>[];
     final bool playing = controller.notationPlaybacks.isNotEmpty;
+    final Rect? viewport = visible?.value.inflate(8);
     int next = 0;
     for (int i = 0; i < strokes.length; i++) {
       // Selected indices ascend, so one cursor walks them.
@@ -174,6 +188,9 @@ class CompletedStrokesPainter extends CustomPainter {
         continue;
       }
       final Stroke stroke = strokes[i];
+      if (viewport != null && !stroke.bounds.overlaps(viewport)) {
+        continue;
+      }
       if ((playing && controller.isPlayingStroke(stroke)) ||
           controller.isStrokeHidden(stroke)) {
         continue;
@@ -193,7 +210,8 @@ class CompletedStrokesPainter extends CustomPainter {
   @override
   bool shouldRepaint(CompletedStrokesPainter oldDelegate) {
     return oldDelegate.controller != controller ||
-        oldDelegate.brightness != brightness;
+        oldDelegate.brightness != brightness ||
+        oldDelegate.visible != visible;
   }
 }
 

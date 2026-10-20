@@ -62,7 +62,7 @@ abstract final class AppIcons {
   static const IconData model = CupertinoIcons.chevron_down;
 
   // Editor.
-  static const IconData pen = CupertinoIcons.pen;
+  static const IconData pen = CupertinoIcons.pencil_outline;
   static const IconData highlighter = CupertinoIcons.paintbrush;
   static const IconData stickyNote = CupertinoIcons.square_on_square;
   static const IconData lasso = CupertinoIcons.lasso;
@@ -73,6 +73,7 @@ abstract final class AppIcons {
   static const IconData paste = CupertinoIcons.doc_on_clipboard;
   static const IconData tune = CupertinoIcons.slider_horizontal_3;
   static const IconData insertImage = CupertinoIcons.photo;
+  static const IconData camera = CupertinoIcons.camera;
   static const IconData addPage = CupertinoIcons.doc_text;
   static const IconData infinite = CupertinoIcons.infinite;
   static const IconData grows = CupertinoIcons.arrow_up_left_arrow_down_right;

@@ -131,10 +131,10 @@ void main() {
         ]),
       );
 
-      // The disc's 10 px box, plus 12 px on every side, at 2x.
+      // The disc's 10 px box, plus 12 px on every side, at 3x.
       expect(image.logicalBounds, const Rect.fromLTRB(33, 33, 67, 67));
-      expect(image.width, 68);
-      expect(image.height, 68);
+      expect(image.width, 102);
+      expect(image.height, 102);
       expect(image.png.sublist(0, 8), <int>[
         0x89,
         0x50,
@@ -146,8 +146,8 @@ void main() {
         0x0A,
       ]);
       final _Decoded pixels = await _decode(image);
-      expect(pixels.width, 68);
-      expect(pixels.height, 68);
+      expect(pixels.width, 102);
+      expect(pixels.height, 102);
       expect(pixels.at(50, 50), isSameColorAs(_black));
       expect(pixels.at(53, 50), isSameColorAs(_black));
       // Round, not square: the corner of the disc's box is paper.
@@ -235,16 +235,16 @@ void main() {
       SelectionInkSnapshot.fromStrokes(<SnapshotStroke>[stroke]),
     );
 
-    // Ink: 98..202 by 198..202. Padded by 12: 128 by 28, at 2x.
+    // Ink: 98..202 by 198..202. Padded by 12: 128 by 28, at 3x.
     expect(image.logicalBounds, const Rect.fromLTRB(86, 186, 214, 214));
-    expect(image.scale, 2);
-    expect(image.width, 256);
-    expect(image.height, 56);
+    expect(image.scale, 3);
+    expect(image.width, 384);
+    expect(image.height, 84);
     final _Decoded pixels = await _decode(image);
     expect(pixels.at(98.5, 200), isSameColorAs(_black));
     expect(pixels.at(96, 200), isSameColorAs(_white));
     expect(pixels.pixel(0, 0), isSameColorAs(_white));
-    expect(pixels.pixel(255, 55), isSameColorAs(_white));
+    expect(pixels.pixel(383, 83), isSameColorAs(_white));
 
     const SelectionImageRenderer wider = SelectionImageRenderer(
       config: AiImageConfig(padding: 30),
@@ -407,7 +407,7 @@ void main() {
     });
   }
 
-  test('a large selection is shrunk to fit 768 pixels', () async {
+  test('a large selection is shrunk to fit 2048 pixels', () async {
     final SelectionImage image = await renderer.render(
       SelectionInkSnapshot.fromStrokes(<SnapshotStroke>[
         _line(
@@ -420,13 +420,13 @@ void main() {
     );
 
     // 5044 by 1044 logical pixels.
-    expect(image.width, 768);
-    expect(image.height, lessThanOrEqualTo(768));
-    expect(image.scale, closeTo(768 / 5044, 1e-9));
+    expect(image.width, 2048);
+    expect(image.height, lessThanOrEqualTo(2048));
+    expect(image.scale, closeTo(2048 / 5044, 1e-9));
     expect(image.height, (1044 * image.scale).ceil());
     expect(image.width / image.height, closeTo(5044 / 1044, 0.02));
     final _Decoded pixels = await _decode(image);
-    expect(pixels.width, 768);
+    expect(pixels.width, 2048);
     expect(pixels.at(2500, 500), isSameColorAs(_red));
 
     // Tall selections are limited the same way.
@@ -435,20 +435,20 @@ void main() {
         _line(const InkVector(0, 0), const InkVector(100, 9000)),
       ]),
     );
-    expect(tall.height, 768);
-    expect(tall.width, lessThan(768));
+    expect(tall.height, 2048);
+    expect(tall.width, lessThan(2048));
   });
 
-  test('a small selection is drawn at 2x and no more', () async {
+  test('a small selection is drawn at 3x and no more', () async {
     final SelectionImage image = await renderer.render(
       SelectionInkSnapshot.fromStrokes(<SnapshotStroke>[
         _dot(const InkVector(5, 5), width: 1),
       ]),
     );
 
-    expect(image.scale, 2);
-    expect(image.width, 50);
-    expect(image.height, 50);
+    expect(image.scale, 3);
+    expect(image.width, 75);
+    expect(image.height, 75);
   });
 
   test('geometry that cannot be drawn fails before anything is allocated', () {

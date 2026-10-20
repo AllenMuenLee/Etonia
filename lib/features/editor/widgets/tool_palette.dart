@@ -15,6 +15,7 @@ import '../ink/ink_palette.dart';
 import '../ink/pen_settings.dart';
 import '../ink/stroke.dart';
 import 'eraser_options.dart';
+import 'image_options.dart';
 import 'ink_color_picker.dart';
 import 'palette_button.dart';
 import 'palette_popover.dart';
@@ -31,12 +32,14 @@ class ToolPaletteController {
   final MenuController eraserMenu = MenuController();
   final MenuController selectMenu = MenuController();
   final MenuController stickyMenu = MenuController();
+  final MenuController imageMenu = MenuController();
 
   bool get hasOpenPopover {
     return penMenu.isOpen ||
         eraserMenu.isOpen ||
         selectMenu.isOpen ||
-        stickyMenu.isOpen;
+        stickyMenu.isOpen ||
+        imageMenu.isOpen;
   }
 
   void closeAll() {
@@ -44,6 +47,7 @@ class ToolPaletteController {
     eraserMenu.close();
     selectMenu.close();
     stickyMenu.close();
+    imageMenu.close();
   }
 }
 
@@ -181,6 +185,7 @@ class ToolPalette extends StatelessWidget {
     required this.onPaste,
     required this.aiActive,
     required this.onToggleAi,
+    this.toolsLocked,
     this.penConfig = const PenConfig(),
     this.eraserConfig = const EraserConfig(),
     this.dense = false,
@@ -192,10 +197,17 @@ class ToolPalette extends StatelessWidget {
     this.stickySettings,
     this.onStickySettingsChanged,
     this.stickyTargetLabel,
+    this.onChooseImageFromGallery,
+    this.onTakePhoto,
   });
 
   static const double _padding = AppSpacing.xxs;
-  static const int _buttonCount = 5;
+  static const int _buttonCount = 6;
+  static const double _buttonStep = 44;
+
+  /// Callbacks for inserting images from gallery or camera.
+  final VoidCallback? onChooseImageFromGallery;
+  final VoidCallback? onTakePhoto;
 
   /// The look of the next sticky note. Without it there is no Sticky note
   /// tool.
@@ -233,6 +245,17 @@ class ToolPalette extends StatelessWidget {
 
   /// Turns AI mode on, or off when it is on.
   final VoidCallback onToggleAi;
+
+  /// Whether input for the assistant is under way. While it is, the AI tool
+  /// is the only one that can be on: the other tools cannot be chosen.
+  final ValueListenable<bool>? toolsLocked;
+
+  bool get _locked => toolsLocked?.value ?? false;
+
+  /// What choosing a tool that is not already on does: nothing while the
+  /// tools are locked.
+  VoidCallback? _choose(VoidCallback choose) => _locked ? null : choose;
+
   final PenConfig penConfig;
   final EraserConfig eraserConfig;
   final bool dense;
@@ -251,7 +274,10 @@ class ToolPalette extends StatelessWidget {
   /// The palette's outer size; fixed so the screen can lay out around it.
   static Size sizeFor(Axis axis) {
     const double thickness = AppSizes.minTouchTarget + 2 * _padding;
-    const double length = _buttonCount * AppSizes.minTouchTarget + 2 * _padding;
+    const double length =
+        (_buttonCount - 1) * _buttonStep +
+        AppSizes.minTouchTarget +
+        2 * _padding;
     return axis == Axis.vertical
         ? const Size(thickness, length)
         : const Size(length, thickness);
@@ -286,17 +312,19 @@ class ToolPalette extends StatelessWidget {
                 penSettings,
                 eraserSettings,
                 aiActive,
+                ?toolsLocked,
                 ?stickySettings,
               ]),
               builder: (BuildContext context, Widget? _) {
-                return Flex(
-                  direction: axis,
-                  mainAxisSize: MainAxisSize.min,
+                return _PaletteButtonsLayout(
+                  axis: axis,
+                  step: _buttonStep,
                   children: <Widget>[
                     _penControl(),
                     _eraserControl(),
                     _selectControl(),
                     if (stickySettings != null) _stickyControl(),
+                    _imageControl(),
                     _aiControl(),
                   ],
                 );
@@ -321,7 +349,9 @@ class ToolPalette extends StatelessWidget {
           semanticLabel: PenOptions.describe(pen),
           selected: selected,
           dense: dense,
-          onPressed: selected ? toggle : () => tool.value = EditorTool.pen,
+          onPressed: selected
+              ? toggle
+              : _choose(() => tool.value = EditorTool.pen),
           child: _PenIcon(
             ink: pen.activeInk,
             highlighter: pen.isHighlighter,
@@ -367,7 +397,9 @@ class ToolPalette extends StatelessWidget {
               'Eraser, ${EraserOptions.describe(eraserSettings.value)}',
           selected: selected,
           dense: dense,
-          onPressed: selected ? toggle : () => tool.value = EditorTool.eraser,
+          onPressed: selected
+              ? toggle
+              : _choose(() => tool.value = EditorTool.eraser),
           child: const EraserIcon(),
         );
       },
@@ -397,7 +429,9 @@ class ToolPalette extends StatelessWidget {
           tooltip: 'Select',
           selected: selected,
           dense: dense,
-          onPressed: selected ? toggle : () => tool.value = EditorTool.select,
+          onPressed: selected
+              ? toggle
+              : _choose(() => tool.value = EditorTool.select),
           child: const Icon(AppIcons.lasso),
         );
       },
@@ -438,10 +472,10 @@ class ToolPalette extends StatelessWidget {
           dense: dense,
           onPressed: selected
               ? toggle
-              : () {
+              : _choose(() {
                   tool.value = EditorTool.sticky;
                   toggle();
-                },
+                }),
           child: _StickyIcon(color: settings.value.color),
         );
       },
@@ -456,6 +490,42 @@ class ToolPalette extends StatelessWidget {
                   onStickySettingsChanged?.call(next),
             );
           },
+        );
+      },
+    );
+  }
+
+  /// Opens image insertion options: gallery or camera.
+  Widget _imageControl() {
+    final bool enabled =
+        onChooseImageFromGallery != null || onTakePhoto != null;
+    return PalettePopover(
+      paletteEdge: edge,
+      controller: controller?.imageMenu,
+      anchorBuilder: (BuildContext context, VoidCallback toggle) {
+        return PaletteButton(
+          key: const ValueKey<String>('insert-image-button'),
+          tooltip: 'Insert image',
+          semanticLabel: 'Insert image',
+          dense: dense,
+          onPressed: enabled ? toggle : null,
+          child: const PictureIcon(),
+        );
+      },
+      panelBuilder: (BuildContext context, VoidCallback close) {
+        return ImageOptions(
+          onChooseFromGallery: onChooseImageFromGallery == null
+              ? null
+              : () {
+                  close();
+                  onChooseImageFromGallery!();
+                },
+          onTakePhoto: onTakePhoto == null
+              ? null
+              : () {
+                  close();
+                  onTakePhoto!();
+                },
         );
       },
     );
@@ -502,6 +572,48 @@ class _AiGlyph extends StatelessWidget {
             letterSpacing: 0.4,
           ),
         ),
+      ),
+    );
+  }
+}
+
+/// Lays out the palette buttons along [axis] spaced by [step] while
+/// preserving each button's 48 px touch target.
+class _PaletteButtonsLayout extends StatelessWidget {
+  const _PaletteButtonsLayout({
+    required this.axis,
+    required this.step,
+    required this.children,
+  });
+
+  final Axis axis;
+  final double step;
+  final List<Widget> children;
+
+  @override
+  Widget build(BuildContext context) {
+    final double width = axis == Axis.horizontal
+        ? (children.length - 1) * step + AppSizes.minTouchTarget
+        : AppSizes.minTouchTarget;
+    final double height = axis == Axis.vertical
+        ? (children.length - 1) * step + AppSizes.minTouchTarget
+        : AppSizes.minTouchTarget;
+
+    return SizedBox(
+      width: width,
+      height: height,
+      child: Stack(
+        clipBehavior: Clip.none,
+        children: <Widget>[
+          for (int i = 0; i < children.length; i++)
+            Positioned(
+              left: axis == Axis.horizontal ? i * step : 0,
+              top: axis == Axis.vertical ? i * step : 0,
+              width: AppSizes.minTouchTarget,
+              height: AppSizes.minTouchTarget,
+              child: children[i],
+            ),
+        ],
       ),
     );
   }
@@ -749,8 +861,150 @@ class _StickyLinesPainter extends CustomPainter {
       oldDelegate.color != color;
 }
 
+/// A pen glyph, styled to match the floating tool palette.
+class PenIcon extends StatelessWidget {
+  const PenIcon({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    final IconThemeData theme = IconTheme.of(context);
+    return SizedBox.square(
+      dimension: theme.size,
+      child: CustomPaint(
+        painter: _PenIconPainter(theme.color ?? const Color(0xFF000000)),
+      ),
+    );
+  }
+}
+
+class _PenIconPainter extends CustomPainter {
+  const _PenIconPainter(this.color);
+
+  final Color color;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final double unit = size.shortestSide / 24;
+    final Paint paint = Paint()
+      ..color = color
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 1.8 * unit
+      ..strokeJoin = StrokeJoin.round
+      ..strokeCap = StrokeCap.round
+      ..isAntiAlias = true;
+
+    // The surface line being drawn on.
+    canvas.drawLine(
+      Offset(4 * unit, 20.5 * unit),
+      Offset(16 * unit, 20.5 * unit),
+      paint,
+    );
+
+    // An angled pen pointing down-left toward the baseline, matching the
+    // eraser's angle and stroke weight.
+    canvas
+      ..save()
+      ..translate(12.5 * unit, 10.5 * unit)
+      ..rotate(-3 * math.pi / 4);
+
+    // Barrel: rounded top cap, straight body.
+    final RRect barrel = RRect.fromRectAndCorners(
+      Rect.fromLTRB(-9.5 * unit, -2.4 * unit, 2.5 * unit, 2.4 * unit),
+      topLeft: Radius.circular(1.8 * unit),
+      bottomLeft: Radius.circular(1.8 * unit),
+    );
+    canvas.drawRRect(barrel, paint);
+
+    // Collar band separating barrel and nib.
+    canvas.drawLine(
+      Offset(2.5 * unit, -2.4 * unit),
+      Offset(2.5 * unit, 2.4 * unit),
+      paint,
+    );
+
+    // Tapered nib.
+    final Path nib = Path()
+      ..moveTo(2.5 * unit, -2.4 * unit)
+      ..lineTo(7.5 * unit, -0.6 * unit)
+      ..lineTo(9.5 * unit, 0)
+      ..lineTo(7.5 * unit, 0.6 * unit)
+      ..lineTo(2.5 * unit, 2.4 * unit);
+    canvas.drawPath(nib, paint);
+
+    // Nib slit.
+    canvas.drawLine(
+      Offset(4.0 * unit, 0),
+      Offset(8.0 * unit, 0),
+      paint,
+    );
+
+    canvas.restore();
+  }
+
+  @override
+  bool shouldRepaint(_PenIconPainter oldDelegate) => oldDelegate.color != color;
+}
+
+/// A picture glyph, styled to match the floating tool palette.
+class PictureIcon extends StatelessWidget {
+  const PictureIcon({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    final IconThemeData theme = IconTheme.of(context);
+    return SizedBox.square(
+      dimension: theme.size,
+      child: CustomPaint(
+        painter: _PictureIconPainter(theme.color ?? const Color(0xFF000000)),
+      ),
+    );
+  }
+}
+
+class _PictureIconPainter extends CustomPainter {
+  const _PictureIconPainter(this.color);
+
+  final Color color;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final double unit = size.shortestSide / 24;
+    final Paint paint = Paint()
+      ..color = color
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 1.8 * unit
+      ..strokeJoin = StrokeJoin.round
+      ..strokeCap = StrokeCap.round
+      ..isAntiAlias = true;
+
+    final Rect frame = Rect.fromCenter(
+      center: Offset(12 * unit, 12 * unit),
+      width: 17 * unit,
+      height: 14 * unit,
+    );
+    final RRect rrect = RRect.fromRectAndRadius(frame, Radius.circular(2.5 * unit));
+    canvas.drawRRect(rrect, paint);
+
+    canvas.save();
+    canvas.clipRRect(rrect);
+    final Path mountains = Path()
+      ..moveTo(3.5 * unit, 16.5 * unit)
+      ..lineTo(8 * unit, 11.5 * unit)
+      ..lineTo(12.5 * unit, 15.5 * unit)
+      ..lineTo(16 * unit, 12.5 * unit)
+      ..lineTo(20.5 * unit, 16.5 * unit);
+    canvas.drawPath(mountains, paint);
+
+    canvas.drawCircle(Offset(15.5 * unit, 8 * unit), 1.5 * unit, paint);
+    canvas.restore();
+  }
+
+  @override
+  bool shouldRepaint(_PictureIconPainter oldDelegate) => oldDelegate.color != color;
+}
+
 /// The writing tool's glyph with a sample of the current ink at its
-/// corner: a translucent bar for the highlighter. The pen is shown plain.
+/// corner: a dot for the pen, a translucent bar for the highlighter.
 class _PenIcon extends StatelessWidget {
   const _PenIcon({
     required this.ink,
@@ -766,32 +1020,29 @@ class _PenIcon extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    if (!highlighter) {
-      return const SizedBox.square(
-        dimension: AppSizes.icon + AppSpacing.xxs,
-        child: Center(child: Icon(AppIcons.pen)),
-      );
-    }
     final AppColors colors = AppColors.of(context);
     final Color color = ink.resolve(Theme.of(context).brightness);
     return SizedBox.square(
       dimension: AppSizes.icon + AppSpacing.xxs,
       child: Stack(
         children: <Widget>[
-          const Align(
-            alignment: Alignment.topLeft,
-            child: Icon(AppIcons.highlighter),
+          Align(
+            alignment: highlighter ? Alignment.topLeft : Alignment.center,
+            child: highlighter
+                ? const Icon(AppIcons.highlighter)
+                : const PenIcon(),
           ),
           Positioned(
             right: 0,
             bottom: 0,
             child: Container(
               key: const ValueKey<String>('pen-ink-dot'),
-              width: _dot * 1.6,
+              width: highlighter ? _dot * 1.6 : _dot,
               height: _dot,
               decoration: BoxDecoration(
-                color: color.withValues(alpha: opacity),
-                borderRadius: BorderRadius.circular(2),
+                color: highlighter ? color.withValues(alpha: opacity) : color,
+                shape: highlighter ? BoxShape.rectangle : BoxShape.circle,
+                borderRadius: highlighter ? BorderRadius.circular(2) : null,
                 border: Border.all(color: colors.surface, width: 1.5),
               ),
             ),

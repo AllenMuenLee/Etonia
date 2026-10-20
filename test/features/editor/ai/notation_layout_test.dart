@@ -6,6 +6,7 @@ import 'package:greatnote/features/editor/ai/ai_notation.dart';
 import 'package:greatnote/features/editor/ai/notation_font.dart';
 import 'package:greatnote/features/editor/ai/notation_formula.dart';
 import 'package:greatnote/features/editor/ai/notation_layout.dart';
+import 'package:greatnote/features/editor/handwriting/handwriting_style.dart';
 import 'package:greatnote/features/editor/ink/ink_controller.dart';
 import 'package:greatnote/features/editor/ink/ink_notation.dart';
 import 'package:greatnote/features/editor/ink/ink_sample.dart';
@@ -182,17 +183,24 @@ void main() {
       expect(NotationFont.canWrite('日本'), isFalse);
 
       // "I" at size 20 from (100, 50): its stem runs the full cap height,
-      // with the slight lean and drift of the handwriting treatment.
+      // leaning forward, with the slight drift of the handwriting
+      // treatment.
       final List<List<InkVector>> i = NotationFont.write(
         'I',
         origin: const InkVector(100, 50),
         size: 20,
       );
-      expect(i[1].first.y, closeTo(50, 0.2));
-      expect(i[1].last.y, closeTo(70, 0.2));
-      expect(i[1].first.x, inInclusiveRange(103.5, 105));
-      expect(i[1].last.x, inInclusiveRange(103.5, 105));
-      expect((i[1].first.x - i[1].last.x).abs(), greaterThan(0.3));
+      final InkVector top = i.single.reduce(
+        (InkVector a, InkVector b) => a.y < b.y ? a : b,
+      );
+      final InkVector foot = i.single.reduce(
+        (InkVector a, InkVector b) => a.y > b.y ? a : b,
+      );
+      expect(top.y, closeTo(50, 0.6));
+      expect(foot.y, closeTo(70, 0.6));
+      expect(foot.x, inInclusiveRange(99.5, 101));
+      // Leaning forward by the standard slant.
+      expect(top.x - foot.x, closeTo(20 * 0.12, 0.6));
 
       // Wider with more letters, and lines stacked 1.6 sizes apart.
       expect(
@@ -210,10 +218,62 @@ void main() {
         origin: InkVector.zero,
         size: 20,
       );
-      expect(lines[1].first.y - lines[0].first.y, closeTo(32, 0.5));
+      expect(lines[1].first.y - lines[0].first.y, closeTo(32, 1));
       expect(
         () => NotationFont.write('é', origin: InkVector.zero, size: 20),
         throwsArgumentError,
+      );
+    });
+
+    test('g is a single storey with a tail curled left, not a q', () {
+      List<InkVector> ink(String char) => NotationFont.write(
+        char,
+        origin: InkVector.zero,
+        size: 20,
+      ).expand((List<InkVector> stroke) => stroke).toList();
+      double lowestX(List<InkVector> points) =>
+          points.reduce((InkVector a, InkVector b) => a.y > b.y ? a : b).x;
+      final List<InkVector> g = ink('g');
+      final List<InkVector> q = ink('q');
+      expect(
+        NotationFont.write('g', origin: InkVector.zero, size: 20),
+        hasLength(1),
+      );
+      // Both hang below the baseline, but only the g's tail curls back.
+      expect(g.map((InkVector p) => p.y).reduce(math.max), greaterThan(22));
+      final double gRight = g.map((InkVector p) => p.x).reduce(math.max);
+      expect(gRight - lowestX(g), greaterThan(3.5));
+      final double qRight = q.map((InkVector p) => p.x).reduce(math.max);
+      expect(qRight - lowestX(q), lessThan(3));
+    });
+
+    test('a writer\'s style changes the ink but not the font\'s metrics', () {
+      const HandwritingStyle wide = HandwritingStyle(
+        slant: 0.4,
+        widthScale: 1.4,
+        xHeight: 0.5,
+      );
+      double right(List<List<InkVector>> strokes) => strokes
+          .expand((List<InkVector> stroke) => stroke)
+          .map((InkVector p) => p.x)
+          .reduce(math.max);
+      final List<List<InkVector>> standard = NotationFont.write(
+        'quiet notes',
+        origin: InkVector.zero,
+        size: 20,
+      );
+      final List<List<InkVector>> styled = NotationFont.write(
+        'quiet notes',
+        origin: InkVector.zero,
+        size: 20,
+        style: wide,
+      );
+      expect(styled, hasLength(standard.length));
+      expect(right(styled), greaterThan(right(standard) * 1.3));
+      // The assistant plans with the font's own measure.
+      expect(
+        right(standard),
+        lessThanOrEqualTo(NotationFont.width('quiet notes', 20) + 0.5),
       );
     });
 

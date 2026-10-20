@@ -373,7 +373,7 @@ void main() {
         ),
       );
 
-      expect(text, contains('no blank area'));
+      expect(text, contains('No blank space is provided'));
       expect(text, contains('sticky_normalized'));
       expect(text, isNot(contains('free_areas')));
     });

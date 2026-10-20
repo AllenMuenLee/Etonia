@@ -1365,6 +1365,9 @@ class InkCanvas extends StatefulWidget {
     this.aiInput,
     this.carry,
     this.onSelectionCarried,
+    this.visible,
+    this.enableNativeInk = true,
+    this.exclusionRects,
   });
 
   /// Shared with the note's other pages, so that a selection moved onto one
@@ -1391,6 +1394,15 @@ class InkCanvas extends StatefulWidget {
   final bool pageGrows;
 
   final InkController controller;
+
+  /// The part of this page currently visible in page coordinates. When
+  /// omitted (tests, snapshots and exports), every stroke is painted.
+  final ValueListenable<Rect>? visible;
+
+  /// Whether real platform stylus events use the native sampling bridge.
+  /// This remains on in production; framework-driven performance tests turn
+  /// it off so their synthetic stylus packets exercise the Dart pipeline.
+  final bool enableNativeInk;
 
   /// What a pointer does. An inverted stylus erases whatever this says.
   final ValueListenable<EditorTool> tool;
@@ -1431,6 +1443,10 @@ class InkCanvas extends StatefulWidget {
   /// Page-local PDF paper that a lasso may capture as a bitmap excerpt.
   final Rect? selectablePdfBounds;
 
+  /// Global screen rectangles (such as tool palettes and top bars) where
+  /// native stylus strokes must be excluded from previewing and writing.
+  final ValueGetter<List<Rect>>? exclusionRects;
+
   @override
   State<InkCanvas> createState() => _InkCanvasState();
 }
@@ -1444,6 +1460,13 @@ class _InkCanvasState extends State<InkCanvas> with WidgetsBindingObserver {
   bool _dispatchingNative = false;
   List<RawInkSample>? _nativeSamples;
   List<Object?>? _lastNativeSurfaceSignature;
+
+  /// The native pointer whose stroke this canvas is following, if any.
+  int? _nativeLivePointer;
+
+  /// Native pointers that are not ink here: they began on a widget above
+  /// the page, such as the toolbar, or the pen was put down mid-stroke.
+  final Set<int> _ignoredNativePointers = <int>{};
 
   Timer? _holdTimer;
   int? _holdPointer;
@@ -1461,6 +1484,12 @@ class _InkCanvasState extends State<InkCanvas> with WidgetsBindingObserver {
   /// A pointer whose press opened a sticky note, so the rest of its
   /// gesture is not ink.
   int? _consumedPointer;
+
+  /// A finger that went down while only the pen writes, with where and
+  /// when: lifted soon without moving, it is a tap that deselects.
+  int? _fingerTapPointer;
+  Offset _fingerTapStart = Offset.zero;
+  Duration _fingerTapTime = Duration.zero;
 
   Size get _pageSize {
     final RenderObject? box = context.findRenderObject();
@@ -1653,7 +1682,15 @@ class _InkCanvasState extends State<InkCanvas> with WidgetsBindingObserver {
   /// closes it. Choosing the Sticky note tool with one note selected opens
   /// that note, so its options act on it.
   void _onToolChanged() {
-    _scheduleNativeSync();
+    final int? nativePointer = _nativeLivePointer;
+    if (nativePointer != null && widget.tool.value != EditorTool.pen) {
+      // Hide the live preview now rather than after the next frame's sync.
+      _ignoreNativePointer(nativePointer);
+    }
+    if (widget.tool.value != EditorTool.pen) {
+      NativeInkBridge.instance.clearAllPreviews();
+    }
+    _syncNativeSurface();
     _endGesture();
     _lastStickyTap = null;
     widget.pastePrompt?.value = null;
@@ -1698,6 +1735,15 @@ class _InkCanvasState extends State<InkCanvas> with WidgetsBindingObserver {
   }
 
   Future<void> _syncNativeSurface() async {
+    if (!widget.enableNativeInk) {
+      _lastNativeSurfaceSignature = null;
+      if (_nativeRegistered || _nativeRegistering) {
+        await NativeInkBridge.instance.unregisterSurface(_nativeSurfaceId);
+      }
+      _nativeRegistered = false;
+      _nativeRegistering = false;
+      return;
+    }
     final RenderObject? object = context.findRenderObject();
     if (object is! RenderBox || !object.attached || !object.hasSize) {
       return;
@@ -1712,6 +1758,8 @@ class _InkCanvasState extends State<InkCanvas> with WidgetsBindingObserver {
     // Highlighter input is still captured at full native sample rate.
     final bool previewEnabled = enabled && !style.isHighlighter;
     final Color color = style.resolve(Theme.of(context).brightness);
+    final List<Rect> exclusions =
+        widget.exclusionRects?.call() ?? const <Rect>[];
     final NativeInkSurface surface = NativeInkSurface(
       id: _nativeSurfaceId,
       size: object.size,
@@ -1723,6 +1771,7 @@ class _InkCanvasState extends State<InkCanvas> with WidgetsBindingObserver {
       color: color,
       width: style.width,
       pressureSensitivity: pen.dynamics.pressure,
+      exclusionRects: exclusions,
     );
     final List<Object?> signature = <Object?>[
       object.size.width,
@@ -1738,6 +1787,13 @@ class _InkCanvasState extends State<InkCanvas> with WidgetsBindingObserver {
       color.toARGB32(),
       style.width,
       pen.dynamics.pressure,
+      exclusions.length,
+      for (final Rect r in exclusions) ...<Object?>[
+        r.left,
+        r.top,
+        r.right,
+        r.bottom,
+      ],
     ];
     if (_nativeRegistered) {
       if (listEquals(signature, _lastNativeSurfaceSignature)) {
@@ -1772,6 +1828,7 @@ class _InkCanvasState extends State<InkCanvas> with WidgetsBindingObserver {
 
   bool _nativeOwns(PointerEvent event) {
     if (_dispatchingNative ||
+        !widget.enableNativeInk ||
         !_nativeRegistered ||
         widget.tool.value != EditorTool.pen) {
       return false;
@@ -1784,10 +1841,37 @@ class _InkCanvasState extends State<InkCanvas> with WidgetsBindingObserver {
   /// batch. Synthetic events carry the last position while [_nativeSamples]
   /// lets start/add/end consume every actual sample in timestamp order.
   void _onNativeInkPacket(NativeInkPacket packet) {
-    if (!mounted ||
-        packet.surfaceId != _nativeSurfaceId ||
-        widget.tool.value != EditorTool.pen) {
+    if (!mounted || packet.surfaceId != _nativeSurfaceId) {
       return;
+    }
+    final bool ends =
+        packet.phase == NativeInkPhase.up ||
+        packet.phase == NativeInkPhase.cancel;
+    if (packet.phase == NativeInkPhase.down) {
+      _ignoredNativePointers.remove(packet.pointer);
+      if (widget.tool.value != EditorTool.pen || !_nativeHitsCanvas(packet)) {
+        _ignoreNativePointer(packet.pointer);
+      } else {
+        _nativeLivePointer = packet.pointer;
+      }
+    } else if (widget.tool.value != EditorTool.pen) {
+      _ignoreNativePointer(packet.pointer);
+    }
+    if (widget.tool.value != EditorTool.pen) {
+      _ignoreNativePointer(packet.pointer);
+      return;
+    }
+    if (_ignoredNativePointers.contains(packet.pointer)) {
+      if (ends) {
+        _ignoredNativePointers.remove(packet.pointer);
+        if (_nativeLivePointer == packet.pointer) {
+          _nativeLivePointer = null;
+        }
+      }
+      return;
+    }
+    if (ends && _nativeLivePointer == packet.pointer) {
+      _nativeLivePointer = null;
     }
     if (packet.samples.isEmpty && packet.phase != NativeInkPhase.cancel) {
       return;
@@ -1877,6 +1961,36 @@ class _InkCanvasState extends State<InkCanvas> with WidgetsBindingObserver {
     }
   }
 
+  /// Stops treating native [pointer] as ink here and hides its preview.
+  void _ignoreNativePointer(int pointer) {
+    if (_ignoredNativePointers.add(pointer)) {
+      NativeInkBridge.instance.finishPreview(_nativeSurfaceId, pointer);
+    }
+  }
+
+  /// Native code only knows the page's rectangle, so a stylus pressed on a
+  /// toolbar or panel above the page also reaches it. Flutter's own hit test
+  /// says whether the page is really what lies under the pen.
+  bool _nativeHitsCanvas(NativeInkPacket packet) {
+    final RenderObject? object = context.findRenderObject();
+    if (object is! RenderBox || !object.attached || packet.samples.isEmpty) {
+      return false;
+    }
+    final Offset global = object.localToGlobal(packet.samples.first.position);
+    final HitTestResult result = HitTestResult();
+    WidgetsBinding.instance.hitTestInView(
+      result,
+      global,
+      View.of(context).viewId,
+    );
+    for (final HitTestEntry entry in result.path) {
+      if (entry.target == object) {
+        return true;
+      }
+    }
+    return false;
+  }
+
   void _onPointerDown(PointerDownEvent event) {
     if (_nativeOwns(event)) {
       return;
@@ -1886,6 +2000,11 @@ class _InkCanvasState extends State<InkCanvas> with WidgetsBindingObserver {
       return;
     }
     if (kind == InkDeviceKind.touch && (widget.stylusOnly?.value ?? false)) {
+      // Fingers only move the page here, but a tap still deselects. A
+      // second finger makes it a pinch.
+      _fingerTapPointer = _fingerTapPointer == null ? event.pointer : -1;
+      _fingerTapStart = event.position;
+      _fingerTapTime = event.timeStamp;
       return;
     }
     if (widget.isInputBlocked?.call() ?? false) {
@@ -1974,6 +2093,9 @@ class _InkCanvasState extends State<InkCanvas> with WidgetsBindingObserver {
     if (!onEditing && _isSecondStickyTap(event, position)) {
       return;
     }
+    if (widget.tool.value != EditorTool.pen) {
+      return;
+    }
     widget.carry?.clearSelection();
     final PenSettings pen = widget.penSettings.value;
     // Pen and Highlighter share the capture and smoothing; the highlighter
@@ -2022,6 +2144,30 @@ class _InkCanvasState extends State<InkCanvas> with WidgetsBindingObserver {
     return true;
   }
 
+  /// Clears the selection on every page, unless [position] is on this
+  /// page's selection or its handles.
+  void _deselectUnlessOnSelection(InkVector position) {
+    final InkController controller = widget.controller;
+    final InkSelection? selection = controller.selection;
+    if (selection != null &&
+        selection.frame.hitTest(
+              position,
+              handleHitRadius: controller.selectionConfig.handleHitRadius,
+              rotationHandleOffset:
+                  controller.selectionConfig.rotationHandleOffset,
+              tolerance: controller.selectionConfig.geometryTolerance,
+            ) !=
+            null) {
+      return;
+    }
+    final SelectionCarry? carry = widget.carry;
+    if (carry != null) {
+      carry.clearSelection();
+    } else {
+      controller.clearSelection();
+    }
+  }
+
   /// Remembers a tap that left a dot on a sticky note, for a double tap.
   void _recordStickyTap(PointerUpEvent event) {
     final InkController controller = widget.controller;
@@ -2060,6 +2206,10 @@ class _InkCanvasState extends State<InkCanvas> with WidgetsBindingObserver {
     if (event.pointer == _consumedPointer) {
       return;
     }
+    if (event.pointer == _fingerTapPointer &&
+        (event.position - _fingerTapStart).distance > kTouchSlop) {
+      _fingerTapPointer = -1;
+    }
     if (_isWritingForAi(event)) {
       widget.aiInput!.add(event.pointer, _samples(event));
       return;
@@ -2092,6 +2242,9 @@ class _InkCanvasState extends State<InkCanvas> with WidgetsBindingObserver {
         );
       }
     } else {
+      if (widget.tool.value != EditorTool.pen) {
+        return;
+      }
       widget.controller.addSamples(event.pointer, _samples(event));
       _trackShapeHold(event);
     }
@@ -2103,6 +2256,16 @@ class _InkCanvasState extends State<InkCanvas> with WidgetsBindingObserver {
     }
     if (event.pointer == _consumedPointer) {
       _consumedPointer = null;
+      return;
+    }
+    if (_fingerTapPointer != null && event.kind == PointerDeviceKind.touch) {
+      final bool tapped =
+          event.pointer == _fingerTapPointer &&
+          event.timeStamp - _fingerTapTime < kLongPressTimeout;
+      _fingerTapPointer = null;
+      if (tapped) {
+        _deselectUnlessOnSelection(_position(event));
+      }
       return;
     }
     if (event.pointer == _holdPointer) {
@@ -2179,6 +2342,9 @@ class _InkCanvasState extends State<InkCanvas> with WidgetsBindingObserver {
     }
     if (event.pointer == _consumedPointer) {
       _consumedPointer = null;
+    }
+    if (event.pointer == _fingerTapPointer) {
+      _fingerTapPointer = null;
     }
     widget.carry?._cancelSelectionGesture(this, event.pointer);
     // A placement not lifted into place inserts nothing.
@@ -2362,6 +2528,7 @@ class _InkCanvasState extends State<InkCanvas> with WidgetsBindingObserver {
                   controller: widget.controller,
                   accent: colors.accent,
                   config: widget.controller.stickyConfig,
+                  visible: widget.visible,
                 ),
               ),
             ),
@@ -2383,6 +2550,7 @@ class _InkCanvasState extends State<InkCanvas> with WidgetsBindingObserver {
                 painter: CompletedStrokesPainter(
                   controller: widget.controller,
                   brightness: brightness,
+                  visible: widget.visible,
                 ),
               ),
             ),

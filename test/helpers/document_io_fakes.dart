@@ -9,6 +9,7 @@ class FakeDocumentPicker implements DocumentPicker {
   PickedDocument? pdf;
   PickedDocument? goodnotes;
   PickedDocument? image;
+  final List<DocumentImageSource> imageSources = <DocumentImageSource>[];
 
   @override
   Future<PickedDocument?> pickPdf() async => pdf;
@@ -17,7 +18,10 @@ class FakeDocumentPicker implements DocumentPicker {
   Future<PickedDocument?> pickGoodnotes() async => goodnotes ?? pdf;
 
   @override
-  Future<PickedDocument?> pickImage() async => image;
+  Future<PickedDocument?> pickImage(DocumentImageSource source) async {
+    imageSources.add(source);
+    return image;
+  }
 }
 
 class FakeSharedDocumentSource implements SharedDocumentSource {

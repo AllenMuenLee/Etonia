@@ -136,7 +136,14 @@ void main() {
     await _pumpOpen(tester, plan);
 
     expect(
-      find.descendant(of: _pill, matching: find.text('\$1.20 left')),
+      find.descendant(of: _pill, matching: find.text('100% tokens')),
+      findsOneWidget,
+    );
+    expect(
+      find.descendant(
+        of: _pill,
+        matching: find.byKey(const ValueKey<String>('ai-token-bar')),
+      ),
       findsOneWidget,
     );
     expect(tester.getSize(_pill).height, greaterThanOrEqualTo(48));
@@ -214,7 +221,7 @@ void main() {
       await _choose(tester, AiModelId.astra);
       expect(_shownModel(tester), 'Astra');
       expect(
-        find.descendant(of: _pill, matching: find.text('\$15.00 left')),
+        find.descendant(of: _pill, matching: find.text('100% tokens')),
         findsOneWidget,
       );
       expect(tester.takeException(), isNull);

@@ -33,6 +33,15 @@ class NoteAssetData {
   final Uint8List bytes;
 }
 
+/// Optional persistent thumbnail storage implemented by file-backed
+/// repositories. Thumbnail rendering remains usable without it.
+abstract interface class ThumbnailDiskStore {
+  Future<Uint8List?> readThumbnail(String noteId, String key);
+  Future<void> writeThumbnail(String noteId, String key, Uint8List png);
+  Future<void> deleteThumbnails(String noteId);
+  Future<void> retainThumbnailNotes(Set<String> noteIds);
+}
+
 /// Thrown when a library operation cannot be done as asked: a missing item,
 /// an empty name, or a folder moved into itself.
 class LibraryException implements Exception {
@@ -68,10 +77,13 @@ abstract class NoteRepository extends ChangeNotifier {
   /// folder.
   Future<FolderListing> search(String query);
 
+  /// [id] keeps the id the note has elsewhere, as in a backup; it must
+  /// not be in use.
   Future<NoteEntry> createNote({
     String title = 'Untitled note',
     String? folderId,
     PageSetup setup = const PageSetup(),
+    String? id,
   });
 
   Future<Folder> createFolder(
@@ -95,8 +107,9 @@ abstract class NoteRepository extends ChangeNotifier {
   Future<NoteEntry> duplicateNote(String id);
 
   /// Moves the note to Recently Deleted, where its pages and assets are
-  /// kept until it is restored or deleted for good.
-  Future<void> deleteNote(String id);
+  /// kept until it is restored or deleted for good. [at] is when it was
+  /// deleted, now by default; earlier for one deleted on another device.
+  Future<void> deleteNote(String id, {DateTime? at});
 
   /// The notes in Recently Deleted, most recently deleted first.
   Future<List<NoteEntry>> trash();
@@ -233,13 +246,18 @@ abstract class IndexedNoteRepository extends NoteRepository {
     return done.future;
   }
 
+  /// Whether [id] is taken, by a folder or a note here or in Recently
+  /// Deleted.
+  bool _inUse(String id) =>
+      _folders.containsKey(id) ||
+      _notes.containsKey(id) ||
+      _trash.containsKey(id);
+
   String _id() {
     String id;
     do {
       id = _newId();
-    } while (_folders.containsKey(id) ||
-        _notes.containsKey(id) ||
-        _trash.containsKey(id));
+    } while (_inUse(id));
     return id;
   }
 
@@ -355,12 +373,16 @@ abstract class IndexedNoteRepository extends NoteRepository {
     String title = 'Untitled note',
     String? folderId,
     PageSetup setup = const PageSetup(),
+    String? id,
   }) {
     return _mutate(() async {
       _checkFolder(folderId);
+      if (id != null && _inUse(id)) {
+        throw LibraryException('The id $id is in use.');
+      }
       final DateTime now = _clock();
       final NoteEntry note = NoteEntry(
-        id: _id(),
+        id: id ?? _id(),
         title: _name(title),
         folderId: folderId,
         created: now,
@@ -479,11 +501,11 @@ abstract class IndexedNoteRepository extends NoteRepository {
   }
 
   @override
-  Future<void> deleteNote(String id) {
+  Future<void> deleteNote(String id, {DateTime? at}) {
     return _mutate(() async {
       final NoteEntry note = _note(id);
       _notes.remove(id);
-      _trash[id] = note.copyWith(deleted: () => _clock());
+      _trash[id] = note.copyWith(deleted: () => at ?? _clock());
       await writeIndex();
     });
   }

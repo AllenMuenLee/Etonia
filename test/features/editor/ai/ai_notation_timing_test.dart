@@ -297,14 +297,14 @@ void main() {
     expect(on, contains('flow travelling along a path'));
     expect(on, contains('atoms that combine'));
     expect(on, contains('Never animate fixed labeling'));
-    expect(on, contains('Give fixed items no step'));
-    expect(on, contains('fixed items are not redrawn when it repeats'));
+    expect(on, contains('give fixed items no step'));
+    expect(on, contains('fixed items are not redrawn'));
     expect(on, isNot(contains('build a graph up stage by stage')));
     expect(on, isNot(contains('give every item a step')));
     expect(on, contains('repeats until the user stops it'));
     expect(on, contains('share a step are drawn together'));
     expect(on, contains('never give times'));
-    expect(on, contains('appears at once'));
+    expect(on, contains('appear at once'));
     for (final String gone in <String>['duration_ms', 'start_ms', 'end_ms']) {
       expect(on, isNot(contains(gone)));
     }

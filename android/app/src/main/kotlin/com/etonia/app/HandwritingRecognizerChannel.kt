@@ -2,6 +2,10 @@ package com.etonia.app
 
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
+import android.graphics.Canvas
+import android.graphics.Color
+import android.graphics.Paint
+import android.graphics.Path
 import com.google.mlkit.common.model.DownloadConditions
 import com.google.mlkit.common.model.RemoteModelManager
 import com.google.mlkit.vision.common.InputImage
@@ -45,6 +49,9 @@ class HandwritingRecognizerChannel(messenger: BinaryMessenger) :
     companion object {
         const val NAME = "com.etonia.app/handwriting_recognizer"
         private const val FALLBACK_LANGUAGE = "en-US"
+
+        /** Logical units below which a line is too flat to judge by its height. */
+        private const val MIN_LINE_HEIGHT = 12f
     }
 
     private val channel = MethodChannel(messenger, NAME)
@@ -65,70 +72,137 @@ class HandwritingRecognizerChannel(messenger: BinaryMessenger) :
             result.notImplemented()
             return
         }
-        val ink = inkFrom(call.argument<List<List<Double>>>("strokes"))
+        val strokes = call.argument<List<List<Double>>>("strokes")
+            ?.filter { it.size >= 3 }
+            .orEmpty()
         val recognizer = inkRecognizer()
-        if (ink == null || recognizer == null) {
+        if (strokes.isEmpty() || recognizer == null) {
             recognizePicture(call, result)
             return
         }
-        try {
-            val width = call.argument<Number>("logicalWidth")?.toFloat() ?: 0f
-            val height = call.argument<Number>("logicalHeight")?.toFloat() ?: 0f
-            val context = RecognitionContext.builder()
-                .setPreContext(call.argument<String>("preContext").orEmpty().takeLast(20))
-                .apply {
-                    if (width > 0f && height > 0f) setWritingArea(WritingArea(width, height))
+        // Digital Ink reads one line of writing at a time: several lines
+        // sent as one ink come back run together or misread. Each line is
+        // read on its own, top to bottom, the lines above it as context.
+        val lines = linesOf(strokes)
+        val width = call.argument<Number>("logicalWidth")?.toFloat() ?: 0f
+        val segments = mutableListOf<List<Map<String, Any?>>>()
+        var preContext = call.argument<String>("preContext").orEmpty()
+        fun next(index: Int) {
+            if (index >= lines.size) {
+                if (segments.isEmpty()) {
+                    recognizePicture(call, result)
+                } else {
+                    result.success(mapOf("segments" to segments))
                 }
-                .build()
-            recognizer.recognize(ink, context)
-                .addOnSuccessListener { recognized ->
-                    val ranked = recognized.candidates.take(5)
-                        .filter { it.text.isNotBlank() }
-                    // ML Kit scores are model-specific costs (lower is
-                    // better), not normalized probabilities. A moderate gap
-                    // is enough for search; only a clear gap enters the
-                    // reusable pool. Ambiguous scores stay as metadata.
-                    val winner = ranked.firstOrNull()?.score
-                    val runnerUp = ranked.getOrNull(1)?.score
-                    val winnerGap = if (winner != null && runnerUp != null) {
-                        runnerUp - winner
-                    } else {
-                        null
+                return
+            }
+            val line = lines[index]
+            try {
+                val context = RecognitionContext.builder()
+                    .setPreContext(preContext.takeLast(20))
+                    .apply {
+                        val height = line.bottom - line.top
+                        if (width > 0f && height > 0f) {
+                            setWritingArea(WritingArea(width, height))
+                        }
                     }
-                    val candidates = ranked.mapIndexed { index, candidate ->
-                        mapOf<String, Any?>(
-                            "text" to candidate.text.trim(),
-                            "confidence" to when {
-                                index == 0 && winner != null && runnerUp == null ->
-                                    0.90
-                                index == 0 && winnerGap != null && winnerGap >= 1.0f ->
-                                    0.90
-                                index == 0 && winnerGap != null && winnerGap >= 0.5f ->
-                                    0.75
-                                candidate.score != null -> 0.60
-                                else -> null
-                            },
-                        )
+                    .build()
+                recognizer.recognize(inkFrom(line.strokes), context)
+                    .addOnSuccessListener { recognized ->
+                        val candidates = rankedCandidates(recognized.candidates)
+                        if (candidates.isNotEmpty()) {
+                            segments.add(candidates)
+                            preContext = "$preContext ${candidates.first()["text"]}".trim()
+                        }
+                        next(index + 1)
                     }
-                    if (candidates.isEmpty()) {
-                        recognizePicture(call, result)
-                    } else {
-                        result.success(mapOf("segments" to listOf(candidates)))
-                    }
-                }
-                .addOnFailureListener { recognizePicture(call, result) }
-        } catch (error: Throwable) {
-            recognizePicture(call, result)
+                    .addOnFailureListener { next(index + 1) }
+            } catch (error: Throwable) {
+                next(index + 1)
+            }
+        }
+        next(0)
+    }
+
+    /** ML Kit's candidates for one line, best first, with confidences. */
+    private fun rankedCandidates(
+        recognized: List<com.google.mlkit.vision.digitalink.RecognitionCandidate>,
+    ): List<Map<String, Any?>> {
+        val ranked = recognized.take(5).filter { it.text.isNotBlank() }
+        // ML Kit scores are model-specific costs (lower is better), not
+        // normalized probabilities. A moderate gap is enough for search;
+        // only a clear gap enters the reusable pool. Ambiguous scores stay
+        // as metadata.
+        val winner = ranked.firstOrNull()?.score
+        val runnerUp = ranked.getOrNull(1)?.score
+        val winnerGap = if (winner != null && runnerUp != null) runnerUp - winner else null
+        return ranked.mapIndexed { index, candidate ->
+            mapOf<String, Any?>(
+                "text" to candidate.text.trim(),
+                "confidence" to when {
+                    index == 0 && winner != null && runnerUp == null -> 0.90
+                    index == 0 && winnerGap != null && winnerGap >= 1.0f -> 0.90
+                    index == 0 && winnerGap != null && winnerGap >= 0.5f -> 0.75
+                    candidate.score != null -> 0.60
+                    else -> null
+                },
+            )
         }
     }
 
-    /** The strokes sent from Dart, each a run of x, y, and milliseconds. */
-    private fun inkFrom(strokes: List<List<Double>>?): Ink? {
-        if (strokes.isNullOrEmpty()) return null
-        val ink = Ink.builder()
-        var any = false
+    /** One line of writing: its strokes, in the order written, and its extent. */
+    private class Line(var top: Float, var bottom: Float) {
+        val strokes = mutableListOf<List<Double>>()
+        val center: Float get() = (top + bottom) / 2
+    }
+
+    /**
+     * Groups strokes into lines of writing, top to bottom. A stroke joins
+     * the line its middle falls within, give or take part of the line's
+     * height, so dots, accents, and descenders stay with their letters; a
+     * stroke clear of every line starts a new one.
+     */
+    private fun linesOf(strokes: List<List<Double>>): List<Line> {
+        val lines = mutableListOf<Line>()
         for (stroke in strokes) {
-            if (stroke.size < 3) continue
+            var top = Float.MAX_VALUE
+            var bottom = -Float.MAX_VALUE
+            var i = 1
+            while (i < stroke.size) {
+                val y = stroke[i].toFloat()
+                if (y < top) top = y
+                if (y > bottom) bottom = y
+                i += 3
+            }
+            val middle = (top + bottom) / 2
+            val line = lines
+                .filter { line ->
+                    // A flat stroke, such as a minus, still reaches the
+                    // letters beside it.
+                    val reach = maxOf(line.bottom - line.top, bottom - top, MIN_LINE_HEIGHT) * 0.5f
+                    middle >= line.top - reach && middle <= line.bottom + reach
+                }
+                .minByOrNull { Math.abs(it.center - middle) }
+            if (line == null) {
+                lines.add(Line(top, bottom).also { it.strokes.add(stroke) })
+            } else {
+                line.strokes.add(stroke)
+                // A tall stroke, such as a bracket, does not stretch an
+                // established line over the next one.
+                val height = line.bottom - line.top
+                if (height < MIN_LINE_HEIGHT || bottom - top <= height * 1.5f) {
+                    line.top = minOf(line.top, top)
+                    line.bottom = maxOf(line.bottom, bottom)
+                }
+            }
+        }
+        return lines.sortedBy { it.top }
+    }
+
+    /** Strokes sent from Dart, each a run of x, y, and milliseconds. */
+    private fun inkFrom(strokes: List<List<Double>>): Ink {
+        val ink = Ink.builder()
+        for (stroke in strokes) {
             val builder = Ink.Stroke.builder()
             var i = 0
             while (i + 2 < stroke.size) {
@@ -142,9 +216,8 @@ class HandwritingRecognizerChannel(messenger: BinaryMessenger) :
                 i += 3
             }
             ink.addStroke(builder.build())
-            any = true
         }
-        return if (any) ink.build() else null
+        return ink.build()
     }
 
     /** The digital ink recognizer, once its model is on the device. */
@@ -185,7 +258,15 @@ class HandwritingRecognizerChannel(messenger: BinaryMessenger) :
 
     /** The ink model for [locale], or for its language, or for English. */
     private fun inkModelFor(locale: Locale): DigitalInkRecognitionModel? {
-        val tags = listOf(locale.toLanguageTag(), locale.language, FALLBACK_LANGUAGE)
+        // ML Kit names Chinese models by script, as zh-Hani-TW, which no
+        // device locale (zh-TW, zh-Hant-TW) spells out.
+        val han = if (locale.language == "zh" && locale.country.isNotEmpty()) {
+            listOf("zh-Hani-${locale.country}")
+        } else {
+            emptyList()
+        }
+        val tags = listOf(locale.toLanguageTag()) + han +
+            listOf(locale.language, FALLBACK_LANGUAGE)
         for (tag in tags) {
             val identifier = try {
                 DigitalInkRecognitionModelIdentifier.fromLanguageTag(tag)
@@ -199,11 +280,12 @@ class HandwritingRecognizerChannel(messenger: BinaryMessenger) :
         return null
     }
 
-    /** Reads the PNG Dart drew of the strokes, as a picture of text. */
+    /** Reads a picture of the strokes, rasterizing vectors only on fallback. */
     private fun recognizePicture(call: MethodCall, result: MethodChannel.Result) {
         val png = call.argument<ByteArray>("png")
         val bitmap: Bitmap? = try {
-            png?.let { BitmapFactory.decodeByteArray(it, 0, it.size) }
+            if (png != null && png.isNotEmpty()) BitmapFactory.decodeByteArray(png, 0, png.size)
+            else bitmapFromStrokes(call)
         } catch (error: Throwable) {
             null
         }
@@ -228,6 +310,49 @@ class HandwritingRecognizerChannel(messenger: BinaryMessenger) :
             bitmap.recycle()
             result.success("")
         }
+    }
+
+    /** Builds the OCR fallback bitmap off Flutter's UI isolate. */
+    private fun bitmapFromStrokes(call: MethodCall): Bitmap? {
+        val strokes = call.argument<List<List<Double>>>("strokes") ?: return null
+        val width = (call.argument<Number>("width")?.toInt() ?: 0).coerceIn(1, 4096)
+        val height = (call.argument<Number>("height")?.toInt() ?: 0).coerceIn(1, 4096)
+        val logicalWidth = call.argument<Number>("logicalWidth")?.toFloat() ?: return null
+        val logicalHeight = call.argument<Number>("logicalHeight")?.toFloat() ?: return null
+        if (logicalWidth <= 0f || logicalHeight <= 0f) return null
+        val bitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
+        val canvas = Canvas(bitmap)
+        canvas.drawColor(Color.WHITE)
+        canvas.scale(width / logicalWidth, height / logicalHeight)
+        val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = Color.BLACK
+            style = Paint.Style.STROKE
+            strokeWidth = 3f
+            strokeCap = Paint.Cap.ROUND
+            strokeJoin = Paint.Join.ROUND
+        }
+        for (stroke in strokes) {
+            val count = stroke.size / 3
+            if (count == 0) continue
+            val path = Path()
+            path.moveTo(stroke[0].toFloat(), stroke[1].toFloat())
+            path.lineTo(stroke[0].toFloat(), stroke[1].toFloat())
+            for (point in 1 until count - 1) {
+                val at = point * 3
+                val next = (point + 1) * 3
+                path.quadTo(
+                    stroke[at].toFloat(), stroke[at + 1].toFloat(),
+                    ((stroke[at] + stroke[next]) / 2).toFloat(),
+                    ((stroke[at + 1] + stroke[next + 1]) / 2).toFloat(),
+                )
+            }
+            if (count > 1) {
+                val last = (count - 1) * 3
+                path.lineTo(stroke[last].toFloat(), stroke[last + 1].toFloat())
+            }
+            canvas.drawPath(path, paint)
+        }
+        return bitmap
     }
 
     /** The lines of [text], top to bottom and, along a line, left to right. */

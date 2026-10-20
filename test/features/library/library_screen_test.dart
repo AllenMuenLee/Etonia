@@ -20,6 +20,7 @@ import 'package:greatnote/features/library/note_repository.dart';
 
 import '../../helpers/ai_fakes.dart';
 import '../../helpers/document_io_fakes.dart';
+import '../../helpers/google_drive_fakes.dart';
 import '../../helpers/pump_app.dart';
 
 final DateTime _now = DateTime(2026, 10, 14, 15, 30);
@@ -967,7 +968,6 @@ void main() {
     await _pumpLibrary(tester, repository);
     for (final Finder target in <Finder>[
       find.byType(TextField),
-      find.byTooltip('Plans & Credits'),
       find.byTooltip('Google Drive'),
       find.byTooltip('Sort'),
       find.byTooltip('Show as list'),
@@ -977,6 +977,7 @@ void main() {
         of: find.byKey(const ValueKey<String>('sidebar-library')),
         matching: find.byType(InkWell),
       ),
+      find.byTooltip('Plans & Credits'),
       find.descendant(
         of: find.byKey(const ValueKey<String>('sidebar-trash')),
         matching: find.byType(InkWell),
@@ -1046,5 +1047,52 @@ void main() {
       (await repository.list(null)).notes.map((NoteEntry n) => n.title).toSet(),
       <String>{'Lecture 1', 'Handout'},
     );
+  });
+
+  testWidgets('opening signed out asks for Google first, then calibration', (
+    WidgetTester tester,
+  ) async {
+    final FakeGoogleDriveClient drive = FakeGoogleDriveClient();
+    setViewportSize(tester, TestViewport.tabletLandscape.size);
+    await tester.pumpWidget(
+      GreatnoteApp(
+        home: LibraryScreen(
+          repository: _repository(),
+          clock: () => _now,
+          googleDriveClient: drive,
+          onboard: true,
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.text('Sign in to Etonia'), findsOneWidget);
+    expect(find.text("Choose the AI's handwriting"), findsNothing);
+    await tester.tap(find.text('Sign in with Google'));
+    await tester.pumpAndSettle();
+
+    expect(drive.currentAccount, isNotNull);
+    expect(find.text('Sign in to Etonia'), findsNothing);
+    expect(find.text("Choose the AI's handwriting"), findsOneWidget);
+  });
+
+  testWidgets('opening signed in goes straight on', (
+    WidgetTester tester,
+  ) async {
+    setViewportSize(tester, TestViewport.tabletLandscape.size);
+    await tester.pumpWidget(
+      GreatnoteApp(
+        home: LibraryScreen(
+          repository: _repository(),
+          clock: () => _now,
+          googleDriveClient: FakeGoogleDriveClient(signedIn: true),
+          onboard: true,
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.text('Sign in to Etonia'), findsNothing);
+    expect(find.text("Choose the AI's handwriting"), findsOneWidget);
   });
 }

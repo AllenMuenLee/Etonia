@@ -487,3 +487,139 @@ class SegmentedChoice<T> extends StatelessWidget {
     );
   }
 }
+
+/// A recessed, shaded capsule gauge with a lit, glowing fill bar for
+/// showing remaining AI token allowance.
+class TokenMeterBar extends StatelessWidget {
+  const TokenMeterBar({
+    super.key,
+    required this.fraction,
+    this.height = 10,
+    this.width,
+    this.semanticsLabel,
+    this.semanticsValue,
+  });
+
+  /// Fill ratio from `0.0` (empty) to `1.0` (full).
+  final double fraction;
+  final double height;
+  final double? width;
+  final String? semanticsLabel;
+  final String? semanticsValue;
+
+  @override
+  Widget build(BuildContext context) {
+    final AppColors colors = AppColors.of(context);
+    final bool dark = Theme.of(context).brightness == Brightness.dark;
+    final double clamped = fraction.clamp(0.0, 1.0);
+    final BorderRadius radius = BorderRadius.circular(height);
+
+    // Recessed trough: shaded at the top edge, softly catching light at the bottom.
+    final Color troughTop = Color.alphaBlend(
+      colors.shadow.withValues(alpha: dark ? 0.42 : 0.10),
+      colors.surfaceMuted,
+    );
+    final Color troughBottom = Color.alphaBlend(
+      Colors.white.withValues(alpha: dark ? 0.05 : 0.65),
+      colors.surfaceMuted,
+    );
+
+    // Lit fill: deep base -> rich accent -> luminous tip.
+    final Color fillStart = Color.alphaBlend(
+      colors.shadow.withValues(alpha: dark ? 0.22 : 0.16),
+      colors.accent,
+    );
+    final Color fillEnd = Color.lerp(
+      colors.accent,
+      Colors.white,
+      dark ? 0.28 : 0.22,
+    )!;
+
+    Widget bar = SizedBox(
+      width: width,
+      height: height,
+      child: DecoratedBox(
+        decoration: BoxDecoration(
+          borderRadius: radius,
+          gradient: LinearGradient(
+            begin: Alignment.topCenter,
+            end: Alignment.bottomCenter,
+            colors: <Color>[troughTop, colors.surfaceMuted, troughBottom],
+            stops: const <double>[0.0, 0.55, 1.0],
+          ),
+          border: Border.all(
+            color: colors.divider.withValues(alpha: dark ? 0.75 : 0.85),
+            width: AppSizes.hairline,
+          ),
+          boxShadow: <BoxShadow>[
+            BoxShadow(
+              color: Colors.white.withValues(alpha: dark ? 0.04 : 0.55),
+              blurRadius: 1,
+              offset: const Offset(0, 1),
+            ),
+          ],
+        ),
+        child: ClipRRect(
+          borderRadius: radius,
+          child: Align(
+            alignment: AlignmentDirectional.centerStart,
+            child: AnimatedFractionallySizedBox(
+              duration: AppMotion.resolve(context, AppMotion.medium),
+              curve: AppMotion.standard,
+              widthFactor: clamped,
+              heightFactor: 1,
+              child: clamped <= 0
+                  ? const SizedBox.expand()
+                  : DecoratedBox(
+                      decoration: BoxDecoration(
+                        borderRadius: radius,
+                        gradient: LinearGradient(
+                          begin: AlignmentDirectional.centerStart,
+                          end: AlignmentDirectional.centerEnd,
+                          colors: <Color>[fillStart, colors.accent, fillEnd],
+                          stops: const <double>[0.0, 0.68, 1.0],
+                        ),
+                        boxShadow: <BoxShadow>[
+                          BoxShadow(
+                            color: colors.accent.withValues(
+                              alpha: dark ? 0.50 : 0.32,
+                            ),
+                            blurRadius: height * 0.9,
+                            spreadRadius: 0.5,
+                          ),
+                        ],
+                      ),
+                      // Specular top highlight and bottom cylindrical shade.
+                      child: DecoratedBox(
+                        decoration: BoxDecoration(
+                          borderRadius: radius,
+                          gradient: LinearGradient(
+                            begin: Alignment.topCenter,
+                            end: Alignment.bottomCenter,
+                            colors: <Color>[
+                              Colors.white.withValues(
+                                alpha: dark ? 0.34 : 0.42,
+                              ),
+                              Colors.white.withValues(alpha: 0.0),
+                              colors.shadow.withValues(
+                                alpha: dark ? 0.24 : 0.14,
+                              ),
+                            ],
+                            stops: const <double>[0.0, 0.48, 1.0],
+                          ),
+                        ),
+                        child: const SizedBox.expand(),
+                      ),
+                    ),
+            ),
+          ),
+        ),
+      ),
+    );
+
+    if (semanticsLabel != null || semanticsValue != null) {
+      bar = Semantics(label: semanticsLabel, value: semanticsValue, child: bar);
+    }
+    return bar;
+  }
+}

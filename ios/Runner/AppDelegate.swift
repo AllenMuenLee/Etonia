@@ -156,22 +156,27 @@ final class HandwritingRecognizerChannel {
       result(FlutterMethodNotImplemented)
       return
     }
-    guard let arguments = call.arguments as? [String: Any],
-      let png = arguments["png"] as? FlutterStandardTypedData
-    else {
+    guard let arguments = call.arguments as? [String: Any] else {
       result("")
       return
     }
-    let bytes = png.data
     let customWords = Array((arguments["customWords"] as? [String] ?? []).prefix(64))
     queue.async {
-      let text = autoreleasepool { Self.recognize(png: bytes, customWords: customWords) }
+      let text = autoreleasepool { () -> [String: Any] in
+        let image: CGImage?
+        if let png = arguments["png"] as? FlutterStandardTypedData {
+          image = UIImage(data: png.data)?.cgImage
+        } else {
+          image = Self.imageFromStrokes(arguments)
+        }
+        return Self.recognize(image: image, customWords: customWords)
+      }
       DispatchQueue.main.async { result(text) }
     }
   }
 
-  private static func recognize(png: Data, customWords: [String]) -> [String: Any] {
-    guard let image = UIImage(data: png)?.cgImage else {
+  private static func recognize(image: CGImage?, customWords: [String]) -> [String: Any] {
+    guard let image else {
       return ["segments": []]
     }
     let request = VNRecognizeTextRequest()
@@ -207,6 +212,64 @@ final class HandwritingRecognizerChannel {
       }
     }
     return ["segments": segments]
+  }
+
+  /// Rasterizes vector handwriting on the recognition queue, avoiding a
+  /// Flutter GPU readback and PNG encode/decode for Vision requests.
+  private static func imageFromStrokes(_ arguments: [String: Any]) -> CGImage? {
+    guard let strokes = arguments["strokes"] as? [[NSNumber]],
+      let width = arguments["width"] as? NSNumber,
+      let height = arguments["height"] as? NSNumber,
+      let logicalWidth = arguments["logicalWidth"] as? NSNumber,
+      let logicalHeight = arguments["logicalHeight"] as? NSNumber
+    else { return nil }
+    let pixelWidth = min(max(1, width.intValue), 4096)
+    let pixelHeight = min(max(1, height.intValue), 4096)
+    let logical = CGSize(
+      width: CGFloat(logicalWidth.doubleValue),
+      height: CGFloat(logicalHeight.doubleValue))
+    guard logical.width > 0, logical.height > 0 else { return nil }
+    let colorSpace = CGColorSpaceCreateDeviceGray()
+    guard let context = CGContext(
+      data: nil, width: pixelWidth, height: pixelHeight, bitsPerComponent: 8,
+      bytesPerRow: 0, space: colorSpace, bitmapInfo: CGImageAlphaInfo.none.rawValue)
+    else { return nil }
+    context.setFillColor(gray: 1, alpha: 1)
+    context.fill(CGRect(x: 0, y: 0, width: pixelWidth, height: pixelHeight))
+    context.translateBy(x: 0, y: CGFloat(pixelHeight))
+    context.scaleBy(
+      x: CGFloat(pixelWidth) / logical.width,
+      y: -CGFloat(pixelHeight) / logical.height)
+    context.setStrokeColor(gray: 0, alpha: 1)
+    context.setLineWidth(3)
+    context.setLineCap(.round)
+    context.setLineJoin(.round)
+    for stroke in strokes {
+      let count = stroke.count / 3
+      guard count > 0 else { continue }
+      func point(_ index: Int) -> CGPoint {
+        let offset = index * 3
+        return CGPoint(
+          x: CGFloat(stroke[offset].doubleValue),
+          y: CGFloat(stroke[offset + 1].doubleValue))
+      }
+      let first = point(0)
+      context.beginPath()
+      context.move(to: first)
+      context.addLine(to: first)
+      if count > 2 {
+        for index in 1..<(count - 1) {
+          let current = point(index)
+          let next = point(index + 1)
+          context.addQuadCurve(
+            to: CGPoint(x: (current.x + next.x) / 2, y: (current.y + next.y) / 2),
+            control: current)
+        }
+      }
+      if count > 1 { context.addLine(to: point(count - 1)) }
+      context.strokePath()
+    }
+    return context.makeImage()
   }
 
   /// The user's preferred languages that [request] can read, in order of

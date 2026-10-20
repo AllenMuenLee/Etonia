@@ -165,39 +165,71 @@ class PdfExporter {
       }
     }
     final Map<int, Uint8List> pdfBackgrounds = <int, Uint8List>{};
-    for (int progress = 0; progress < indices.length; progress++) {
-      if (cancellation?.isCancelled ?? false) {
-        throw const FileSystemException('Export cancelled');
-      }
-      final int index = indices[progress];
-      final StoredPage page = content.pages[index];
-      if (page.pdfSource != null) {
-        final Uint8List? sourceBytes = assets[page.pdfSource!.assetId];
-        if (sourceBytes == null) {
-          onProgress?.call(progress + 1, indices.length);
-          continue;
+    // Each source PDF is parsed once for the whole export when the
+    // rasterizer can keep it open, instead of once per page.
+    final Map<String, Future<OpenPdf?>> openSources =
+        <String, Future<OpenPdf?>>{};
+    final PdfRasterizer rasterizer = this.rasterizer;
+    try {
+      for (int progress = 0; progress < indices.length; progress++) {
+        if (cancellation?.isCancelled ?? false) {
+          throw const FileSystemException('Export cancelled');
         }
-        final ui.Size sourcePoints =
-            page.pdfSource!.pageSize * DocumentUnits.pdfPointsPerPageUnit;
-        try {
-          final RasterizedPdfPage rendered = await rasterizer.render(
-            sourceBytes,
-            page.pdfSource!.pageIndex,
-            pixelWidth: math.max(
-              1,
-              (sourcePoints.width / 72 * config.exportPdfRasterDpi).round(),
-            ),
-            pixelHeight: math.max(
-              1,
-              (sourcePoints.height / 72 * config.exportPdfRasterDpi).round(),
-            ),
+        final int index = indices[progress];
+        final StoredPage page = content.pages[index];
+        final PdfPageSource? source = page.pdfSource;
+        if (source != null) {
+          final Uint8List? sourceBytes = assets[source.assetId];
+          if (sourceBytes == null) {
+            onProgress?.call(progress + 1, indices.length);
+            continue;
+          }
+          final ui.Size sourcePoints =
+              source.pageSize * DocumentUnits.pdfPointsPerPageUnit;
+          final int pixelWidth = math.max(
+            1,
+            (sourcePoints.width / 72 * config.exportPdfRasterDpi).round(),
           );
-          pdfBackgrounds[index] = rendered.png;
-        } on Object {
-          // Keep the page, its images, and ink without the PDF paper.
+          final int pixelHeight = math.max(
+            1,
+            (sourcePoints.height / 72 * config.exportPdfRasterDpi).round(),
+          );
+          try {
+            final OpenPdf? open = rasterizer is PdfDocumentRasterizer
+                ? await (openSources[source.assetId] ??=
+                      (rasterizer as PdfDocumentRasterizer)
+                          .open(sourceBytes)
+                          .then<OpenPdf?>(
+                            (OpenPdf pdf) => pdf,
+                            onError: (Object _) => null,
+                          ))
+                : null;
+            pdfBackgrounds[index] = open == null
+                ? (await rasterizer.render(
+                    sourceBytes,
+                    source.pageIndex,
+                    pixelWidth: pixelWidth,
+                    pixelHeight: pixelHeight,
+                  )).png
+                : await _encodePng(
+                    await open.renderImage(
+                      source.pageIndex,
+                      pixelWidth: pixelWidth,
+                      pixelHeight: pixelHeight,
+                    ),
+                  );
+          } on Object {
+            // Keep the page, its images, and ink without the PDF paper.
+          }
+          // Let frames through between page renders on long exports.
+          await Future<void>.delayed(Duration.zero);
         }
+        onProgress?.call(progress + 1, indices.length);
       }
-      onProgress?.call(progress + 1, indices.length);
+    } finally {
+      for (final Future<OpenPdf?> open in openSources.values) {
+        await (await open)?.dispose();
+      }
     }
     final _PreparedExport prepared = _PreparedExport(
       title: title,
@@ -507,6 +539,21 @@ typedef _PreparedStroke = ({
 });
 
 /// Kept top-level so the isolate closure captures nothing but [prepared].
+/// Encodes [image] with the engine's native PNG codec and disposes it.
+Future<Uint8List> _encodePng(ui.Image image) async {
+  try {
+    final ByteData? png = await image.toByteData(
+      format: ui.ImageByteFormat.png,
+    );
+    if (png == null) {
+      throw StateError('The PDF page could not be encoded.');
+    }
+    return png.buffer.asUint8List(png.offsetInBytes, png.lengthInBytes);
+  } finally {
+    image.dispose();
+  }
+}
+
 Future<Uint8List> _generateInIsolate(_PreparedExport prepared) =>
     Isolate.run(() => _generatePdf(prepared));
 
