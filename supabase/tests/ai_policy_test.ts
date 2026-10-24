@@ -1,6 +1,7 @@
 import { strict as assert } from "node:assert";
 import {
   combineSteps,
+  drawingRequest,
   costOf,
   modelConfig,
   outputBudget,
@@ -293,6 +294,39 @@ Deno.test("with Notation on, the chosen model writes the words and a second mode
   const turns = notation.body.messages as { role: string; content: unknown }[];
   assert.deepEqual(turns.map((t) => t.role), ["user", "assistant", "user"]);
   assert.equal(turns[1].content, "The hypotenuse is 5.");
+
+  // The drawing step is told what the user asked, on every provider, and
+  // a follow-up keeps the requests that came before it.
+  {
+    const asked = {
+      ...input,
+      ...notationOptions,
+      notationContext,
+      prompt: "complete the inverted op amp",
+      history: [
+        { role: "user" as const, content: "what is this?" },
+        { role: "assistant" as const, content: "A triangle." },
+      ],
+    };
+    for (const model of [claude, openai, gemini]) {
+      const body = JSON.stringify(
+        providerRequest(model, asked, 1234, "k", {
+          step: "notation",
+          message: "Answer.",
+        }).body,
+      );
+      assert(body.includes('The user asked: \\"complete the inverted op amp\\"'));
+      assert(body.includes('\\"what is this?\\"'));
+      assert(!body.includes("A triangle."));
+      assert(body.includes("animate it with steps"));
+    }
+    const staticText = drawingRequest(asked, "static");
+    assert(staticText.includes("adding only what is missing"));
+    assert(!staticText.includes("animate"));
+    assert(
+      drawingRequest({ ...asked, prompt: "x".repeat(5000) }).length < 2500,
+    );
+  }
 
   const answerSvg =
     '<svg xmlns="http://www.w3.org/2000/svg" data-etonia-version="1" viewBox="0 0 1 1"><title>Answer</title><desc data-etonia-role="message">The hypotenuse is 5.</desc></svg>';

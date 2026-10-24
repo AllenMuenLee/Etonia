@@ -4,6 +4,8 @@ import 'dart:ui';
 import 'package:flutter/foundation.dart';
 import 'package:xml/xml.dart';
 
+import '../ink/ink_palette.dart';
+
 /// A validated, self-contained SVG that remains editable as vector source.
 ///
 /// Greatnote deliberately keeps the SVG text instead of rasterizing or
@@ -224,24 +226,57 @@ class EditableSvg {
 
   /// Returns a renderable frame. Fixed elements remain visible; stepped
   /// elements appear cumulatively. The original [source] is never changed.
-  String frame(int visibleStep) {
-    if (!isAnimated || visibleStep >= stepCount) return source;
+  String frame(int visibleStep, {Brightness? brightness}) {
+    if ((!isAnimated || visibleStep >= stepCount) && brightness == null) {
+      return source;
+    }
     final XmlDocument document = XmlDocument.parse(source);
-    final List<XmlElement> elements = document.descendants
-        .whereType<XmlElement>()
-        .toList(growable: false)
-        .reversed
-        .toList(growable: false);
-    for (final XmlElement element in elements) {
-      final int? step = int.tryParse(
-        element.getAttribute('data-etonia-step') ?? '',
-      );
-      if (step != null && step > visibleStep) {
-        element.parent?.children.remove(element);
+    if (isAnimated && visibleStep < stepCount) {
+      final List<XmlElement> elements = document.descendants
+          .whereType<XmlElement>()
+          .toList(growable: false)
+          .reversed
+          .toList(growable: false);
+      for (final XmlElement element in elements) {
+        final int? step = int.tryParse(
+          element.getAttribute('data-etonia-step') ?? '',
+        );
+        if (step != null && step > visibleStep) {
+          element.parent?.children.remove(element);
+        }
       }
     }
+    if (brightness != null) _applySemanticInk(document, brightness);
     return document.rootElement.toXmlString(pretty: false);
   }
+
+  static void _applySemanticInk(XmlDocument document, Brightness brightness) {
+    for (final XmlElement element
+        in document.descendants.whereType<XmlElement>()) {
+      final String? common = element.getAttribute('data-etonia-ink');
+      final String? strokeInk =
+          element.getAttribute('data-etonia-stroke-ink') ?? common;
+      final String? fillInk =
+          element.getAttribute('data-etonia-fill-ink') ?? common;
+      final String? stroke = element.getAttribute('stroke');
+      if (strokeInk != null && stroke != null && stroke != 'none') {
+        final InkColor? ink = InkPalette.byId(strokeInk);
+        if (ink != null) {
+          element.setAttribute('stroke', _color(ink.resolve(brightness)));
+        }
+      }
+      final String? fill = element.getAttribute('fill');
+      if (fillInk != null && fill != null && fill != 'none') {
+        final InkColor? ink = InkPalette.byId(fillInk);
+        if (ink != null) {
+          element.setAttribute('fill', _color(ink.resolve(brightness)));
+        }
+      }
+    }
+  }
+
+  static String _color(Color color) =>
+      '#${color.toARGB32().toRadixString(16).padLeft(8, '0').substring(2)}';
 
   /// Crops the root viewBox to the declared content bounds. This makes the
   /// object-level selection frame match what the user sees while preserving

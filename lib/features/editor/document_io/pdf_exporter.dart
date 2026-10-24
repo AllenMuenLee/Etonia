@@ -606,7 +606,12 @@ Future<Uint8List> _generatePdf(_PreparedExport export) async {
                 width: element.size.width * scale,
                 height: element.size.height * scale,
                 child: element.vector != null
-                    ? pw.SvgImage(svg: element.vector!.source)
+                    ? pw.SvgImage(
+                        svg: element.vector!.frame(
+                          element.vector!.stepCount,
+                          brightness: Brightness.light,
+                        ),
+                      )
                     : pw.Image(images[element.assetId]!, fit: pw.BoxFit.fill),
               ),
             ),

@@ -293,27 +293,21 @@ void main() {
       animationEnabled: true,
     );
     expect(on, contains('Animation is enabled'));
-    expect(on, contains('use it readily, but only for what moves'));
-    expect(on, contains('flow travelling along a path'));
-    expect(on, contains('atoms that combine'));
-    expect(on, contains('Never animate fixed labeling'));
-    expect(on, contains('give fixed items no step'));
-    expect(on, contains('fixed items are not redrawn'));
-    expect(on, isNot(contains('build a graph up stage by stage')));
-    expect(on, isNot(contains('give every item a step')));
-    expect(on, contains('repeats until the user stops it'));
-    expect(on, contains('share a step are drawn together'));
-    expect(on, contains('never give times'));
-    expect(on, contains('appear at once'));
+    expect(on, contains('data-etonia-step="1"'));
+    expect(on, contains('(maximum 24)'));
+    expect(on, contains('Fixed labels and the reference figure have no step'));
+    expect(on, contains('The steps loop until the user stops animation'));
+    expect(on, contains('data-etonia-duration-ms on the root from 300'));
+    expect(on, contains('Do not use JavaScript'));
     for (final String gone in <String>['duration_ms', 'start_ms', 'end_ms']) {
       expect(on, isNot(contains(gone)));
     }
     final String staticOnly = AiPrompts.systemFor(notationEnabled: true);
-    expect(staticOnly, contains('Animation is disabled for this request'));
-    expect(staticOnly, contains('omit step on every item'));
+    expect(staticOnly, contains('Animation is disabled'));
+    expect(staticOnly, contains('omit data-etonia-step'));
     expect(staticOnly, isNot(contains('Animation is enabled')));
     final String off = AiPrompts.systemFor(notationEnabled: false);
-    expect(off, isNot(contains('step')));
-    expect(off, contains('notation must be null'));
+    expect(off, isNot(contains('data-etonia-step')));
+    expect(off, contains('return no visible SVG elements'));
   });
 }

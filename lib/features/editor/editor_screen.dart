@@ -30,8 +30,10 @@ import 'ai/notation_layout.dart';
 import 'ai/notation_font.dart';
 import 'ai/notation_space.dart';
 import 'ai/selection_image_renderer.dart';
+import 'ai/svg_notation_styler.dart';
 import 'handwriting/handwriting_calibration.dart';
 import 'handwriting/handwriting_calibration_screen.dart';
+import 'handwriting/handwriting_style.dart';
 import 'handwriting/handwriting_indexer.dart';
 import 'handwriting/ink_search.dart';
 import 'handwriting/recognized_handwriting.dart';
@@ -537,6 +539,11 @@ class EditorScreenState extends State<EditorScreen>
   /// Whether the panel's edge is being dragged, so it follows the finger
   /// instead of animating to each new width.
   bool _resizingAiPanel = false;
+
+  /// The panel's width under the finger while its edge is dragged. Only the
+  /// panel follows it; the page keeps its layout until the drag ends, so a
+  /// drag never lays out the page, its ink and its PDF paper on each frame.
+  final ValueNotifier<double> _aiPanelDragWidth = ValueNotifier<double>(0);
 
   bool _showHandwritingCalibrationNotice = false;
   HandwritingCalibrationState? _handwritingCalibrationState;
@@ -1253,13 +1260,31 @@ class EditorScreenState extends State<EditorScreen>
         bounds.isEmpty) {
       return const AiNotationApplication(AiNotationStatus.notAppliedInvalid);
     }
-    final EditableSvg cropped = vector.croppedToContent();
+    final EditableSvg cropped;
+    try {
+      final PenSettings pen = _penSettings.value;
+      cropped = SvgNotationStyler.apply(
+        vector,
+        handwriting:
+            HandwritingCalibration.current.value ?? HandwritingStyle.standard,
+        defaultInk: pen.ink,
+        penWidth: pen.width,
+        snapper: InkSnapper(<List<InkVector>>[
+          for (final Stroke stroke in controller.strokes) stroke.points,
+        ], reach: const AiNotationConfig().inkSnapDistance),
+      ).croppedToContent();
+    } on FormatException {
+      return const AiNotationApplication(AiNotationStatus.notAppliedInvalid);
+    }
     final NoteImageElement element = NoteImageElement(
       id: 'svg-ai-${DateTime.now().microsecondsSinceEpoch.toRadixString(36)}',
       assetId: '',
       pixelSize: cropped.viewBox.size,
-      center: InkVector(bounds.center.dx, bounds.center.dy),
-      size: bounds.size,
+      center: InkVector(
+        cropped.contentBounds.center.dx,
+        cropped.contentBounds.center.dy,
+      ),
+      size: cropped.contentBounds.size,
       fileName: '${vector.label}.svg',
       vector: cropped,
       aiGenerated: true,
@@ -2216,6 +2241,7 @@ class EditorScreenState extends State<EditorScreen>
     WidgetsBinding.instance.removeObserver(this);
     _audioPlayer.removeListener(_onAudioPlayerChanged);
     _strokeReplay.dispose();
+    _aiPanelDragWidth.dispose();
     if (_ownsAudioRecorder) {
       if (_audioRecorder.state == NoteAudioRecorderState.idle) {
         _audioRecorder.dispose();
@@ -2418,20 +2444,34 @@ class EditorScreenState extends State<EditorScreen>
     }
   }
 
-  /// Widens the panel beside the editor by [delta], within what the config
-  /// allows and what an editor [available] pixels wide can spare.
+  void _startAiPanelResize(double width) {
+    _aiPanelDragWidth.value = width;
+    setState(() {
+      _resizingAiPanel = true;
+      _aiPanelWidth = width;
+    });
+  }
+
+  /// Widens the dragged panel by [delta], within what the config allows and
+  /// what an editor [available] pixels wide can spare.
   void _resizeAiPanel(double delta, double available) {
     final AiLayoutConfig config = widget.aiLayoutConfig;
     final double widest = math.max(
       config.minPanelWidth,
       math.min(config.maxPanelWidth, available - config.minEditorWidth),
     );
-    final double width = ((_aiPanelWidth ?? config.panelWidth) + delta)
+    _aiPanelDragWidth.value = (_aiPanelDragWidth.value + delta)
         .clamp(config.minPanelWidth, widest)
         .toDouble();
-    if (width != _aiPanelWidth) {
-      setState(() => _aiPanelWidth = width);
-    }
+  }
+
+  /// Lays the page out once, around where the panel was let go.
+  void _endAiPanelResize() {
+    if (!_resizingAiPanel) return;
+    setState(() {
+      _resizingAiPanel = false;
+      _aiPanelWidth = _aiPanelDragWidth.value;
+    });
   }
 
   /// The panel over the editor, against [side], above a barrier that
@@ -2524,6 +2564,12 @@ class EditorScreenState extends State<EditorScreen>
     // while the keyboard moves, unlike the padding.
     final double bottomSafeArea = MediaQuery.viewPaddingOf(context).bottom;
     final bool showNavigation = sizeClass != WindowSizeClass.compact;
+    if (panelSide == null && _resizingAiPanel) {
+      // Closed under the finger: its handle went with it, and never ended
+      // the drag.
+      _resizingAiPanel = false;
+      _aiPanelWidth = _aiPanelDragWidth.value;
+    }
     _publishChrome();
     return Scaffold(
       // The keyboard only ever serves the assistant's composer, which lifts
@@ -2914,19 +2960,49 @@ class EditorScreenState extends State<EditorScreen>
                         : null,
                   ),
                 ),
-                if (panelSide != null)
-                  AnimatedPositioned(
-                    key: const ValueKey<String>('ai-panel-beside'),
-                    duration: _resizingAiPanel
-                        ? Duration.zero
-                        : AppMotion.resolve(context, AppMotion.snappy.duration),
-                    curve: AppMotion.fadeInCurve,
+                // What a narrowing panel uncovers before the page is laid
+                // out again: more of the desk the page sits on.
+                if (panelSide != null && _resizingAiPanel)
+                  Positioned(
+                    key: const ValueKey<String>('ai-panel-resize-desk'),
                     top: 0,
                     bottom: 0,
                     left: panelSide == AiPanelSide.left
                         ? 0
                         : size.width - panelWidth,
                     width: panelWidth,
+                    child: ColoredBox(color: colors.writingSurface),
+                  ),
+                if (panelSide != null)
+                  ValueListenableBuilder<double>(
+                    valueListenable: _aiPanelDragWidth,
+                    builder:
+                        (
+                          BuildContext context,
+                          double dragWidth,
+                          Widget? panel,
+                        ) {
+                          final double width = _resizingAiPanel
+                              ? dragWidth
+                              : panelWidth;
+                          return AnimatedPositioned(
+                            key: const ValueKey<String>('ai-panel-beside'),
+                            duration: _resizingAiPanel
+                                ? Duration.zero
+                                : AppMotion.resolve(
+                                    context,
+                                    AppMotion.snappy.duration,
+                                  ),
+                            curve: AppMotion.fadeInCurve,
+                            top: 0,
+                            bottom: 0,
+                            left: panelSide == AiPanelSide.left
+                                ? 0
+                                : size.width - width,
+                            width: width,
+                            child: panel!,
+                          );
+                        },
                     child: DecoratedBox(
                       position: DecorationPosition.foreground,
                       decoration: BoxDecoration(
@@ -2983,16 +3059,13 @@ class EditorScreenState extends State<EditorScreen>
                               right: panelSide == AiPanelSide.left ? 0 : null,
                               child: _PanelResizeHandle(
                                 active: _resizingAiPanel,
-                                onDragStart: () => setState(() {
-                                  _resizingAiPanel = true;
-                                  _aiPanelWidth = panelWidth;
-                                }),
+                                onDragStart: () =>
+                                    _startAiPanelResize(panelWidth),
                                 onDragUpdate: (double dx) => _resizeAiPanel(
                                   panelSide == AiPanelSide.right ? -dx : dx,
                                   size.width,
                                 ),
-                                onDragEnd: () =>
-                                    setState(() => _resizingAiPanel = false),
+                                onDragEnd: _endAiPanelResize,
                               ),
                             ),
                           ],

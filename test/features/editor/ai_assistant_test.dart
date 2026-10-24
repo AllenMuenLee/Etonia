@@ -595,6 +595,51 @@ void main() {
       expect(_panelRect(tester).left, 0);
     });
 
+    testWidgets('dragging its edge resizes only the panel until let go', (
+      WidgetTester tester,
+    ) async {
+      await _pumpOpen(tester);
+      _assistant(tester).setSide(AiPanelSide.right);
+      await tester.pumpAndSettle();
+      final Rect surfaceBefore = _surfaceRect(tester);
+      final Rect panelBefore = _panelRect(tester);
+      expect(panelBefore.width, 360);
+      final Finder handle = find.byWidgetPredicate(
+        (Widget widget) =>
+            widget is MouseRegion &&
+            widget.cursor == SystemMouseCursors.resizeColumn,
+      );
+
+      final TestGesture gesture = await tester.startGesture(
+        tester.getCenter(handle),
+      );
+      await gesture.moveBy(const Offset(-40, 0));
+      await tester.pump();
+      await gesture.moveBy(const Offset(-60, 0));
+      await tester.pump();
+
+      // The panel follows the finger; the page keeps its layout meanwhile.
+      expect(_panelRect(tester).left, lessThan(panelBefore.left));
+      expect(_panelRect(tester).right, panelBefore.right);
+      expect(_surfaceRect(tester), surfaceBefore);
+
+      await gesture.moveBy(const Offset(200, 0));
+      await tester.pump();
+      // Narrower than it began, the uncovered strip is still desk.
+      expect(_panelRect(tester).width, lessThan(panelBefore.width));
+      expect(_surfaceRect(tester), surfaceBefore);
+
+      await gesture.moveBy(const Offset(-100, 0));
+      await tester.pump();
+      final double dragged = _panelRect(tester).width;
+      await gesture.up();
+      await tester.pumpAndSettle();
+
+      expect(_panelRect(tester).width, dragged);
+      expect(_surfaceRect(tester).right, _panelRect(tester).left);
+      expect(tester.takeException(), isNull);
+    });
+
     testWidgets(
       'compact: a side sheet over the editor, closed by its barrier',
       (WidgetTester tester) async {

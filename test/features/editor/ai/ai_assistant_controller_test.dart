@@ -173,7 +173,10 @@ void main() {
       expect(rig.assistant.sendQuickAction(action), isTrue);
 
       final AiRequest request = rig.client.requests.single;
-      expect(request.systemInstruction, AiPrompts.system);
+      expect(
+        request.systemInstruction,
+        AiPrompts.systemFor(notationEnabled: false),
+      );
       expect(request.imagePng, same(rig.assistant.context!.image!.png));
       expect(request.messages.single.role, AiRole.user);
       expect(request.messages.single.text, action.prompt);
@@ -212,12 +215,13 @@ void main() {
     );
 
     final String drawing = AiPrompts.systemFor(notationEnabled: true);
-    expect(drawing, contains('build on their ink'));
-    expect(drawing, contains('no text sits on a line'));
-    // Anything beyond a simple text answer is written on the note.
-    expect(drawing, contains('Every answer must come with a notation'));
-    expect(drawing, contains('except a simple text answer'));
-    expect(drawing, contains('make the most reasonable choice and draw it'));
+    // Finishing the user's drawing adds to it; it never copies it.
+    expect(drawing, contains('Build on selected_ink coordinates'));
+    expect(drawing, contains('add only what is missing'));
+    expect(drawing, contains('never a second copy of a shape'));
+    expect(drawing, contains("Do not redraw the user's note"));
+    // Words become the user's own handwriting, kept as SVG paths.
+    expect(drawing, contains('user-configured handwriting'));
     expect(drawing, isNot(contains('is ambiguous')));
     expect(drawing, isNot(contains('op amp')));
   });
@@ -950,9 +954,10 @@ void main() {
         same(assistant.context!.image!.png),
       );
       expect(client.requests.single.notationImagePng, isNotNull);
+      expect(client.requests.single.systemInstruction, AiPrompts.textSystem);
       expect(
         client.requests.single.systemInstruction,
-        contains('Answer in words only'),
+        contains('include only title and the message desc'),
       );
       expect(
         client.requests.single.notationInstruction,

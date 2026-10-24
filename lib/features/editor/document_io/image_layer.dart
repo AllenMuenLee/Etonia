@@ -144,7 +144,11 @@ class _PlacedImage extends StatelessWidget {
         child: Transform.rotate(
           angle: element.rotation,
           child: element.vector != null
-              ? _SvgContents(vector: element.vector!, animate: animateSvg)
+              ? _SvgContents(
+                  vector: element.vector!,
+                  animate: animateSvg,
+                  brightness: Theme.of(context).brightness,
+                )
               : cache == null
               ? const Center(child: Text('Image unavailable'))
               : _ImageContents(
@@ -162,10 +166,15 @@ class _PlacedImage extends StatelessWidget {
 /// Renders the retained SVG source. Animation changes only at semantic SVG
 /// steps, keeping parsing and widget work off per-frame paths.
 class _SvgContents extends StatefulWidget {
-  const _SvgContents({required this.vector, required this.animate});
+  const _SvgContents({
+    required this.vector,
+    required this.animate,
+    required this.brightness,
+  });
 
   final EditableSvg vector;
   final bool animate;
+  final Brightness brightness;
 
   @override
   State<_SvgContents> createState() => _SvgContentsState();
@@ -192,7 +201,8 @@ class _SvgContentsState extends State<_SvgContents>
   @override
   void didUpdateWidget(_SvgContents oldWidget) {
     super.didUpdateWidget(oldWidget);
-    if (oldWidget.vector.source != widget.vector.source) {
+    if (oldWidget.vector.source != widget.vector.source ||
+        oldWidget.brightness != widget.brightness) {
       _controller?.dispose();
       _controller = null;
       _prepare();
@@ -205,7 +215,7 @@ class _SvgContentsState extends State<_SvgContents>
   void _prepare() {
     _frames = <String>[
       for (int step = 0; step <= widget.vector.stepCount; step++)
-        widget.vector.frame(step),
+        widget.vector.frame(step, brightness: widget.brightness),
     ];
     _step = widget.vector.isAnimated ? 0 : widget.vector.stepCount;
   }

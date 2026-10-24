@@ -189,7 +189,8 @@ function inputCostBound(model: ModelConfig, input: AiInput, part: Part = "all"):
     ? input.prompt + input.systemInstruction + JSON.stringify(input.history ?? [])
     : part === "draw"
     ? input.prompt + (input.notationInstruction ?? input.systemInstruction) +
-      (input.noteMetadata ?? "") + JSON.stringify(input.responseSchema ?? "")
+      (input.noteMetadata ?? "") + JSON.stringify(input.responseSchema ?? "") +
+      drawingRequest(input)
     : input.prompt + input.systemInstruction + (input.notationInstruction ?? "") +
       (input.noteMetadata ?? "") + JSON.stringify(input.history ?? []) +
       JSON.stringify(input.responseSchema ?? "");
@@ -360,6 +361,34 @@ function withoutFence(text: string): string {
   return body.replace(/^```[^\n]*\n?/, "").replace(/```\s*$/, "").trim();
 }
 
+const maxRequestEcho = 1500;
+const maxEarlierRequests = 3;
+const maxEarlierRequestLength = 300;
+
+/** The closing turn of the drawing step: what the user actually asked for,
+ * so the drawing model decides what to write, draw, complete, or animate from
+ * their words and not only from the explanation. Recent earlier requests come
+ * along so a follow-up ("now animate it") keeps its subject. */
+export function drawingRequest(input: AiInput, visual?: "static"): string {
+  const clip = (text: string, limit: number) => Array.from(text.trim()).slice(0, limit).join("");
+  const earlier = (input.history ?? [])
+    .filter((message) => message.role === "user")
+    .slice(-maxEarlierRequests)
+    .map((message) => clip(message.content, maxEarlierRequestLength))
+    .filter((text) => text !== "");
+  return `The user asked: ${JSON.stringify(clip(input.prompt, maxRequestEcho))}` +
+    (earlier.length > 0
+      ? `\nEarlier in this conversation they asked: ${earlier.map((t) => JSON.stringify(t)).join("; ")}`
+      : "") +
+    "\nFollowing your explanation, put on the note what this request calls for. If it asks you to " +
+    "draw, complete, label, mark, plot, or fix something, do that directly on their own ink, adding " +
+    "only what is missing. " +
+    (visual === "static"
+      ? ""
+      : "If it asks for something to move or unfold in stages, animate it with steps. ") +
+    "Otherwise add only the useful visual, or no visible elements when none helps.";
+}
+
 export function providerRequest(
   model: ModelConfig,
   input: AiInput,
@@ -412,7 +441,7 @@ export function providerRequest(
           ...(aiStep?.step === "notation"
             ? [
               { role: "assistant", content: aiStep.message },
-              { role: "user", content: "Add only the useful visual." },
+              { role: "user", content: drawingRequest(input, aiStep.visual) },
             ]
             : []),
         ],
@@ -467,7 +496,7 @@ export function providerRequest(
               { role: "assistant", content: aiStep.message },
               {
                 role: "user",
-                content: "Following your explanation, write and draw it on the note.",
+                content: drawingRequest(input, aiStep.visual),
               },
             ]
             : []),
@@ -495,7 +524,7 @@ export function providerRequest(
         ...(aiStep?.step === "notation"
           ? [
             { role: "model", parts: [{ text: aiStep.message }] },
-            { role: "user", parts: [{ text: "Add only the useful visual." }] },
+            { role: "user", parts: [{ text: drawingRequest(input, aiStep.visual) }] },
           ]
           : []),
       ],

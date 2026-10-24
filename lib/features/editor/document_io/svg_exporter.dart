@@ -124,6 +124,7 @@ class SvgExporter {
       'data-etonia-stroke-id': stroke.id,
       'fill': 'none',
       'stroke': paint,
+      'data-etonia-stroke-ink': stroke.style.ink.id,
       'stroke-opacity': _n(color.a),
       'stroke-width': _n(stroke.style.width),
       'stroke-linecap': 'round',
