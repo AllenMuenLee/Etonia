@@ -2,8 +2,10 @@ import 'dart:async';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:greatnote/backend/backend_service.dart' show BackendFailure;
 import 'package:greatnote/features/editor/ai/ai_client.dart';
 import 'package:greatnote/features/editor/ai/ai_usage_gate.dart';
+import 'package:greatnote/features/payment/account_page.dart';
 import 'package:greatnote/features/payment/account_panel.dart';
 import 'package:greatnote/features/payment/billing_backend.dart';
 import 'package:greatnote/features/payment/in_app_purchase_gateway.dart';
@@ -38,6 +40,20 @@ class TestBillingBackend extends BillingBackend {
   Future<SubscriptionState> verifyPurchase(StorePurchaseUpdate purchase) async {
     if (fail) throw StateError('unverified');
     return verification?.future ?? result;
+  }
+
+  Object? redeemError;
+  String? redeemed;
+
+  @override
+  Future<SubscriptionState> redeemGiftCode(String code) async {
+    if (redeemError != null) throw redeemError!;
+    redeemed = code;
+    return result = SubscriptionState(
+      remainingCreditsMicroUsd: 3500000,
+      freeCreditMicroUsd: 3500000,
+      freeCreditExpiresAt: DateTime.now().add(const Duration(days: 30)),
+    );
   }
 
   int googleSignIns = 0;
@@ -148,6 +164,34 @@ void main() {
       expect(controller.accessFor(AiModelId.haiku), AiModelAccess.noPlan);
     },
   );
+
+  test('a gift code adds free credit that lapses after its month', () async {
+    final backend = TestBillingBackend()..result = const SubscriptionState();
+    final controller = SubscriptionController(
+      store: InMemorySubscriptionStore(),
+      backend: backend,
+    );
+    addTearDown(controller.dispose);
+    await controller.load();
+    await controller.redeemGiftCode(' GIFT-123 ');
+    expect(backend.redeemed, 'GIFT-123');
+    expect(controller.hasFreeCredit, isTrue);
+    expect(controller.remainingCreditsMicroUsd, 3500000);
+    expect(controller.errorMessage, isNull);
+
+    backend.redeemError = const BackendFailure('invalid_code');
+    await controller.redeemGiftCode('nope');
+    expect(controller.errorMessage, 'That gift code is not valid.');
+
+    backend.result = SubscriptionState(
+      remainingCreditsMicroUsd: 3500000,
+      freeCreditMicroUsd: 3500000,
+      freeCreditExpiresAt: DateTime.now().subtract(const Duration(seconds: 1)),
+    );
+    await controller.refresh();
+    expect(controller.remainingCreditsMicroUsd, 0);
+    expect(controller.accessFor(AiModelId.haiku), AiModelAccess.outOfCredits);
+  });
 
   test('server state parses the free credit', () {
     final state = SubscriptionState.fromJson(const <String, Object?>{
@@ -268,4 +312,80 @@ void main() {
       controller.dispose();
     },
   );
+
+  for (final TestViewport viewport in <TestViewport>[
+    TestViewport.compact,
+    TestViewport.tabletLandscape,
+  ]) {
+    testWidgets(
+      'the account page splits the profile, subscription and backup into tabs at '
+      '${viewport.name}',
+      (WidgetTester tester) async {
+        final backend = TestBillingBackend();
+        final controller = SubscriptionController(
+          store: InMemorySubscriptionStore(),
+          backend: backend,
+        );
+        await controller.load();
+        await pumpApp(
+          tester,
+          viewport: viewport,
+          home: AccountPage(
+            controller: controller,
+            backup: const Text('backup section'),
+          ),
+        );
+        expect(tester.takeException(), isNull);
+        expect(find.text('person@example.com'), findsOneWidget);
+        for (final String tab in <String>[
+          'Profile',
+          'Subscription',
+          'Backup',
+        ]) {
+          expect(find.text(tab), findsOneWidget);
+        }
+
+        await tester.tap(
+          find.byKey(const ValueKey<String>('account-tab-subscription')),
+        );
+        await tester.pumpAndSettle();
+        expect(find.text('Pro · \$12.99 / month'), findsOneWidget);
+        expect(find.text('person@example.com'), findsNothing);
+        // Every plan is listed here, not one tap away.
+        for (final SubscriptionPlan plan in SubscriptionPlan.values) {
+          final Finder card = find.byKey(ValueKey<String>('plan-${plan.name}'));
+          await tester.ensureVisible(card);
+          expect(card, findsOneWidget);
+        }
+
+        await tester.tap(
+          find.byKey(const ValueKey<String>('account-tab-backup')),
+        );
+        await tester.pumpAndSettle();
+        expect(find.text('backup section'), findsOneWidget);
+        expect(
+          find.byKey(const ValueKey<String>('plan-pro1299')),
+          findsNothing,
+        );
+        controller.dispose();
+      },
+    );
+  }
+
+  testWidgets('the account page without a backup section says so', (
+    WidgetTester tester,
+  ) async {
+    final backend = TestBillingBackend()..userId = null;
+    final controller = SubscriptionController(
+      store: InMemorySubscriptionStore(),
+      backend: backend,
+    );
+    await controller.load();
+    await pumpApp(tester, home: AccountPage(controller: controller));
+    expect(find.text('Continue with Google'), findsOneWidget);
+    await tester.tap(find.byKey(const ValueKey<String>('account-tab-backup')));
+    await tester.pumpAndSettle();
+    expect(find.text('Backup is not available in this build.'), findsOneWidget);
+    controller.dispose();
+  });
 }

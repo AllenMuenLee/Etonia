@@ -8,7 +8,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/semantics.dart';
 
 import '../../../app/theme/app_tokens.dart';
-import '../ai/ai_canvas_input.dart';
+import '../../../shared/feedback/app_haptics.dart';
 import '../document_io/document_models.dart';
 import 'eraser_settings.dart';
 import 'ink_controller.dart';
@@ -21,10 +21,14 @@ import 'scribble_erase.dart';
 import 'shape_config.dart';
 import 'shape_recognizer.dart';
 import 'ink_selection.dart';
+import 'pointer_claims.dart';
+import 'ruler.dart';
+import 'ruler_gesture.dart';
+import 'ruler_layer.dart';
 import 'selection_transform.dart';
 import 'stroke.dart';
-import 'stroke_follower.dart';
 import '../sticky/sticky_note.dart';
+import '../audio/stroke_replay_controller.dart';
 
 /// Coordinates cross-page lasso selection and smooth cross-page selection
 /// transforms across all mounted [InkCanvas]es of a note.
@@ -1362,12 +1366,16 @@ class InkCanvas extends StatefulWidget {
     this.stickySettings,
     this.onStickyPlaced,
     this.pageGrows = false,
-    this.aiInput,
     this.carry,
     this.onSelectionCarried,
     this.visible,
     this.enableNativeInk = true,
     this.exclusionRects,
+    this.exclusionsChanged,
+    this.replay,
+    this.onReplayStrokeTapped,
+    this.ruler,
+    this.pointerClaims,
   });
 
   /// Shared with the note's other pages, so that a selection moved onto one
@@ -1377,10 +1385,6 @@ class InkCanvas extends StatefulWidget {
   /// Called once a selection moved from another page has arrived on this
   /// one, still being moved.
   final VoidCallback? onSelectionCarried;
-
-  /// Where writing goes with [EditorTool.ai]: a glowing stroke for the
-  /// assistant, never ink. Without it the AI tool writes nothing.
-  final AiCanvasInputController? aiInput;
 
   /// The look the Sticky note tool gives a new note.
   final ValueListenable<StickyNoteSettings>? stickySettings;
@@ -1447,6 +1451,21 @@ class InkCanvas extends StatefulWidget {
   /// native stylus strokes must be excluded from previewing and writing.
   final ValueGetter<List<Rect>>? exclusionRects;
 
+  /// Notifies when [exclusionRects] would answer differently.
+  final Listenable? exclusionsChanged;
+
+  /// While active, page input seeks recorded ink instead of editing it.
+  final StrokeReplayController? replay;
+  final ValueChanged<Stroke>? onReplayStrokeTapped;
+
+  /// The ruler laid on this page, if the editor has one. While it shows,
+  /// strokes begun near its edge run along it.
+  final RulerController? ruler;
+
+  /// Where a touch the ruler takes is recorded, so the scrolling
+  /// view above does not also move with it.
+  final PointerClaims? pointerClaims;
+
   @override
   State<InkCanvas> createState() => _InkCanvasState();
 }
@@ -1454,6 +1473,9 @@ class InkCanvas extends StatefulWidget {
 class _InkCanvasState extends State<InkCanvas> with WidgetsBindingObserver {
   static const int _nativePointerOffset = 0x40000000;
   final int _nativeSurfaceId = NativeInkBridge.instance.allocateSurfaceId();
+
+  /// False while this canvas sits in an offstage tab.
+  bool _paneVisible = true;
   bool _nativeRegistered = false;
   bool _nativeRegistering = false;
   bool _nativeSyncScheduled = false;
@@ -1490,6 +1512,20 @@ class _InkCanvasState extends State<InkCanvas> with WidgetsBindingObserver {
   int? _fingerTapPointer;
   Offset _fingerTapStart = Offset.zero;
   Duration _fingerTapTime = Duration.zero;
+  int? _replayPointer;
+  Offset _replayStart = Offset.zero;
+
+  /// Touches moving or turning the ruler.
+  late final RulerGestureTracker _rulerGesture = RulerGestureTracker(
+    widget.ruler?.config ?? const RulerConfig(),
+  );
+
+  /// The ruler edge the stroke or erase under way is run along, if any, the
+  /// pointer drawing it, and what the distance badge shows.
+  RulerGuide? _guide;
+  int? _guidePointer;
+  final ValueNotifier<RulerReadout?> _rulerReadout =
+      ValueNotifier<RulerReadout?>(null);
 
   Size get _pageSize {
     final RenderObject? box = context.findRenderObject();
@@ -1503,8 +1539,16 @@ class _InkCanvasState extends State<InkCanvas> with WidgetsBindingObserver {
     widget.tool.addListener(_onToolChanged);
     widget.penSettings.addListener(_onNativeSettingsChanged);
     widget.stylusOnly?.addListener(_onNativeSettingsChanged);
+    widget.exclusionsChanged?.addListener(_onNativeSettingsChanged);
+    widget.replay?.addListener(_onNativeSettingsChanged);
+    widget.ruler?.addListener(_onRulerChanged);
     widget.carry?._attach(this);
     _scheduleNativeSync();
+    // After the first frame: placing the ruler tells the palette, which
+    // must not be told while the tree is being built.
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) _onRulerChanged();
+    });
   }
 
   @override
@@ -1530,6 +1574,21 @@ class _InkCanvasState extends State<InkCanvas> with WidgetsBindingObserver {
       oldWidget.stylusOnly?.removeListener(_onNativeSettingsChanged);
       widget.stylusOnly?.addListener(_onNativeSettingsChanged);
     }
+    if (oldWidget.exclusionsChanged != widget.exclusionsChanged) {
+      oldWidget.exclusionsChanged?.removeListener(_onNativeSettingsChanged);
+      widget.exclusionsChanged?.addListener(_onNativeSettingsChanged);
+    }
+    if (oldWidget.replay != widget.replay) {
+      oldWidget.replay?.removeListener(_onNativeSettingsChanged);
+      widget.replay?.addListener(_onNativeSettingsChanged);
+    }
+    if (oldWidget.ruler != widget.ruler) {
+      oldWidget.ruler?.removeListener(_onRulerChanged);
+      widget.ruler?.addListener(_onRulerChanged);
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) _onRulerChanged();
+      });
+    }
     if (oldWidget.carry != widget.carry) {
       _leaveCarry(oldWidget.carry);
       widget.carry?._attach(this);
@@ -1549,6 +1608,11 @@ class _InkCanvasState extends State<InkCanvas> with WidgetsBindingObserver {
     widget.tool.removeListener(_onToolChanged);
     widget.penSettings.removeListener(_onNativeSettingsChanged);
     widget.stylusOnly?.removeListener(_onNativeSettingsChanged);
+    widget.exclusionsChanged?.removeListener(_onNativeSettingsChanged);
+    widget.replay?.removeListener(_onNativeSettingsChanged);
+    widget.ruler?.removeListener(_onRulerChanged);
+    _releaseClaims();
+    _rulerReadout.dispose();
     if (_nativeRegistered || _nativeRegistering) {
       NativeInkBridge.instance.unregisterSurface(_nativeSurfaceId);
     }
@@ -1566,7 +1630,6 @@ class _InkCanvasState extends State<InkCanvas> with WidgetsBindingObserver {
   void _endGesture() {
     _cancelHold();
     _cancelShapeHold();
-    widget.aiInput?.cancelActive();
     widget.carry?.finalizeSelectionGesture();
     widget.controller.finalizeActiveGesture();
   }
@@ -1683,15 +1746,16 @@ class _InkCanvasState extends State<InkCanvas> with WidgetsBindingObserver {
   /// that note, so its options act on it.
   void _onToolChanged() {
     final int? nativePointer = _nativeLivePointer;
-    if (nativePointer != null && widget.tool.value != EditorTool.pen) {
+    if (nativePointer != null && !_nativePenTool) {
       // Hide the live preview now rather than after the next frame's sync.
       _ignoreNativePointer(nativePointer);
     }
-    if (widget.tool.value != EditorTool.pen) {
+    if (!_nativePenTool) {
       NativeInkBridge.instance.clearAllPreviews();
     }
     _syncNativeSurface();
     _endGesture();
+    _endGuide();
     _lastStickyTap = null;
     widget.pastePrompt?.value = null;
     final EditorTool tool = widget.tool.value;
@@ -1718,6 +1782,167 @@ class _InkCanvasState extends State<InkCanvas> with WidgetsBindingObserver {
 
   void _onNativeSettingsChanged() => _scheduleNativeSync();
 
+  /// Whether the native stylus path draws: with the pen, and not beside the
+  /// ruler, whose edge the native preview could not follow. The Flutter
+  /// pipeline takes the pen over while the ruler shows.
+  bool get _nativePenTool =>
+      widget.tool.value == EditorTool.pen &&
+      !(widget.ruler?.isVisible ?? false);
+
+  // Ruler.
+
+  /// The ruler as it lies on this page.
+  RulerState _rulerState() {
+    final Size size = _pageSize;
+    // As long as the page's diagonal, so the ruler crosses the whole page
+    // at any angle.
+    final double? length = size.isEmpty
+        ? null
+        : size.bottomRight(Offset.zero).distance;
+    return widget.ruler!.stateFor(
+      widget.controller,
+      _rulerFallbackCenter(),
+      length: length,
+    );
+  }
+
+  /// Where a ruler not yet placed on this page is put: the middle of what
+  /// shows of it.
+  Offset _rulerFallbackCenter() {
+    final Rect? visible = widget.visible?.value;
+    if (visible != null && !visible.isEmpty) {
+      return visible.center;
+    }
+    final Size size = _pageSize;
+    return size.isEmpty ? const Offset(200, 200) : size.center(Offset.zero);
+  }
+
+  /// The ruler appeared, or changed: it is put down where it is seen, and
+  /// the native stylus path stands aside or comes back.
+  void _onRulerChanged() {
+    final RulerController? ruler = widget.ruler;
+    if (ruler != null &&
+        ruler.isVisible &&
+        !ruler.hasPose(widget.controller) &&
+        mounted) {
+      ruler.place(widget.controller, _rulerState());
+    }
+    if (ruler != null && !ruler.isVisible) {
+      _rulerGesture.cancel();
+      _endGuide();
+    }
+    _scheduleNativeSync();
+  }
+
+  void _releaseClaims() {
+    _rulerGesture.cancel();
+  }
+
+  /// Takes a press for the ruler, if that is what it is.
+  bool _beginRuler(PointerDownEvent event, InkDeviceKind kind) {
+    final RulerController? ruler = widget.ruler;
+    if (ruler == null ||
+        !ruler.isVisible ||
+        ruler.isLocked ||
+        kind == InkDeviceKind.stylus ||
+        kind == InkDeviceKind.invertedStylus) {
+      return false;
+    }
+    if (_rulerGesture.isActive) {
+      // A second finger, anywhere on the page, turns the ruler with the
+      // first.
+      if (kind == InkDeviceKind.touch &&
+          _rulerGesture.join(event.pointer, event.localPosition)) {
+        widget.pointerClaims?.claim(event.pointer);
+        return true;
+      }
+      return false;
+    }
+    final RulerState state = _rulerState();
+    final RulerGrab? grab = _rulerGesture.grabAt(state, event.localPosition);
+    if (grab == null) {
+      return false;
+    }
+    if (widget.isInputBlocked?.call() ?? false) {
+      return true;
+    }
+    widget.pastePrompt?.value = null;
+    _rulerGesture.begin(event.pointer, event.localPosition, state, grab);
+    widget.pointerClaims?.claim(event.pointer);
+    return true;
+  }
+
+  /// Carries a touch the ruler holds. Returns whether it was one.
+  bool _moveRuler(PointerMoveEvent event) {
+    if (_rulerGesture.owns(event.pointer)) {
+      final RulerState? next = _rulerGesture.move(
+        event.pointer,
+        event.localPosition,
+      );
+      if (next != null) {
+        widget.ruler?.place(widget.controller, next);
+        if (_rulerGesture.didSnap) {
+          AppHaptics.selectionClick();
+        }
+      }
+      return true;
+    }
+    return false;
+  }
+
+  /// Lets go of a touch the ruler holds. Returns whether it was one.
+  bool _endRuler(PointerEvent event) {
+    if (_rulerGesture.owns(event.pointer)) {
+      widget.pointerClaims?.release(event.pointer);
+      _rulerGesture.end(event.pointer);
+      return true;
+    }
+    return false;
+  }
+
+  /// A stroke or erase begins at [page]: if it starts at the ruler's edge it
+  /// follows it. Returns where it starts.
+  Offset _beginGuide(PointerEvent event, Offset page) {
+    _endGuide();
+    final RulerController? ruler = widget.ruler;
+    if (ruler == null || !ruler.isVisible) {
+      return page;
+    }
+    final RulerGuide? guide = RulerGuide.begin(
+      RulerGeometry(_rulerState()),
+      ruler.config,
+      page,
+    );
+    if (guide == null) {
+      return page;
+    }
+    _guide = guide;
+    _guidePointer = event.pointer;
+    final Offset snapped = guide.apply(page);
+    _rulerReadout.value = guide.readout;
+    return snapped;
+  }
+
+  /// [event]'s position, run along the ruler's edge if its stroke follows it.
+  InkVector _guidedPosition(PointerEvent event) {
+    final RulerGuide? guide = _guide;
+    if (guide == null || _guidePointer != event.pointer) {
+      return _position(event);
+    }
+    final Offset snapped = guide.apply(event.localPosition);
+    _rulerReadout.value = guide.readout;
+    return InkVector(snapped.dx, snapped.dy);
+  }
+
+  void _endGuide([PointerEvent? event]) {
+    if (event != null && event.pointer != _guidePointer) {
+      return;
+    }
+    _guide = null;
+    _guidePointer = null;
+    _rulerReadout.value = null;
+  }
+
   /// Registers the canvas's current screen transform with the native input
   /// observer. This runs after layout, and again whenever the page viewport
   /// rebuilds while scrolling or zooming.
@@ -1735,7 +1960,7 @@ class _InkCanvasState extends State<InkCanvas> with WidgetsBindingObserver {
   }
 
   Future<void> _syncNativeSurface() async {
-    if (!widget.enableNativeInk) {
+    if (!widget.enableNativeInk || (widget.replay?.isActive ?? false)) {
       _lastNativeSurfaceSignature = null;
       if (_nativeRegistered || _nativeRegistering) {
         await NativeInkBridge.instance.unregisterSurface(_nativeSurfaceId);
@@ -1753,7 +1978,10 @@ class _InkCanvasState extends State<InkCanvas> with WidgetsBindingObserver {
     final Offset yBasis = object.localToGlobal(const Offset(0, 1)) - origin;
     final PenSettings pen = widget.penSettings.value;
     final StrokeStyle style = pen.strokeStyle(widget.penConfig);
-    final bool enabled = widget.tool.value == EditorTool.pen;
+    // Only editors on screen claim stylus input: with split screen, a hidden
+    // tab's stale rectangle must not compete with the two visible panes, and
+    // native code then only tests the surfaces the pen can actually land on.
+    final bool enabled = _paneVisible && _nativePenTool;
     // A translucent preview would compound with Flutter's active highlighter.
     // Highlighter input is still captured at full native sample rate.
     final bool previewEnabled = enabled && !style.isHighlighter;
@@ -1771,6 +1999,8 @@ class _InkCanvasState extends State<InkCanvas> with WidgetsBindingObserver {
       color: color,
       width: style.width,
       pressureSensitivity: pen.dynamics.pressure,
+      stabilization: pen.stabilization,
+      writingStyle: style.writing.name,
       exclusionRects: exclusions,
     );
     final List<Object?> signature = <Object?>[
@@ -1787,6 +2017,8 @@ class _InkCanvasState extends State<InkCanvas> with WidgetsBindingObserver {
       color.toARGB32(),
       style.width,
       pen.dynamics.pressure,
+      pen.stabilization,
+      style.writing.name,
       exclusions.length,
       for (final Rect r in exclusions) ...<Object?>[
         r.left,
@@ -1830,7 +2062,7 @@ class _InkCanvasState extends State<InkCanvas> with WidgetsBindingObserver {
     if (_dispatchingNative ||
         !widget.enableNativeInk ||
         !_nativeRegistered ||
-        widget.tool.value != EditorTool.pen) {
+        !_nativePenTool) {
       return false;
     }
     return event.kind == PointerDeviceKind.stylus ||
@@ -1844,20 +2076,24 @@ class _InkCanvasState extends State<InkCanvas> with WidgetsBindingObserver {
     if (!mounted || packet.surfaceId != _nativeSurfaceId) {
       return;
     }
+    if (widget.replay?.isActive ?? false) {
+      _ignoreNativePointer(packet.pointer);
+      return;
+    }
     final bool ends =
         packet.phase == NativeInkPhase.up ||
         packet.phase == NativeInkPhase.cancel;
     if (packet.phase == NativeInkPhase.down) {
       _ignoredNativePointers.remove(packet.pointer);
-      if (widget.tool.value != EditorTool.pen || !_nativeHitsCanvas(packet)) {
+      if (!_nativePenTool || !_nativeHitsCanvas(packet)) {
         _ignoreNativePointer(packet.pointer);
       } else {
         _nativeLivePointer = packet.pointer;
       }
-    } else if (widget.tool.value != EditorTool.pen) {
+    } else if (!_nativePenTool) {
       _ignoreNativePointer(packet.pointer);
     }
-    if (widget.tool.value != EditorTool.pen) {
+    if (!_nativePenTool) {
       _ignoreNativePointer(packet.pointer);
       return;
     }
@@ -1992,11 +2228,21 @@ class _InkCanvasState extends State<InkCanvas> with WidgetsBindingObserver {
   }
 
   void _onPointerDown(PointerDownEvent event) {
+    if (widget.replay?.isActive ?? false) {
+      _replayPointer = event.pointer;
+      _replayStart = event.position;
+      return;
+    }
     if (_nativeOwns(event)) {
       return;
     }
     final InkDeviceKind? kind = _deviceKind(event);
     if (kind == null) {
+      return;
+    }
+    // A finger or mouse on the ruler moves it, before a finger is left to
+    // scroll the page.
+    if (_beginRuler(event, kind)) {
       return;
     }
     if (kind == InkDeviceKind.touch && (widget.stylusOnly?.value ?? false)) {
@@ -2024,27 +2270,24 @@ class _InkCanvasState extends State<InkCanvas> with WidgetsBindingObserver {
     if (kind == InkDeviceKind.invertedStylus ||
         widget.tool.value == EditorTool.eraser) {
       widget.carry?.clearSelection();
-      // Begun on the note open for writing, the eraser erases its ink
-      // only; anywhere else, the page's.
+      // Sticky ink is erasable whether or not its note is selected or open
+      // for writing. A gesture begun on sticky paper belongs to that note;
+      // anywhere else it belongs to the page.
+      final StickyNoteElement? eraseTarget = onEditing
+          ? editing
+          : controller.stickyAt(position);
+      final Offset erasePoint = _beginGuide(event, event.localPosition);
       controller.startErase(
         pointer: event.pointer,
-        position: position,
+        position: InkVector(erasePoint.dx, erasePoint.dy),
         settings: widget.eraserSettings.value,
         config: widget.eraserConfig,
         screenScale: _screenScale(),
-        inSticky: onEditing ? editing : null,
+        inSticky: eraseTarget,
       );
       return;
     }
     if (widget.tool.value == EditorTool.ai) {
-      if (!controller.isBusy) {
-        widget.aiInput?.begin(
-          event.pointer,
-          controller,
-          _sample(event, kind),
-          toScreen: _toScreen,
-        );
-      }
       return;
     }
     if (widget.tool.value == EditorTool.sticky) {
@@ -2098,19 +2341,24 @@ class _InkCanvasState extends State<InkCanvas> with WidgetsBindingObserver {
     }
     widget.carry?.clearSelection();
     final PenSettings pen = widget.penSettings.value;
+    _beginGuide(event, event.localPosition);
     // Pen and Highlighter share the capture and smoothing; the highlighter
-    // is even along its length, and never follows ink or becomes a shape.
+    // is even along its length, and never becomes a shape.
+    // Ink written on a sticky note belongs to it, whether or not it is
+    // open for writing.
+    final StickyNoteElement? target = onEditing
+        ? editing
+        : controller.stickyAt(position);
     final bool began = controller.startStroke(
       pointer: event.pointer,
       sample: _sample(event, kind),
       style: pen.strokeStyle(widget.penConfig),
       dynamics: pen.dynamics,
       smoothingConfig: pen.smoothing(controller.smoothing),
-      follower: pen.followsStrokes && !onEditing ? _follower() : null,
       scribbleErase: pen.armsScribbleToErase ? widget.scribbleConfig : null,
-      intoSticky: onEditing ? editing : null,
+      intoSticky: target,
     );
-    if (began && pen.armsHoldToShape && !onEditing) {
+    if (began && pen.armsHoldToShape && target == null) {
       _cancelShapeHold();
       _shapePointer = event.pointer;
       _shapeAnchor = event.localPosition;
@@ -2171,21 +2419,20 @@ class _InkCanvasState extends State<InkCanvas> with WidgetsBindingObserver {
   /// Remembers a tap that left a dot on a sticky note, for a double tap.
   void _recordStickyTap(PointerUpEvent event) {
     final InkController controller = widget.controller;
-    final Stroke? dot = controller.lastStroke;
-    if (dot == null || !dot.isDot) {
+    final StickyNoteElement? sticky = controller.lastWrittenSticky;
+    final Stroke? dot = sticky?.strokes.lastOrNull;
+    if (sticky == null || dot == null || !dot.isDot) {
       _lastStickyTap = null;
       return;
     }
-    final InkVector at = dot.points.first;
-    final StickyNoteElement? sticky = controller.stickyAt(at);
-    _lastStickyTap = sticky == null
-        ? null
-        : _StickyTap(
-            stickyId: sticky.id,
-            position: at,
-            time: event.timeStamp,
-            dot: dot,
-          );
+    // Where it lies on the page: the dot's own points are the note's.
+    final InkVector at = _position(event);
+    _lastStickyTap = _StickyTap(
+      stickyId: sticky.id,
+      position: at,
+      time: event.timeStamp,
+      dot: dot,
+    );
   }
 
   void _announce(String message) {
@@ -2200,6 +2447,16 @@ class _InkCanvasState extends State<InkCanvas> with WidgetsBindingObserver {
   }
 
   void _onPointerMove(PointerMoveEvent event) {
+    if (widget.replay?.isActive ?? false) {
+      if (event.pointer == _replayPointer &&
+          (event.position - _replayStart).distance > kTouchSlop) {
+        _replayPointer = -1;
+      }
+      return;
+    }
+    if (_moveRuler(event)) {
+      return;
+    }
     if (_nativeOwns(event)) {
       return;
     }
@@ -2209,10 +2466,6 @@ class _InkCanvasState extends State<InkCanvas> with WidgetsBindingObserver {
     if (event.pointer == _fingerTapPointer &&
         (event.position - _fingerTapStart).distance > kTouchSlop) {
       _fingerTapPointer = -1;
-    }
-    if (_isWritingForAi(event)) {
-      widget.aiInput!.add(event.pointer, _samples(event));
-      return;
     }
     if (_isPlacing(event)) {
       widget.controller.updateStickyPlacement(event.pointer, _position(event));
@@ -2225,7 +2478,7 @@ class _InkCanvasState extends State<InkCanvas> with WidgetsBindingObserver {
     if (_isAdjustingShape(event)) {
       widget.controller.adjustShape(event.pointer, _position(event));
     } else if (_isErasing(event)) {
-      widget.controller.eraseTo(event.pointer, _position(event));
+      widget.controller.eraseTo(event.pointer, _guidedPosition(event));
     } else if (_isSelecting(event)) {
       final double slop = widget.controller.selectionConfig.pasteHoldSlop;
       if (event.pointer == _holdPointer &&
@@ -2251,6 +2504,24 @@ class _InkCanvasState extends State<InkCanvas> with WidgetsBindingObserver {
   }
 
   void _onPointerUp(PointerUpEvent event) {
+    if (widget.replay?.isActive ?? false) {
+      final bool tapped = event.pointer == _replayPointer;
+      _replayPointer = null;
+      if (tapped) {
+        final Stroke? stroke = hitTestStroke(
+          widget.controller.strokes,
+          _position(event),
+        );
+        if (stroke?.completedAtMs != null &&
+            stroke?.recordingId == widget.replay?.track?.id) {
+          widget.onReplayStrokeTapped?.call(stroke!);
+        }
+      }
+      return;
+    }
+    if (_endRuler(event)) {
+      return;
+    }
     if (_nativeOwns(event)) {
       return;
     }
@@ -2273,10 +2544,6 @@ class _InkCanvasState extends State<InkCanvas> with WidgetsBindingObserver {
     }
     if (event.pointer == _shapePointer) {
       _cancelShapeHold();
-    }
-    if (_isWritingForAi(event)) {
-      widget.aiInput!.end(event.pointer, _samples(event));
-      return;
     }
     if (_isPlacing(event)) {
       final StickyNoteElement? placed = widget.controller.endStickyPlacement(
@@ -2303,7 +2570,8 @@ class _InkCanvasState extends State<InkCanvas> with WidgetsBindingObserver {
     if (_isAdjustingShape(event)) {
       widget.controller.endShapeAdjust(event.pointer, _position(event));
     } else if (_isErasing(event)) {
-      widget.controller.endErase(event.pointer, _position(event));
+      widget.controller.endErase(event.pointer, _guidedPosition(event));
+      _endGuide(event);
     } else if (_isSelecting(event)) {
       final SelectionCarry? carry = widget.carry;
       if (carry != null && carry._ownsPointer(event.pointer, this)) {
@@ -2321,13 +2589,18 @@ class _InkCanvasState extends State<InkCanvas> with WidgetsBindingObserver {
         );
       }
     } else {
+      // Taps are watched on notes not yet open for writing: a second one
+      // opens the note.
       final bool onPage =
           widget.controller.activePointer == event.pointer &&
-          widget.controller.activeStrokeSticky == null;
+          widget.controller.activeStrokeSticky != null &&
+          widget.controller.activeStrokeSticky?.id !=
+              widget.controller.editingSticky?.id;
       final int erased = widget.controller.endStroke(
         event.pointer,
         _samples(event),
       );
+      _endGuide(event);
       if (erased > 0) {
         _announce(erased == 1 ? 'Erased 1 stroke' : 'Erased $erased strokes');
       } else if (onPage) {
@@ -2337,6 +2610,14 @@ class _InkCanvasState extends State<InkCanvas> with WidgetsBindingObserver {
   }
 
   void _onPointerCancel(PointerCancelEvent event) {
+    if (event.pointer == _replayPointer || _replayPointer == -1) {
+      _replayPointer = null;
+      return;
+    }
+    if (_endRuler(event)) {
+      return;
+    }
+    _endGuide(event);
     if (_nativeOwns(event)) {
       return;
     }
@@ -2351,7 +2632,6 @@ class _InkCanvasState extends State<InkCanvas> with WidgetsBindingObserver {
     widget.controller
       ..cancelStickyPlacement(event.pointer)
       ..cancelStickyDrag(event.pointer);
-    widget.aiInput?.cancel(event.pointer);
     if (event.pointer == _holdPointer) {
       _cancelHold();
     }
@@ -2366,13 +2646,6 @@ class _InkCanvasState extends State<InkCanvas> with WidgetsBindingObserver {
       ..cancelStroke(event.pointer)
       ..cancelErase(event.pointer)
       ..cancelSelectionGesture(event.pointer);
-  }
-
-  bool _isWritingForAi(PointerEvent event) {
-    final AiCanvasInputController? input = widget.aiInput;
-    return input != null &&
-        input.activePointer == event.pointer &&
-        identical(input.page, widget.controller);
   }
 
   bool _isPlacing(PointerEvent event) {
@@ -2419,7 +2692,7 @@ class _InkCanvasState extends State<InkCanvas> with WidgetsBindingObserver {
       return native.last;
     }
     return RawInkSample(
-      position: _position(event),
+      position: _guidedPosition(event),
       timestamp: event.timeStamp,
       deviceKind: kind,
       pressure: _pressure(event, kind),
@@ -2442,35 +2715,6 @@ class _InkCanvasState extends State<InkCanvas> with WidgetsBindingObserver {
 
   /// How many screen pixels one canvas pixel covers here, through the
   /// page's fit and any zoom.
-  /// How close on screen the pen comes to ink to follow it, and how far
-  /// it moves away to be let go, whatever the zoom.
-  static const double _followCapture = 10;
-  static const double _followRelease = 26;
-
-  StrokeFollower _follower() {
-    final double scale = _screenScale();
-    return StrokeFollower(
-      <List<InkVector>>[
-        for (final Stroke stroke in widget.controller.strokes) stroke.points,
-      ],
-      captureRadius: _followCapture / scale,
-      releaseRadius: _followRelease / scale,
-    );
-  }
-
-  /// [page], on this page, in global coordinates, through the page's fit and
-  /// any zoom; null once the page is gone.
-  Rect? _toScreen(Rect page) {
-    if (!mounted) {
-      return null;
-    }
-    final RenderObject? box = context.findRenderObject();
-    if (box is! RenderBox || !box.attached) {
-      return null;
-    }
-    return MatrixUtils.transformRect(box.getTransformTo(null), page);
-  }
-
   double _screenScale() {
     final RenderObject? box = context.findRenderObject();
     if (box is! RenderBox || !box.attached) {
@@ -2506,6 +2750,7 @@ class _InkCanvasState extends State<InkCanvas> with WidgetsBindingObserver {
 
   @override
   Widget build(BuildContext context) {
+    _paneVisible = TickerMode.valuesOf(context).enabled;
     _scheduleNativeSync();
     final Brightness brightness = Theme.of(context).brightness;
     final AppColors colors = AppColors.of(context);
@@ -2520,7 +2765,18 @@ class _InkCanvasState extends State<InkCanvas> with WidgetsBindingObserver {
         child: Stack(
           fit: StackFit.expand,
           children: <Widget>[
-            // Sticky notes lie above images and below the page's ink.
+            RepaintBoundary(
+              child: CustomPaint(
+                painter: CompletedStrokesPainter(
+                  controller: widget.controller,
+                  brightness: brightness,
+                  visible: widget.visible,
+                  replay: widget.replay,
+                  replayHighlight: colors.accent,
+                ),
+              ),
+            ),
+            // Sticky notes lie above images and completed page strokes.
             RepaintBoundary(
               child: CustomPaint(
                 key: const ValueKey<String>('sticky-notes-layer'),
@@ -2544,15 +2800,6 @@ class _InkCanvasState extends State<InkCanvas> with WidgetsBindingObserver {
                   _announce('${note.label} deleted');
                 }
               },
-            ),
-            RepaintBoundary(
-              child: CustomPaint(
-                painter: CompletedStrokesPainter(
-                  controller: widget.controller,
-                  brightness: brightness,
-                  visible: widget.visible,
-                ),
-              ),
             ),
             // An AI notation still being drawn, above the finished ink.
             NotationPlaybackLayer(controller: widget.controller),
@@ -2580,31 +2827,12 @@ class _InkCanvasState extends State<InkCanvas> with WidgetsBindingObserver {
                     crossPageOverlay: carry == null
                         ? null
                         : () => carry._overlayFor(this),
+                    scale: _screenScale(),
+                    scaleProvider: _screenScale,
                   ),
                 ),
               ),
             ),
-            // What is written for the assistant glows above everything
-            // else, and repaints alone as it is written.
-            if (widget.aiInput != null)
-              ExcludeSemantics(
-                child: RepaintBoundary(
-                  child: CustomPaint(
-                    key: const ValueKey<String>('ai-canvas-stroke-layer'),
-                    painter: AiCanvasStrokePainter(
-                      input: widget.aiInput!,
-                      page: widget.controller,
-                      color: colors.accent,
-                      core: Color.lerp(
-                        colors.accent,
-                        const Color(0xFFFFFFFF),
-                        0.7,
-                      )!,
-                      width: widget.aiInput!.config.glowWidth,
-                    ),
-                  ),
-                ),
-              ),
             ExcludeSemantics(
               child: RepaintBoundary(
                 child: CustomPaint(
@@ -2613,10 +2841,22 @@ class _InkCanvasState extends State<InkCanvas> with WidgetsBindingObserver {
                     controller: widget.controller,
                     color: colors.textPrimary,
                     haloColor: colors.writingSurface,
+                    scale: _screenScale(),
+                    scaleProvider: _screenScale,
                   ),
                 ),
               ),
             ),
+            // The ruler lies above all ink, in a layer of its own: moving it
+            // repaints no strokes. It is not part of the page's ink.
+            if (widget.ruler != null)
+              RulerLayer(
+                controller: widget.ruler!,
+                stateOf: _rulerState,
+                readout: _rulerReadout,
+                accent: colors.accent,
+                brightness: brightness,
+              ),
           ],
         ),
       ),

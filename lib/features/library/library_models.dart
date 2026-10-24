@@ -15,26 +15,22 @@ String? cleanName(String name) {
 }
 
 /// The color a folder is marked with, so folders can be told apart at a
-/// glance in the sidebar and the grid. Each has a shade for light and for
-/// dark themes, as ARGB; [accent] follows the app's accent color.
+/// glance in the sidebar and the grid. Older stored names remain valid and
+/// are mapped onto the six shared highlighters by the presentation layer.
 enum FolderColor {
-  accent('Blue', null, null),
-  red('Red', 0xFFD9480F, 0xFFFF8A65),
-  orange('Orange', 0xFFE8590C, 0xFFFFA94D),
-  yellow('Yellow', 0xFFE0A100, 0xFFFFD43B),
-  green('Green', 0xFF2F9E44, 0xFF69DB7C),
-  teal('Teal', 0xFF0C8599, 0xFF66D9E8),
-  purple('Purple', 0xFF7048E8, 0xFFB197FC),
-  pink('Pink', 0xFFC2255C, 0xFFF783AC),
-  gray('Gray', 0xFF5C6370, 0xFFADB5BD);
+  accent('None'),
+  red('Rose'),
+  orange('Peach'),
+  yellow('Lemon'),
+  green('Mint'),
+  teal('Sky'),
+  purple('Lilac'),
+  pink('Rose'),
+  gray('None');
 
-  const FolderColor(this.label, this.light, this.dark);
+  const FolderColor(this.label);
 
   final String label;
-
-  /// Null for [accent].
-  final int? light;
-  final int? dark;
 
   static FolderColor byName(Object? name) {
     for (final FolderColor color in values) {
@@ -119,6 +115,7 @@ class NoteEntry {
     required this.pageCount,
     this.searchText = '',
     this.deleted,
+    this.revision = 0,
   });
 
   factory NoteEntry.fromJson(Map<String, Object?> json) {
@@ -130,6 +127,7 @@ class NoteEntry {
       modified: DateTime.fromMillisecondsSinceEpoch(json['modified']! as int),
       pageCount: (json['pageCount'] as int?) ?? 1,
       searchText: json['searchText'] as String? ?? '',
+      revision: (json['revision'] as int?) ?? 0,
       deleted: json['deleted'] == null
           ? null
           : DateTime.fromMillisecondsSinceEpoch(json['deleted']! as int),
@@ -150,6 +148,11 @@ class NoteEntry {
   /// library.
   final DateTime? deleted;
 
+  /// How many times the note's pages have been saved. Unlike [modified],
+  /// a rename leaves it, and it is stored exactly: it names the note's
+  /// picture in the library.
+  final int revision;
+
   NoteEntry copyWith({
     String? title,
     String? Function()? folderId,
@@ -157,6 +160,7 @@ class NoteEntry {
     int? pageCount,
     String? searchText,
     DateTime? Function()? deleted,
+    int? revision,
   }) {
     return NoteEntry(
       id: id,
@@ -167,6 +171,7 @@ class NoteEntry {
       pageCount: pageCount ?? this.pageCount,
       searchText: searchText ?? this.searchText,
       deleted: deleted == null ? this.deleted : deleted(),
+      revision: revision ?? this.revision,
     );
   }
 
@@ -180,6 +185,7 @@ class NoteEntry {
       'pageCount': pageCount,
       if (searchText.isNotEmpty) 'searchText': searchText,
       if (deleted != null) 'deleted': deleted!.millisecondsSinceEpoch,
+      if (revision != 0) 'revision': revision,
     };
   }
 }

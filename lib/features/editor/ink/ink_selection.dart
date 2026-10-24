@@ -1,5 +1,5 @@
 import 'dart:math' as math;
-import 'dart:ui' show Rect;
+import 'dart:ui' show Offset, Rect;
 
 import 'ink_sample.dart';
 import 'selection_geometry.dart';
@@ -7,6 +7,39 @@ import 'selection_transform.dart';
 import 'stroke.dart';
 import '../document_io/document_models.dart';
 import '../sticky/sticky_note.dart';
+
+/// The topmost stroke whose rendered centerline is within [tolerance] of
+/// [position]. The stroke's own half-width is added to the hit radius.
+Stroke? hitTestStroke(
+  List<Stroke> strokes,
+  InkVector position, {
+  double tolerance = 16,
+}) {
+  if (!position.isFinite || tolerance < 0 || !tolerance.isFinite) return null;
+  for (int index = strokes.length - 1; index >= 0; index--) {
+    final Stroke stroke = strokes[index];
+    final double reach = tolerance + stroke.style.width / 2;
+    if (!stroke.bounds
+        .inflate(tolerance)
+        .contains(Offset(position.x, position.y))) {
+      continue;
+    }
+    if (stroke.isDot) {
+      if ((stroke.points.first - position).length <= reach) return stroke;
+      continue;
+    }
+    for (int i = 0; i + 1 < stroke.points.length; i++) {
+      final InkVector a = stroke.points[i];
+      final InkVector delta = stroke.points[i + 1] - a;
+      final double lengthSquared = delta.dot(delta);
+      final double t = lengthSquared == 0
+          ? 0
+          : ((position - a).dot(delta) / lengthSquared).clamp(0.0, 1.0);
+      if ((a + delta * t - position).length <= reach) return stroke;
+    }
+  }
+  return null;
+}
 
 /// The strokes picked by a lasso, and how many got past the bounds check.
 class StrokeSelectionResult {
@@ -284,7 +317,9 @@ class InkClipboard {
       strokes,
       List<NoteImageElement>.unmodifiable(<NoteImageElement>[
         for (final NoteImageElement image in images)
-          if (assetIds[image.assetId] case final String assetId)
+          if (image.isVector)
+            image
+          else if (assetIds[image.assetId] case final String assetId)
             image.copyWith(assetId: assetId),
       ]),
       frame,

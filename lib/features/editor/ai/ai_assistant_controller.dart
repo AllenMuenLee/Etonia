@@ -4,9 +4,11 @@ import 'dart:ui' show Brightness, Color, Rect, Size;
 import 'package:flutter/foundation.dart';
 
 import '../document_io/document_models.dart';
+import '../handwriting/handwriting_calibration.dart';
 import '../ink/ink_sample.dart';
 import '../ink/ink_selection.dart';
 import '../ink/stroke.dart';
+import '../sticky/sticky_note.dart';
 import 'ai_client.dart';
 import 'ai_config.dart';
 import 'ai_notation.dart';
@@ -45,13 +47,90 @@ class AiPanelPlacement {
   int get hashCode => Object.hash(isOpen, side);
 }
 
+/// One thing the user chose for a conversation, as it lay on its page: what
+/// the page shows a frame around.
+class AiContextGroup {
+  AiContextGroup({
+    this.strokes = const <Stroke>[],
+    this.images = const <NoteImageElement>[],
+    this.stickies = const <StickyNoteElement>[],
+    this.pdfBounds,
+    this.page,
+  });
+
+  /// What [selection] holds, less [except]: the strokes a conversation drew
+  /// itself are not what was chosen.
+  factory AiContextGroup.of(
+    InkSelection selection, {
+    Object? page,
+    Set<Stroke>? except,
+  }) {
+    return AiContextGroup(
+      strokes: <Stroke>[
+        for (final Stroke stroke in selection.strokes)
+          if (except == null || !except.contains(stroke)) stroke,
+      ],
+      images: selection.images,
+      stickies: selection.stickies,
+      pdfBounds: selection.pdfBounds,
+      page: page,
+    );
+  }
+
+  final List<Stroke> strokes;
+  final List<NoteImageElement> images;
+  final List<StickyNoteElement> stickies;
+  final Rect? pdfBounds;
+
+  /// The page it lies on, as the editor named it; null when not known, as
+  /// for a conversation saved with the note.
+  final Object? page;
+
+  /// Where it lies on its page, or null when it holds nothing.
+  Rect? get bounds {
+    Rect? bounds = pdfBounds;
+    void add(Rect rect) => bounds = bounds?.expandToInclude(rect) ?? rect;
+    for (final Stroke stroke in strokes) {
+      add(stroke.bounds);
+    }
+    for (final NoteImageElement image in images) {
+      add(image.bounds);
+    }
+    for (final StickyNoteElement sticky in stickies) {
+      add(sticky.bounds);
+    }
+    return bounds;
+  }
+}
+
 /// The ink one conversation is about: the snapshot taken when AI was
 /// pressed, and the image made from it. The snapshot never changes; the
 /// image arrives once, shortly after.
 class AiSelectionContext {
-  AiSelectionContext._(this._snapshot, [this._loadBitmaps]);
+  AiSelectionContext._(
+    this._snapshot, {
+    this._loadBitmaps,
+    this._groups = const <AiContextGroup>[],
+  });
 
   SelectionInkSnapshot _snapshot;
+
+  final List<AiContextGroup> _groups;
+
+  /// Each thing chosen for the conversation, as it lies on its page. One
+  /// group, taken from the snapshot, for a conversation saved with the
+  /// note.
+  List<AiContextGroup> get groups {
+    if (_groups.isNotEmpty) return _groups;
+    return <AiContextGroup>[
+      AiContextGroup(
+        strokes: _snapshot.sourceStrokes,
+        images: _snapshot.sourceImages,
+        stickies: _snapshot.stickies,
+        pdfBounds: _snapshot.explicitBounds,
+      ),
+    ];
+  }
 
   /// The ink as it was when the conversation began. A conversation saved
   /// with the note gets its bitmaps back when its image is first drawn.
@@ -294,6 +373,19 @@ class AiAssistantController extends ChangeNotifier {
 
   bool get animationEnabled => _animationEnabled;
 
+  /// Whether the assistant's notes always show on the note.
+  /// When off, they only show while AI mode is active.
+  bool get showNotesInChat => _showNotesInChat;
+  bool _showNotesInChat = true;
+
+  void setShowNotesInChat(bool show) {
+    if (_disposed || show == _showNotesInChat) {
+      return;
+    }
+    _showNotesInChat = show;
+    notifyListeners();
+  }
+
   void setNotationEnabled(bool enabled) {
     if (_disposed || enabled == _notationEnabled) {
       return;
@@ -338,13 +430,26 @@ class AiAssistantController extends ChangeNotifier {
   /// Shows the panel for [selection]. A remembered conversation resumes when
   /// more than half of either its strokes or the current selection overlap;
   /// otherwise a new conversation is started. Sends nothing.
+  ///
+  /// With [ask], a chat already open stays as it is when [selection] is
+  /// not about it, whatever it holds, and offers to add the selection to it
+  /// or to start another.
   void open(
     InkSelection selection, {
     required Brightness brightness,
     required Color background,
     SelectionInkSnapshot? snapshot,
+    Object? page,
+    bool ask = false,
   }) {
     if (_disposed) {
+      return;
+    }
+    final _AiConversation? current = _conversation;
+    if (ask && isOpen && current != null && !_matches(current, selection)) {
+      _selectionChanged = true;
+      _selectionHasChat = _bestMatch(selection) != null;
+      notifyListeners();
       return;
     }
     _activateOrCapture(
@@ -352,6 +457,7 @@ class AiAssistantController extends ChangeNotifier {
       brightness: brightness,
       background: background,
       snapshot: snapshot,
+      page: page,
     );
     _selectionChanged = false;
     _selectionHasChat = false;
@@ -366,6 +472,7 @@ class AiAssistantController extends ChangeNotifier {
     required Brightness brightness,
     required Color background,
     SelectionInkSnapshot? snapshot,
+    Object? page,
   }) {
     if (_disposed) {
       return;
@@ -375,6 +482,7 @@ class AiAssistantController extends ChangeNotifier {
       brightness: brightness,
       background: background,
       snapshot: snapshot,
+      page: page,
     );
     _selectionChanged = false;
     _selectionHasChat = false;
@@ -482,23 +590,36 @@ class AiAssistantController extends ChangeNotifier {
   /// ink already there are sent together from the next message on. The
   /// messages are kept; a request in flight keeps the image it was sent
   /// with.
-  void addToContext(InkSelection selection) {
+  void addToContext(
+    InkSelection selection, {
+    List<SnapshotBitmap> bitmaps = const <SnapshotBitmap>[],
+    Object? page,
+  }) {
     final _AiConversation? conversation = _conversation;
     if (_disposed || conversation == null) {
       return;
     }
+    final AiContextGroup group = AiContextGroup.of(
+      selection,
+      page: page,
+      // What the conversation drew is already its own.
+      except: conversation.notationStrokes,
+    );
     final SelectionInkSnapshot? merged = SelectionInkSnapshot.merged(
       conversation.context.snapshot,
-      // What the conversation drew is already its own.
-      <Stroke>[
-        for (final Stroke stroke in selection.strokes)
-          if (!conversation.notationStrokes.contains(stroke)) stroke,
-      ],
+      group.strokes,
+      images: group.images,
+      stickies: group.stickies,
+      pdfBounds: group.pdfBounds,
+      bitmaps: bitmaps,
     );
     _selectionChanged = false;
     _selectionHasChat = false;
     if (merged != null) {
-      final AiSelectionContext context = AiSelectionContext._(merged);
+      final AiSelectionContext context = AiSelectionContext._(
+        merged,
+        groups: <AiContextGroup>[...conversation.context.groups, group],
+      );
       conversation.context = context;
       conversation.lastUsed = ++_conversationClock;
       unawaited(_render(context));
@@ -627,12 +748,12 @@ class AiAssistantController extends ChangeNotifier {
     }
     // With notation, the model is sent one picture: the selection with a
     // coordinate grid, numbered in a margin round it.
-    final Uint8List imagePng = noteImage == null
-        ? image.png
-        : await const SelectionGridRenderer().render(
-            image,
-            noteImage.logicalSize,
-          );
+    final Uint8List? notationImagePng = noteImage == null
+        ? null
+        : await SelectionGridRenderer(
+            maxDimension: renderer.config.maxDimension,
+            maxPngBytes: renderer.config.maxPngBytes,
+          ).render(image, noteImage.logicalSize);
     if (_disposed || token != conversation.requestToken) {
       return;
     }
@@ -641,11 +762,18 @@ class AiAssistantController extends ChangeNotifier {
     try {
       result = await _client.send(
         request = AiRequest(
-          systemInstruction: AiPrompts.systemFor(
-            notationEnabled: notationAuthorized,
-            animationEnabled: animationAuthorized,
-          ),
-          imagePng: imagePng,
+          systemInstruction: notationAuthorized
+              ? AiPrompts.textSystem
+              : AiPrompts.systemFor(notationEnabled: false),
+          notationInstruction: notationAuthorized
+              ? AiPrompts.systemFor(
+                  notationEnabled: true,
+                  animationEnabled: animationAuthorized,
+                  textSize: HandwritingCalibration.textSize.value,
+                )
+              : null,
+          imagePng: image.png,
+          notationImagePng: notationImagePng,
           messages: conversation.messages,
           noteImage: noteImage,
           notationEnabled: notationAuthorized,
@@ -824,6 +952,7 @@ class AiAssistantController extends ChangeNotifier {
     required Brightness brightness,
     required Color background,
     SelectionInkSnapshot? snapshot,
+    Object? page,
   }) {
     final _AiConversation? remembered = _bestMatch(selection);
     if (remembered != null) {
@@ -840,6 +969,7 @@ class AiAssistantController extends ChangeNotifier {
             brightness: brightness,
             background: background,
           ),
+      groups: <AiContextGroup>[AiContextGroup.of(selection, page: page)],
     );
     final _AiConversation conversation = _AiConversation(
       context,
@@ -1062,6 +1192,8 @@ class AiAssistantController extends ChangeNotifier {
               'width': stroke.width,
               'color': stroke.color.toARGB32(),
               'dot': stroke.isDot,
+              if (stroke.writing != WritingStyle.pen)
+                'style': stroke.writing.name,
             },
         ],
         'bitmaps': <Object?>[
@@ -1162,6 +1294,10 @@ class AiAssistantController extends ChangeNotifier {
               width: number(stroke['width']),
               color: Color(stroke['color']! as int),
               isDot: stroke['dot'] == true,
+              writing: WritingStyle.values.firstWhere(
+                (WritingStyle style) => style.name == stroke['style'],
+                orElse: () => WritingStyle.pen,
+              ),
             ),
       ],
       sourceStrokes: sourceStrokes,
@@ -1197,7 +1333,7 @@ class AiAssistantController extends ChangeNotifier {
           };
 
     final _AiConversation conversation = _AiConversation(
-      AiSelectionContext._(snapshot, loadBitmaps),
+      AiSelectionContext._(snapshot, loadBitmaps: loadBitmaps),
       (json['lastUsed'] as int?) ?? 0,
     )..notationStrokes.addAll(notationStrokes);
     final List<AiMessage> messages = <AiMessage>[];

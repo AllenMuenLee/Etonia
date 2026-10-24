@@ -1,12 +1,14 @@
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
-import 'package:greatnote/app/theme/app_icons.dart';
+import 'package:greatnote/shared/widgets/app_controls.dart';
 import 'package:greatnote/app/theme/app_tokens.dart';
 import 'package:greatnote/features/editor/ink/eraser_settings.dart';
 import 'package:greatnote/features/editor/ink/ink_controller.dart';
 import 'package:greatnote/features/editor/ink/ink_painter.dart';
 import 'package:greatnote/features/editor/ink/ink_palette.dart';
+import 'package:greatnote/features/editor/ink/ink_sample.dart';
+import 'package:greatnote/features/editor/ink/pen_settings.dart';
 import 'package:greatnote/features/editor/ink/stroke.dart';
 import 'package:greatnote/features/editor/widgets/eraser_options.dart';
 import 'package:greatnote/features/editor/widgets/tool_palette.dart';
@@ -137,17 +139,19 @@ void main() {
         expect(slider.min, 8);
         expect(slider.max, 80);
         expect(slider.value, 24);
-        // The current mode has a checkmark and a selected state, not only a
-        // color.
-        Finder check(EraserMode mode) {
-          return find.descendant(
-            of: find.byKey(ValueKey<String>('eraser-mode-${mode.name}')),
-            matching: find.byIcon(AppIcons.check),
-          );
-        }
-
-        expect(check(EraserMode.area), findsOneWidget);
-        expect(check(EraserMode.stroke), findsNothing);
+        // The current mode is under the sliding thumb and has a selected
+        // state, not only a color.
+        expect(
+          tester
+              .widget<SelectionCapsule>(
+                find.descendant(
+                  of: find.byType(EraserOptions),
+                  matching: find.byType(SelectionCapsule),
+                ),
+              )
+              .index,
+          EraserMode.values.indexOf(EraserMode.area),
+        );
         expect(
           tester.getSemantics(find.bySemanticsLabel('Area')),
           isSemantics(label: 'Area', isButton: true, isSelected: true),
@@ -182,8 +186,17 @@ void main() {
         await tester.tap(find.text('Stroke'));
         await tester.pumpAndSettle();
 
-        expect(check(EraserMode.area), findsNothing);
-        expect(check(EraserMode.stroke), findsOneWidget);
+        expect(
+          tester
+              .widget<SelectionCapsule>(
+                find.descendant(
+                  of: find.byType(EraserOptions),
+                  matching: find.byType(SelectionCapsule),
+                ),
+              )
+              .index,
+          EraserMode.values.indexOf(EraserMode.stroke),
+        );
         expect(find.bySemanticsLabel('Eraser, Stroke'), findsOneWidget);
         // The popover stays open so the size can be set after the mode.
         expect(find.byType(EraserOptions), findsOneWidget);
@@ -220,7 +233,10 @@ void main() {
   testWidgets('area mode cuts the stroke under the eraser, live', (
     WidgetTester tester,
   ) async {
-    final InkController controller = await pumpEditor(tester);
+    final InkController controller = await pumpEditor(
+      tester,
+      penConfig: const PenConfig(strokeWidthScale: 1),
+    );
     Offset at(double x, double y) => pageToGlobal(tester, Offset(x, y));
     final Offset from = at(100, 200);
     final Offset to = at(400, 200);
@@ -304,7 +320,10 @@ void main() {
   testWidgets('stroke mode removes every stroke it touches, whole', (
     WidgetTester tester,
   ) async {
-    final InkController controller = await pumpEditor(tester);
+    final InkController controller = await pumpEditor(
+      tester,
+      penConfig: const PenConfig(strokeWidthScale: 1),
+    );
     final Offset origin = canvasRect(tester).topLeft;
     for (final double y in <double>[200, 260, 400]) {
       await _drag(tester, origin + Offset(100, y), origin + Offset(400, y));
@@ -355,7 +374,10 @@ void main() {
   testWidgets('switching back to the pen draws with the same color and width', (
     WidgetTester tester,
   ) async {
-    final InkController controller = await pumpEditor(tester);
+    final InkController controller = await pumpEditor(
+      tester,
+      penConfig: const PenConfig(strokeWidthScale: 1),
+    );
     final Offset origin = canvasRect(tester).topLeft;
     final InkColor blue = InkPalette.colors.firstWhere(
       (InkColor ink) => ink.id == 'blue',
@@ -464,7 +486,10 @@ void main() {
     WidgetTester tester,
   ) async {
     final SemanticsHandle handle = tester.ensureSemantics();
-    final InkController controller = await pumpEditor(tester);
+    final InkController controller = await pumpEditor(
+      tester,
+      penConfig: const PenConfig(strokeWidthScale: 1),
+    );
     Offset at(double x, double y) => pageToGlobal(tester, Offset(x, y));
     await _drag(tester, at(100, 200), at(400, 200));
 
@@ -807,4 +832,39 @@ void main() {
     await gesture.up();
     handle.dispose();
   });
+
+  test('eraser edge does not become thicker when zoomed in', () {
+    final InkController controller = InkController();
+    controller.startErase(
+      pointer: 1,
+      position: const InkVector(100, 100),
+      settings: const EraserSettings(mode: EraserMode.area, size: 24),
+      screenScale: 2.0,
+    );
+
+    final _IndicatorRecordingCanvas canvas = _IndicatorRecordingCanvas();
+    final EraserIndicatorPainter painter = EraserIndicatorPainter(
+      controller: controller,
+      color: const Color(0xFF000000),
+      haloColor: const Color(0xFFFFFFFF),
+      scale: 2.0,
+    );
+    painter.paint(canvas, const Size(500, 500));
+
+    expect(canvas.strokes, hasLength(2));
+    // Halo width (normally 3.0) is scaled down by 2.0 to 1.5 so on-screen width is 3.0.
+    expect(canvas.strokes[0].$2, closeTo(1.5, 1e-9));
+    // Outline width (normally 1.0) is scaled down by 2.0 to 0.5 so on-screen width is 1.0.
+    expect(canvas.strokes[1].$2, closeTo(0.5, 1e-9));
+    controller.dispose();
+  });
+}
+
+class _IndicatorRecordingCanvas extends Fake implements Canvas {
+  final List<(double radius, double strokeWidth)> strokes = [];
+
+  @override
+  void drawCircle(Offset c, double radius, Paint paint) {
+    strokes.add((radius, paint.strokeWidth));
+  }
 }

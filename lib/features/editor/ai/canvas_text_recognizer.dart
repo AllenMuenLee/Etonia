@@ -52,10 +52,18 @@ abstract interface class CanvasTextRecognizer {
 
 @immutable
 class RecognizedTextSegment {
-  const RecognizedTextSegment(this.text, {this.confidence});
+  const RecognizedTextSegment(
+    this.text, {
+    this.confidence,
+    this.alternatives = const <String>[],
+  });
 
   final String text;
   final double? confidence;
+
+  /// Other native readings, in recognizer order. Search keeps these rather
+  /// than making the first reading an irreversible decision.
+  final List<String> alternatives;
 }
 
 /// Optional richer recognizer contract used by persistent handwriting
@@ -273,7 +281,16 @@ class PlatformCanvasTextRecognizer implements DetailedCanvasTextRecognizer {
             orElse: () => candidates.first,
           );
           words.add(
-            RecognizedTextSegment(chosen, confidence: selected.confidence),
+            RecognizedTextSegment(
+              chosen,
+              confidence: selected.confidence,
+              alternatives: <String>[
+                for (final HandwritingCandidate candidate in candidates)
+                  if (candidate.text.trim().isNotEmpty &&
+                      candidate.text.trim() != chosen)
+                    candidate.text.trim(),
+              ],
+            ),
           );
         }
       }

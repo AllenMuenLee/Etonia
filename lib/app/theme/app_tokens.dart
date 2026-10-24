@@ -16,17 +16,28 @@ abstract final class AppSpacing {
 
 /// The only corner radii used by the app.
 abstract final class AppRadii {
-  /// Paper corners and small indicators.
-  static const double small = 4;
+  static const double small = 8;
+  static const double medium = 14;
+  static const double large = 22;
+  static const double glass = 24;
+  static const double xl = 28;
+}
 
-  /// Buttons and inline fields.
-  static const double medium = 10;
+/// Symmetric fallback radii for widgets that do not accept a continuous
+/// [RoundedSuperellipseBorder].
+abstract final class AppBorderRadius {
+  static const BorderRadius medium = BorderRadius.all(
+    Radius.circular(AppRadii.medium),
+  );
+  static const BorderRadius large = BorderRadius.all(
+    Radius.circular(AppRadii.large),
+  );
+  static const BorderRadius glass = BorderRadius.all(
+    Radius.circular(AppRadii.glass),
+  );
+  static const BorderRadius xl = BorderRadius.all(Radius.circular(AppRadii.xl));
 
-  /// Floating chrome: palette, popovers, menus, and cards.
-  static const double large = 16;
-
-  /// Dialogs and sheets: the largest surfaces get the softest corners.
-  static const double xl = 20;
+  static BorderRadius circular(double radius) => BorderRadius.circular(radius);
 }
 
 abstract final class AppSizes {
@@ -50,47 +61,89 @@ abstract final class AppSizes {
   static const double maxContentWidth = 1280;
 }
 
+/// The shared motion vocabulary. Movement uses a spring; durations and curves
+/// are reserved for opacity and colour.
 abstract final class AppMotion {
-  static const Duration fast = Duration(milliseconds: 120);
-  static const Duration medium = Duration(milliseconds: 200);
-  static const Curve standard = Curves.easeOutCubic;
+  static final SpringDescription snappy =
+      SpringDescription.withDurationAndBounce(
+        duration: const Duration(milliseconds: 300),
+      );
+  static final SpringDescription smooth =
+      SpringDescription.withDurationAndBounce(
+        duration: const Duration(milliseconds: 400),
+      );
+  static final SpringDescription bouncy =
+      SpringDescription.withDurationAndBounce(
+        duration: const Duration(milliseconds: 450),
+        bounce: 0.25,
+      );
+  static final SpringDescription sheet =
+      SpringDescription.withDurationAndBounce(
+        duration: const Duration(milliseconds: 450),
+        bounce: 0.05,
+      );
+  static final SpringDescription _reducedSpring =
+      SpringDescription.withDurationAndBounce(duration: reduced);
 
-  /// For whole surfaces arriving: a page, a panel. Slower than [medium],
-  /// and eased in as well as out, so it starts softly instead of landing.
-  static const Duration gentle = Duration(milliseconds: 210);
-  static const Curve gentleCurve = Cubic(0.3, 0, 0, 1);
-
-  /// A released palette settling into its dock: brief, so it never trails
-  /// the finger that let it go.
-  static const Duration dock = Duration(milliseconds: 100);
-
-  /// How far a control sinks under the finger, and how quickly.
-  static const double pressedScale = 0.95;
-  static const Duration press = Duration(milliseconds: 100);
-
-  /// Brings a pressed control back: quick, with a slight overshoot, and
-  /// settled in about [medium].
-  static const SpringDescription spring = SpringDescription(
-    mass: 1,
-    stiffness: 600,
-    damping: 32,
-  );
-
-  /// One pass of the light through a progress track or placeholder.
+  static const Duration fadeIn = Duration(milliseconds: 160);
+  static const Duration fadeOut = Duration(milliseconds: 110);
+  static const Duration zoom = Duration(milliseconds: 280);
+  static const Duration press = Duration(milliseconds: 220);
+  static const Duration reduced = Duration(milliseconds: 120);
   static const Duration shimmer = Duration(milliseconds: 1600);
-
-  /// One breath of the glow around a busy panel.
+  static const Duration bars = Duration(milliseconds: 1200);
   static const Duration pulse = Duration(milliseconds: 2400);
+  static const Duration toast = Duration(milliseconds: 2500);
+  static const Duration checkDraw = Duration(milliseconds: 180);
+  static const Duration errorShake = Duration(milliseconds: 240);
+  static const Duration stateFade = Duration(milliseconds: 150);
+  static const Duration streamChunk = Duration(milliseconds: 120);
 
-  /// Handwritten words flying from the page into the chat's composer:
-  /// long enough to follow with the eye, short enough not to wait on.
-  static const Duration flight = Duration(milliseconds: 620);
-  static const Curve flightCurve = Cubic(0.45, 0, 0.2, 1);
+  static const Curve fadeInCurve = Curves.easeOut;
+  static const Curve fadeOutCurve = Curves.easeIn;
+  static const Curve reducedCurve = Curves.linear;
+  static const Curve zoomInCurve = Curves.easeOutCubic;
+  static const Curve zoomOutCurve = Curves.easeInCubic;
 
-  /// Collapses [duration] to zero when the platform requests reduced motion.
+  /// Scale of a scene at the far edge of a zoom: smaller than rest for what
+  /// is arriving from deeper in, larger for what has passed the viewer.
+  static const double zoomFar = 0.9;
+  static const double zoomNear = 1.1;
+
+  /// A small overshoot for badges and lifts that pop into place.
+  static const Curve popCurve = Curves.easeOutBack;
+
+  static const double buttonPressedScale = 0.97;
+  static const double iconPressedScale = 0.92;
+  static const double cardPressedScale = 0.98;
+  static const double pressedScale = buttonPressedScale;
+
+  static SpringDescription spring(
+    BuildContext context,
+    SpringDescription token,
+  ) => MediaQuery.disableAnimationsOf(context) ? _reducedSpring : token;
+
+  static Duration springDuration(
+    BuildContext context,
+    SpringDescription token,
+  ) => MediaQuery.disableAnimationsOf(context) ? reduced : token.duration;
+
   static Duration resolve(BuildContext context, Duration duration) {
-    return MediaQuery.disableAnimationsOf(context) ? Duration.zero : duration;
+    return MediaQuery.disableAnimationsOf(context) ? reduced : duration;
   }
+
+  static final AnimationStyle popupStyle = AnimationStyle(
+    duration: snappy.duration,
+    reverseDuration: fadeOut,
+    curve: fadeInCurve,
+    reverseCurve: fadeOutCurve,
+  );
+  static final AnimationStyle sheetStyle = AnimationStyle(
+    duration: sheet.duration,
+    reverseDuration: smooth.duration,
+    curve: fadeInCurve,
+    reverseCurve: fadeOutCurve,
+  );
 }
 
 /// Semantic colors. Feature widgets read these instead of color literals.
@@ -107,6 +160,7 @@ class AppColors extends ThemeExtension<AppColors> {
     required this.accent,
     required this.onAccent,
     required this.danger,
+    required this.success,
     required this.selected,
     required this.focus,
     required this.shadow,
@@ -115,6 +169,10 @@ class AppColors extends ThemeExtension<AppColors> {
     required this.ambientShadow,
     required this.glassEdge,
     required this.canvasDot,
+    required this.recordingSurface,
+    required this.recordingForeground,
+    required this.scrubberTrack,
+    required this.highlighters,
   });
 
   /// App chrome behind everything else.
@@ -139,6 +197,9 @@ class AppColors extends ThemeExtension<AppColors> {
   /// Destructive actions, such as Delete, and errors.
   final Color danger;
 
+  /// Positive status only; never a brand or selection colour.
+  final Color success;
+
   /// Fill behind a selected control.
   final Color selected;
 
@@ -162,49 +223,79 @@ class AppColors extends ThemeExtension<AppColors> {
   /// The dots of the grid the app's chrome floats over.
   final Color canvasDot;
 
-  // Cool grays and slate, with a single indigo accent. No large surface is
-  // pure white or pure black.
+  /// High-contrast audio chrome, independent of translucent page content.
+  final Color recordingSurface;
+  final Color recordingForeground;
+  final Color scrubberTrack;
+
+  /// Colour belongs to user content. These are the only non-status hues in
+  /// app chrome.
+  final List<Color> highlighters;
+
   static const AppColors light = AppColors(
-    background: Color(0xFFF9FAFB),
+    background: Color(0xFFF2F2F4),
     surface: Color(0xFFFFFFFF),
-    surfaceMuted: Color(0xFFF1F5F9),
-    writingSurface: Color(0xFFFDFDFD),
-    textPrimary: Color(0xFF0F172A),
-    textSecondary: Color(0xFF64748B),
-    divider: Color(0xFFE5E7EB),
-    // Indigo 500, a hair deeper so white labels on it meet AA.
-    accent: Color(0xFF6164F1),
+    surfaceMuted: Color(0xFFE9E9EC),
+    writingSurface: Color(0xFFFFFFFF),
+    textPrimary: Color(0xFF0A0A0B),
+    textSecondary: Color(0xFF6B6B70),
+    divider: Color(0x1A0A0A0B),
+    accent: Color(0xFF0A0A0B),
     onAccent: Color(0xFFFFFFFF),
-    danger: Color(0xFFDC2626),
-    selected: Color(0xFFEEF2FF),
-    focus: Color(0xFF6164F1),
-    shadow: Color(0xFF0F172A),
-    pageRule: Color(0xFFE2E8F0),
-    pageMarginRule: Color(0xFFF0CFCB),
-    ambientShadow: Color(0xFFE2E8F0),
-    glassEdge: Color(0x66FFFFFF),
-    canvasDot: Color(0xFFE5E7EB),
+    danger: Color(0xFFE5362B),
+    success: Color(0xFF1E9E4A),
+    selected: Color(0x140A0A0B),
+    focus: Color(0xFF0A0A0B),
+    shadow: Color(0xFF000000),
+    pageRule: Color(0xFFE1E1E4),
+    pageMarginRule: Color(0xFFE8C8C8),
+    ambientShadow: Color(0xFFB8B8BD),
+    glassEdge: Color(0xB3FFFFFF),
+    canvasDot: Color(0xFFD8D8DC),
+    recordingSurface: Color(0xFFFFFFFF),
+    recordingForeground: Color(0xFF0A0A0B),
+    scrubberTrack: Color(0xFFC7C7CC),
+    highlighters: <Color>[
+      Color(0xFFFFE66D),
+      Color(0xFFFFB48A),
+      Color(0xFFFF9DB8),
+      Color(0xFFC9B8FF),
+      Color(0xFF8FD3FF),
+      Color(0xFF8FE8C4),
+    ],
   );
 
   static const AppColors dark = AppColors(
-    background: Color(0xFF0E1424),
-    surface: Color(0xFF1E293B),
-    surfaceMuted: Color(0xFF273449),
-    writingSurface: Color(0xFF182133),
-    textPrimary: Color(0xFFF1F5F9),
-    textSecondary: Color(0xFF94A3B8),
-    divider: Color(0xFF334155),
-    accent: Color(0xFF818CF8),
-    onAccent: Color(0xFF0F172A),
-    danger: Color(0xFFF87171),
-    selected: Color(0xFF2A2F5E),
-    focus: Color(0xFF818CF8),
-    shadow: Color(0xFF020617),
-    pageRule: Color(0xFF2C3648),
-    pageMarginRule: Color(0xFF4F3A3A),
-    ambientShadow: Color(0xFF020617),
-    glassEdge: Color(0x14FFFFFF),
-    canvasDot: Color(0xFF334155),
+    background: Color(0xFF000000),
+    surface: Color(0xFF151517),
+    surfaceMuted: Color(0xFF232326),
+    writingSurface: Color(0xFF161618),
+    textPrimary: Color(0xFFF5F5F7),
+    textSecondary: Color(0xFF9A9AA0),
+    divider: Color(0x24FFFFFF),
+    accent: Color(0xFFFFFFFF),
+    onAccent: Color(0xFF000000),
+    danger: Color(0xFFFF6B61),
+    success: Color(0xFF4CD27A),
+    selected: Color(0x24FFFFFF),
+    focus: Color(0xFFFFFFFF),
+    shadow: Color(0xFF000000),
+    pageRule: Color(0xFF303034),
+    pageMarginRule: Color(0xFF4A3436),
+    ambientShadow: Color(0xFF000000),
+    glassEdge: Color(0x6BFFFFFF),
+    canvasDot: Color(0xFF303034),
+    recordingSurface: Color(0xFF1E1E1E),
+    recordingForeground: Color(0xFFFFFFFF),
+    scrubberTrack: Color(0xFF48484A),
+    highlighters: <Color>[
+      Color(0xFFD9C45D),
+      Color(0xFFD99975),
+      Color(0xFFD9869C),
+      Color(0xFFAB9CD9),
+      Color(0xFF7AB3D9),
+      Color(0xFF7AC5A7),
+    ],
   );
 
   static AppColors of(BuildContext context) {
@@ -231,6 +322,7 @@ class AppColors extends ThemeExtension<AppColors> {
     Color? accent,
     Color? onAccent,
     Color? danger,
+    Color? success,
     Color? selected,
     Color? focus,
     Color? shadow,
@@ -239,6 +331,10 @@ class AppColors extends ThemeExtension<AppColors> {
     Color? ambientShadow,
     Color? glassEdge,
     Color? canvasDot,
+    Color? recordingSurface,
+    Color? recordingForeground,
+    Color? scrubberTrack,
+    List<Color>? highlighters,
   }) {
     return AppColors(
       background: background ?? this.background,
@@ -251,6 +347,7 @@ class AppColors extends ThemeExtension<AppColors> {
       accent: accent ?? this.accent,
       onAccent: onAccent ?? this.onAccent,
       danger: danger ?? this.danger,
+      success: success ?? this.success,
       selected: selected ?? this.selected,
       focus: focus ?? this.focus,
       shadow: shadow ?? this.shadow,
@@ -259,6 +356,10 @@ class AppColors extends ThemeExtension<AppColors> {
       ambientShadow: ambientShadow ?? this.ambientShadow,
       glassEdge: glassEdge ?? this.glassEdge,
       canvasDot: canvasDot ?? this.canvasDot,
+      recordingSurface: recordingSurface ?? this.recordingSurface,
+      recordingForeground: recordingForeground ?? this.recordingForeground,
+      scrubberTrack: scrubberTrack ?? this.scrubberTrack,
+      highlighters: highlighters ?? this.highlighters,
     );
   }
 
@@ -278,6 +379,7 @@ class AppColors extends ThemeExtension<AppColors> {
       accent: Color.lerp(accent, other.accent, t)!,
       onAccent: Color.lerp(onAccent, other.onAccent, t)!,
       danger: Color.lerp(danger, other.danger, t)!,
+      success: Color.lerp(success, other.success, t)!,
       selected: Color.lerp(selected, other.selected, t)!,
       focus: Color.lerp(focus, other.focus, t)!,
       shadow: Color.lerp(shadow, other.shadow, t)!,
@@ -286,6 +388,21 @@ class AppColors extends ThemeExtension<AppColors> {
       ambientShadow: Color.lerp(ambientShadow, other.ambientShadow, t)!,
       glassEdge: Color.lerp(glassEdge, other.glassEdge, t)!,
       canvasDot: Color.lerp(canvasDot, other.canvasDot, t)!,
+      recordingSurface: Color.lerp(
+        recordingSurface,
+        other.recordingSurface,
+        t,
+      )!,
+      recordingForeground: Color.lerp(
+        recordingForeground,
+        other.recordingForeground,
+        t,
+      )!,
+      scrubberTrack: Color.lerp(scrubberTrack, other.scrubberTrack, t)!,
+      highlighters: <Color>[
+        for (int i = 0; i < highlighters.length; i++)
+          Color.lerp(highlighters[i], other.highlighters[i], t)!,
+      ],
     );
   }
 }
@@ -370,22 +487,17 @@ abstract final class AppShadows {
   );
 }
 
-/// Shared treatments for the frosted chrome. Keeping the opacity, blur, and
-/// edge in one place makes menus, panels, and controls read as one system.
+/// Shared treatments for the tinted chrome. Keeping opacity and edge treatment
+/// in one place makes menus, panels, and controls read as one system.
 abstract final class AppGlass {
-  /// How much of the surface's own color covers what is behind it.
-  static const double opacity = 0.88;
-
-  /// A deliberately heavy frost: content and ink remain recognizable as
-  /// color, but no longer stay legible through translucent chrome.
-  static const double blurSigma = 48;
-
-  /// Colors behind the glass come through richer, as through real frosted
-  /// glass, rather than washed out by the blur.
-  static const double saturation = 1.8;
+  static const double blurSigma = 24;
+  static const double saturation = 1.6;
+  static const double fullOpacityLight = 0.60;
+  static const double fullOpacityDark = 0.50;
+  static const double tintedOpacity = 0.86;
 
   static Color surface(AppColors colors) =>
-      colors.surface.withValues(alpha: colors.surface.a * opacity);
+      colors.surface.withValues(alpha: colors.surface.a * tintedOpacity);
 
   static Color muted(AppColors colors) =>
       colors.surfaceMuted.withValues(alpha: colors.surfaceMuted.a * 0.90);
@@ -396,64 +508,87 @@ abstract final class AppGlass {
   static BorderSide border(AppColors colors) =>
       BorderSide(color: colors.glassEdge, width: AppSizes.hairline);
 
-  /// Blurs and saturates whatever is behind a glass surface.
   static final ImageFilter filter = ImageFilter.compose(
     outer: ImageFilter.blur(sigmaX: blurSigma, sigmaY: blurSigma),
     inner: ColorFilter.matrix(_saturate(saturation)),
   );
 
-  /// The CSS `saturate()` matrix.
-  static List<double> _saturate(double s) {
+  static List<double> _saturate(double value) {
     const double r = 0.213, g = 0.715, b = 0.072;
     return <double>[
-      r + (1 - r) * s, g - g * s, b - b * s, 0, 0, //
-      r - r * s, g + (1 - g) * s, b - b * s, 0, 0, //
-      r - r * s, g - g * s, b + (1 - b) * s, 0, 0, //
-      0, 0, 0, 1, 0, //
+      r + (1 - r) * value,
+      g - g * value,
+      b - b * value,
+      0,
+      0,
+      r - r * value,
+      g + (1 - g) * value,
+      b - b * value,
+      0,
+      0,
+      r - r * value,
+      g - g * value,
+      b + (1 - b) * value,
+      0,
+      0,
+      0,
+      0,
+      0,
+      1,
+      0,
     ];
   }
 }
 
-/// Clips and heavily frosts the backdrop behind translucent chrome.
+enum GlassQuality { full, tinted }
+
+/// Clips the tinted surface used by floating chrome.
 ///
-/// Use this around surfaces that provide their own translucent decoration.
-/// [GlassSurface] already includes it.
+/// This intentionally does not live-filter the backdrop. On a tablet-sized
+/// editor, several simultaneous backdrop filters dominate raster time while a
+/// page, palette, or sheet moves. [GlassSurface] already includes this clip.
 class GlassBlur extends StatelessWidget {
   const GlassBlur({
     super.key,
     required this.child,
     this.borderRadius = BorderRadius.zero,
+    this.quality = GlassQuality.tinted,
   });
 
   final Widget child;
   final BorderRadius borderRadius;
+  final GlassQuality quality;
 
   @override
   Widget build(BuildContext context) {
-    return ClipRRect(
-      borderRadius: borderRadius,
-      child: BackdropFilter(filter: AppGlass.filter, child: child),
-    );
+    final Widget filtered = quality == GlassQuality.full
+        ? BackdropFilter.grouped(filter: AppGlass.filter, child: child)
+        : child;
+    if (borderRadius == BorderRadius.zero) return filtered;
+    return ClipRSuperellipse(borderRadius: borderRadius, child: filtered);
   }
 }
 
-/// A Material surface whose translucent color always frosts its backdrop.
+/// A Material surface with the app's high-opacity glass tint.
 class GlassMaterial extends StatelessWidget {
   const GlassMaterial({
     super.key,
     required this.child,
     this.color,
     this.borderRadius = BorderRadius.zero,
+    this.quality = GlassQuality.tinted,
   });
 
   final Widget child;
   final Color? color;
   final BorderRadius borderRadius;
+  final GlassQuality quality;
 
   @override
   Widget build(BuildContext context) {
     return GlassBlur(
       borderRadius: borderRadius,
+      quality: quality,
       child: Material(
         color: color ?? AppGlass.surface(AppColors.of(context)),
         borderRadius: borderRadius,
@@ -463,7 +598,7 @@ class GlassMaterial extends StatelessWidget {
   }
 }
 
-/// A frosted, translucent surface for the app's floating chrome.
+/// A softly tinted surface for the app's floating chrome.
 class GlassSurface extends StatelessWidget {
   const GlassSurface({
     super.key,
@@ -471,16 +606,29 @@ class GlassSurface extends StatelessWidget {
     this.borderRadius = BorderRadius.zero,
     this.color,
     this.boxShadow,
+    this.quality = GlassQuality.tinted,
   });
 
   final Widget child;
   final BorderRadius borderRadius;
   final Color? color;
   final List<BoxShadow>? boxShadow;
+  final GlassQuality quality;
 
   @override
   Widget build(BuildContext context) {
     final AppColors colors = AppColors.of(context);
+    final bool dark = Theme.of(context).brightness == Brightness.dark;
+    final Color rimLight = dark ? colors.accent : colors.onAccent;
+    final Color tint =
+        color ??
+        colors.surface.withValues(
+          alpha: quality == GlassQuality.tinted
+              ? AppGlass.tintedOpacity
+              : dark
+              ? AppGlass.fullOpacityDark
+              : AppGlass.fullOpacityLight,
+        );
     // The shadow sits outside the clip, so it is not cut off by it.
     return DecoratedBox(
       decoration: BoxDecoration(
@@ -489,13 +637,24 @@ class GlassSurface extends StatelessWidget {
       ),
       child: GlassBlur(
         borderRadius: borderRadius,
+        quality: quality,
         child: DecoratedBox(
-          decoration: BoxDecoration(
-            color: color ?? AppGlass.surface(colors),
-            border: Border.fromBorderSide(AppGlass.border(colors)),
-            borderRadius: borderRadius,
+          decoration: BoxDecoration(color: tint, borderRadius: borderRadius),
+          child: DecoratedBox(
+            decoration: BoxDecoration(
+              border: Border.fromBorderSide(AppGlass.border(colors)),
+              borderRadius: borderRadius,
+              gradient: LinearGradient(
+                begin: Alignment.topLeft,
+                end: Alignment.bottomRight,
+                colors: <Color>[
+                  rimLight.withValues(alpha: dark ? 0.08 : 0.14),
+                  rimLight.withValues(alpha: 0),
+                ],
+              ),
+            ),
+            child: child,
           ),
-          child: child,
         ),
       ),
     );
@@ -503,27 +662,26 @@ class GlassSurface extends StatelessWidget {
 }
 
 /// The canvas behind every route: the background color, with a faint dot
-/// grid for the frosted chrome to blur. The writing page stays opaque.
+/// grid that gives the app's chrome a sense of depth. The writing page stays
+/// opaque.
 class GlassBackdrop extends StatelessWidget {
-  const GlassBackdrop({super.key, required this.child});
+  const GlassBackdrop({super.key, required this.child, this.showDots = false});
 
   /// The distance between dots.
   static const double spacing = 20;
 
   final Widget child;
+  final bool showDots;
 
   @override
   Widget build(BuildContext context) {
     final AppColors colors = AppColors.of(context);
-    return ColoredBox(
-      color: colors.background,
-      child: CustomPaint(
-        painter: _DotGridPainter(
-          color: colors.canvasDot.withValues(alpha: 0.4),
-        ),
-        isComplex: true,
-        child: child,
-      ),
+    final Widget ground = ColoredBox(color: colors.background, child: child);
+    if (!showDots) return ground;
+    return CustomPaint(
+      painter: _DotGridPainter(color: colors.canvasDot.withValues(alpha: 0.4)),
+      isComplex: true,
+      child: ground,
     );
   }
 }

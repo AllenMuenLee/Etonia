@@ -66,6 +66,12 @@ abstract final class AppIcons {
   static const IconData highlighter = CupertinoIcons.paintbrush;
   static const IconData stickyNote = CupertinoIcons.square_on_square;
   static const IconData lasso = CupertinoIcons.lasso;
+  // The palette's extension toggle: along a row it points right to open and
+  // left to close; down a column, down and up.
+  static const IconData toolsExpandAcross = CupertinoIcons.chevron_right;
+  static const IconData toolsCollapseAcross = CupertinoIcons.chevron_left;
+  static const IconData toolsExpandDown = CupertinoIcons.chevron_down;
+  static const IconData toolsCollapseDown = CupertinoIcons.chevron_up;
   static const IconData undo = CupertinoIcons.arrow_uturn_left;
   static const IconData redo = CupertinoIcons.arrow_uturn_right;
   static const IconData copy = CupertinoIcons.doc_on_doc;
@@ -82,7 +88,22 @@ abstract final class AppIcons {
   static const IconData send = CupertinoIcons.arrow_up;
   static const IconData microphone = CupertinoIcons.mic;
   static const IconData microphoneActive = CupertinoIcons.mic_fill;
+  static const IconData play = CupertinoIcons.play_fill;
+  static const IconData pause = CupertinoIcons.pause_fill;
+  static const IconData stop = CupertinoIcons.stop_fill;
+  static const IconData backward15 = CupertinoIcons.gobackward_15;
+  static const IconData forward15 = CupertinoIcons.goforward_15;
   static const IconData up = CupertinoIcons.arrow_up;
   static const IconData panelLeft = CupertinoIcons.sidebar_left;
   static const IconData panelRight = CupertinoIcons.sidebar_right;
+
+  // Split screen.
+  static const IconData splitScreen = CupertinoIcons.rectangle_split_3x1;
+  static const IconData splitTwo = CupertinoIcons.square_split_2x1;
+  static const IconData splitThree = CupertinoIcons.rectangle_split_3x1;
+  static const IconData splitFour = CupertinoIcons.square_grid_2x2;
+  static const IconData singlePane = CupertinoIcons.square;
+  static const IconData closePane = CupertinoIcons.xmark;
+  static const IconData maximizePane =
+      CupertinoIcons.arrow_up_left_arrow_down_right;
 }

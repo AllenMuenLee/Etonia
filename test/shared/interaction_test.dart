@@ -5,6 +5,7 @@ import 'package:greatnote/app/theme/app_tokens.dart';
 import 'package:greatnote/shared/feedback/app_haptics.dart';
 import 'package:greatnote/shared/widgets/pressable.dart';
 import 'package:greatnote/shared/widgets/processing.dart';
+import 'package:leak_tracker_flutter_testing/leak_tracker_flutter_testing.dart';
 
 import '../helpers/pump_app.dart';
 
@@ -120,25 +121,70 @@ void main() {
         await tester.pumpAndSettle();
       }
     });
+
+    testWidgets(
+      'settles if reduced motion changes during a press',
+      (WidgetTester tester) async {
+        const Widget pressable = Pressable(
+          child: ColoredBox(
+            color: Color(0xFF6164F1),
+            child: SizedBox.square(dimension: 48),
+          ),
+        );
+        await tester.pumpWidget(_themed(pressable));
+        final TestGesture gesture = await tester.startGesture(
+          tester.getCenter(find.byType(Pressable)),
+        );
+        await tester.pumpAndSettle();
+        expect(_scaleOf(tester), moreOrLessEquals(AppMotion.pressedScale));
+
+        await tester.pumpWidget(_themed(pressable, reduceMotion: true));
+        await tester.pumpAndSettle();
+        expect(_scaleOf(tester), 1);
+        await gesture.up();
+      },
+      experimentalLeakTesting: LeakTesting.settings.withTrackedAll(),
+    );
   });
 
   group('processing', () {
-    testWidgets('the track reports progress to screen readers', (
+    testWidgets('progress is read out as a percentage', (
+      WidgetTester tester,
+    ) async {
+      await tester.pumpWidget(
+        _themed(const ProgressCount(value: 0.25, semanticsLabel: 'Exporting')),
+      );
+      await tester.pumpAndSettle();
+      expect(
+        tester.getSemantics(find.byType(ProgressCount)),
+        matchesSemantics(label: 'Exporting', value: '25%'),
+      );
+      expect(find.text('25%'), findsOneWidget);
+    });
+
+    testWidgets('nothing waits as a bar or a spinner', (
       WidgetTester tester,
     ) async {
       await tester.pumpWidget(
         _themed(
-          const SizedBox(
-            width: 200,
-            child: ShimmerTrack(value: 0.25, semanticsLabel: 'Exporting'),
+          const Column(
+            mainAxisSize: MainAxisSize.min,
+            children: <Widget>[
+              SizedBox(
+                width: 200,
+                child: LoadingReveal(
+                  placeholder: SizedBox.square(dimension: 40),
+                  child: null,
+                ),
+              ),
+              SizedBox(width: 200, child: PendingLines()),
+              ProgressCount(value: 0.5),
+            ],
           ),
         ),
       );
-      await tester.pump(AppMotion.shimmer);
-      expect(
-        tester.getSemantics(find.byType(ShimmerTrack)),
-        matchesSemantics(label: 'Exporting', value: '25%'),
-      );
+      await tester.pump();
+      expect(find.byType(ProgressIndicator), findsNothing);
     });
 
     testWidgets('indicators settle under reduced motion', (
@@ -149,8 +195,12 @@ void main() {
           const Column(
             mainAxisSize: MainAxisSize.min,
             children: <Widget>[
-              SizedBox(width: 200, child: ShimmerTrack()),
-              SizedBox.square(dimension: 80, child: ShimmerPlaceholder()),
+              SizedBox(width: 200, child: PendingLines()),
+              Breathe(child: Text('Working')),
+              LoadingReveal(
+                placeholder: SizedBox.square(dimension: 80),
+                child: null,
+              ),
               AmbientGlow(active: true, child: SizedBox.square(dimension: 40)),
             ],
           ),
@@ -160,6 +210,26 @@ void main() {
       // Nothing loops, so the frame settles.
       await tester.pumpAndSettle();
     });
+
+    testWidgets(
+      'indicators stop while their subtree is offstage',
+      (WidgetTester tester) async {
+        Widget pending(bool enabled) => _themed(
+          TickerMode(
+            enabled: enabled,
+            child: const SizedBox(width: 200, child: PendingLines()),
+          ),
+        );
+        await tester.pumpWidget(pending(true));
+        await tester.pump(AppMotion.shimmer);
+        expect(tester.hasRunningAnimations, isTrue);
+
+        await tester.pumpWidget(pending(false));
+        await tester.pumpAndSettle();
+        expect(tester.hasRunningAnimations, isFalse);
+      },
+      experimentalLeakTesting: LeakTesting.settings.withTrackedAll(),
+    );
 
     testWidgets('the glow keeps its child when it turns off', (
       WidgetTester tester,
@@ -182,11 +252,10 @@ void main() {
 
   test('glass and canvas tokens follow the style guide', () {
     const AppColors light = AppColors.light;
-    expect(light.background, const Color(0xFFF9FAFB));
-    expect(light.textPrimary, const Color(0xFF0F172A));
-    expect(AppGlass.surface(light).a, moreOrLessEquals(0.88));
-    expect(AppGlass.blurSigma, 48);
-    expect(light.glassEdge.a, moreOrLessEquals(0.40, epsilon: 0.01));
+    expect(light.background, const Color(0xFFF2F2F4));
+    expect(light.textPrimary, const Color(0xFF0A0A0B));
+    expect(AppGlass.surface(light).a, moreOrLessEquals(0.86));
+    expect(light.glassEdge.a, moreOrLessEquals(0.70, epsilon: 0.01));
     expect(GlassBackdrop.spacing, 20);
     for (final double space in <double>[
       AppSpacing.xxs,
@@ -199,5 +268,21 @@ void main() {
     ]) {
       expect(space % 4, 0);
     }
+  });
+
+  testWidgets('glass surfaces do not live-filter the page behind them', (
+    WidgetTester tester,
+  ) async {
+    await tester.pumpWidget(
+      _themed(
+        const GlassMaterial(
+          borderRadius: BorderRadius.all(Radius.circular(16)),
+          child: SizedBox.square(dimension: 80),
+        ),
+      ),
+    );
+
+    expect(find.byType(BackdropFilter), findsNothing);
+    expect(find.byType(ClipRSuperellipse), findsOneWidget);
   });
 }

@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 
 import '../../../app/theme/app_icons.dart';
 import '../../../app/theme/app_tokens.dart';
+import '../../../shared/widgets/processing.dart';
 import '../../editor/document_io/document_importer.dart';
 import '../library_screen.dart' show formatModified;
 import 'auto_backup_scheduler.dart';
@@ -9,6 +10,8 @@ import 'cloud_sync_state.dart';
 import 'goodnotes_drive_replicator.dart';
 import 'google_drive_backup_service.dart';
 import 'google_drive_client.dart';
+import '../../../shared/navigation/app_dialogs.dart';
+import '../../../shared/navigation/app_sheets.dart';
 
 /// Shows the Google Drive sheet: the connection, backup and restore, and
 /// importing the Goodnotes folder. [onOpenFolder] shows a non-root library
@@ -22,10 +25,8 @@ Future<void> showGoogleDriveSheet(
   ValueChanged<String>? onOpenFolder,
   DateTime Function() clock = DateTime.now,
 }) {
-  return showModalBottomSheet<void>(
+  return showAppSheet<void>(
     context: context,
-    showDragHandle: true,
-    isScrollControlled: true,
     builder: (BuildContext context) => GoogleDriveSheet(
       client: client,
       backup: backup,
@@ -37,7 +38,7 @@ Future<void> showGoogleDriveSheet(
   );
 }
 
-enum _Task { connect, backUp, restore, replicate }
+enum _Task { backUp, restore, replicate }
 
 class GoogleDriveSheet extends StatefulWidget {
   const GoogleDriveSheet({
@@ -48,7 +49,12 @@ class GoogleDriveSheet extends StatefulWidget {
     this.autoBackup,
     this.onOpenFolder,
     this.clock = DateTime.now,
+    this.embedded = false,
   });
+
+  /// Shown inside another page, as a section: just the cards, with no
+  /// header, scrolling or width of its own.
+  final bool embedded;
 
   final GoogleDriveClient client;
   final GoogleDriveBackupService backup;
@@ -83,7 +89,12 @@ class _GoogleDriveSheetState extends State<GoogleDriveSheet> {
   void initState() {
     super.initState();
     _account = widget.client.currentAccount;
-    if (_account == null) _restoreSession();
+    if (_account == null) {
+      _restoreSession();
+    } else {
+      // Signed in from the Account button: let automatic backup run.
+      _link(true);
+    }
     widget.backup.lastBackupAt().then((DateTime? time) {
       if (mounted) setState(() => _lastBackup = time);
     });
@@ -170,31 +181,6 @@ class _GoogleDriveSheetState extends State<GoogleDriveSheet> {
     };
   }
 
-  Future<void> _connect() async {
-    await _run(_Task.connect, (_, _) async {
-      final GoogleDriveAccount? account = await widget.client.signIn();
-      if (!mounted) return;
-      if (account == null) {
-        _show('Sign-in was cancelled');
-        return;
-      }
-      setState(() => _account = account);
-      await _link(true);
-    });
-  }
-
-  Future<void> _disconnect() async {
-    await widget.client.signOut();
-    await _link(false);
-    if (!mounted) return;
-    setState(() {
-      _account = null;
-      _message = null;
-      _issues = const <ReplicationIssue>[];
-      _replicatedFolderId = null;
-    });
-  }
-
   Future<void> _backUp() async {
     await _run(_Task.backUp, (
       ImportCancellationToken cancellation,
@@ -212,16 +198,21 @@ class _GoogleDriveSheetState extends State<GoogleDriveSheet> {
               '${_count(summary.folderCount, 'folder')}. '
               '${summary.uploadedFiles} uploaded, '
               '${summary.unchangedFiles} already up to date.',
+          if (summary.addedHere > 0)
+            '${_count(summary.addedHere, 'note')} from other devices added.',
           if (summary.movedToDeleted > 0)
-            '${_count(summary.movedToDeleted, 'note')} in the backup but not '
-                'on this device moved to Recently Deleted.',
+            '${_count(summary.movedToDeleted, 'note')} deleted elsewhere '
+                'moved to Recently Deleted.',
+          if (summary.deletedForGood > 0)
+            '${_count(summary.deletedForGood, 'note')} deleted for good '
+                'elsewhere removed.',
         ].join(' '),
       );
     });
   }
 
   Future<void> _restore() async {
-    final RestoreMode? mode = await showDialog<RestoreMode>(
+    final RestoreMode? mode = await showAppDialog<RestoreMode>(
       context: context,
       builder: (BuildContext context) => AlertDialog(
         title: const Text('Restore from Google Drive?'),
@@ -313,7 +304,7 @@ class _GoogleDriveSheetState extends State<GoogleDriveSheet> {
   }
 
   Future<GoodnotesDriveRoot?> _pickRoot(List<GoodnotesDriveRoot> roots) {
-    return showDialog<GoodnotesDriveRoot>(
+    return showAppDialog<GoodnotesDriveRoot>(
       context: context,
       builder: (BuildContext context) {
         final DateTime now = widget.clock();
@@ -358,6 +349,57 @@ class _GoogleDriveSheetState extends State<GoogleDriveSheet> {
     final GoogleDriveAccount? account = _account;
     final bool connected = account != null;
     final bool canAct = connected && !_busy;
+    final List<Widget> cards = <Widget>[
+      _ConnectionCard(account: account),
+      const SizedBox(height: AppSpacing.md),
+      _BackupCard(
+        lastBackup: _lastBackup,
+        now: widget.clock(),
+        scheduler: widget.autoBackup,
+        enabled: canAct,
+        onBackUp: _backUp,
+        onRestore: _restore,
+      ),
+      const SizedBox(height: AppSpacing.md),
+      _GoodnotesCard(enabled: canAct, onImport: _importGoodnotes),
+      if (_busy) ...<Widget>[
+        const SizedBox(height: AppSpacing.lg),
+        _ProgressPanel(
+          progress: _progress,
+          onCancel:
+              _task == _Task.restore && _progress?.phase == 'Restoring library'
+              ? null
+              : () {
+                  _cancellation?.cancel();
+                  setState(() {});
+                },
+          cancelling: _cancellation?.isCancelled ?? false,
+        ),
+      ],
+      if (_message != null) ...<Widget>[
+        const SizedBox(height: AppSpacing.lg),
+        _ResultPanel(
+          message: _message!,
+          error: _messageIsError,
+          issues: _issues,
+          onOpenFolder:
+              _replicatedFolderId == null || widget.onOpenFolder == null
+              ? null
+              : () {
+                  final String id = _replicatedFolderId!;
+                  // Back to the library, which then shows the folder.
+                  Navigator.of(context).pop();
+                  widget.onOpenFolder!(id);
+                },
+        ),
+      ],
+    ];
+    if (widget.embedded) {
+      return Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: cards,
+      );
+    }
     return SafeArea(
       child: Center(
         heightFactor: 1,
@@ -383,55 +425,7 @@ class _GoogleDriveSheetState extends State<GoogleDriveSheet> {
                 ],
               ),
               const SizedBox(height: AppSpacing.md),
-              _ConnectionCard(
-                account: account,
-                connecting: _task == _Task.connect,
-                enabled: !_busy,
-                onConnect: _connect,
-                onDisconnect: _disconnect,
-              ),
-              const SizedBox(height: AppSpacing.md),
-              _BackupCard(
-                lastBackup: _lastBackup,
-                now: widget.clock(),
-                scheduler: widget.autoBackup,
-                enabled: canAct,
-                onBackUp: _backUp,
-                onRestore: _restore,
-              ),
-              const SizedBox(height: AppSpacing.md),
-              _GoodnotesCard(enabled: canAct, onImport: _importGoodnotes),
-              if (_busy && _task != _Task.connect) ...<Widget>[
-                const SizedBox(height: AppSpacing.lg),
-                _ProgressPanel(
-                  progress: _progress,
-                  onCancel:
-                      _task == _Task.restore &&
-                          _progress?.phase == 'Restoring library'
-                      ? null
-                      : () {
-                          _cancellation?.cancel();
-                          setState(() {});
-                        },
-                  cancelling: _cancellation?.isCancelled ?? false,
-                ),
-              ],
-              if (_message != null) ...<Widget>[
-                const SizedBox(height: AppSpacing.lg),
-                _ResultPanel(
-                  message: _message!,
-                  error: _messageIsError,
-                  issues: _issues,
-                  onOpenFolder:
-                      _replicatedFolderId == null || widget.onOpenFolder == null
-                      ? null
-                      : () {
-                          final String id = _replicatedFolderId!;
-                          Navigator.of(context).pop();
-                          widget.onOpenFolder!(id);
-                        },
-                ),
-              ],
+              ...cards,
             ],
           ),
         ),
@@ -515,6 +509,7 @@ class _BackupMenu extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return MenuAnchor(
+      animated: !MediaQuery.disableAnimationsOf(context),
       alignmentOffset: const Offset(0, AppSpacing.xxs),
       menuChildren: <Widget>[
         MenuItemButton(
@@ -552,8 +547,8 @@ class _AutoBackupControl extends StatelessWidget {
       builder: (BuildContext context, Duration interval, _) {
         final bool automatic = interval != AutoBackupScheduler.off;
         return AnimatedContainer(
-          duration: AppMotion.resolve(context, AppMotion.fast),
-          curve: AppMotion.standard,
+          duration: AppMotion.resolve(context, AppMotion.fadeIn),
+          curve: AppMotion.fadeInCurve,
           padding: const EdgeInsets.fromLTRB(
             AppSpacing.md,
             AppSpacing.sm,
@@ -562,7 +557,7 @@ class _AutoBackupControl extends StatelessWidget {
           ),
           decoration: BoxDecoration(
             color: automatic ? colors.selected : colors.surface,
-            borderRadius: BorderRadius.circular(AppRadii.medium),
+            borderRadius: AppBorderRadius.medium,
           ),
           child: Column(
             children: <Widget>[
@@ -608,37 +603,40 @@ class _AutoBackupControl extends StatelessWidget {
                   padding: const EdgeInsets.only(left: AppSpacing.xxs),
                   child: Row(
                     children: <Widget>[
-                      Expanded(
-                        child: Text('Frequency', style: text.bodyMedium),
-                      ),
-                      Semantics(
-                        label: 'Automatic backup frequency',
-                        child: DropdownButtonHideUnderline(
-                          child: DropdownButton<Duration>(
-                            value:
-                                AutoBackupScheduler.choices.contains(interval)
-                                ? interval
-                                : null,
-                            hint: Text(AutoBackupScheduler.describe(interval)),
-                            borderRadius: BorderRadius.circular(
-                              AppRadii.medium,
-                            ),
-                            onChanged: (Duration? every) {
-                              if (every != null) {
-                                scheduler.setInterval(every);
-                              }
-                            },
-                            items: <DropdownMenuItem<Duration>>[
-                              for (final Duration every
-                                  in AutoBackupScheduler.choices)
-                                if (every != AutoBackupScheduler.off)
-                                  DropdownMenuItem<Duration>(
-                                    value: every,
-                                    child: Text(
-                                      AutoBackupScheduler.describe(every),
+                      Text('Frequency', style: text.bodyMedium),
+                      const SizedBox(width: AppSpacing.sm),
+                      Flexible(
+                        child: Semantics(
+                          label: 'Automatic backup frequency',
+                          child: DropdownButtonHideUnderline(
+                            child: DropdownButton<Duration>(
+                              isExpanded: true,
+                              alignment: AlignmentDirectional.centerEnd,
+                              value:
+                                  AutoBackupScheduler.choices.contains(interval)
+                                  ? interval
+                                  : null,
+                              hint: Text(
+                                AutoBackupScheduler.describe(interval),
+                              ),
+                              borderRadius: AppBorderRadius.medium,
+                              onChanged: (Duration? every) {
+                                if (every != null) {
+                                  scheduler.setInterval(every);
+                                }
+                              },
+                              items: <DropdownMenuItem<Duration>>[
+                                for (final Duration every
+                                    in AutoBackupScheduler.choices)
+                                  if (every != AutoBackupScheduler.off)
+                                    DropdownMenuItem<Duration>(
+                                      value: every,
+                                      child: Text(
+                                        AutoBackupScheduler.describe(every),
+                                      ),
                                     ),
-                                  ),
-                            ],
+                              ],
+                            ),
                           ),
                         ),
                       ),
@@ -715,7 +713,7 @@ class _DriveCard extends StatelessWidget {
       padding: const EdgeInsets.all(AppSpacing.md),
       decoration: BoxDecoration(
         color: colors.surfaceMuted,
-        borderRadius: BorderRadius.circular(AppRadii.large),
+        borderRadius: AppBorderRadius.large,
         border: Border.all(color: colors.divider, width: AppSizes.hairline),
       ),
       child: child,
@@ -736,7 +734,7 @@ class _CardIcon extends StatelessWidget {
       height: 40,
       decoration: BoxDecoration(
         color: colors.selected,
-        borderRadius: BorderRadius.circular(AppRadii.medium),
+        borderRadius: AppBorderRadius.medium,
       ),
       child: Icon(icon, size: 20, color: colors.accent),
     );
@@ -744,19 +742,9 @@ class _CardIcon extends StatelessWidget {
 }
 
 class _ConnectionCard extends StatelessWidget {
-  const _ConnectionCard({
-    required this.account,
-    required this.connecting,
-    required this.enabled,
-    required this.onConnect,
-    required this.onDisconnect,
-  });
+  const _ConnectionCard({required this.account});
 
   final GoogleDriveAccount? account;
-  final bool connecting;
-  final bool enabled;
-  final VoidCallback onConnect;
-  final VoidCallback onDisconnect;
 
   @override
   Widget build(BuildContext context) {
@@ -765,7 +753,7 @@ class _ConnectionCard extends StatelessWidget {
     final GoogleDriveAccount? account = this.account;
     final String title = account == null ? 'Not connected' : account.label;
     final String detail = account == null
-        ? 'Connect to back up your library and import from Goodnotes.'
+        ? 'Sign in from the Account button to back up your library and import from Goodnotes.'
         : account.email;
     return Semantics(
       container: true,
@@ -776,7 +764,7 @@ class _ConnectionCard extends StatelessWidget {
         padding: const EdgeInsets.all(AppSpacing.md),
         decoration: BoxDecoration(
           color: colors.surfaceMuted,
-          borderRadius: BorderRadius.circular(AppRadii.large),
+          borderRadius: AppBorderRadius.large,
         ),
         child: Row(
           children: <Widget>[
@@ -809,23 +797,6 @@ class _ConnectionCard extends StatelessWidget {
                 ),
               ),
             ),
-            const SizedBox(width: AppSpacing.sm),
-            if (account == null)
-              FilledButton(
-                style: FilledButton.styleFrom(
-                  minimumSize: const Size(0, AppSizes.minTouchTarget),
-                ),
-                onPressed: enabled ? onConnect : null,
-                child: Text(connecting ? 'Connecting…' : 'Connect'),
-              )
-            else
-              OutlinedButton(
-                style: OutlinedButton.styleFrom(
-                  minimumSize: const Size(0, AppSizes.minTouchTarget),
-                ),
-                onPressed: enabled ? onDisconnect : null,
-                child: const Text('Disconnect'),
-              ),
           ],
         ),
       ),
@@ -861,23 +832,33 @@ class _ProgressPanel extends StatelessWidget {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: <Widget>[
-          Text(phase, style: text.titleSmall),
-          if (progress?.currentName != null)
-            Text(
-              progress!.currentName!,
-              style: text.bodySmall!.copyWith(color: colors.textSecondary),
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-            ),
-          const SizedBox(height: AppSpacing.xs),
-          ClipRRect(
-            borderRadius: BorderRadius.circular(AppRadii.small),
-            child: LinearProgressIndicator(
-              value: fraction,
-              minHeight: 6,
-              semanticsLabel: 'Google Drive progress',
-            ),
+          // The phase and the figure rise into place as they change, and
+          // the file being worked on breathes while it is.
+          Row(
+            children: <Widget>[
+              Expanded(
+                child: GentleSwitcher(
+                  value: phase,
+                  child: Text(phase, style: text.titleSmall),
+                ),
+              ),
+              ProgressCount(
+                value: fraction,
+                semanticsLabel: 'Google Drive progress',
+                style: text.titleSmall!.copyWith(color: colors.textSecondary),
+              ),
+            ],
           ),
+          if (progress?.currentName != null)
+            Breathe(
+              active: !cancelling,
+              child: Text(
+                progress!.currentName!,
+                style: text.bodySmall!.copyWith(color: colors.textSecondary),
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+              ),
+            ),
           const SizedBox(height: AppSpacing.xs),
           Align(
             alignment: AlignmentDirectional.centerEnd,
@@ -916,7 +897,7 @@ class _ResultPanel extends StatelessWidget {
       padding: const EdgeInsets.all(AppSpacing.md),
       decoration: BoxDecoration(
         color: colors.surfaceMuted,
-        borderRadius: BorderRadius.circular(AppRadii.large),
+        borderRadius: AppBorderRadius.large,
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,

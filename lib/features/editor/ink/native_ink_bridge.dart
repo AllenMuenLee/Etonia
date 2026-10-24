@@ -83,6 +83,8 @@ class NativeInkSurface {
     required this.color,
     required this.width,
     required this.pressureSensitivity,
+    required this.stabilization,
+    required this.writingStyle,
     this.exclusionRects = const <Rect>[],
   });
 
@@ -96,6 +98,8 @@ class NativeInkSurface {
   final Color color;
   final double width;
   final double pressureSensitivity;
+  final double stabilization;
+  final String writingStyle;
   final List<Rect> exclusionRects;
 
   Map<String, Object> toMap() {
@@ -114,6 +118,8 @@ class NativeInkSurface {
       'color': color.toARGB32(),
       'strokeWidth': width,
       'pressureSensitivity': pressureSensitivity,
+      'stabilization': stabilization,
+      'writingStyle': writingStyle,
     };
     if (exclusionRects.isNotEmpty) {
       final List<double> rects = <double>[];

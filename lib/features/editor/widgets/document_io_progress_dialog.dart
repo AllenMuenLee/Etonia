@@ -1,7 +1,9 @@
 import 'package:flutter/material.dart';
 
 import '../../../shared/widgets/processing.dart';
+import '../../../shared/widgets/etonia_mark.dart';
 import '../../../app/theme/app_tokens.dart';
+import '../../../shared/navigation/app_dialogs.dart';
 
 class DocumentIoProgressResult {
   const DocumentIoProgressResult({this.error, this.cancelled = false});
@@ -20,7 +22,7 @@ Future<DocumentIoProgressResult> showDocumentIoProgress(
   required DocumentIoOperation operation,
   required VoidCallback onCancel,
 }) async {
-  return await showDialog<DocumentIoProgressResult>(
+  return await showAppDialog<DocumentIoProgressResult>(
         context: context,
         barrierDismissible: false,
         builder: (_) => _DocumentIoProgressDialog(
@@ -103,16 +105,29 @@ class _DocumentIoProgressDialogState extends State<_DocumentIoProgressDialog> {
           child: Column(
             mainAxisSize: MainAxisSize.min,
             crossAxisAlignment: CrossAxisAlignment.stretch,
+            // How far it has come, as figures that rise into place with
+            // each page, the status breathing while the work runs on.
             children: <Widget>[
               const SizedBox(height: AppSpacing.xs),
-              ShimmerTrack(value: value),
+              const Center(child: EtoniaBarsLoader(size: 44)),
               const SizedBox(height: AppSpacing.sm),
-              Text(
-                status,
-                style: Theme.of(context).textTheme.bodySmall!.copyWith(
-                  fontFeatures: const <FontFeature>[
-                    FontFeature.tabularFigures(),
-                  ],
+              ProgressCount(
+                value: value,
+                style: Theme.of(context).textTheme.headlineSmall,
+              ),
+              const SizedBox(height: AppSpacing.xs),
+              Breathe(
+                active: !_cancelled,
+                child: GentleSwitcher(
+                  value: status,
+                  child: Text(
+                    status,
+                    style: Theme.of(context).textTheme.bodySmall!.copyWith(
+                      fontFeatures: const <FontFeature>[
+                        FontFeature.tabularFigures(),
+                      ],
+                    ),
+                  ),
                 ),
               ),
             ],

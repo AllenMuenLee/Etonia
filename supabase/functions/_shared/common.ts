@@ -47,9 +47,16 @@ export async function rpc(db: Admin, name: string, args: Record<string, unknown>
       "rate_limited",
       "request_in_progress",
       "purchase_owner",
+      "invalid_code",
+      "code_redeemed",
+      "code_exhausted",
+      "unauthorized",
     ];
     const code = codes.find((c) => error.message === c);
-    throw new Failure(code ?? "server", code === "rate_limited" ? 429 : code ? 409 : 503);
+    throw new Failure(
+      code ?? "server",
+      code === "rate_limited" ? 429 : code === "unauthorized" ? 401 : code ? 409 : 503,
+    );
   }
   return data;
 }
@@ -69,7 +76,10 @@ export function endpoint(handler: (req: Request) => Promise<Response>) {
     }
   };
 }
-export async function readBody(req: Request, maxBytes = 65536): Promise<Record<string, any>> {
+export async function readBody(
+  req: Request,
+  maxBytes: number | null = 65536,
+): Promise<Record<string, any>> {
   if (!req.body) throw new Failure("rejected");
   const reader = req.body.getReader();
   const parts: Uint8Array[] = [];
@@ -78,7 +88,7 @@ export async function readBody(req: Request, maxBytes = 65536): Promise<Record<s
     const { done, value } = await reader.read();
     if (done) break;
     size += value.length;
-    if (size > maxBytes) {
+    if (maxBytes !== null && size > maxBytes) {
       await reader.cancel();
       throw new Failure("rejected", 413);
     }

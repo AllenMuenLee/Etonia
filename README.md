@@ -195,9 +195,19 @@ bar spans the whole width; only the AI panel, when open beside the editor,
 takes space from the page. The palette floats over the page, and the page's
 own floating bars (selection actions, Paste) move clear of it.
 
+## Tabs and split view
+
+One top bar spans the window: back, the open notes' tabs, and Settings.
+Hold a tab and drag it to the left or right of the window to show its note
+beside the one shown. Each pane then has tabs of its own over it, while the
+bar and Settings stay single and follow the pane last pressed (outlined).
+Pull the handle between the panes to resize them, or all the way to an edge
+to put a pane away. Two panes at most.
+
 ## Undo and redo
 
-Undo and Redo sit in the top bar, before the page controls, and answer to
+Undo and Redo hang from the top bar at the left, on one card with find and
+the page controls, and answer to
 `Ctrl`/`Cmd`+Z, `Ctrl`/`Cmd`+Shift+Z, and `Ctrl`+Y. History is per page and
 per session, kept by `InkController`: every committed change (a stroke, a
 shape, a whole erase gesture, a transform, a cut, a paste, an inserted
@@ -696,7 +706,7 @@ off screen with `dart:ui`:
 
 - the crop is the union of the strokes' rendered bounds plus 12 logical
   pixels on every side;
-- it is drawn at 2 physical pixels per logical pixel, or less when that
+- it is drawn at 3 physical pixels per logical pixel, or less when that
   would make a side longer than 2048 pixels; never more;
 - the background is the writing surface's color in the theme at the moment
   of capture, opaque, and the ink uses that theme's colors. A later theme
@@ -705,20 +715,17 @@ off screen with `dart:ui`:
   layers use: round caps and joins, and a disc for a dot;
 - unselected ink, the selection frame, its handles, and the action bar are
   never drawn;
-- a selection that is empty, not finite, or too large to shrink legibly is
-  refused with a message, before any bitmap is allocated.
+- a selection that is empty or not finite is refused with a message, before
+  any bitmap is allocated.
 
 The panel's preview shows those same PNG bytes. They are held in memory for
 the conversation and written nowhere.
 
-With Notation on, sending a message also snapshots and renders the complete
-current writing surface through `NoteImageRenderer`. That PNG contains normal
-document ink over the opaque paper color, but no active gesture, selection
-chrome, controls, or AI panel. It is rendered at up to 2x and capped at 2048
-pixels per side. The image, logical surface size, selected focus bounds, and
-document revision form one immutable request context. These bytes also stay
-in memory only. Settings explains that enabling notation sends this broader
-context.
+With Notation on, the app still sends one tight, lossless selection crop. A
+coordinate grid is composited onto that crop so marks can be placed accurately.
+The rest of the page is represented only by compact numeric metadata: page size,
+focus bounds, simplified selected ink, nearby occupied boxes, and available blank
+areas. The full note and PDF are not uploaded.
 
 The quick actions send fixed prompts, which are in `AiPrompts`
 (`lib/features/editor/ai/ai_config.dart`) with the system instruction. The
@@ -726,20 +733,15 @@ transcript shows a quick action under its short label.
 
 ### Service
 
-Requests go to Google's hosted `gemma-4-31b-it` through the Gemini API:
-
-```text
-POST https://generativelanguage.googleapis.com/v1beta/models/gemma-4-31b-it:generateContent
-```
-
-The endpoint keeps no state, so every request carries the system instruction,
-the selected image as `inline_data` in the first user turn, and the whole
-conversation in order. A notation-enabled request attaches its fresh
-whole-note image and normalized focus metadata to the latest user turn. The
-key travels in the `x-goog-api-key`
-header, never in the URL. The model's thinking is turned off
-(`thinkingLevel: minimal`), which roughly halves the wait; answers still
-take 10 to 70 seconds, so an attempt gets 120 seconds.
+Requests go through the authenticated Supabase AI function, which routes the
+chosen alias to its server-configured OpenAI, Anthropic, or Gemini model. The
+provider endpoint keeps no app state, so each answer carries the selected crop
+and a bounded, compact transcript. With Notation enabled, a small first pass
+answers and returns `null`, `static`, or `animated`. Only the latter two cause a
+second pass containing the large drawing grammar, response schema, and page
+metadata. The first pass reads the clean crop; the second uses its gridded
+variant for precise coordinates. A text-only answer therefore pays for neither
+the notation prompt nor the grid image.
 
 The service intermittently answers 500 or 503 at once, having generated
 nothing; those are sent once more after a second. Nothing else is retried
@@ -872,6 +874,11 @@ drawing whole. Disabling future notation or merely closing the AI panel does
 not. When the platform requests reduced motion, the same final strokes are
 committed and shown immediately.
 
+If a playing stroke is replaced by an edit, playback follows the replacement,
+including one with a different number of points; its reveal timing is spread
+over the new geometry. If it is erased, playback releases only that stroke and
+continues with the rest.
+
 The profile command in [Commands](#commands) records separate timeline
 summaries for ordinary animation frames, loop rollover, and forced finish. It
 also writes `build/ai_notation_metrics.json` with the existing and animated
@@ -917,20 +924,21 @@ IDs, token rates, and output limits come from the server's `AI_MODEL_CONFIG`, wi
 an example in `supabase/model-config.example.json`. The selected alias is a local
 preference; the client cannot choose an arbitrary provider URL, price, or balance.
 
-Each AI request temporarily forwards the current question, recent messages in that
-selection's AI conversation, and the selected PNG crop. Notation also sends numeric
-page dimensions and crop bounds, so returned marks can be placed on the page. Full
-note images and PDFs are never sent to Supabase. No prompt, image, answer, or
-conversation is persisted or logged by the backend. Responses currently arrive in
-full after server-side accounting.
+Each AI request temporarily forwards the current question, at most 12 complete
+turns from that selection's conversation, and the selected PNG crop. Older turns
+are compacted, the newest two stay detailed, and prior drawing JSON is removed.
+Notation also sends numeric page dimensions and crop bounds, so returned marks can
+be placed on the page. Full note images and PDFs are never sent to Supabase. No
+prompt, image, answer, or conversation is persisted or logged by the backend.
+Responses currently arrive in full after server-side accounting.
 
 ### Plans and credits
 
 | Plan | Display price | Included models without credit charges | AI credits |
 | --- | --- | --- | --- |
 | Starter | $4.99/month | Haiku, Luna | $1.20 for Sonnet & Sol |
-| Pro | $12.99/month | Haiku, Luna | $5.00 for all metered models |
-| Max | $29.99/month | Haiku, Luna | $15.00 for all metered models |
+| Pro | $12.99/month | Haiku, Luna | $4.00 for all metered models |
+| Max | $29.99/month | Haiku, Luna | $10.00 for all metered models |
 
 Actual localized prices come from the store. Product mappings and allowances
 live in the database migration and must match the products configured in Apple
@@ -965,13 +973,13 @@ The sizes and limits live in `AiLayoutConfig`, `AiImageConfig`, and
 | `pixelRatio` | 3 | physical pixels per logical pixel, at most |
 | `maxDimension` | 2048 px | longest side of the image (lossless PNG) |
 | `maxPngBytes` | 3.5 MB | larger PNGs are redrawn smaller, within the backend's limit |
-| `minPixelRatio` | 0.05 | a selection needing a smaller ratio is refused |
+| `maxOutputTokens` | 16,384 | hard ceiling for unusually detailed answers or drawings |
 | `maxLabelRunes` | 80 | longest notation description |
 | `maxItems` | 48 | most texts, plots, graphs, paths, and strokes in one response |
 | `maxPointsPerStroke` | 128 | most points the model gives one stroke |
 | `maxPathPoints` | 64 | most key points in one path |
 | `maxTotalPoints` | 4096 | points the model gives over all strokes and paths |
-| `maxTextRunes` / `maxTotalTextRunes` | 120 / 600 | characters in one text, and in all |
+| `maxTextRunes` / `maxTotalTextRunes` | 48 / 400 | characters in one text, and in all |
 | `minTextSize` / `maxTextSize` | 8 / 120 px | height of a capital letter |
 | `maxFormulaLength` | 160 | longest graph formula |
 | `graphSamples` | 240 | points a graph's curve is worked out at |
@@ -983,7 +991,6 @@ The sizes and limits live in `AiLayoutConfig`, `AiImageConfig`, and
 | `maxPlotChildren` | 16 | most children in one plot |
 | `maxPlotMarks` | 8 | most points one mark or intersection labels |
 | `plotTextSize` | 12 px | capital height of tick numbers and marked coordinates |
-| `maxResponseBytes` | 256 KiB | largest retained structured model answer |
 
 ### Known limitations
 

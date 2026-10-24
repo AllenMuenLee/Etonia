@@ -35,7 +35,7 @@ void main() {
       final StrokeStyle style = highlighter.strokeStyle(config);
       expect(style.writing, WritingStyle.highlighter);
       expect(style.opacity, 0.35);
-      expect(style.width, 12);
+      expect(style.width, 6);
     });
 
     test('the pen keeps its own defaults', () {
@@ -43,7 +43,7 @@ void main() {
       expect(style.writing, WritingStyle.pen);
       expect(style.opacity, 1);
       expect(style.ink, InkPalette.ink);
-      expect(style.width, 3);
+      expect(style.width, 1.5);
     });
   });
 
@@ -66,17 +66,15 @@ void main() {
     expect(settings.highlighterWidth, 30);
   });
 
-  test('a highlighter has no taper, pressure, following, or shapes', () {
+  test('a highlighter has no taper, pressure, or shapes', () {
     final PenSettings highlighter = PenSettings.defaults().copyWith(
       style: WritingStyle.highlighter,
       tipSharpness: 1,
       pressureSensitivity: 1,
       holdToShape: true,
-      followStroke: true,
     );
     expect(highlighter.dynamics.isNone, isTrue);
     expect(highlighter.armsHoldToShape, isFalse);
-    expect(highlighter.followsStrokes, isFalse);
 
     final PenSettings pen = highlighter.copyWith(style: WritingStyle.pen);
     expect(pen.dynamics.isNone, isFalse);

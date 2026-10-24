@@ -124,12 +124,21 @@ void main() {
     );
   });
 
-  testWidgets('library thumbnails show the note under page ink', (
+  testWidgets('library thumbnails show the note above page ink', (
     WidgetTester tester,
   ) async {
     final StoredPage page = StoredPage(
       setup: const PageSetup(size: PageSize.custom, customSize: Size(200, 200)),
-      strokes: const <Stroke>[],
+      strokes: <Stroke>[
+        Stroke.fromPoints(
+          style: const StrokeStyle(
+            ink: InkPalette.ink,
+            width: 20,
+            writing: WritingStyle.pen,
+          ),
+          points: const <InkVector>[InkVector(50, 100), InkVector(150, 100)],
+        ),
+      ],
       stickyNotes: <StickyNoteElement>[_note(colorId: 'green')],
     );
     final Color? center = await tester.runAsync(() async {

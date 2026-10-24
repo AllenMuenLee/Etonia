@@ -62,6 +62,10 @@ import Vision
 
 /// Receives PDFs shared into Etonia from another app's share sheet or "Open
 /// in" action and forwards their filename and bytes to Dart.
+///
+/// Files are read on a queue of their own, in the order they arrive: a large
+/// PDF, or one in iCloud that must first download, would otherwise freeze
+/// the app. Everything else here stays on the main thread.
 final class SharedDocumentChannel {
   static let name = "com.etonia.app/shared_documents"
 
@@ -69,6 +73,8 @@ final class SharedDocumentChannel {
   private var pending: [[String: Any]] = []
   private var dartReady = false
   private var recentPaths: [String: TimeInterval] = [:]
+  private let reader = DispatchQueue(
+    label: "com.etonia.app.shared-documents", qos: .userInitiated)
 
   func attach(messenger: FlutterBinaryMessenger) {
     let methodChannel = FlutterMethodChannel(name: Self.name, binaryMessenger: messenger)
@@ -100,37 +106,44 @@ final class SharedDocumentChannel {
     }
     recentPaths[standardized] = now
 
-    let accessed = url.startAccessingSecurityScopedResource()
-    defer {
-      if accessed {
-        url.stopAccessingSecurityScopedResource()
+    reader.async { [weak self] in
+      let accessed = url.startAccessingSecurityScopedResource()
+      defer {
+        if accessed {
+          url.stopAccessingSecurityScopedResource()
+        }
       }
+      guard let data = try? Data(contentsOf: url), !data.isEmpty else {
+        return
+      }
+      let name = url.lastPathComponent.isEmpty ? "Shared.pdf" : url.lastPathComponent
+      if standardized.contains("/Documents/Inbox/") {
+        try? FileManager.default.removeItem(at: url)
+      }
+      let payload: [String: Any] = [
+        "name": name,
+        "bytes": FlutterStandardTypedData(bytes: data),
+      ]
+      DispatchQueue.main.async { self?.deliver(payload) }
     }
-    guard let data = try? Data(contentsOf: url), !data.isEmpty else {
-      return false
-    }
-    let name = url.lastPathComponent.isEmpty ? "Shared.pdf" : url.lastPathComponent
-    if standardized.contains("/Documents/Inbox/") {
-      try? FileManager.default.removeItem(at: url)
-    }
-    let payload: [String: Any] = [
-      "name": name,
-      "bytes": FlutterStandardTypedData(bytes: data),
-    ]
+    return true
+  }
+
+  private func deliver(_ payload: [String: Any]) {
     if dartReady, let channel {
       channel.invokeMethod("onDocumentShared", arguments: payload)
     } else {
       pending.append(payload)
     }
-    return true
   }
 }
 
 /// Reads handwriting written on the page in AI mode with Apple's on-device
 /// Vision text recognition.
 ///
-/// Dart sends an offscreen PNG of Etonia's own strokes, dark on white.
-/// Vision reads that bitmap, so no text input, Scribble, or
+/// Dart sends Etonia's own strokes as vectors, drawn dark on white on the
+/// recognition queue (older callers send a PNG of them instead). Vision
+/// reads that bitmap, so no text input, Scribble, or
 /// `UIIndirectScribbleInteraction` is involved and iPadOS never draws ink of
 /// its own over the page. The image lives only for the request.
 ///

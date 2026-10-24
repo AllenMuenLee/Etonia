@@ -24,6 +24,15 @@ Deno.serve(endpoint(async (req) => {
       throw new Failure("verification_failed", 409);
     }
     await applySnapshots(db, user, snapshots);
+  } else if (body.action === "redeem") {
+    if (typeof body.code !== "string" || body.code.length > 64) throw new Failure("rejected");
+    return json(
+      await rpc(db, "billing_redeem_gift", {
+        p_user: user,
+        p_anonymous: account.anonymous,
+        p_code: body.code,
+      }),
+    );
   } else if (body.action === "status") {
     if (!account.anonymous) await reconcile(db, user);
   } else throw new Failure("rejected");

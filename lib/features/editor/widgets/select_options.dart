@@ -1,4 +1,4 @@
-import 'package:flutter/material.dart';
+﻿import 'package:flutter/material.dart';
 
 import '../../../app/theme/app_tokens.dart';
 import '../../../app/theme/app_icons.dart';
@@ -14,7 +14,7 @@ class SelectOptions extends StatelessWidget {
   Widget build(BuildContext context) {
     final AppColors colors = AppColors.of(context);
     final bool enabled = onPaste != null;
-    final BorderRadius radius = BorderRadius.circular(AppRadii.medium);
+    const BorderRadius radius = AppBorderRadius.medium;
 
     return Semantics(
       container: true,

@@ -5,12 +5,15 @@ import 'dart:ui' as ui;
 import '../../backend/backend_service.dart';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/physics.dart';
 import 'package:flutter/semantics.dart';
 
 import '../../app/theme/app_tokens.dart';
 import '../../app/theme/app_icons.dart';
 import '../../shared/layout/breakpoints.dart';
+import '../../shared/memory/memory_pressure.dart';
 import '../editor/ai/ai_client.dart';
+import '../editor/ai/ai_config.dart';
 import '../editor/handwriting/handwriting_calibration.dart';
 import '../editor/handwriting/handwriting_calibration_screen.dart';
 import '../editor/ink/input_defaults.dart';
@@ -43,20 +46,31 @@ import 'note_thumbnails.dart';
 import 'open_notes.dart';
 import 'shared_note_clipboard.dart';
 import '../../shared/widgets/app_controls.dart';
+import '../../shared/widgets/dog_ear.dart';
 import '../../shared/widgets/ignore_keyboard.dart';
+import '../../shared/widgets/scene_transitions.dart';
 import '../../shared/widgets/processing.dart';
 import '../../shared/widgets/pressable.dart';
+import '../payment/account_page.dart';
 import '../payment/in_app_purchase_gateway.dart';
 import '../payment/payment_models.dart';
-import '../payment/payment_page.dart';
 import '../payment/subscription_controller.dart';
 
 /// Opens the library on this device, then shows it. With a [repository]
 /// that one is used instead.
 class LibraryHome extends StatefulWidget {
-  const LibraryHome({super.key, this.repository, this.subscription});
+  const LibraryHome({
+    super.key,
+    this.repository,
+    this.subscription,
+    this.opening,
+  });
 
   final NoteRepository? repository;
+
+  /// The device's library, already being opened, as at startup alongside
+  /// the platform services. Without one, it is opened here.
+  final Future<FileNoteRepository>? opening;
 
   /// The user's plan and AI credits. Without one, the device's library
   /// gets one beside it, connected to the platform store; a library
@@ -69,7 +83,7 @@ class LibraryHome extends StatefulWidget {
 
 class _LibraryHomeState extends State<LibraryHome> {
   late final Future<NoteRepository> _repository = widget.repository == null
-      ? FileNoteRepository.openDefault()
+      ? (widget.opening ?? FileNoteRepository.openDefault())
       : Future<NoteRepository>.value(widget.repository);
 
   SubscriptionController? _subscription;
@@ -100,6 +114,8 @@ class _LibraryHomeState extends State<LibraryHome> {
       HandwritingCalibrationState? state,
     ) {
       HandwritingCalibration.current.value = state?.style;
+      HandwritingCalibration.textSize.value =
+          state?.textSize ?? AiTextSize.medium;
     });
   }
 
@@ -119,24 +135,28 @@ class _LibraryHomeState extends State<LibraryHome> {
       future: _repository,
       builder: (BuildContext context, AsyncSnapshot<NoteRepository> snapshot) {
         final NoteRepository? repository = snapshot.data;
-        if (repository != null) {
-          _checkHandwriting(repository);
-          return LibraryScreen(
-            repository: repository,
-            subscription: widget.subscription ?? _subscriptionFor(repository),
-            onboard: _onDevice(repository),
-          );
-        }
-        return Scaffold(
-          backgroundColor: AppColors.of(context).background,
-          body: Center(
-            child: snapshot.hasError
-                ? const Text("The library couldn't be opened.")
-                : const SizedBox(
-                    width: AppSpacing.xxl * 2,
-                    child: ShimmerTrack(semanticsLabel: 'Loading'),
+        if (repository != null) _checkHandwriting(repository);
+        final Color background = AppColors.of(context).background;
+        // The library fades in over its empty background once it is read.
+        return LoadingReveal(
+          timing: LoadTimings.library,
+          semanticsLabel: 'Loading',
+          placeholder: Scaffold(backgroundColor: background),
+          child: repository != null
+              ? LibraryScreen(
+                  repository: repository,
+                  subscription:
+                      widget.subscription ?? _subscriptionFor(repository),
+                  onboard: _onDevice(repository),
+                )
+              : snapshot.hasError
+              ? Scaffold(
+                  backgroundColor: background,
+                  body: const Center(
+                    child: Text("The library couldn't be opened."),
                   ),
-          ),
+                )
+              : null,
         );
       },
     );
@@ -355,6 +375,12 @@ class _LibraryScreenState extends State<LibraryScreen> {
       ValueNotifier<PalettePlacement>(const PalettePlacement());
   final OpenNotes _openNotes = OpenNotes();
   bool _tabsShowing = false;
+
+  /// Which showing of a folder's contents this is, and the way the move to
+  /// it went: into a folder, back out of one, or to the side. A new folder
+  /// is a new scene, carried in as the last one goes out.
+  int _scene = 0;
+  int _sceneDirection = 0;
   StreamSubscription<PickedDocument>? _sharedDocumentsSubscription;
   final List<PickedDocument> _pendingSharedImports = <PickedDocument>[];
   bool _importingShared = false;
@@ -366,8 +392,10 @@ class _LibraryScreenState extends State<LibraryScreen> {
 
   /// Notes stay in Recently Deleted this long.
   static const Duration _trashKeeps = Duration(days: 30);
+  static const Duration _searchDelay = Duration(milliseconds: 120);
 
   final TextEditingController _search = TextEditingController();
+  Timer? _searchDebounce;
 
   /// Each note's first page, drawn once.
   late ThumbnailCache _thumbnails = ThumbnailCache(
@@ -445,7 +473,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
         },
       )..load());
 
-  Future<void> _openPlans() => showPaymentPage(context, _subscription);
+  Future<void> _openPlans() => _openAccount(openPlans: true);
 
   Future<void> _calibrateHandwriting() async {
     await showHandwritingCalibration(context, store: _handwritingProfileStore);
@@ -456,11 +484,27 @@ class _LibraryScreenState extends State<LibraryScreen> {
   /// Recently Deleted is shown, rather than a folder or search results.
   bool get _showingTrash => _inTrash && _query.isEmpty;
 
+  /// The system is low on memory: only the thumbnails likely on screen
+  /// are kept.
+  void _releaseMemory() => _thumbnails.releaseMemory();
+
+  /// While the app is out of sight, the pictures of the notes just saved
+  /// are drawn and stored even with a note in front: no one is watching,
+  /// and the app may not be opened again before it is closed.
+  late final AppLifecycleListener _lifecycle;
+
   @override
   void initState() {
     super.initState();
-    _repository.addListener(_reload);
-    _search.addListener(_reload);
+    MemoryPressure.instance.addListener(_releaseMemory);
+    _lifecycle = AppLifecycleListener(
+      onHide: () => _thumbnails.resume(),
+      onShow: () {
+        if (_tabsShowing) _thumbnails.pause();
+      },
+    );
+    _repository.addListener(_onRepositoryChanged);
+    _search.addListener(_scheduleSearchReload);
     _reload();
     _repository.purgeTrash(_trashKeeps);
     _autoBackup.start();
@@ -493,8 +537,8 @@ class _LibraryScreenState extends State<LibraryScreen> {
   void didUpdateWidget(LibraryScreen oldWidget) {
     super.didUpdateWidget(oldWidget);
     if (oldWidget.repository != widget.repository) {
-      oldWidget.repository.removeListener(_reload);
-      widget.repository.addListener(_reload);
+      oldWidget.repository.removeListener(_onRepositoryChanged);
+      widget.repository.addListener(_onRepositoryChanged);
       _thumbnails.dispose();
       _thumbnails = ThumbnailCache(
         repository: widget.repository,
@@ -514,8 +558,12 @@ class _LibraryScreenState extends State<LibraryScreen> {
 
   @override
   void dispose() {
+    MemoryPressure.instance.removeListener(_releaseMemory);
+    _lifecycle.dispose();
+    _searchDebounce?.cancel();
     _sharedDocumentsSubscription?.cancel();
-    _repository.removeListener(_reload);
+    _repository.removeListener(_onRepositoryChanged);
+    _hiddenReload?.cancel();
     _search.dispose();
     _thumbnails.dispose();
     _stylusOnly.dispose();
@@ -527,19 +575,66 @@ class _LibraryScreenState extends State<LibraryScreen> {
     super.dispose();
   }
 
+  /// While a note is in front of the library, its saves come every pause
+  /// in the writing; the library behind reads them all once writing has
+  /// paused for this long, or as soon as it is shown again.
+  static const Duration _hiddenReloadDelay = Duration(seconds: 2);
+  Timer? _hiddenReload;
+
+  void _onRepositoryChanged() {
+    if (!_tabsShowing) {
+      _reload();
+      return;
+    }
+    _hiddenReload?.cancel();
+    _hiddenReload = Timer(_hiddenReloadDelay, _reload);
+  }
+
   Future<void> _reload() async {
+    _hiddenReload?.cancel();
+    _hiddenReload = null;
+    _searchDebounce?.cancel();
     final int load = ++_loads;
     final String query = _query;
-    final List<NoteEntry> trash = await _repository.trash();
     final bool inTrash = _inTrash && query.isEmpty;
-    final FolderListing listing = inTrash
-        ? FolderListing(folders: const <Folder>[], notes: trash)
+
+    // These reads are independent. Start all of them before awaiting so a
+    // slow filesystem operation does not turn library refresh into a serial
+    // waterfall. The generation below still makes the latest refresh win.
+    final Future<List<NoteEntry>> trashFuture = _repository.trash();
+    final Future<FolderListing> listingFuture = inTrash
+        ? trashFuture.then(
+            (List<NoteEntry> trash) =>
+                FolderListing(folders: const <Folder>[], notes: trash),
+          )
         : query.isEmpty
-        ? await _repository.list(_folderId)
-        : await _repository.search(query);
-    final List<Folder> path = await _repository.pathTo(_folderId);
-    final List<Folder> folders = await _repository.allFolders();
-    final Map<String, int> counts = await _repository.itemCounts();
+        ? _repository.list(_folderId)
+        : _repository.search(query);
+    final Future<List<Folder>> pathFuture = _repository.pathTo(_folderId);
+    final Future<List<Folder>> foldersFuture = _repository.allFolders();
+    final Future<Map<String, int>> countsFuture = _repository.itemCounts();
+    // Pictures are let go only for notes gone from every folder, not for
+    // those merely in another one: theirs stay on disk for when it opens.
+    final bool prune = query.isEmpty && _folderId == null && !inTrash;
+    final Future<List<NoteEntry>> everyNoteFuture = prune
+        ? _repository.allNotes()
+        : Future<List<NoteEntry>>.value(const <NoteEntry>[]);
+
+    final (
+      List<NoteEntry> trash,
+      FolderListing listing,
+      List<Folder> path,
+      List<Folder> folders,
+      Map<String, int> counts,
+      List<NoteEntry> everyNote,
+    ) = await (
+      trashFuture,
+      listingFuture,
+      pathFuture,
+      foldersFuture,
+      countsFuture,
+      everyNoteFuture,
+    ).wait;
     if (!mounted || load != _loads) {
       return;
     }
@@ -557,9 +652,9 @@ class _LibraryScreenState extends State<LibraryScreen> {
         for (final Folder folder in folders) folder.id: folder,
       };
       _counts = counts;
-      if (query.isEmpty && _folderId == null && !inTrash) {
+      if (prune) {
         _thumbnails.retainOnly(<String>{
-          for (final NoteEntry note in listing.notes) note.id,
+          for (final NoteEntry note in everyNote) note.id,
           for (final NoteEntry note in trash) note.id,
         });
       }
@@ -574,13 +669,28 @@ class _LibraryScreenState extends State<LibraryScreen> {
         _selecting = false;
       }
     });
+    // The folder's first pages start drawing now, not when each card is
+    // built after the folder's transition. A note in front has them wait.
+    if (!_tabsShowing) {
+      _thumbnails.prefetch(_listing!.notes, _NoteThumbnail.styleOf(context));
+    }
+  }
+
+  void _scheduleSearchReload() {
+    _searchDebounce?.cancel();
+    _searchDebounce = Timer(_searchDelay, _reload);
   }
 
   void _openFolder(String? id) {
     if (id == _folderId && _query.isEmpty && !_inTrash) {
       return;
     }
+    // The pictures still on their way for the folder left are let go.
+    _thumbnails.cancelPending();
+    final int direction = _directionTo(id);
     setState(() {
+      _scene++;
+      _sceneDirection = direction;
       _inTrash = false;
       _clearSelection();
       _folderId = id;
@@ -594,6 +704,25 @@ class _LibraryScreenState extends State<LibraryScreen> {
     _reload();
   }
 
+  /// Which way the move to folder [id] goes: 1 into it, -1 back out to a
+  /// folder around the one shown, or 0 to one beside it.
+  int _directionTo(String? id) {
+    if (_inTrash) return -1;
+    final String? from = _folderId;
+    if (id == from) return 0;
+    // Whether [inner] is somewhere inside [outer] (the library holds all).
+    bool within(String? inner, String? outer) {
+      for (String? at = inner; at != null; at = _folders[at]?.parentId) {
+        if (at == outer) return true;
+      }
+      return outer == null;
+    }
+
+    if (within(id, from)) return 1;
+    if (within(from, id)) return -1;
+    return 0;
+  }
+
   void _setSort(LibrarySort sort) {
     setState(() => _sort = sort);
     _reload();
@@ -602,11 +731,57 @@ class _LibraryScreenState extends State<LibraryScreen> {
   /// Shows [note] in a tab beside the notes already open, which stay open
   /// on the way back to the library.
   Future<void> _openNote(NoteEntry note) async {
+    // The note zooms out of its card, starting on this frame.
+    _zoomRect = _artRect(note.id);
+    // Nothing the library was still drawing holds up the note.
+    _thumbnails.pause();
     _openNotes.open(note);
     setState(() => _tabsShowing = true);
   }
 
-  void _showLibrary() => setState(() => _tabsShowing = false);
+  void _showLibrary() {
+    final bool zooming = _tabsShowing;
+    // It shrinks back into the card it came from, wherever that is now.
+    final String? shown = _openNotes.active?.id;
+    if (shown != null) _zoomRect = _artRect(shown) ?? _zoomRect;
+    setState(() => _tabsShowing = false);
+    // Pictures are drawn once the note has shrunk back into its card
+    // ([_onLibraryShown]): until then the cards keep their old ones, and
+    // nothing redraws the library under the moving note.
+    if (!zooming) _thumbnails.resume();
+    if (_hiddenReload != null) _reload();
+  }
+
+  /// The library is at rest in front again.
+  void _onLibraryShown() {
+    if (!_tabsShowing) _thumbnails.resume();
+  }
+
+  /// [note] was saved from its editor: its card's picture is drawn from
+  /// the first page in memory, and stored, rather than read back from disk.
+  void _onNoteSaved(NoteEntry note, NoteContent content) {
+    if (!mounted || content.pages.isEmpty) return;
+    _thumbnails.capture(note, content.pages.first);
+  }
+
+  /// The picture of each note's card, so a note can zoom out of it and back.
+  final Map<String, GlobalKey> _artKeys = <String, GlobalKey>{};
+  final GlobalKey<_LibraryEditorTransitionState> _transition =
+      GlobalKey<_LibraryEditorTransitionState>();
+  Rect? _zoomRect;
+
+  GlobalKey _artKeyFor(String noteId) =>
+      _artKeys.putIfAbsent(noteId, GlobalKey.new);
+
+  /// The card's picture on screen, as the library lies at rest; null when
+  /// it is not shown, such as scrolled away or in another folder.
+  Rect? _artRect(String noteId) {
+    final RenderObject? box = _artKeys[noteId]?.currentContext
+        ?.findRenderObject();
+    if (box is! RenderBox || !box.attached || !box.hasSize) return null;
+    final Rect shown = box.localToGlobal(Offset.zero) & box.size;
+    return _transition.currentState?.atRest(shown) ?? shown;
+  }
 
   Widget _noteTab(
     NoteEntry note,
@@ -633,6 +808,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
       tabsBuilder: tabs,
       onBack: onBack,
       onRenamed: onRenamed,
+      onSaved: _onNoteSaved,
     );
   }
 
@@ -646,13 +822,21 @@ class _LibraryScreenState extends State<LibraryScreen> {
       return;
     }
     _template = draft.setup;
-    final NoteEntry note = await _repository.createNote(
+    // The note opens on this frame; the disk catches up behind the zoom.
+    final (:NoteEntry note, :Future<void> saved) = _repository.startNote(
       title: draft.name,
       folderId: _folderId,
       setup: draft.setup,
     );
-    if (mounted) {
-      await _openNote(note);
+    unawaited(_openNote(note));
+    try {
+      await saved;
+    } on Object {
+      if (!mounted) return;
+      _openNotes.close(note.id);
+      ScaffoldMessenger.maybeOf(context)?.showSnackBar(
+        const SnackBar(content: Text("Couldn't create the note.")),
+      );
     }
   }
 
@@ -777,23 +961,29 @@ class _LibraryScreenState extends State<LibraryScreen> {
     }
   }
 
-  Future<void> _openGoogleDrive() {
-    return showGoogleDriveSheet(
+  /// The account: sign-in, the subscription, and backup to Google Drive.
+  Future<void> _openAccount({bool openPlans = false}) {
+    return showAccountPage(
       context,
-      client: _drive,
-      backup: _backup,
-      autoBackup: _autoBackup,
-      replicator: GoodnotesDriveReplicator(
+      _subscription,
+      openPlans: openPlans,
+      backup: GoogleDriveSheet(
         client: _drive,
-        repository: _repository,
-        importer: DocumentImporter(
-          rasterizer: widget.pdfRasterizer,
-          config: widget.documentIoConfig,
+        backup: _backup,
+        autoBackup: _autoBackup,
+        replicator: GoodnotesDriveReplicator(
+          client: _drive,
+          repository: _repository,
+          importer: DocumentImporter(
+            rasterizer: widget.pdfRasterizer,
+            config: widget.documentIoConfig,
+          ),
+          state: _cloudState,
         ),
-        state: _cloudState,
+        onOpenFolder: _openFolder,
+        clock: widget.clock,
+        embedded: true,
       ),
-      onOpenFolder: _openFolder,
-      clock: widget.clock,
     );
   }
 
@@ -925,6 +1115,8 @@ class _LibraryScreenState extends State<LibraryScreen> {
 
   void _openTrash() {
     setState(() {
+      _scene++;
+      _sceneDirection = 1;
       _clearSelection();
       _inTrash = true;
       _listing = null;
@@ -1207,8 +1399,17 @@ class _LibraryScreenState extends State<LibraryScreen> {
     return found;
   }
 
+  /// The library as last built while it was in front. Opening a note flips
+  /// [_tabsShowing] and nothing else, so the same widget goes back in and the
+  /// whole library subtree is skipped on the frame the zoom starts, not
+  /// rebuilt for nothing. It is built afresh as soon as it is shown again.
+  Widget? _libraryInFront;
+
   @override
   Widget build(BuildContext context) {
+    final Widget library = _tabsShowing && _libraryInFront != null
+        ? _libraryInFront!
+        : _libraryInFront = _buildLibrary(context);
     // Keep the bounded tab host mounted when browsing the library. Popping
     // its route used to destroy every editor before opening a second note.
     return PopScope(
@@ -1217,8 +1418,11 @@ class _LibraryScreenState extends State<LibraryScreen> {
         if (!didPop && _tabsShowing) _showLibrary();
       },
       child: _LibraryEditorTransition(
+        key: _transition,
         showEditor: _tabsShowing,
-        library: _buildLibrary(context),
+        origin: _zoomRect,
+        onLibraryShown: _onLibraryShown,
+        library: library,
         editor: NoteTabsPage(
           notes: _openNotes,
           builder: _noteTab,
@@ -1291,7 +1495,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
       onSort: _setSort,
       onToggleView: () => setState(() => _grid = !_grid),
       onNewFolder: _newFolder,
-      onGoogleDrive: _openGoogleDrive,
+      onAccount: _openAccount,
       subscription: _subscription,
       onPlans: _openPlans,
       onCalibrateHandwriting: _calibrateHandwriting,
@@ -1399,15 +1603,26 @@ class _LibraryScreenState extends State<LibraryScreen> {
   }
 
   Widget _buildBody(BuildContext context, bool compact) {
-    final FolderListing? listing = _listing;
-    if (listing == null) {
-      return const Center(
-        child: SizedBox(
-          width: AppSpacing.xxl * 2,
-          child: ShimmerTrack(semanticsLabel: 'Loading'),
-        ),
-      );
-    }
+    // The last folder's items fade away toward where they came from as the
+    // next folder's are read and rise into place.
+    return SceneCrossfade(
+      scope: _scene,
+      direction: _sceneDirection,
+      child: LoadingReveal(
+        timing: LoadTimings.library,
+        semanticsLabel: 'Loading',
+        child: _listing == null
+            ? null
+            : _buildItems(context, compact, _listing!),
+      ),
+    );
+  }
+
+  Widget _buildItems(
+    BuildContext context,
+    bool compact,
+    FolderListing listing,
+  ) {
     if (listing.isEmpty) {
       return _EmptyState(
         query: _query,
@@ -1418,9 +1633,13 @@ class _LibraryScreenState extends State<LibraryScreen> {
     final bool trash = _showingTrash;
     final bool searching = _query.isNotEmpty;
     final DateTime now = widget.clock();
-    final List<Widget> folders = <Widget>[
-      for (final Folder folder in listing.folders)
-        _LibraryItem(
+    final int folderCount = listing.folders.length;
+    final int itemCount = folderCount + listing.notes.length;
+
+    Widget buildItem(BuildContext context, int index) {
+      if (index < folderCount) {
+        final Folder folder = listing.folders[index];
+        return _LibraryItem(
           key: ValueKey<String>('folder-${folder.id}'),
           grid: _grid,
           kind: 'Folder',
@@ -1444,42 +1663,44 @@ class _LibraryScreenState extends State<LibraryScreen> {
           dragData: _Dragged.folder(folder),
           canAccept: (_Dragged item) => _canDrop(item, folder.id),
           onAccept: (_Dragged item) => _drop(item, folder.id),
+        );
+      }
+
+      final NoteEntry note = listing.notes[index - folderCount];
+      return _LibraryItem(
+        key: ValueKey<String>('note-${note.id}'),
+        grid: _grid,
+        kind: 'Note',
+        title: note.title,
+        subtitle: trash
+            ? _daysLeft(note, now)
+            : searching
+            ? _locationOf(note.folderId)
+            : null,
+        date: trash
+            ? formatModified(note.deleted!, now)
+            : formatModified(note.modified, now),
+        leading: _NoteThumbnail(
+          key: _artKeyFor(note.id),
+          note: note,
+          cache: _thumbnails,
+          alignment: Alignment.center,
         ),
-    ];
-    final List<Widget> notes = <Widget>[
-      for (final NoteEntry note in listing.notes)
-        _LibraryItem(
-          key: ValueKey<String>('note-${note.id}'),
-          grid: _grid,
-          kind: 'Note',
-          title: note.title,
-          subtitle: trash
-              ? _daysLeft(note, now)
-              : searching
-              ? _locationOf(note.folderId)
-              : null,
-          date: trash
-              ? formatModified(note.deleted!, now)
-              : formatModified(note.modified, now),
-          leading: _NoteThumbnail(
-            note: note,
-            cache: _thumbnails,
-            alignment: Alignment.center,
-          ),
-          dragIcon: const Icon(AppIcons.note),
-          actions: trash ? _ItemAction.forDeleted : _ItemAction.forNotes,
-          selecting: _selecting,
-          selected: _selectedNotes.contains(note.id),
-          // A deleted note is not opened: a tap offers its actions.
-          menuOnTap: trash,
-          draggable: !trash,
-          onOpen: _selecting
-              ? () => _toggle(_selectedNotes, note.id)
-              : () => _openNote(note),
-          onAction: (_ItemAction action) => _noteAction(note, action),
-          dragData: _Dragged.note(note),
-        ),
-    ];
+        dragIcon: const Icon(AppIcons.note),
+        actions: trash ? _ItemAction.forDeleted : _ItemAction.forNotes,
+        selecting: _selecting,
+        selected: _selectedNotes.contains(note.id),
+        // A deleted note is not opened: a tap offers its actions.
+        menuOnTap: trash,
+        draggable: !trash,
+        onOpen: _selecting
+            ? () => _toggle(_selectedNotes, note.id)
+            : () => _openNote(note),
+        onAction: (_ItemAction action) => _noteAction(note, action),
+        dragData: _Dragged.note(note),
+      );
+    }
+
     final EdgeInsets padding = EdgeInsets.fromLTRB(
       compact ? AppSpacing.md : AppSpacing.lg,
       compact ? AppSpacing.xs : AppSpacing.md,
@@ -1488,12 +1709,13 @@ class _LibraryScreenState extends State<LibraryScreen> {
       AppSpacing.xxl + AppSpacing.xl,
     );
     return Align(
+      key: ValueKey<int>(_scene),
       alignment: Alignment.topCenter,
       child: ConstrainedBox(
         key: const ValueKey<String>('library-items'),
         constraints: const BoxConstraints(maxWidth: AppSizes.maxContentWidth),
         child: _grid
-            ? GridView(
+            ? GridView.builder(
                 padding: padding,
                 gridDelegate: SliverGridDelegateWithMaxCrossAxisExtent(
                   maxCrossAxisExtent: compact ? 180 : 200,
@@ -1501,11 +1723,13 @@ class _LibraryScreenState extends State<LibraryScreen> {
                   crossAxisSpacing: compact ? AppSpacing.md : AppSpacing.lg,
                   childAspectRatio: 0.72,
                 ),
-                children: <Widget>[...folders, ...notes],
+                itemCount: itemCount,
+                itemBuilder: buildItem,
               )
-            : ListView(
+            : ListView.builder(
                 padding: padding,
-                children: <Widget>[...folders, ...notes],
+                itemCount: itemCount,
+                itemBuilder: buildItem,
               ),
       ),
     );
@@ -1538,12 +1762,21 @@ class _LibraryScreenState extends State<LibraryScreen> {
 /// The top bar: where you are, search, sort, view, and New folder.
 class _LibraryEditorTransition extends StatefulWidget {
   const _LibraryEditorTransition({
+    super.key,
     required this.showEditor,
+    required this.origin,
     required this.library,
     required this.editor,
+    this.onLibraryShown,
   });
 
   final bool showEditor;
+
+  /// Called once the library is back at rest, the note gone from over it.
+  final VoidCallback? onLibraryShown;
+
+  /// The card the note opens from and closes into, in global coordinates.
+  final Rect? origin;
   final Widget library;
   final Widget editor;
 
@@ -1552,30 +1785,113 @@ class _LibraryEditorTransition extends StatefulWidget {
       _LibraryEditorTransitionState();
 }
 
-class _LibraryEditorTransitionState extends State<_LibraryEditorTransition> {
+class _LibraryEditorTransitionState extends State<_LibraryEditorTransition>
+    with SingleTickerProviderStateMixin {
   bool _transitioning = false;
 
-  /// While the two slide past each other, each is drawn once into a
-  /// picture and the pictures move. Fading the live screens would draw
-  /// them, frosted glass and all, offscreen again on every frame.
+  /// How far the editor has come over the library: 0 for the library alone,
+  /// 1 for the editor. One spring drives the editor's zoom out of its card,
+  /// the library settling back, and the dim, all inside the frame update. A
+  /// spring can be grabbed and reversed mid-flight with its velocity kept.
+  late final AnimationController _progress =
+      AnimationController(vsync: this, value: widget.showEditor ? 1 : 0)
+        ..addStatusListener(_settled)
+        ..addListener(_syncSnapshots);
+
+  /// How far the note must have come for it to be drawn live again. It builds
+  /// its editor about now, and a picture of that, redrawn at full size on
+  /// each change, costs more than the last sliver of motion saves.
+  static const double _liveAt = 0.98;
+
+  /// The library recedes a little as the note comes over it.
+  late final Animation<double> _libraryScale = _progress.drive(
+    Tween<double>(begin: 1, end: 0.96),
+  );
+  late final Animation<double> _dim = _progress.drive(
+    Tween<double>(begin: 0, end: 0.12),
+  );
+
+  /// The editor fades in over the first part of the zoom, so the card's
+  /// shape and the screen's need not match.
+  late final Animation<double> _editorOpacity = _progress.drive(
+    CurveTween(curve: const Interval(0, 0.3)),
+  );
+
+  /// Where the zoom starts and ends, in this widget's own coordinates.
+  Rect? _origin;
+
+  /// While the two move, each is drawn once into a picture and the pictures
+  /// move, avoiding a full-screen alpha blend on every transition frame.
   final SnapshotController _librarySnapshot = SnapshotController();
   final SnapshotController _editorSnapshot = SnapshotController();
+
+  /// [shown], a rect read off the library as it lies now, as it would lie at
+  /// rest: the library is a little smaller while a note covers it.
+  Rect atRest(Rect shown) {
+    final RenderObject? box = context.findRenderObject();
+    if (box is! RenderBox || !box.attached || !box.hasSize) return shown;
+    final Offset center = box.localToGlobal(box.size.center(Offset.zero));
+    final double scale = _libraryScale.value;
+    Offset out(Offset point) => center + (point - center) / scale;
+    return Rect.fromPoints(out(shown.topLeft), out(shown.bottomRight));
+  }
+
+  Rect? _local(Rect? global) {
+    final RenderObject? box = context.findRenderObject();
+    if (global == null || box is! RenderBox || !box.attached) return null;
+    return Rect.fromPoints(
+      box.globalToLocal(global.topLeft),
+      box.globalToLocal(global.bottomRight),
+    );
+  }
 
   @override
   void didUpdateWidget(_LibraryEditorTransition oldWidget) {
     super.didUpdateWidget(oldWidget);
     if (oldWidget.showEditor != widget.showEditor) {
       _transitioning = true;
+      // A note with no card yet, as one just made, zooms from the middle, not
+      // from where the last note's card was.
+      _origin = widget.showEditor
+          ? _local(widget.origin)
+          : _local(widget.origin) ?? _origin;
+      final double target = widget.showEditor ? 1 : 0;
+      if (MediaQuery.disableAnimationsOf(context)) {
+        _progress.animateTo(target, duration: AppMotion.reduced);
+      } else {
+        // Seeded with the velocity it had, so reversing mid-flight is smooth.
+        _progress.animateWith(
+          SpringSimulation(
+            AppMotion.smooth,
+            _progress.value,
+            target,
+            _progress.velocity,
+          ),
+        );
+      }
     }
+    _syncSnapshots();
+  }
+
+  void _syncSnapshots() {
     _librarySnapshot.allowSnapshotting = _transitioning;
-    _editorSnapshot.allowSnapshotting = _transitioning;
+    _editorSnapshot.allowSnapshotting =
+        _transitioning && !(widget.showEditor && _progress.value > _liveAt);
   }
 
   @override
   void dispose() {
+    _progress.dispose();
     _librarySnapshot.dispose();
     _editorSnapshot.dispose();
     super.dispose();
+  }
+
+  void _settled(AnimationStatus status) {
+    if (status == AnimationStatus.completed ||
+        status == AnimationStatus.dismissed) {
+      _finishTransition();
+    }
   }
 
   void _finishTransition() {
@@ -1583,12 +1899,23 @@ class _LibraryEditorTransitionState extends State<_LibraryEditorTransition> {
     setState(() => _transitioning = false);
     _librarySnapshot.allowSnapshotting = false;
     _editorSnapshot.allowSnapshotting = false;
+    if (!widget.showEditor) widget.onLibraryShown?.call();
   }
+
+  /// The card's rect, or a small one at the middle when there is none.
+  Rect _start(Size size) =>
+      _origin ??
+      Rect.fromCenter(
+        center: size.center(Offset.zero),
+        width: size.width * 0.3,
+        height: size.height * 0.3,
+      );
 
   @override
   Widget build(BuildContext context) {
     final bool showEditor = widget.showEditor;
-    final Duration duration = AppMotion.resolve(context, AppMotion.gentle);
+    final AppColors colors = AppColors.of(context);
+    final bool reduced = MediaQuery.disableAnimationsOf(context);
     return Stack(
       fit: StackFit.expand,
       children: <Widget>[
@@ -1600,28 +1927,34 @@ class _LibraryEditorTransitionState extends State<_LibraryEditorTransition> {
               excluding: showEditor,
               child: ExcludeFocus(
                 excluding: showEditor,
-                child: AnimatedSlide(
-                  offset: showEditor ? const Offset(-0.035, 0) : Offset.zero,
-                  duration: duration,
-                  curve: AppMotion.gentleCurve,
-                  child: AnimatedOpacity(
-                    opacity: showEditor ? 0 : 1,
-                    duration: duration,
-                    curve: AppMotion.gentleCurve,
-                    child: TickerMode(
-                      enabled: !showEditor,
-                      child: IgnoreKeyboard(
-                        ignoring: showEditor,
-                        child: SnapshotWidget(
-                          controller: _librarySnapshot,
-                          mode: SnapshotMode.permissive,
-                          child: RepaintBoundary(child: widget.library),
-                        ),
+                child: ScaleTransition(
+                  scale: reduced
+                      ? const AlwaysStoppedAnimation<double>(1)
+                      : _libraryScale,
+                  child: TickerMode(
+                    enabled: !showEditor,
+                    child: IgnoreKeyboard(
+                      ignoring: showEditor,
+                      child: SnapshotWidget(
+                        controller: _librarySnapshot,
+                        mode: SnapshotMode.permissive,
+                        child: RepaintBoundary(child: widget.library),
                       ),
                     ),
                   ),
                 ),
               ),
+            ),
+          ),
+        ),
+        // The library dims as the note comes over it: one flat rect with
+        // alpha, not a blend of two surfaces.
+        Offstage(
+          offstage: !_transitioning,
+          child: IgnorePointer(
+            child: FadeTransition(
+              opacity: _dim,
+              child: ColoredBox(color: colors.shadow),
             ),
           ),
         ),
@@ -1633,24 +1966,66 @@ class _LibraryEditorTransitionState extends State<_LibraryEditorTransition> {
               excluding: !showEditor,
               child: ExcludeFocus(
                 excluding: !showEditor,
-                child: AnimatedSlide(
-                  offset: showEditor ? Offset.zero : const Offset(0.055, 0),
-                  duration: duration,
-                  curve: AppMotion.gentleCurve,
-                  child: AnimatedOpacity(
-                    opacity: showEditor ? 1 : 0,
-                    duration: duration,
-                    curve: AppMotion.gentleCurve,
-                    onEnd: _finishTransition,
-                    child: TickerMode(
-                      enabled: showEditor,
-                      child: SnapshotWidget(
-                        controller: _editorSnapshot,
-                        mode: SnapshotMode.permissive,
-                        child: RepaintBoundary(child: widget.editor),
+                child: LayoutBuilder(
+                  builder: (BuildContext context, BoxConstraints box) {
+                    final Size size = box.biggest;
+                    return AnimatedBuilder(
+                      animation: _progress,
+                      builder: (BuildContext context, Widget? child) {
+                        final double t = _progress.value.clamp(0.0, 1.0);
+                        if (reduced) {
+                          return FadeTransition(
+                            opacity: _progress,
+                            child: child,
+                          );
+                        }
+                        final Rect start = _start(size);
+                        final double scale = ui.lerpDouble(
+                          (start.width / size.width).clamp(0.05, 1.0),
+                          1,
+                          t,
+                        )!;
+                        final Offset center = Offset.lerp(
+                          start.center,
+                          size.center(Offset.zero),
+                          t,
+                        )!;
+                        return FadeTransition(
+                          opacity: _editorOpacity,
+                          child: Transform(
+                            transform: Matrix4.identity()
+                              ..translateByDouble(center.dx, center.dy, 0, 1)
+                              ..scaleByDouble(scale, scale, 1, 1)
+                              ..translateByDouble(
+                                -size.width / 2,
+                                -size.height / 2,
+                                0,
+                                1,
+                              ),
+                            child: ClipRRect(
+                              clipBehavior: _transitioning
+                                  ? Clip.antiAlias
+                                  : Clip.none,
+                              // Concentric with the card at the start, square
+                              // at the screen's edge.
+                              borderRadius: BorderRadius.circular(
+                                ui.lerpDouble(AppRadii.large, 0, t)! / scale,
+                              ),
+                              child: child,
+                            ),
+                          ),
+                        );
+                      },
+                      child: TickerMode(
+                        enabled: showEditor,
+                        child: SnapshotWidget(
+                          controller: _editorSnapshot,
+                          mode: SnapshotMode.permissive,
+                          child: RepaintBoundary(child: widget.editor),
+                        ),
                       ),
-                    ),
-                  ),
+                    );
+                  },
                 ),
               ),
             ),
@@ -1672,7 +2047,7 @@ class _LibraryBar extends StatelessWidget implements PreferredSizeWidget {
     required this.onSort,
     required this.onToggleView,
     required this.onNewFolder,
-    required this.onGoogleDrive,
+    required this.onAccount,
     required this.subscription,
     required this.onPlans,
     required this.onCalibrateHandwriting,
@@ -1726,8 +2101,8 @@ class _LibraryBar extends StatelessWidget implements PreferredSizeWidget {
   final VoidCallback onToggleView;
   final VoidCallback onNewFolder;
 
-  /// Opens the Google Drive sheet: backup, restore, and Goodnotes import.
-  final VoidCallback onGoogleDrive;
+  /// Opens the account page: sign-in, the subscription, and backup.
+  final VoidCallback onAccount;
 
   /// Shown in the Plans & Credits pill, which [onPlans] opens.
   final SubscriptionController subscription;
@@ -1738,7 +2113,8 @@ class _LibraryBar extends StatelessWidget implements PreferredSizeWidget {
   final VoidCallback onCalibrateHandwriting;
 
   /// Whether a dragged item can go into a folder on the path, and moving
-  /// it there; the folders above the open one take drops.
+  /// it there. Every segment takes valid drops, including the open folder
+  /// when a search result currently lives somewhere else.
   final bool Function(_Dragged item, String? folderId) canDrop;
   final void Function(_Dragged item, String? folderId) onDrop;
 
@@ -1883,13 +2259,17 @@ class _LibraryBar extends StatelessWidget implements PreferredSizeWidget {
                                 const SizedBox(width: AppSpacing.xs),
                               ],
                               IconButton(
-                                tooltip: 'Google Drive',
-                                onPressed: onGoogleDrive,
-                                icon: const Icon(AppIcons.cloud),
+                                key: const ValueKey<String>(
+                                  'library-account-button',
+                                ),
+                                tooltip: 'Account',
+                                onPressed: onAccount,
+                                icon: const Icon(AppIcons.account),
                               ),
                               // On compact widths, where the bar is full,
                               // the view toggle is in this menu too.
                               PopupMenuButton<Object>(
+                                popUpAnimationStyle: AppMotion.popupStyle,
                                 tooltip: 'Sort',
                                 icon: const Icon(AppIcons.sort),
                                 onSelected: (Object choice) {
@@ -2067,24 +2447,33 @@ class _Breadcrumbs extends StatelessWidget {
         );
       }
       crumbs.add(
-        last
-            ? Padding(
-                padding: const EdgeInsets.symmetric(horizontal: AppSpacing.xs),
-                child: Semantics(
-                  header: true,
-                  child: Text(
-                    name,
-                    style: text.titleLarge,
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
+        _DropTarget(
+          key: ValueKey<String>('breadcrumb-${id ?? 'library'}'),
+          canAccept: (_Dragged item) => canDrop(item, id),
+          onAccept: (_Dragged item) => onDrop(item, id),
+          radius: AppRadii.medium,
+          child: last
+              ? SizedBox(
+                  height: AppSizes.minTouchTarget,
+                  child: Padding(
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: AppSpacing.xs,
+                    ),
+                    child: Align(
+                      alignment: AlignmentDirectional.centerStart,
+                      child: Semantics(
+                        header: true,
+                        child: Text(
+                          name,
+                          style: text.titleLarge,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                      ),
+                    ),
                   ),
-                ),
-              )
-            : _DropTarget(
-                canAccept: (_Dragged item) => canDrop(item, id),
-                onAccept: (_Dragged item) => onDrop(item, id),
-                radius: AppRadii.medium,
-                child: TextButton(
+                )
+              : TextButton(
                   onPressed: () => onOpenFolder(id),
                   style: TextButton.styleFrom(
                     foregroundColor: colors.textSecondary,
@@ -2105,22 +2494,26 @@ class _Breadcrumbs extends StatelessWidget {
                     overflow: TextOverflow.ellipsis,
                   ),
                 ),
-              ),
+        ),
       );
     }
     // Starts at the leading edge; a trail too long to fit scrolls, showing
     // its end.
-    return LayoutBuilder(
-      builder: (BuildContext context, BoxConstraints constraints) {
-        return SingleChildScrollView(
-          scrollDirection: Axis.horizontal,
-          reverse: true,
-          child: ConstrainedBox(
-            constraints: BoxConstraints(minWidth: constraints.maxWidth),
-            child: Row(children: crumbs),
-          ),
-        );
-      },
+    return GentleSwitcher(
+      value: path.map((Folder folder) => folder.id).join('/'),
+      child: LayoutBuilder(
+        builder: (BuildContext context, BoxConstraints constraints) {
+          return SingleChildScrollView(
+            scrollDirection: Axis.horizontal,
+            reverse: true,
+            clipBehavior: Clip.none,
+            child: ConstrainedBox(
+              constraints: BoxConstraints(minWidth: constraints.maxWidth),
+              child: Row(children: crumbs),
+            ),
+          );
+        },
+      ),
     );
   }
 }
@@ -2143,7 +2536,7 @@ class _NewNoteButton extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final AppColors colors = AppColors.of(context);
-    final BorderRadius radius = BorderRadius.circular(AppRadii.large);
+    const BorderRadius radius = AppBorderRadius.large;
     // The menu lines up with the button's trailing edge: laid out in the
     // opposite direction, it grows away from the corner the button sits
     // in. With no room below, it flips to sit above the button, clear of
@@ -2157,6 +2550,7 @@ class _NewNoteButton extends StatelessWidget {
     return Directionality(
       textDirection: opposite,
       child: MenuAnchor(
+        animated: !MediaQuery.disableAnimationsOf(context),
         // Under the opposite direction above, directional start resolves to
         // the button's trailing edge and aligns the menu's trailing edge to it.
         style: const MenuStyle(alignment: AlignmentDirectional.topStart),
@@ -2211,7 +2605,7 @@ class _NewNoteButton extends StatelessWidget {
                         AppSpacing.lg - 2,
                         0,
                       ),
-                      shape: RoundedRectangleBorder(borderRadius: radius),
+                      shape: const RoundedRectangleBorder(borderRadius: radius),
                     ),
                     icon: const Icon(AppIcons.add, size: 22),
                     label: const Text('New note'),
@@ -2230,6 +2624,7 @@ class _NewNoteButton extends StatelessWidget {
 /// color while one that [canAccept] is held over it.
 class _DropTarget extends StatelessWidget {
   const _DropTarget({
+    super.key,
     required this.canAccept,
     required this.onAccept,
     required this.child,
@@ -2257,10 +2652,10 @@ class _DropTarget extends StatelessWidget {
           ) {
             final bool over = candidates.isNotEmpty;
             return AnimatedContainer(
-              duration: AppMotion.resolve(context, AppMotion.fast),
+              duration: AppMotion.resolve(context, AppMotion.fadeIn),
               foregroundDecoration: BoxDecoration(
                 color: over ? colors.accent.withValues(alpha: 0.10) : null,
-                borderRadius: BorderRadius.circular(radius),
+                borderRadius: AppBorderRadius.circular(radius),
                 border: Border.all(
                   color: over ? colors.accent : Colors.transparent,
                   width: AppSizes.focusRingWidth,
@@ -2277,13 +2672,29 @@ class _DropTarget extends StatelessWidget {
 class _DragFeedback extends StatelessWidget {
   const _DragFeedback({required this.icon, required this.title});
 
+  /// The icon rides just above the stylus, where it stays visible. Flutter
+  /// normally hit-tests drop targets at the stylus; [dropHotspotOffset]
+  /// moves that test to the icon's center instead.
+  static const double _iconLift = AppSpacing.md;
+  static const Offset dropHotspotOffset = Offset(0, -_iconLift);
+  static const Offset _anchor = Offset(
+    AppSpacing.md + AppSizes.icon / 2,
+    AppSpacing.sm + AppSizes.icon / 2 + _iconLift,
+  );
+
+  static Offset anchorAbovePointer(
+    Draggable<Object> draggable,
+    BuildContext context,
+    Offset position,
+  ) => _anchor;
+
   final Widget icon;
   final String title;
 
   @override
   Widget build(BuildContext context) {
     final AppColors colors = AppColors.of(context);
-    final BorderRadius radius = BorderRadius.circular(AppRadii.large);
+    const BorderRadius radius = AppBorderRadius.large;
     return Transform.rotate(
       angle: -0.03,
       child: Material(
@@ -2353,24 +2764,56 @@ class _EmptyState extends StatelessWidget {
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: <Widget>[
-            DecoratedBox(
-              decoration: BoxDecoration(
-                color: AppGlass.muted(colors),
-                shape: BoxShape.circle,
-              ),
-              child: SizedBox.square(
-                dimension: 72,
-                child: Icon(
-                  searching
-                      ? AppIcons.noResults
-                      : trash
-                      ? AppIcons.trash
-                      : AppIcons.emptyLibrary,
-                  size: 32,
-                  color: colors.textSecondary,
+            if (searching || trash)
+              DecoratedBox(
+                decoration: BoxDecoration(
+                  color: AppGlass.muted(colors),
+                  shape: BoxShape.circle,
+                ),
+                child: SizedBox.square(
+                  dimension: 72,
+                  child: Icon(
+                    searching ? AppIcons.noResults : AppIcons.trash,
+                    size: 32,
+                    color: colors.textSecondary,
+                  ),
+                ),
+              )
+            else
+              SizedBox(
+                width: 84,
+                height: 104,
+                child: DogEar(
+                  flapColor: colors.surfaceMuted,
+                  backgroundColor: colors.surfaceMuted,
+                  child: Padding(
+                    padding: const EdgeInsets.fromLTRB(14, 28, 14, 14),
+                    child: Column(
+                      children: <Widget>[
+                        for (final double width in <double>[
+                          1,
+                          0.74,
+                          0.88,
+                        ]) ...<Widget>[
+                          FractionallySizedBox(
+                            widthFactor: width,
+                            child: Container(
+                              height: 7,
+                              decoration: BoxDecoration(
+                                color: colors.textSecondary.withValues(
+                                  alpha: 0.28,
+                                ),
+                                borderRadius: BorderRadius.circular(999),
+                              ),
+                            ),
+                          ),
+                          const SizedBox(height: AppSpacing.xs),
+                        ],
+                      ],
+                    ),
+                  ),
                 ),
               ),
-            ),
             const SizedBox(height: AppSpacing.lg),
             Text(
               searching
@@ -2487,6 +2930,7 @@ class _LibraryItemState extends State<_LibraryItem> {
     final TextTheme text = Theme.of(context).textTheme;
     final bool grid = widget.grid;
     final Widget menu = PopupMenuButton<_ItemAction>(
+      popUpAnimationStyle: AppMotion.popupStyle,
       key: _menu,
       tooltip: 'More actions for ${widget.title}',
       icon: Icon(AppIcons.more, size: 20, color: colors.textSecondary),
@@ -2569,24 +3013,38 @@ class _LibraryItemState extends State<_LibraryItem> {
               ),
             ),
           );
-    final BorderRadius radius = BorderRadius.circular(
-      grid ? AppRadii.large : AppRadii.medium,
+    final BorderRadius radius = grid
+        ? AppBorderRadius.large
+        : AppBorderRadius.medium;
+    final Duration settle = AppMotion.resolve(
+      context,
+      AppMotion.snappy.duration,
     );
-    final Widget check = DecoratedBox(
-      decoration: BoxDecoration(
-        shape: BoxShape.circle,
-        color: widget.selected ? colors.accent : colors.surface,
-        border: Border.all(
-          color: widget.selected ? colors.accent : colors.textSecondary,
-          width: 1.5,
+    // The badge pops in from 0.6 and its check draws on, in selection mode.
+    final Widget check = AnimatedScale(
+      scale: widget.selected ? 1 : 0.6,
+      duration: settle,
+      curve: AppMotion.popCurve,
+      child: AnimatedContainer(
+        duration: settle,
+        curve: AppMotion.fadeInCurve,
+        width: 22,
+        height: 22,
+        padding: const EdgeInsets.all(4),
+        decoration: BoxDecoration(
+          shape: BoxShape.circle,
+          color: widget.selected ? colors.accent : colors.surface,
+          border: Border.all(
+            color: widget.selected ? colors.accent : colors.textSecondary,
+            width: 1.5,
+          ),
+          boxShadow: AppShadows.paper(colors),
         ),
-        boxShadow: AppShadows.paper(colors),
-      ),
-      child: SizedBox.square(
-        dimension: 22,
-        child: widget.selected
-            ? Icon(AppIcons.check, size: 14, color: colors.onAccent)
-            : null,
+        child: StrokeDrawCheck(
+          selected: widget.selected,
+          color: colors.onAccent,
+          strokeWidth: 1.8,
+        ),
       ),
     );
     final Widget card = Semantics(
@@ -2622,8 +3080,8 @@ class _LibraryItemState extends State<_LibraryItem> {
           ? EdgeInsets.zero
           : const EdgeInsets.only(bottom: AppSpacing.xxs),
       child: AnimatedContainer(
-        duration: AppMotion.resolve(context, AppMotion.fast),
-        curve: AppMotion.standard,
+        duration: AppMotion.resolve(context, AppMotion.snappy.duration),
+        curve: AppMotion.fadeInCurve,
         decoration: BoxDecoration(
           borderRadius: radius,
           color: widget.selected
@@ -2676,6 +3134,10 @@ class _LibraryItemState extends State<_LibraryItem> {
     return LongPressDraggable<_Dragged>(
       data: widget.dragData,
       maxSimultaneousDrags: widget.selecting || !widget.draggable ? 0 : null,
+      // Keep the preview clear of the stylus and use its icon, rather than
+      // the stylus itself, as the point that enters a drop target.
+      dragAnchorStrategy: _DragFeedback.anchorAbovePointer,
+      feedbackOffset: _DragFeedback.dropHotspotOffset,
       feedback: _DragFeedback(icon: widget.dragIcon, title: widget.title),
       childWhenDragging: Opacity(opacity: 0.35, child: target),
       child: Pressable(pressedScale: 0.97, child: target),
@@ -2824,6 +3286,7 @@ class _FolderPainter extends CustomPainter {
 /// [ThumbnailCache], drawn once and only shown here.
 class _NoteThumbnail extends StatelessWidget {
   const _NoteThumbnail({
+    super.key,
     required this.note,
     required this.cache,
     this.alignment = Alignment.center,
@@ -2835,16 +3298,23 @@ class _NoteThumbnail extends StatelessWidget {
   /// Where the page sits in the space it is given.
   final AlignmentGeometry alignment;
 
-  @override
-  Widget build(BuildContext context) {
+  /// The colors the pictures are drawn in under [context]'s theme.
+  static ThumbnailStyle styleOf(BuildContext context) {
     final AppColors colors = AppColors.of(context);
-    final ThumbnailStyle style = ThumbnailStyle(
+    return ThumbnailStyle(
       brightness: Theme.of(context).brightness,
       paper: colors.writingSurface,
       rule: colors.pageRule,
       marginRule: colors.pageMarginRule,
     );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final AppColors colors = AppColors.of(context);
+    final ThumbnailStyle style = styleOf(context);
     final BorderRadius radius = BorderRadius.circular(AppRadii.small + 2);
+    final bool isDark = Theme.of(context).brightness == Brightness.dark;
     return ThumbnailView(
       image: cache.watch(note, style),
       placeholderAspect: 3 / 4,
@@ -2856,31 +3326,33 @@ class _NoteThumbnail extends StatelessWidget {
             decoration: BoxDecoration(
               color: colors.writingSurface,
               borderRadius: radius,
-              boxShadow: AppShadows.floating(colors),
-            ),
-            child: DecoratedBox(
-              position: DecorationPosition.foreground,
-              decoration: BoxDecoration(
-                borderRadius: radius,
-                border: Border.all(
-                  color: colors.textPrimary.withValues(alpha: 0.06),
-                  width: AppSizes.hairline,
+              boxShadow: <BoxShadow>[
+                BoxShadow(
+                  color: colors.shadow.withValues(alpha: isDark ? 0.35 : 0.08),
+                  blurRadius: 3,
+                  spreadRadius: 0.5,
                 ),
-              ),
-              child: ClipRRect(
-                borderRadius: radius,
-                child: AnimatedOpacity(
-                  opacity: image == null ? 0 : 1,
-                  duration: AppMotion.resolve(context, AppMotion.medium),
-                  curve: AppMotion.standard,
-                  child: image == null
-                      ? const SizedBox.expand()
-                      : RawImage(
+                BoxShadow(
+                  color: colors.shadow.withValues(alpha: isDark ? 0.25 : 0.06),
+                  blurRadius: 8,
+                  offset: const Offset(0, 2),
+                ),
+              ],
+            ),
+            child: ClipRRect(
+              borderRadius: radius,
+              child: LoadingReveal(
+                effect: RevealEffect.fade,
+                timing: LoadTimings.thumbnail,
+                child: image == null
+                    ? null
+                    : SizedBox.expand(
+                        child: RawImage(
                           image: image,
                           fit: BoxFit.fill,
                           filterQuality: FilterQuality.medium,
                         ),
-                ),
+                      ),
               ),
             ),
           ),
@@ -3085,10 +3557,7 @@ class _FolderSidebar extends StatelessWidget {
             // Recently Deleted, pinned to the bottom corner: deleted notes
             // wait here, and a note dropped here is deleted.
             const Divider(indent: AppSpacing.md, endIndent: AppSpacing.md),
-            _SidebarAiQuotaCard(
-              subscription: subscription,
-              onPlans: onPlans,
-            ),
+            _SidebarAiQuotaCard(subscription: subscription, onPlans: onPlans),
             Padding(
               padding: const EdgeInsets.all(AppSpacing.xs),
               child: _DropTarget(
@@ -3143,7 +3612,8 @@ class _SidebarAiQuotaCard extends StatelessWidget {
         final bool hasTokens =
             (plan != null || subscription.hasFreeCredit) &&
             subscription.remainingCreditsMicroUsd > 0;
-        final String planTitle = plan?.title ??
+        final String planTitle =
+            plan?.title ??
             (subscription.hasFreeCredit ? 'Free Tier' : 'AI Plans');
         final String percent = formatTokenPercent(
           subscription.remainingCreditsMicroUsd,
@@ -3157,59 +3627,59 @@ class _SidebarAiQuotaCard extends StatelessWidget {
           ),
           child: Material(
             color: colors.surfaceMuted,
-            borderRadius: BorderRadius.circular(AppRadii.medium),
+            borderRadius: AppBorderRadius.medium,
             child: Tooltip(
               message: 'Plans & Credits',
               child: InkWell(
                 key: const ValueKey<String>('library-plans-button'),
-                borderRadius: BorderRadius.circular(AppRadii.medium),
+                borderRadius: AppBorderRadius.medium,
                 onTap: onPlans,
                 child: Padding(
                   padding: const EdgeInsets.symmetric(
                     horizontal: AppSpacing.sm,
                     vertical: AppSpacing.xs,
                   ),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  mainAxisSize: MainAxisSize.min,
-                  children: <Widget>[
-                    Row(
-                      children: <Widget>[
-                        Icon(AppIcons.plans, size: 16, color: colors.accent),
-                        const SizedBox(width: AppSpacing.xs),
-                        Expanded(
-                          child: Text(
-                            planTitle,
-                            style: text.labelMedium?.copyWith(
-                              color: colors.textPrimary,
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    mainAxisSize: MainAxisSize.min,
+                    children: <Widget>[
+                      Row(
+                        children: <Widget>[
+                          Icon(AppIcons.plans, size: 16, color: colors.accent),
+                          const SizedBox(width: AppSpacing.xs),
+                          Expanded(
+                            child: Text(
+                              planTitle,
+                              style: text.labelMedium?.copyWith(
+                                color: colors.textPrimary,
+                                fontWeight: FontWeight.w600,
+                              ),
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                            ),
+                          ),
+                          Text(
+                            hasTokens ? percent : 'Upgrade',
+                            style: text.labelSmall?.copyWith(
+                              color: colors.accent,
                               fontWeight: FontWeight.w600,
                             ),
-                            maxLines: 1,
-                            overflow: TextOverflow.ellipsis,
                           ),
-                        ),
-                        Text(
-                          hasTokens ? percent : 'Upgrade',
-                          style: text.labelSmall?.copyWith(
-                            color: colors.accent,
-                            fontWeight: FontWeight.w600,
-                          ),
-                        ),
-                      ],
-                    ),
-                    const SizedBox(height: AppSpacing.xs),
-                    TokenMeterBar(
-                      key: const ValueKey<String>('library-token-bar'),
-                      fraction: subscription.tokenFraction,
-                      height: 5,
-                    ),
-                  ],
+                        ],
+                      ),
+                      const SizedBox(height: AppSpacing.xs),
+                      TokenMeterBar(
+                        key: const ValueKey<String>('library-token-bar'),
+                        fraction: subscription.tokenFraction,
+                        height: 5,
+                      ),
+                    ],
+                  ),
                 ),
               ),
             ),
           ),
-        ),
-      );
+        );
       },
     );
   }
@@ -3260,14 +3730,20 @@ class _SidebarRowState extends State<_SidebarRow> {
   Widget build(BuildContext context) {
     final AppColors colors = AppColors.of(context);
     final TextTheme text = Theme.of(context).textTheme;
-    final BorderRadius radius = BorderRadius.circular(AppRadii.medium);
+    const BorderRadius radius = AppBorderRadius.medium;
     final bool? expanded = widget.expanded;
     final bool hasMenu = widget.actions.isNotEmpty && widget.onAction != null;
     return Semantics(
       container: true,
       explicitChildNodes: true,
       child: Material(
-        color: widget.selected ? colors.selected : Colors.transparent,
+        color: widget.selected
+            ? colors.selected
+            : colors.selected.withValues(alpha: 0),
+        animationDuration: AppMotion.resolve(
+          context,
+          AppMotion.snappy.duration,
+        ),
         borderRadius: radius,
         child: Row(
           children: <Widget>[
@@ -3280,7 +3756,7 @@ class _SidebarRowState extends State<_SidebarRow> {
                 onPressed: widget.onToggle,
                 icon: AnimatedRotation(
                   turns: expanded ? 0.25 : 0,
-                  duration: AppMotion.resolve(context, AppMotion.fast),
+                  duration: AppMotion.resolve(context, AppMotion.fadeIn),
                   child: Icon(
                     AppIcons.disclosure,
                     size: 20,
@@ -3321,17 +3797,24 @@ class _SidebarRowState extends State<_SidebarRow> {
                         widget.icon,
                         const SizedBox(width: AppSpacing.sm),
                         Expanded(
-                          child: Text(
-                            widget.label,
-                            maxLines: 1,
-                            overflow: TextOverflow.ellipsis,
-                            style: text.bodyMedium?.copyWith(
+                          child: AnimatedDefaultTextStyle(
+                            duration: AppMotion.resolve(
+                              context,
+                              AppMotion.snappy.duration,
+                            ),
+                            curve: AppMotion.fadeInCurve,
+                            style: text.bodyMedium!.copyWith(
                               color: widget.selected
                                   ? colors.accent
                                   : colors.textPrimary,
                               fontWeight: widget.selected
                                   ? FontWeight.w600
                                   : FontWeight.w500,
+                            ),
+                            child: Text(
+                              widget.label,
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
                             ),
                           ),
                         ),
@@ -3358,6 +3841,7 @@ class _SidebarRowState extends State<_SidebarRow> {
             ),
             if (hasMenu)
               PopupMenuButton<_ItemAction>(
+                popUpAnimationStyle: AppMotion.popupStyle,
                 key: _menu,
                 tooltip: 'More actions for ${widget.label}',
                 icon: Icon(

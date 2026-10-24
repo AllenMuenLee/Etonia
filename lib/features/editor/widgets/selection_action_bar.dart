@@ -1,4 +1,4 @@
-import 'dart:math' as math;
+﻿import 'dart:math' as math;
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
@@ -330,7 +330,7 @@ class _FloatingBar extends StatelessWidget {
     return Listener(
       behavior: HitTestBehavior.opaque,
       child: GlassSurface(
-        borderRadius: BorderRadius.circular(AppRadii.large),
+        borderRadius: AppBorderRadius.large,
         boxShadow: AppShadows.floating(colors),
         child: Material(
           type: MaterialType.transparency,

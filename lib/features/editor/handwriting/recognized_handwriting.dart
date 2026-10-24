@@ -28,8 +28,15 @@ class RecognizedInkWord {
     required Iterable<Stroke> sourceStrokes,
     required Iterable<List<InkVector>> normalizedStrokes,
     required this.aspectRatio,
+    Iterable<String> alternatives = const <String>[],
     this.stickyId,
   }) : sourceStrokes = List<Stroke>.unmodifiable(sourceStrokes),
+       alternatives = List<String>.unmodifiable(
+         alternatives
+             .map((String value) => value.trim())
+             .where((String value) => value.isNotEmpty && value != text.trim())
+             .toSet(),
+       ),
        normalizedStrokes = List<List<InkVector>>.unmodifiable(
          normalizedStrokes.map(List<InkVector>.unmodifiable),
        );
@@ -41,6 +48,7 @@ class RecognizedInkWord {
     required String text,
     required double? confidence,
     required List<Stroke> strokes,
+    Iterable<String> alternatives = const <String>[],
     String? stickyId,
   }) {
     final Rect bounds = _geometryBoundsOf(strokes);
@@ -59,6 +67,7 @@ class RecognizedInkWord {
     return RecognizedInkWord(
       text: text.trim(),
       confidence: confidence,
+      alternatives: alternatives,
       sourceStrokes: strokes,
       normalizedStrokes: reusable
           ? <List<InkVector>>[
@@ -81,6 +90,10 @@ class RecognizedInkWord {
 
   final String text;
   final double? confidence;
+
+  /// Native alternatives retained for fuzzy search. They are never reused
+  /// as generated handwriting unless separately accepted as the winner.
+  final List<String> alternatives;
 
   /// Identity links to the live page strokes. If any is erased, the search
   /// entry is removed; transforms replace these links with their successors.
@@ -109,6 +122,7 @@ class RecognizedInkWord {
       RecognizedInkWord(
         text: text,
         confidence: confidence,
+        alternatives: alternatives,
         sourceStrokes: <Stroke>[
           for (final Stroke stroke in sourceStrokes)
             replacements[stroke] ?? stroke,

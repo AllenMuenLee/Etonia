@@ -76,26 +76,25 @@ class GeminiAiClient implements AiClient {
             <String, Object?>{
               'inline_data': <String, Object?>{
                 'mime_type': 'image/png',
-                'data': base64Encode(request.imagePng),
+                'data': base64Encode(request.providerImagePng),
               },
             },
           ],
           if (request.noteImage case final note? when index == lastUser)
             <String, Object?>{'text': aiNoteMetadata(note)},
-          <String, Object?>{'text': message.wireText},
+          <String, Object?>{'text': message.historyText},
         ],
       });
     }
     return <String, Object?>{
       'system_instruction': <String, Object?>{
         'parts': <Map<String, Object?>>[
-          <String, Object?>{'text': request.systemInstruction},
+          <String, Object?>{'text': request.providerSystemInstruction},
         ],
       },
       'contents': contents,
       'generationConfig': <String, Object?>{
-        'responseMimeType': 'application/json',
-        'responseJsonSchema': aiResponseJsonSchema(notationConfig),
+        'responseMimeType': 'text/plain',
         'maxOutputTokens': notationConfig.maxOutputTokens,
         if (thinkingLevel != null || thinkingBudget != null)
           'thinkingConfig': <String, Object?>{
@@ -195,19 +194,10 @@ class GeminiAiClient implements AiClient {
       return AiError(AiFailure(_failureKind(status), statusCode: status));
     }
     reader.start(status);
-    final int maxBytes = notationConfig.maxResponseBytes * 2;
-    int bytes = 0;
     try {
       await for (final String line
           in response.stream
               .timeout(config.timeout)
-              .map((List<int> chunk) {
-                bytes += chunk.length;
-                if (bytes > maxBytes) {
-                  throw const FormatException('Too large');
-                }
-                return chunk;
-              })
               .transform(utf8.decoder)
               .transform(const LineSplitter())) {
         if (!reader.addLine(line)) {
@@ -215,7 +205,7 @@ class GeminiAiClient implements AiClient {
         }
       }
     } on FormatException {
-      // Over the size limit, or not UTF-8. Nothing of it is kept.
+      // Invalid UTF-8 is not a readable model response.
       if (!abort.isCompleted) {
         abort.complete();
       }
@@ -267,7 +257,6 @@ class _AnswerReader {
   /// Each candidate's text so far, by candidate index.
   final SplayTreeMap<int, StringBuffer> _texts =
       SplayTreeMap<int, StringBuffer>();
-  int _textBytes = 0;
   bool _blocked = false;
   bool _malformed = false;
   AiFailure? _error;
@@ -288,7 +277,6 @@ class _AnswerReader {
     _data.clear();
     _whole.clear();
     _texts.clear();
-    _textBytes = 0;
     _blocked = false;
     _malformed = false;
     _error = null;
@@ -467,11 +455,6 @@ class _AnswerReader {
         final Object? piece = part['text'];
         if (piece is! String || piece.isEmpty) {
           continue;
-        }
-        _textBytes += utf8.encode(piece).length;
-        if (_textBytes > _config.maxResponseBytes) {
-          _malformed = true;
-          return;
         }
         _texts
             .putIfAbsent(index is int ? index : position, StringBuffer.new)

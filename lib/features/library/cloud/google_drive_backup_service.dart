@@ -79,7 +79,9 @@ class BackupSummary {
     required this.uploadedFiles,
     required this.unchangedFiles,
     this.deletedCount = 0,
+    this.addedHere = 0,
     this.movedToDeleted = 0,
+    this.deletedForGood = 0,
   });
 
   final DateTime exportedAt;
@@ -89,9 +91,14 @@ class BackupSummary {
   /// Notes backed up from Recently Deleted.
   final int deletedCount;
 
-  /// Notes in the backup that were not on this device, now kept in its
-  /// Recently Deleted, and so in the backup's.
+  /// Notes brought into the library here, as the log has them there.
+  final int addedHere;
+
+  /// Notes moved to Recently Deleted here, as they were deleted elsewhere.
   final int movedToDeleted;
+
+  /// Notes deleted for good here, as they were deleted for good elsewhere.
+  final int deletedForGood;
 
   /// Note contents and assets sent this time.
   final int uploadedFiles;
@@ -133,12 +140,13 @@ class RestoreSummary {
 /// previous one whole. A file whose hash is in the previous manifest is
 /// not sent again.
 ///
-/// Recently Deleted is backed up too, as the manifest's `trash`. A note in
-/// the backup that is not on this device is not dropped from it: it is
-/// brought into Recently Deleted here, and so stays in the backup's, until
-/// it is deleted for good from Recently Deleted. Only a note this device
-/// backed up or restored before and no longer has anywhere leaves the
-/// backup.
+/// Recently Deleted is backed up too, as the manifest's `trash`. The
+/// manifest's `log` has the latest status of every note, by id: in the
+/// library, deleted, or deleted for good, and when. Each backup syncs with
+/// it first: a status changed elsewhere since this device last synced is
+/// brought here, unless this device changed the note later. A note deleted
+/// elsewhere moves to Recently Deleted here; one is deleted for good here
+/// only when the log says it was deleted for good.
 class GoogleDriveBackupService {
   GoogleDriveBackupService({
     required this.client,
@@ -165,10 +173,12 @@ class GoogleDriveBackupService {
   static const String _lastBackupKey = 'lastBackupAt';
   static const String _linkedKey = 'driveLinked';
 
-  /// The ids of the notes, in the library or Recently Deleted, that the
-  /// last backup from here or restore to here had. One of them gone since
-  /// was deleted for good.
-  static const String _knownNotesKey = 'backedUpNoteIds';
+  /// Each note's status, by id, when this device last synced with the
+  /// backup's log.
+  static const String _syncedKey = 'syncedNoteStatus';
+
+  /// What older versions kept in place of [_syncedKey].
+  static const String _legacyKnownNotesKey = 'backedUpNoteIds';
 
   /// Backups and restores run one at a time, in the order asked for.
   Future<void> _queue = Future<void>.value();
@@ -237,7 +247,7 @@ class GoogleDriveBackupService {
     );
     await flushPendingSaves?.call();
     // Reads wait for queued saves, so what is read is what was written.
-    final List<Folder> folders = await repository.allFolders();
+    List<Folder> folders = await repository.allFolders();
     List<NoteEntry> notes = await _allNotes(folders);
     List<NoteEntry> deleted = await repository.trash();
     check();
@@ -252,50 +262,20 @@ class GoogleDriveBackupService {
     final _Manifest? previous = await _readManifest(root.id);
     check();
 
-    // Notes in the backup that are not here go to Recently Deleted rather
-    // than out of the backup, unless this device had them and has since
-    // deleted them for good.
-    int moved = 0;
-    if (previous != null) {
-      final Set<String> known = await _knownNotes();
-      final Set<String> here = <String>{
-        for (final NoteEntry note in notes) note.id,
-        for (final NoteEntry note in deleted) note.id,
-      };
-      for (final _NoteRecord record in previous.allNotes) {
-        if (here.contains(record.entry.id) || known.contains(record.entry.id)) {
-          continue;
-        }
-        check();
-        onProgress?.call(
-          CloudProgress(
-            phase: 'Preparing backup',
-            completedItems: 0,
-            totalItems: 0,
-            currentName: record.entry.title,
-          ),
-        );
-        final _DownloadedNote note;
-        try {
-          note = await _downloadNote(record);
-        } on GoogleDriveBackupException {
-          // Missing or damaged in Drive: there is nothing left to keep.
-          continue;
-        }
-        final bool folderHere = folders.any(
-          (Folder folder) => folder.id == record.entry.folderId,
-        );
-        await _createNote(
-          note,
-          folderId: folderHere ? record.entry.folderId : null,
-          deleted: record.entry.deleted ?? _clock(),
-        );
-        moved++;
-      }
-      if (moved > 0) {
-        notes = await _allNotes(folders);
-        deleted = await repository.trash();
-      }
+    // Each note's latest status, here or in the backup's log, and that
+    // status brought here where it is newer.
+    final _Reconciled sync = await _reconcile(
+      previous,
+      folders,
+      notes,
+      deleted,
+      check: check,
+      onProgress: onProgress,
+    );
+    if (sync.changedHere) {
+      folders = await repository.allFolders();
+      notes = await _allNotes(folders);
+      deleted = await repository.trash();
     }
     final Map<String, List<NoteAsset>> assets = <String, List<NoteAsset>>{
       for (final NoteEntry note in <NoteEntry>[...notes, ...deleted])
@@ -411,9 +391,11 @@ class GoogleDriveBackupService {
 
     final List<Map<String, Object?>> noteRecords = <Map<String, Object?>>[
       for (final NoteEntry note in notes) await backUpNote(note),
+      for (final _NoteRecord record in sync.keptNotes) record.json,
     ];
     final List<Map<String, Object?>> trashRecords = <Map<String, Object?>>[
       for (final NoteEntry note in deleted) await backUpNote(note),
+      for (final _NoteRecord record in sync.keptTrash) record.json,
     ];
     check();
 
@@ -430,6 +412,10 @@ class GoogleDriveBackupService {
       ],
       'notes': noteRecords,
       'trash': trashRecords,
+      'log': <String, Object?>{
+        for (final MapEntry<String, _LogEntry> entry in sync.log.entries)
+          entry.key: entry.value.toJson(),
+      },
     };
     await client.uploadFile(
       parentId: root.id,
@@ -465,12 +451,9 @@ class GoogleDriveBackupService {
       // Left for the next backup to tidy.
     }
 
+    await _saveSynced(sync.synced);
     await state.update((Map<String, Object?> values) {
       values[_lastBackupKey] = exportedAt.millisecondsSinceEpoch;
-      values[_knownNotesKey] = <String>[
-        for (final NoteEntry note in notes) note.id,
-        for (final NoteEntry note in deleted) note.id,
-      ];
     });
     return BackupSummary(
       exportedAt: exportedAt,
@@ -479,7 +462,9 @@ class GoogleDriveBackupService {
       uploadedFiles: uploaded,
       unchangedFiles: unchanged,
       deletedCount: deleted.length,
-      movedToDeleted: moved,
+      addedHere: sync.addedHere,
+      movedToDeleted: sync.movedToDeleted,
+      deletedForGood: sync.deletedForGood,
     );
   }
 
@@ -574,29 +559,242 @@ class GoogleDriveBackupService {
       downloaded,
       mode: mode,
     );
-    // Restored under new ids: the backup's are not to be brought back as
-    // missing from here.
-    final Set<String> known = await _knownNotes();
-    await state.update((Map<String, Object?> values) {
-      values[_knownNotesKey] = <String>[
-        ...known,
-        for (final _NoteRecord record in records)
-          if (!known.contains(record.entry.id)) record.entry.id,
-      ];
-    });
+    // Notes now as the log has them are in step with it.
+    final Map<String, NoteStatus> synced = await _syncedStatuses(manifest.log);
+    final Set<String> live = <String>{
+      for (final NoteEntry note in await _allNotes(
+        await repository.allFolders(),
+      ))
+        note.id,
+    };
+    final Set<String> trashed = <String>{
+      for (final NoteEntry note in await repository.trash()) note.id,
+    };
+    for (final MapEntry<String, _LogEntry> entry in manifest.log.entries) {
+      final NoteStatus? local = live.contains(entry.key)
+          ? NoteStatus.live
+          : trashed.contains(entry.key)
+          ? NoteStatus.deleted
+          : null;
+      if (local == entry.value.status ||
+          (local == null && entry.value.status == NoteStatus.purged)) {
+        synced[entry.key] = entry.value.status;
+      }
+    }
+    await _saveSynced(synced);
     done++;
     report('Restoring library', null);
     return summary;
   }
 
-  /// The ids under [_knownNotesKey].
-  Future<Set<String>> _knownNotes() async {
-    final Object? ids = (await state.read())[_knownNotesKey];
-    return <String>{
+  /// Works out each note's latest status: what this device did to it since
+  /// it last synced, or what the backup's log says was done elsewhere,
+  /// whichever is newer. A status from the log is brought here: a note
+  /// deleted elsewhere moves to Recently Deleted, and only one deleted for
+  /// good elsewhere is deleted for good here.
+  Future<_Reconciled> _reconcile(
+    _Manifest? previous,
+    List<Folder> folders,
+    List<NoteEntry> notes,
+    List<NoteEntry> deleted, {
+    required VoidCallback check,
+    ValueChanged<CloudProgress>? onProgress,
+  }) async {
+    final Map<String, NoteEntry> live = <String, NoteEntry>{
+      for (final NoteEntry note in notes) note.id: note,
+    };
+    final Map<String, NoteEntry> trashed = <String, NoteEntry>{
+      for (final NoteEntry note in deleted) note.id: note,
+    };
+    final Map<String, _LogEntry> remote =
+        previous?.log ?? const <String, _LogEntry>{};
+    final Map<String, NoteStatus> base = await _syncedStatuses(remote);
+    final DateTime now = _clock();
+    final _Reconciled result = _Reconciled();
+
+    // The folder here for each of the backup's, made as needed with the
+    // folders above it, or shared with one of the same name and place.
+    final Map<String, String?> placed = <String, String?>{};
+    Future<String?> placeFolder(String? backupId) async {
+      if (backupId == null) return null;
+      if (folders.any((Folder folder) => folder.id == backupId)) {
+        return backupId;
+      }
+      if (placed.containsKey(backupId)) return placed[backupId];
+      // Null while the folders above are placed, so a loop ends.
+      placed[backupId] = null;
+      Folder? there;
+      for (final Folder folder in previous?.folders ?? const <Folder>[]) {
+        if (folder.id == backupId) there = folder;
+      }
+      if (there == null) return null;
+      final String? parentId = await placeFolder(there.parentId);
+      Folder? match;
+      for (final Folder folder in await repository.allFolders()) {
+        if (folder.name == there.name && folder.parentId == parentId) {
+          match = folder;
+        }
+      }
+      match ??= await repository.createFolder(
+        there.name,
+        parentId: parentId,
+        color: there.color,
+      );
+      return placed[backupId] = match.id;
+    }
+
+    Future<void> bringIn(String id, {DateTime? deletedAt}) async {
+      final _NoteRecord? record = previous?.notes[id] ?? previous?.trash[id];
+      if (record == null) {
+        throw GoogleDriveBackupException(
+          'The backup of "${remote[id]?.title}" is missing',
+        );
+      }
+      onProgress?.call(
+        CloudProgress(
+          phase: 'Preparing backup',
+          completedItems: 0,
+          totalItems: 0,
+          currentName: record.entry.title,
+        ),
+      );
+      final _DownloadedNote note = await _downloadNote(record);
+      final String? folderId = record.entry.folderId;
+      await _createNote(
+        note,
+        id: id,
+        // One deleted goes back to its folder only if that is here.
+        folderId: deletedAt == null
+            ? await placeFolder(folderId)
+            : folders.any((Folder folder) => folder.id == folderId)
+            ? folderId
+            : null,
+        deleted: deletedAt,
+      );
+    }
+
+    for (final String id in <String>{
+      ...live.keys,
+      ...trashed.keys,
+      ...remote.keys,
+      ...base.keys,
+    }) {
+      final NoteEntry? here = live[id] ?? trashed[id];
+      final NoteStatus? was = base[id];
+      final NoteStatus? local = live.containsKey(id)
+          ? NoteStatus.live
+          : trashed.containsKey(id)
+          ? NoteStatus.deleted
+          // Gone from here, having been here: deleted for good.
+          : was == null
+          ? null
+          : NoteStatus.purged;
+      final _LogEntry? there = remote[id];
+      final DateTime? localAt = switch (local) {
+        NoteStatus.live => here!.modified,
+        NoteStatus.deleted => here!.deleted ?? now,
+        NoteStatus.purged => now,
+        null => null,
+      };
+      final bool changedThere = there != null && there.status != was;
+      final bool changedHere = local != was;
+      final _LogEntry latest;
+      if (changedThere && (!changedHere || there.at.isAfter(localAt!))) {
+        latest = there;
+      } else if (local != null) {
+        latest = there != null && there.status == local
+            ? there
+            : _LogEntry(
+                status: local,
+                at: localAt!,
+                title: here?.title ?? there?.title ?? '',
+              );
+      } else {
+        continue;
+      }
+
+      if (latest.status != local) {
+        check();
+        try {
+          switch (latest.status) {
+            case NoteStatus.live:
+              if (local == NoteStatus.deleted) {
+                await repository.restoreNote(id);
+              } else {
+                await bringIn(id);
+              }
+              result.addedHere++;
+            case NoteStatus.deleted:
+              if (local == NoteStatus.live) {
+                await repository.deleteNote(id, at: latest.at);
+              } else {
+                await bringIn(id, deletedAt: latest.at);
+              }
+              result.movedToDeleted++;
+            case NoteStatus.purged:
+              if (local == NoteStatus.live) await repository.deleteNote(id);
+              if (local != null) await repository.deleteForever(id);
+              result.deletedForGood++;
+          }
+        } on GoogleDriveBackupException {
+          // Missing or damaged in Drive: the backup keeps it as it was, for
+          // the next sync to try again.
+          final _NoteRecord? record =
+              previous?.notes[id] ?? previous?.trash[id];
+          if (there != null) {
+            result.log[id] = there;
+            if (record != null) {
+              (there.status == NoteStatus.deleted
+                      ? result.keptTrash
+                      : result.keptNotes)
+                  .add(record);
+            }
+          }
+          if (was != null) result.synced[id] = was;
+          continue;
+        }
+        result.changedHere = true;
+      }
+      result.log[id] = latest;
+      result.synced[id] = latest.status;
+    }
+    return result;
+  }
+
+  /// Each note's status when this device last synced, by id.
+  Future<Map<String, NoteStatus>> _syncedStatuses(
+    Map<String, _LogEntry> remote,
+  ) async {
+    final Map<String, Object?> values = await state.read();
+    final Object? synced = values[_syncedKey];
+    if (synced is Map) {
+      return <String, NoteStatus>{
+        for (final MapEntry<Object?, Object?> entry in synced.entries)
+          if (entry.key case final String id)
+            if (NoteStatus.values.asNameMap()[entry.value]
+                case final NoteStatus status)
+              id: status,
+      };
+    }
+    // Older versions kept only the ids last backed up from here, as the
+    // backup then had them.
+    final Object? ids = values[_legacyKnownNotesKey];
+    return <String, NoteStatus>{
       if (ids is List)
         for (final Object? id in ids)
-          if (id is String) id,
+          if (id is String)
+            if (remote[id] case final _LogEntry entry) id: entry.status,
     };
+  }
+
+  Future<void> _saveSynced(Map<String, NoteStatus> synced) {
+    return state.update((Map<String, Object?> values) {
+      values.remove(_legacyKnownNotesKey);
+      values[_syncedKey] = <String, Object?>{
+        for (final MapEntry<String, NoteStatus> entry in synced.entries)
+          entry.key: entry.value.name,
+      };
+    });
   }
 
   /// Downloads the content and assets of [record], checked against their
@@ -636,15 +834,17 @@ class GoogleDriveBackupService {
     return _DownloadedNote(record, json, assetBytes);
   }
 
-  /// Makes a note in the library from [note], in [folderId], and moves it
-  /// to Recently Deleted when it was [deleted] then. Nothing is left of it
-  /// if that fails part way.
+  /// Makes a note in the library from [note], with [id] or a new one, in
+  /// [folderId], and moves it to Recently Deleted when it was [deleted]
+  /// then. Nothing is left of it if that fails part way.
   Future<NoteEntry> _createNote(
     _DownloadedNote note, {
+    String? id,
     required String? folderId,
     DateTime? deleted,
   }) async {
     final NoteEntry created = await repository.createNote(
+      id: id,
       title: note.record.entry.title,
       folderId: folderId,
     );
@@ -695,9 +895,13 @@ class GoogleDriveBackupService {
     final bool merge = mode == RestoreMode.merge;
     final List<Folder> existingFolders = await repository.allFolders();
     final FolderListing previousTop = await repository.list(null);
-    final List<NoteEntry> previousTrash = merge
-        ? await repository.trash()
-        : const <NoteEntry>[];
+    final List<NoteEntry> previousTrash = await repository.trash();
+    final Set<String> used = <String>{
+      for (final Folder folder in existingFolders) folder.id,
+      for (final NoteEntry note in await _allNotes(existingFolders)) note.id,
+      for (final NoteEntry note in previousTrash) note.id,
+    };
+    String? idFor(NoteEntry entry) => used.contains(entry.id) ? null : entry.id;
     // The titles already in each folder, before anything is added.
     final Map<String?, Set<String>> titles = <String?, Set<String>>{};
     if (merge) {
@@ -751,12 +955,18 @@ class GoogleDriveBackupService {
         final String? folderId = entry.folderId == null
             ? null
             : folderIds[entry.folderId];
-        if (merge && (titles[folderId]?.contains(entry.title) ?? false)) {
+        if (merge &&
+            (used.contains(entry.id) ||
+                (titles[folderId]?.contains(entry.title) ?? false))) {
           skipped++;
           continue;
         }
         createdNotes.add(
-          (await _createNote(notes[entry.id]!, folderId: folderId)).id,
+          (await _createNote(
+            notes[entry.id]!,
+            id: idFor(entry),
+            folderId: folderId,
+          )).id,
         );
         restored++;
       }
@@ -775,6 +985,7 @@ class GoogleDriveBackupService {
         createdNotes.add(
           (await _createNote(
             notes[entry.id]!,
+            id: idFor(entry),
             folderId: folderIds[entry.folderId],
             deleted: entry.deleted ?? _clock(),
           )).id,
@@ -935,6 +1146,7 @@ class _Manifest {
     required this.folders,
     required this.notes,
     required this.trash,
+    required this.log,
   });
 
   factory _Manifest.fromJson(String fileId, Map<String, Object?> json) {
@@ -945,16 +1157,43 @@ class _Manifest {
           note.entry.id: note,
     };
 
+    final DateTime exportedAt = DateTime.parse(
+      json['exportedAt']! as String,
+    ).toLocal();
+    final Map<String, _NoteRecord> notes = records(json['notes']);
+    // Older backups have neither.
+    final Map<String, _NoteRecord> trash = records(json['trash']);
+    final Object? log = json['log'];
     return _Manifest(
       fileId: fileId,
-      exportedAt: DateTime.parse(json['exportedAt']! as String).toLocal(),
+      exportedAt: exportedAt,
       folders: <Folder>[
         for (final Object? folder in (json['folders'] as List?) ?? <Object?>[])
           Folder.fromJson(folder! as Map<String, Object?>),
       ],
-      notes: records(json['notes']),
-      // Older backups have none.
-      trash: records(json['trash']),
+      notes: notes,
+      trash: trash,
+      log: log is Map<String, Object?>
+          ? <String, _LogEntry>{
+              for (final MapEntry<String, Object?> entry in log.entries)
+                entry.key: _LogEntry.fromJson(
+                  entry.value! as Map<String, Object?>,
+                ),
+            }
+          : <String, _LogEntry>{
+              for (final _NoteRecord record in notes.values)
+                record.entry.id: _LogEntry(
+                  status: NoteStatus.live,
+                  at: record.entry.modified,
+                  title: record.entry.title,
+                ),
+              for (final _NoteRecord record in trash.values)
+                record.entry.id: _LogEntry(
+                  status: NoteStatus.deleted,
+                  at: record.entry.deleted ?? exportedAt,
+                  title: record.entry.title,
+                ),
+            },
     );
   }
 
@@ -966,6 +1205,9 @@ class _Manifest {
   /// Recently Deleted.
   final Map<String, _NoteRecord> trash;
 
+  /// The latest status of every note, by id, deleted for good or not.
+  final Map<String, _LogEntry> log;
+
   /// [notes], then [trash].
   List<_NoteRecord> get allNotes => <_NoteRecord>[
     ...notes.values,
@@ -973,8 +1215,66 @@ class _Manifest {
   ];
 }
 
+/// Where a note is, as the backup's log has it.
+enum NoteStatus {
+  /// In the library.
+  live,
+
+  /// In Recently Deleted.
+  deleted,
+
+  /// Deleted for good.
+  purged,
+}
+
+/// A note's latest status in the backup's log, and when it came to be.
+class _LogEntry {
+  _LogEntry({required this.status, required this.at, required this.title});
+
+  factory _LogEntry.fromJson(Map<String, Object?> json) {
+    return _LogEntry(
+      status: NoteStatus.values.byName(json['status']! as String),
+      at: DateTime.parse(json['at']! as String).toLocal(),
+      title: (json['title'] as String?) ?? '',
+    );
+  }
+
+  final NoteStatus status;
+  final DateTime at;
+
+  /// For whoever reads the manifest; a note deleted for good has nothing
+  /// else left in it.
+  final String title;
+
+  Map<String, Object?> toJson() => <String, Object?>{
+    'status': status.name,
+    'at': at.toUtc().toIso8601String(),
+    'title': title,
+  };
+}
+
+/// What a sync with the backup's log came to.
+class _Reconciled {
+  /// The log to write.
+  final Map<String, _LogEntry> log = <String, _LogEntry>{};
+
+  /// Each note's status here once synced, to remember.
+  final Map<String, NoteStatus> synced = <String, NoteStatus>{};
+
+  /// Notes that could not be brought here, kept in the backup as they
+  /// were.
+  final List<_NoteRecord> keptNotes = <_NoteRecord>[];
+  final List<_NoteRecord> keptTrash = <_NoteRecord>[];
+
+  bool changedHere = false;
+  int addedHere = 0;
+  int movedToDeleted = 0;
+  int deletedForGood = 0;
+}
+
 class _NoteRecord {
   _NoteRecord({
+    required this.json,
     required this.entry,
     required this.contentHash,
     required this.contentFileId,
@@ -983,6 +1283,7 @@ class _NoteRecord {
 
   factory _NoteRecord.fromJson(Map<String, Object?> json) {
     return _NoteRecord(
+      json: json,
       entry: NoteEntry.fromJson(json['entry']! as Map<String, Object?>),
       contentHash: json['contentHash']! as String,
       contentFileId: json['contentFileId']! as String,
@@ -995,6 +1296,8 @@ class _NoteRecord {
     );
   }
 
+  /// As it is in the manifest.
+  final Map<String, Object?> json;
   final NoteEntry entry;
   final String contentHash;
   final String contentFileId;

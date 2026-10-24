@@ -2,6 +2,7 @@ import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:greatnote/app/theme/app_theme.dart';
+import 'package:greatnote/features/editor/document_io/document_models.dart';
 import 'package:greatnote/features/editor/editor_screen.dart';
 import 'package:greatnote/features/editor/ink/ink_canvas.dart';
 import 'package:greatnote/features/editor/ink/ink_controller.dart';
@@ -71,7 +72,13 @@ Future<void> _openPanel(WidgetTester tester) async {
 Future<void> _choose(WidgetTester tester, String dropdown, String label) async {
   final Finder field = find.byKey(ValueKey<String>(dropdown));
   await tester.ensureVisible(field);
-  await tester.tap(field);
+  // The field's centre can fall on its helper text; tap the dropdown itself.
+  await tester.tap(
+    find.descendant(
+      of: field,
+      matching: find.byWidgetPredicate((Widget w) => w is DropdownButton),
+    ),
+  );
   await tester.pumpAndSettle();
   // The open menu's entry is the last one built.
   await tester.tap(find.text(label).last);
@@ -257,8 +264,6 @@ void main() {
 
     await tester.pumpAndSettle();
 
-    await tester.tap(find.text('Add new page'));
-    await tester.pumpAndSettle();
     await tester.tap(find.text('Add blank page'));
     await tester.pumpAndSettle();
     expect(find.text('2 / 2'), findsOneWidget);
@@ -307,8 +312,6 @@ void main() {
 
     await tester.pumpAndSettle();
 
-    await tester.tap(find.text('Add new page'));
-    await tester.pumpAndSettle();
     await tester.tap(find.text('Add blank page'));
     await tester.pumpAndSettle();
     expect(first.selection, isNull);
@@ -539,8 +542,6 @@ void main() {
     final NoteDocument document = await _pumpDocument(tester);
     await tester.tap(find.byTooltip('Add'));
     await tester.pumpAndSettle();
-    await tester.tap(find.text('Add new page'));
-    await tester.pumpAndSettle();
     await tester.tap(find.text('Add blank page'));
     await tester.pumpAndSettle();
     // The new page is scrolled into view, below the first.
@@ -718,12 +719,14 @@ void main() {
     final Stroke moved = target.strokes.single;
     expect(moved.bounds.center.dy, closeTo(100 / scale, 4));
 
-    // Each page takes back its own part in one step.
-    expect(target.undo(), isTrue);
+    // One history for both pages: the arrival on the target goes first,
+    // then the leaving of the first page, which is shown again.
+    expect(document.undo(), isTrue);
     expect(target.strokes, isEmpty);
-    expect(target.canUndo, isFalse);
-    expect(document.pages[0].ink.undo(), isTrue);
+    expect(document.pages[0].ink.strokes, isEmpty);
+    expect(document.undo(), isTrue);
     expect(document.pages[0].ink.strokes, hasLength(1));
+    expect(document.currentIndex, 0);
   });
 
   testWidgets('a lasso dragged across pages selects strokes on both pages '
@@ -1005,6 +1008,38 @@ void main() {
     expect(document.current.ink.strokes, hasLength(1));
   });
 
+  testWidgets('infinite canvas stays edge to edge when pinched out', (
+    WidgetTester tester,
+  ) async {
+    await _pumpDocument(
+      tester,
+      setup: const PageSetup(size: PageSize.infinite),
+    );
+    await onlyStylusWrites(tester);
+
+    final Finder surface = find.byType(PageViewport);
+    expect(canvasRect(tester), tester.getRect(surface));
+
+    final Offset middle = tester.getCenter(surface);
+    final TestGesture a = await tester.startGesture(
+      middle - const Offset(100, 0),
+      kind: PointerDeviceKind.touch,
+    );
+    final TestGesture b = await tester.startGesture(
+      middle + const Offset(100, 0),
+      kind: PointerDeviceKind.touch,
+    );
+    await a.moveBy(const Offset(50, 0));
+    await b.moveBy(const Offset(-50, 0));
+    await a.up();
+    await b.up();
+    await tester.pump();
+
+    final PageViewportState viewport = tester.state<PageViewportState>(surface);
+    expect(viewport.zoom, 1);
+    expect(canvasRect(tester), tester.getRect(surface));
+  });
+
   testWidgets('compact layouts reach page navigation through the panel', (
     WidgetTester tester,
   ) async {
@@ -1184,4 +1219,56 @@ void _appendTests() {
     await tester.pumpAndSettle();
     expect(document.pageCount, 1);
   });
+
+  testWidgets(
+    'imported PDF document does not allow infinite canvas in page panel or document setup',
+    (WidgetTester tester) async {
+      final NoteDocument document = NoteDocument(
+        pages: <NotePage>[
+          NotePage(
+            ink: InkController(),
+            setup: const PageSetup(
+              size: PageSize.custom,
+              customSize: Size(800, 1100),
+            ),
+            pdfSource: const PdfPageSource(
+              assetId: 'pdf1',
+              pageIndex: 0,
+              pageSize: Size(800, 1100),
+            ),
+          ),
+        ],
+      );
+      addTearDown(document.dispose);
+      expect(document.isImportedPdf, isTrue);
+
+      // document.setSetup directly refuses infinite canvas
+      document.setSetup(const PageSetup(size: PageSize.infinite));
+      expect(document.current.setup.size, isNot(PageSize.infinite));
+
+      // Adding a page also inherits custom PDF size, not infinite
+      document.addPage();
+      expect(document.pageCount, 2);
+      expect(document.isImportedPdf, isTrue);
+      expect(document.current.setup.size, isNot(PageSize.infinite));
+
+      // Even on added page, setSetup refuses infinite
+      document.setSetup(const PageSetup(size: PageSize.infinite));
+      expect(document.current.setup.size, isNot(PageSize.infinite));
+
+      await pumpApp(tester, home: EditorScreen(document: document));
+
+      await _openPanel(tester);
+      final Finder dropdown = find.byKey(
+        const ValueKey<String>('page-size-dropdown'),
+      );
+      await tester.ensureVisible(dropdown);
+      await tester.tap(dropdown);
+      await tester.pumpAndSettle();
+
+      // Infinite option is not present
+      expect(find.text('Infinite'), findsNothing);
+      await _closePanel(tester);
+    },
+  );
 }

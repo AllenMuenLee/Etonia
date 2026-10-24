@@ -1,4 +1,4 @@
-import 'dart:async';
+﻿import 'dart:async';
 import 'dart:ui' as ui;
 
 import 'package:flutter/material.dart';
@@ -27,7 +27,7 @@ class _Repository extends InMemoryNoteRepository {
   }
 
   @override
-  Future<void> saveNote(String id, NoteContent content) {
+  Future<NoteEntry> saveNote(String id, NoteContent content) {
     if (failSaves) return Future.error(StateError('disk unavailable'));
     return super.saveNote(id, content);
   }
@@ -202,6 +202,39 @@ void main() {
     },
   );
 
+  testWidgets(
+    'low memory puts away the editors out of view and reopens them intact',
+    (tester) async {
+      final repo = _Repository();
+      final tabs = OpenNotes();
+      addTearDown(repo.dispose);
+      addTearDown(tabs.dispose);
+      final notes = <NoteEntry>[
+        for (var i = 0; i < 3; i++) await repo.createNote(title: 'Note $i'),
+      ];
+      for (final note in notes) {
+        tabs.open(note);
+        if (note == notes.first) {
+          await tester.pumpWidget(_host(repo, tabs));
+        }
+        await _settle(tester);
+      }
+      expect(find.byType(EditorScreen, skipOffstage: false), findsNWidgets(3));
+
+      tester.binding.handleMemoryPressure();
+      await _settle(tester);
+      // Only the note in view keeps its editor.
+      expect(find.byType(EditorScreen, skipOffstage: false), findsOneWidget);
+      expect(_shown(tester).noteId, notes.last.id);
+
+      tabs.open(notes.first);
+      await _settle(tester);
+      expect(_shown(tester).noteId, notes.first.id);
+      expect(repo.reads[notes.first.id], 2);
+      await tester.pumpWidget(const SizedBox());
+    },
+  );
+
   testWidgets('failed saves pin a tab and prevent close until retry succeeds', (
     tester,
   ) async {
@@ -257,7 +290,7 @@ void main() {
 /// Lets a note opened slide in, and its editor, built after, settle.
 Future<void> _settle(WidgetTester tester) async {
   await tester.pump();
-  await tester.pump(AppMotion.gentle);
+  await tester.pump(AppMotion.smooth.duration);
   await tester.pumpAndSettle();
 }
 

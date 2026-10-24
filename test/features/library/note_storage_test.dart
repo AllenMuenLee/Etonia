@@ -486,6 +486,36 @@ void main() {
       expect(leftovers, isEmpty);
     });
 
+    test('a started note opens before it is stored, with its paper', () async {
+      final FileNoteRepository first = await FileNoteRepository.open(directory);
+      const PageSetup setup = PageSetup(size: PageSize.a4Landscape);
+      final started = first.startNote(title: 'Quick', setup: setup);
+      // Usable at once: nothing has been awaited.
+      expect(started.note.title, 'Quick');
+      final NoteContent loaded = await first.loadNote(started.note.id);
+      await started.saved;
+      expect(loaded.pages.single.setup, setup);
+      first.dispose();
+
+      final FileNoteRepository second = await FileNoteRepository.open(
+        directory,
+      );
+      addTearDown(second.dispose);
+      expect((await second.list(null)).notes.single.id, started.note.id);
+    });
+
+    test('a started note that cannot be stored is withdrawn', () async {
+      final FileNoteRepository repository = await FileNoteRepository.open(
+        directory,
+      );
+      addTearDown(repository.dispose);
+      // The notes folder gone, so the content cannot be written.
+      await Directory('${directory.path}/notes').delete(recursive: true);
+      final started = repository.startNote(title: 'Doomed');
+      await expectLater(started.saved, throwsA(anything));
+      expect((await repository.list(null)).notes, isEmpty);
+    });
+
     test('Recently Deleted survives reopening, pages and all', () async {
       final FileNoteRepository first = await FileNoteRepository.open(directory);
       final NoteEntry note = await first.createNote(title: 'Binned');

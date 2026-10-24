@@ -46,6 +46,7 @@ class NoteInkSnapshot {
             width: stroke.style.width,
             color: stroke.style.resolve(brightness),
             isDot: stroke.isDot,
+            writing: stroke.style.writing,
             widths: stroke.widths,
           ),
       ],
@@ -73,7 +74,7 @@ class NoteInkSnapshot {
   /// for print. Any other picture is taken whole, by its box.
   final List<SnapshotBitmap> bitmaps;
 
-  /// The page's sticky notes, in paint order, under [strokes].
+  /// The page's sticky notes, in paint order, above [strokes].
   final List<StickyNoteElement> stickies;
 
   /// Of [strokes], those the assistant wrote and drew.

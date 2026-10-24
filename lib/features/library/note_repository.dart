@@ -8,7 +8,7 @@ import '../editor/page/page_setup.dart';
 import 'library_models.dart';
 import 'note_content.dart';
 
-enum NoteAssetKind { pdf, image }
+enum NoteAssetKind { pdf, image, audio }
 
 @immutable
 class NoteAsset {
@@ -66,6 +66,9 @@ abstract class NoteRepository extends ChangeNotifier {
   /// Every folder, for choosing where to move something.
   Future<List<Folder>> allFolders();
 
+  /// Every note in every folder, not counting Recently Deleted.
+  Future<List<NoteEntry>> allNotes();
+
   /// How many folders and notes each folder holds directly, by folder id.
   Future<Map<String, int>> itemCounts();
 
@@ -84,6 +87,16 @@ abstract class NoteRepository extends ChangeNotifier {
     String? folderId,
     PageSetup setup = const PageSetup(),
     String? id,
+  });
+
+  /// Like [createNote], for a caller that must not wait on the disk: the
+  /// entry is returned at once and can be opened, since [loadNote] reads only
+  /// after the writes queued here. [saved] completes when the note is stored;
+  /// if that fails the entry is withdrawn and [saved] completes with the error.
+  ({NoteEntry note, Future<void> saved}) startNote({
+    String title = 'Untitled note',
+    String? folderId,
+    PageSetup setup = const PageSetup(),
   });
 
   Future<Folder> createFolder(
@@ -139,8 +152,22 @@ abstract class NoteRepository extends ChangeNotifier {
 
   Future<NoteContent> loadNote(String id);
 
+  /// The first page of [id], as its picture in the library shows it, or
+  /// null when it has none. Only that page is made into ink, however long
+  /// the note.
+  Future<StoredPage?> loadFirstPage(String id) async {
+    final NoteContent content = await loadNote(id);
+    return content.pages.isEmpty ? null : content.pages.first;
+  }
+
+  /// Whoever asked for [id] with [loadNote] has moved on before it
+  /// arrived. Once no one else waits on it, the rest of the reading is
+  /// dropped rather than finished for no one.
+  void abandonLoad(String id) {}
+
   /// Stores [content] and updates the entry's modified time and page count.
-  Future<void> saveNote(String id, NoteContent content);
+  /// Completes with the entry as updated.
+  Future<NoteEntry> saveNote(String id, NoteContent content);
 
   /// Writes bytes atomically before callers save content referring to them.
   Future<String> storeAsset(
@@ -199,6 +226,11 @@ abstract class IndexedNoteRepository extends NoteRepository {
   // a request made after a save must not join an older read.
   final Map<String, (Future<void>, Future<NoteContent>)> _loads = {};
 
+  /// How many callers wait on each read in flight, and the reads no one
+  /// waits on any more.
+  final Map<String, int> _waiting = <String, int>{};
+  final Set<String> _abandoned = <String>{};
+
   static final math.Random _random = math.Random();
 
   static String _randomId() {
@@ -222,6 +254,19 @@ abstract class IndexedNoteRepository extends NoteRepository {
 
   @protected
   Future<NoteContent> readContent(String id);
+
+  /// The first page of [id]'s content, or null when it has none. A
+  /// subclass may read less of the note than [readContent] does.
+  @protected
+  Future<StoredPage?> readFirstPage(String id) async {
+    final NoteContent content = await readContent(id);
+    return content.pages.isEmpty ? null : content.pages.first;
+  }
+
+  /// Whether no one waits any more on the read of [id] in flight. A
+  /// reader that reads in steps stops at its next one.
+  @protected
+  bool isLoadAbandoned(String id) => _abandoned.contains(id);
 
   @protected
   Future<void> writeContent(String id, NoteContent content);
@@ -313,6 +358,12 @@ abstract class IndexedNoteRepository extends NoteRepository {
   }
 
   @override
+  Future<List<NoteEntry>> allNotes() async {
+    await _queue;
+    return List<NoteEntry>.of(_notes.values);
+  }
+
+  @override
   Future<Map<String, int>> itemCounts() async {
     await _queue;
     final Map<String, int> counts = <String, int>{};
@@ -394,6 +445,35 @@ abstract class IndexedNoteRepository extends NoteRepository {
       await writeIndex();
       return note;
     });
+  }
+
+  @override
+  ({NoteEntry note, Future<void> saved}) startNote({
+    String title = 'Untitled note',
+    String? folderId,
+    PageSetup setup = const PageSetup(),
+  }) {
+    _checkFolder(folderId);
+    final DateTime now = _clock();
+    final NoteEntry note = NoteEntry(
+      id: _id(),
+      title: _name(title),
+      folderId: folderId,
+      created: now,
+      modified: now,
+      pageCount: 1,
+    );
+    _notes[note.id] = note;
+    final Future<void> saved = _mutate(() async {
+      try {
+        await writeContent(note.id, NoteContent.blank(setup));
+        await writeIndex();
+      } on Object {
+        _notes.remove(note.id);
+        rethrow;
+      }
+    });
+    return (note: note, saved: saved);
   }
 
   @override
@@ -624,15 +704,46 @@ abstract class IndexedNoteRepository extends NoteRepository {
   Future<NoteContent> loadNote(String id) {
     final barrier = _queue;
     final pending = _loads[id];
-    if (pending != null && identical(pending.$1, barrier)) return pending.$2;
+    // An abandoned read may already be stopping: start afresh instead.
+    if (pending != null &&
+        identical(pending.$1, barrier) &&
+        !_abandoned.contains(id)) {
+      _waiting[id] = (_waiting[id] ?? 0) + 1;
+      return pending.$2;
+    }
+    _abandoned.remove(id);
+    _waiting[id] = 1;
     final loading = _loadNoteAfter(id, barrier);
     _loads[id] = (barrier, loading);
     void release() {
-      if (identical(_loads[id]?.$2, loading)) _loads.remove(id);
+      if (identical(_loads[id]?.$2, loading)) {
+        _loads.remove(id);
+        _waiting.remove(id);
+        _abandoned.remove(id);
+      }
     }
 
     loading.then<void>((_) => release(), onError: (Object _) => release());
     return loading;
+  }
+
+  @override
+  void abandonLoad(String id) {
+    final int? waiting = _waiting[id];
+    if (waiting == null) return;
+    if (waiting > 1) {
+      _waiting[id] = waiting - 1;
+      return;
+    }
+    _waiting.remove(id);
+    _abandoned.add(id);
+  }
+
+  @override
+  Future<StoredPage?> loadFirstPage(String id) async {
+    await _queue;
+    if (!_trash.containsKey(id)) _note(id);
+    return readFirstPage(id);
   }
 
   Future<NoteContent> _loadNoteAfter(String id, Future<void> barrier) async {
@@ -644,16 +755,18 @@ abstract class IndexedNoteRepository extends NoteRepository {
   }
 
   @override
-  Future<void> saveNote(String id, NoteContent content) {
+  Future<NoteEntry> saveNote(String id, NoteContent content) {
     return _mutate(() async {
       final NoteEntry note = _note(id);
       await writeContent(id, content);
-      _notes[id] = note.copyWith(
+      final NoteEntry saved = _notes[id] = note.copyWith(
         modified: _clock(),
         pageCount: content.pages.length,
         searchText: content.searchableText,
+        revision: note.revision + 1,
       );
       await writeIndex();
+      return saved;
     });
   }
 

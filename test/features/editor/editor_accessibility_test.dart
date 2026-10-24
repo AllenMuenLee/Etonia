@@ -37,15 +37,30 @@ void main() {
   // Previous and next page are disabled on a one-page note, so they are
   // skipped; on compact widths they live in the page panel.
   List<String> tooltipsAt(TestViewport viewport) {
+    if (viewport == TestViewport.compact) {
+      return <String>[
+        'Open navigation menu',
+        'Rename note',
+        'Settings',
+        'Page setup',
+        'Add',
+        'Pen',
+        'Eraser',
+        'Select',
+      ];
+    }
     return <String>[
       'Open navigation menu',
       'Rename note',
-      'Page setup',
-      'Add',
       'Settings',
       'Pen',
       'Eraser',
       'Select',
+      'Sticky note',
+      'Turn on AI',
+      'Expand toolbar',
+      'Page setup',
+      'Add',
     ];
   }
 
@@ -199,7 +214,7 @@ void main() {
         return (body.decoration! as BoxDecoration).color!;
       }
 
-      expect(fill('On'), AppColors.light.selected);
+      expect(fill('On'), AppColors.light.accent);
       expect(fill('Off').a, 0);
       expect(
         tester.getSemantics(find.bySemanticsLabel('On')),

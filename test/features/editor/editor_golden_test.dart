@@ -413,12 +413,33 @@ void main() {
     await settleAi(tester);
     await tester.tap(find.byTooltip('Settings'));
     await tester.pumpAndSettle();
+
+    await expectLater(
+      find.byType(GreatnoteApp),
+      matchesGoldenFile('goldens/editor_settings_tablet_landscape_light.png'),
+    );
+  });
+
+  testWidgets('AI options: tablet_landscape_light', (
+    WidgetTester tester,
+  ) async {
+    final InkController controller = await pumpEditor(
+      tester,
+      strokes: _page(),
+      aiClient: FakeAiClient(),
+    );
+    await _select(tester, controller);
+    await tester.tap(find.byTooltip('AI assistant'));
+    await tester.pumpAndSettle();
+    await settleAi(tester);
+    await tester.tap(find.byTooltip('AI settings'));
+    await tester.pumpAndSettle();
     await tester.tap(find.text('Enable notation'));
     await tester.pumpAndSettle();
 
     await expectLater(
       find.byType(GreatnoteApp),
-      matchesGoldenFile('goldens/editor_settings_tablet_landscape_light.png'),
+      matchesGoldenFile('goldens/ai_options_tablet_landscape_light.png'),
     );
   });
 }

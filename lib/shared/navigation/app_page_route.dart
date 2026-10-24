@@ -1,67 +1,83 @@
-import 'package:flutter/widgets.dart';
+import 'package:flutter/cupertino.dart';
 
 import '../../app/theme/app_tokens.dart';
 
-/// A full-screen page that fades in while drifting a little from the
-/// trailing edge, over the one below, which eases back behind it.
+/// Cupertino's full-width push/pop transition on every supported platform.
 ///
-/// The motion starts softly and settles slowly, so a page arrives instead
-/// of landing. Only the pages move, so a transition costs little to draw.
-/// There is no edge swipe to go back: on a page of paper, a stroke begun
-/// at the edge is writing.
-class AppPageRoute<T> extends PageRouteBuilder<T> {
-  AppPageRoute({required WidgetBuilder builder, super.settings})
-    : super(
-        transitionDuration: const Duration(milliseconds: 520),
-        reverseTransitionDuration: const Duration(milliseconds: 400),
-        pageBuilder:
-            (
-              BuildContext context,
-              Animation<double> animation,
-              Animation<double> secondaryAnimation,
-            ) => builder(context),
-        transitionsBuilder:
-            (
-              BuildContext context,
-              Animation<double> animation,
-              Animation<double> secondaryAnimation,
-              Widget child,
-            ) {
-              if (MediaQuery.disableAnimationsOf(context)) {
-                return child;
-              }
-              final Animation<double> enter = CurvedAnimation(
-                parent: animation,
-                curve: AppMotion.gentleCurve,
-              );
-              // The page is opaque well before it stops moving.
-              final Animation<double> fade = CurvedAnimation(
-                parent: animation,
-                curve: const Interval(0, 0.6, curve: Curves.easeOut),
-              );
-              final Animation<double> recede = CurvedAnimation(
-                parent: secondaryAnimation,
-                curve: AppMotion.gentleCurve,
-              );
-              return SlideTransition(
-                position: Tween<Offset>(
-                  begin: Offset.zero,
-                  end: const Offset(-0.04, 0),
-                ).animate(recede),
-                child: SlideTransition(
-                  position: Tween<Offset>(
-                    begin: const Offset(0.08, 0),
-                    end: Offset.zero,
-                  ).animate(enter),
-                  child: FadeTransition(
-                    opacity: fade,
-                    child: ColoredBox(
-                      color: AppColors.of(context).background,
-                      child: child,
-                    ),
-                  ),
-                ),
-              );
-            },
+/// Keeping Flutter's implementation preserves the interactive leading-edge
+/// pop gesture, interruption, RTL geometry, secondary-route parallax and
+/// velocity hand-off instead of approximating them in a custom slide.
+class AppPageTransitionsBuilder extends PageTransitionsBuilder {
+  const AppPageTransitionsBuilder();
+
+  static const CupertinoPageTransitionsBuilder _cupertino =
+      CupertinoPageTransitionsBuilder();
+
+  @override
+  Duration get transitionDuration => AppMotion.smooth.duration;
+
+  @override
+  Duration get reverseTransitionDuration => AppMotion.smooth.duration;
+
+  @override
+  Widget buildTransitions<T>(
+    PageRoute<T> route,
+    BuildContext context,
+    Animation<double> animation,
+    Animation<double> secondaryAnimation,
+    Widget child,
+  ) {
+    final Widget grounded = ColoredBox(
+      color: AppColors.of(context).background,
+      child: child,
+    );
+    if (MediaQuery.disableAnimationsOf(context)) {
+      return FadeTransition(
+        opacity: CurvedAnimation(
+          parent: animation,
+          curve: AppMotion.reducedCurve,
+        ),
+        child: grounded,
       );
+    }
+    return _cupertino.buildTransitions<T>(
+      route,
+      context,
+      animation,
+      secondaryAnimation,
+      grounded,
+    );
+  }
+}
+
+/// A route with native Cupertino gesture ownership on every platform.
+class AppPageRoute<T> extends CupertinoPageRoute<T> {
+  AppPageRoute({
+    required super.builder,
+    super.settings,
+    super.fullscreenDialog,
+    super.maintainState,
+    super.allowSnapshotting,
+    super.barrierDismissible,
+  });
+
+  @override
+  Duration get transitionDuration => AppMotion.smooth.duration;
+
+  @override
+  Duration get reverseTransitionDuration => AppMotion.smooth.duration;
+
+  @override
+  Widget buildTransitions(
+    BuildContext context,
+    Animation<double> animation,
+    Animation<double> secondaryAnimation,
+    Widget child,
+  ) => const AppPageTransitionsBuilder().buildTransitions<T>(
+    this,
+    context,
+    animation,
+    secondaryAnimation,
+    child,
+  );
 }

@@ -6,7 +6,7 @@ version: 0.1.0+1
 
 environment:
   sdk: ^3.12.2
-  flutter: 3.44.2
+  flutter: ">=3.44.2"
 
 dependencies:
   flutter:
@@ -21,12 +21,16 @@ dependencies:
   pdfrx: 2.4.8
   share_plus: 13.3.1
   speech_to_text: ^7.5.0
+  record: ^7.1.2
+  just_audio: ^0.10.6
   cupertino_icons: ^2.0.0
   google_sign_in: ^7.2.0
   crypto: ^3.0.7
   in_app_purchase: ^3.3.1
   supabase_flutter: ^2.18.3
   flutter_secure_storage: ^10.3.4
+  flutter_svg: ^2.2.1
+  xml: ^7.0.1
 
 dev_dependencies:
   flutter_test:
@@ -36,6 +40,7 @@ dev_dependencies:
   # Host side of the profiling harness in test_driver/.
   flutter_driver:
     sdk: flutter
+  leak_tracker_flutter_testing: any
   flutter_lints: ^6.0.0
   # Drives timers in unit tests; the version is the one the SDK pins.
   fake_async: any
@@ -46,6 +51,7 @@ flutter:
   uses-material-design: true
   assets:
     - third_party/ems_readability/OFL.txt
+    - assets/icon/etonia.png
 
 flutter_launcher_icons:
   image_path: assets/icon/etonia.png

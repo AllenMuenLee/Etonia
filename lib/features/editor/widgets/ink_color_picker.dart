@@ -1,26 +1,45 @@
-import 'package:flutter/material.dart';
+﻿import 'package:flutter/material.dart';
 
 import '../../../app/theme/app_tokens.dart';
 import '../../../app/theme/app_icons.dart';
 import '../../../shared/widgets/app_controls.dart';
 import '../ink/ink_palette.dart';
+import 'color_palette_dialog.dart';
 
 /// A grid of the curated inks. The current one is marked with a checkmark
-/// and a ring, not by color alone.
+/// and a ring, not by color alone. Includes a color palette button (色盤)
+/// to select custom colors.
 class InkColorPicker extends StatelessWidget {
   const InkColorPicker({
     super.key,
     required this.selected,
     required this.onSelected,
     this.colors = InkPalette.colors,
+    this.allowPalette = true,
   });
 
   final InkColor selected;
   final ValueChanged<InkColor> onSelected;
   final List<InkColor> colors;
+  final bool allowPalette;
+
+  Future<void> _openPalette(BuildContext context) async {
+    final Color? picked = await showColorPaletteDialog(
+      context,
+      initialColor: selected.resolve(Theme.of(context).brightness),
+      title: 'Ink color',
+    );
+    if (picked != null) {
+      onSelected(InkPalette.custom(picked));
+    }
+  }
 
   @override
   Widget build(BuildContext context) {
+    final bool hasCustomSelected = !colors.any(
+      (InkColor c) => c.id == selected.id,
+    );
+
     return Column(
       mainAxisSize: MainAxisSize.min,
       crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -37,6 +56,18 @@ class InkColorPicker extends StatelessWidget {
                 ink: ink,
                 selected: ink == selected,
                 onTap: () => onSelected(ink),
+              ),
+            if (hasCustomSelected)
+              _InkSwatch(
+                key: ValueKey<String>('ink-swatch-${selected.id}'),
+                ink: selected,
+                selected: true,
+                onTap: () => onSelected(selected),
+              ),
+            if (allowPalette)
+              ColorPaletteButton(
+                onTap: () => _openPalette(context),
+                tooltip: 'Ink palette',
               ),
           ],
         ),
@@ -81,39 +112,60 @@ class _InkSwatch extends StatelessWidget {
           child: SizedBox.square(
             dimension: AppSizes.minTouchTarget,
             child: Center(
-              child: AnimatedContainer(
-                duration: AppMotion.resolve(context, AppMotion.fast),
-                curve: AppMotion.standard,
-                width: AppSizes.colorSwatch + AppSpacing.xs + 2,
-                height: AppSizes.colorSwatch + AppSpacing.xs + 2,
+              child: Stack(
                 alignment: Alignment.center,
-                decoration: BoxDecoration(
-                  shape: BoxShape.circle,
-                  border: Border.all(
-                    color: selected
-                        ? colors.accent
-                        : colors.accent.withValues(alpha: 0),
-                    width: AppSizes.focusRingWidth,
-                  ),
-                ),
-                child: Container(
-                  width: AppSizes.colorSwatch,
-                  height: AppSizes.colorSwatch,
-                  decoration: BoxDecoration(
-                    color: color,
-                    shape: BoxShape.circle,
-                    // Keeps an ink as dark as the panel distinct from it.
-                    border: Border.all(
-                      color: colors.textPrimary.withValues(alpha: 0.08),
-                      width: AppSizes.hairline,
+                children: <Widget>[
+                  // The ring grows from the swatch's center and fades with it.
+                  AnimatedScale(
+                    scale: selected ? 1 : 0.6,
+                    duration: AppMotion.resolve(
+                      context,
+                      AppMotion.snappy.duration,
+                    ),
+                    curve: AppMotion.popCurve,
+                    child: AnimatedOpacity(
+                      opacity: selected ? 1 : 0,
+                      duration: AppMotion.resolve(context, AppMotion.fadeIn),
+                      curve: AppMotion.fadeInCurve,
+                      child: Container(
+                        width: AppSizes.colorSwatch + AppSpacing.xs + 2,
+                        height: AppSizes.colorSwatch + AppSpacing.xs + 2,
+                        decoration: BoxDecoration(
+                          shape: BoxShape.circle,
+                          border: Border.all(
+                            color: colors.accent,
+                            width: AppSizes.focusRingWidth,
+                          ),
+                        ),
+                      ),
                     ),
                   ),
-                  child: selected
-                      ? ExcludeSemantics(
-                          child: Icon(AppIcons.check, size: 16, color: onColor),
-                        )
-                      : null,
-                ),
+                  PopOnSelect(
+                    active: selected,
+                    child: Container(
+                      width: AppSizes.colorSwatch,
+                      height: AppSizes.colorSwatch,
+                      decoration: BoxDecoration(
+                        color: color,
+                        shape: BoxShape.circle,
+                        // Keeps an ink as dark as the panel distinct from it.
+                        border: Border.all(
+                          color: colors.textPrimary.withValues(alpha: 0.08),
+                          width: AppSizes.hairline,
+                        ),
+                      ),
+                      child: selected
+                          ? ExcludeSemantics(
+                              child: Icon(
+                                AppIcons.check,
+                                size: 16,
+                                color: onColor,
+                              ),
+                            )
+                          : null,
+                    ),
+                  ),
+                ],
               ),
             ),
           ),

@@ -96,6 +96,9 @@ class _HandwritingCalibrationScreenState
     extends State<HandwritingCalibrationScreen> {
   _Stage _stage = _Stage.choosing;
 
+  /// What was saved before, whose other choices are kept.
+  HandwritingCalibrationState? _saved;
+
   /// The font chosen on the cards.
   HandwritingFont _font = HandwritingFont.normal;
 
@@ -144,6 +147,7 @@ class _HandwritingCalibrationScreenState
     super.initState();
     widget.store.read().then((HandwritingCalibrationState? state) {
       if (!mounted || state == null) return;
+      _saved = state;
       setState(() {
         if (state.font != null) _font = state.font!;
         if (state.font == HandwritingFont.custom) _custom = state.style;
@@ -297,11 +301,7 @@ class _HandwritingCalibrationScreenState
     if (_saving) return;
     setState(() => _saving = true);
     await widget.store.write(
-      HandwritingCalibrationState(
-        style: style,
-        font: style == null ? null : font,
-        skipped: style == null,
-      ),
+      (_saved ?? const HandwritingCalibrationState()).withStyle(style, font),
     );
     // Letters written out are kept until they make a font, or the writer
     // chooses another.
@@ -357,7 +357,7 @@ class _HandwritingCalibrationScreenState
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: <Widget>[
         Text(
-          'Choose how the AI writes on your notes, or write 15 letters to '
+          'Choose how the AI writes on your notes, or write 18 letters to '
           'make it write like you.',
           style: text.bodyMedium!.copyWith(color: colors.textPrimary),
         ),
@@ -670,7 +670,7 @@ class _FontCard extends StatelessWidget {
                             const SizedBox(width: AppSpacing.xs),
                             Expanded(
                               child: Text(
-                                'Write 15 letters, and the AI will write in '
+                                'Write 18 letters, and the AI will write in '
                                 'your handwriting.',
                                 style: text.bodySmall!.copyWith(
                                   color: colors.textPrimary,

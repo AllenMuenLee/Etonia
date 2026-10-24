@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 
+import '../../shared/navigation/app_page_route.dart';
 import 'app_tokens.dart';
 
 abstract final class AppTheme {
@@ -15,22 +16,21 @@ abstract final class AppTheme {
     // Every role is pinned to a token, so no Material default tints a
     // surface with the seed's hue.
     final ColorScheme scheme =
-        ColorScheme.fromSeed(
-          seedColor: colors.accent,
+        ColorScheme(
           brightness: brightness,
-        ).copyWith(
           primary: colors.accent,
           onPrimary: colors.onAccent,
-          primaryContainer: colors.selected,
-          onPrimaryContainer: colors.accent,
           secondary: colors.accent,
           onSecondary: colors.onAccent,
-          secondaryContainer: colors.selected,
-          onSecondaryContainer: colors.accent,
           error: colors.danger,
           onError: colors.onAccent,
-          surface: AppGlass.surface(colors),
+          surface: colors.surface,
           onSurface: colors.textPrimary,
+        ).copyWith(
+          primaryContainer: colors.selected,
+          onPrimaryContainer: colors.accent,
+          secondaryContainer: colors.selected,
+          onSecondaryContainer: colors.accent,
           onSurfaceVariant: colors.textSecondary,
           surfaceTint: Colors.transparent,
           surfaceDim: AppGlass.background(colors),
@@ -74,11 +74,9 @@ abstract final class AppTheme {
       },
     );
 
-    final RoundedRectangleBorder controlShape = RoundedRectangleBorder(
-      borderRadius: BorderRadius.circular(AppRadii.medium),
-    );
-    final RoundedRectangleBorder floatingShape = RoundedRectangleBorder(
-      borderRadius: BorderRadius.circular(AppRadii.large),
+    const StadiumBorder controlShape = StadiumBorder();
+    final RoundedSuperellipseBorder floatingShape = RoundedSuperellipseBorder(
+      borderRadius: AppBorderRadius.large,
       side: AppGlass.border(colors),
     );
     final Color disabledText = colors.textSecondary.withValues(alpha: 0.55);
@@ -91,7 +89,7 @@ abstract final class AppTheme {
     );
 
     final OutlineInputBorder fieldBorder = OutlineInputBorder(
-      borderRadius: BorderRadius.circular(AppRadii.medium),
+      borderRadius: AppBorderRadius.medium,
       borderSide: BorderSide(color: colors.divider, width: AppSizes.hairline),
     );
 
@@ -99,7 +97,21 @@ abstract final class AppTheme {
       scaffoldBackgroundColor: AppGlass.background(colors),
       canvasColor: AppGlass.surface(colors),
       extensions: <ThemeExtension<dynamic>>[colors],
-      splashFactory: InkSparkle.splashFactory,
+      // A soft ripple that spreads and fades, like ink taken up by paper.
+      // It needs no shader, so its first use does not stall a frame.
+      splashFactory: InkRipple.splashFactory,
+      splashColor: colors.accent.withValues(alpha: 0.10),
+      highlightColor: Colors.transparent,
+      pageTransitionsTheme: const PageTransitionsTheme(
+        builders: <TargetPlatform, PageTransitionsBuilder>{
+          TargetPlatform.android: AppPageTransitionsBuilder(),
+          TargetPlatform.iOS: AppPageTransitionsBuilder(),
+          TargetPlatform.windows: AppPageTransitionsBuilder(),
+          TargetPlatform.macOS: AppPageTransitionsBuilder(),
+          TargetPlatform.linux: AppPageTransitionsBuilder(),
+          TargetPlatform.fuchsia: AppPageTransitionsBuilder(),
+        },
+      ),
       visualDensity: VisualDensity.standard,
       dividerTheme: DividerThemeData(
         color: colors.divider,
@@ -109,6 +121,7 @@ abstract final class AppTheme {
       iconTheme: IconThemeData(color: colors.textPrimary, size: AppSizes.icon),
       iconButtonTheme: IconButtonThemeData(
         style: ButtonStyle(
+          animationDuration: AppMotion.fadeIn,
           foregroundColor: WidgetStateProperty.resolveWith((
             Set<WidgetState> states,
           ) {
@@ -121,7 +134,7 @@ abstract final class AppTheme {
           minimumSize: const WidgetStatePropertyAll<Size>(
             Size.square(AppSizes.minTouchTarget),
           ),
-          shape: WidgetStatePropertyAll<OutlinedBorder>(controlShape),
+          shape: const WidgetStatePropertyAll<OutlinedBorder>(controlShape),
         ),
       ),
       filledButtonTheme: FilledButtonThemeData(
@@ -135,6 +148,7 @@ abstract final class AppTheme {
           textStyle: buttonText,
           shape: controlShape,
           elevation: 0,
+          animationDuration: AppMotion.fadeIn,
         ),
       ),
       textButtonTheme: TextButtonThemeData(
@@ -145,6 +159,7 @@ abstract final class AppTheme {
           padding: buttonPadding,
           textStyle: buttonText,
           shape: controlShape,
+          animationDuration: AppMotion.fadeIn,
         ).copyWith(overlayColor: overlay),
       ),
       outlinedButtonTheme: OutlinedButtonThemeData(
@@ -156,10 +171,12 @@ abstract final class AppTheme {
           textStyle: buttonText,
           shape: controlShape,
           side: BorderSide(color: colors.divider, width: AppSizes.hairline),
+          animationDuration: AppMotion.fadeIn,
         ).copyWith(overlayColor: overlay),
       ),
       segmentedButtonTheme: SegmentedButtonThemeData(
         style: ButtonStyle(
+          animationDuration: AppMotion.snappy.duration,
           backgroundColor: WidgetStateProperty.resolveWith((
             Set<WidgetState> states,
           ) {
@@ -179,7 +196,7 @@ abstract final class AppTheme {
           side: WidgetStatePropertyAll<BorderSide>(
             BorderSide(color: colors.divider, width: AppSizes.hairline),
           ),
-          shape: WidgetStatePropertyAll<OutlinedBorder>(controlShape),
+          shape: const WidgetStatePropertyAll<OutlinedBorder>(controlShape),
           minimumSize: const WidgetStatePropertyAll<Size>(Size(0, 40)),
           textStyle: WidgetStatePropertyAll<TextStyle>(buttonText),
           iconSize: const WidgetStatePropertyAll<double>(18),
@@ -192,9 +209,7 @@ abstract final class AppTheme {
         focusElevation: 0,
         hoverElevation: 0,
         highlightElevation: 0,
-        shape: RoundedRectangleBorder(
-          borderRadius: BorderRadius.circular(AppRadii.large),
-        ),
+        shape: const StadiumBorder(),
         extendedTextStyle: buttonText,
       ),
       inputDecorationTheme: InputDecorationTheme(
@@ -286,7 +301,7 @@ abstract final class AppTheme {
         disabledActiveTrackColor: colors.divider,
         disabledInactiveTrackColor: colors.surfaceMuted,
         disabledThumbColor: colors.divider,
-        trackHeight: 4,
+        trackHeight: 8,
         trackShape: const RoundedRectSliderTrackShape(),
         thumbShape: const RoundSliderThumbShape(
           enabledThumbRadius: 9,
@@ -301,18 +316,20 @@ abstract final class AppTheme {
         color: colors.accent,
         linearTrackColor: colors.surfaceMuted,
         circularTrackColor: Colors.transparent,
-        linearMinHeight: 4,
-        borderRadius: BorderRadius.circular(2),
+        linearMinHeight: 8,
+        borderRadius: BorderRadius.circular(4),
       ),
       tooltipTheme: TooltipThemeData(
         waitDuration: const Duration(milliseconds: 500),
+        // Fades out slowly, so it never blinks away.
+        exitDuration: const Duration(milliseconds: 200),
         padding: const EdgeInsets.symmetric(
           horizontal: AppSpacing.xs,
           vertical: AppSpacing.xxs,
         ),
         decoration: BoxDecoration(
           color: colors.textPrimary.withValues(alpha: 0.92),
-          borderRadius: BorderRadius.circular(AppRadii.small + 2),
+          borderRadius: BorderRadius.circular(AppRadii.medium),
         ),
         textStyle: text.labelMedium!.copyWith(
           color: colors.background,
@@ -329,9 +346,8 @@ abstract final class AppTheme {
           textStyle: text.bodyMedium,
           minimumSize: const Size(180, 44),
           padding: const EdgeInsets.symmetric(horizontal: AppSpacing.sm),
-          shape: RoundedRectangleBorder(
-            borderRadius: BorderRadius.circular(AppRadii.medium - 2),
-          ),
+          shape: const StadiumBorder(),
+          animationDuration: AppMotion.fadeIn,
         ).copyWith(overlayColor: overlay),
       ),
       popupMenuTheme: PopupMenuThemeData(
@@ -356,8 +372,8 @@ abstract final class AppTheme {
         surfaceTintColor: Colors.transparent,
         elevation: 8,
         shadowColor: colors.shadow.withValues(alpha: 0.4),
-        shape: RoundedRectangleBorder(
-          borderRadius: BorderRadius.circular(AppRadii.xl),
+        shape: const RoundedSuperellipseBorder(
+          borderRadius: AppBorderRadius.xl,
         ),
         titleTextStyle: text.titleLarge,
         contentTextStyle: text.bodyMedium!.copyWith(
@@ -410,9 +426,7 @@ abstract final class AppTheme {
         actionTextColor: inverse.accent,
         elevation: 4,
         width: 420,
-        shape: RoundedRectangleBorder(
-          borderRadius: BorderRadius.circular(AppRadii.medium),
-        ),
+        shape: controlShape,
       ),
       listTileTheme: ListTileThemeData(
         iconColor: colors.textSecondary,
@@ -467,17 +481,14 @@ abstract final class AppTheme {
         EdgeInsets.all(AppSpacing.xxs),
       ),
       side: WidgetStatePropertyAll<BorderSide>(AppGlass.border(colors)),
-      shape: WidgetStatePropertyAll<OutlinedBorder>(
-        RoundedRectangleBorder(
-          borderRadius: BorderRadius.circular(AppRadii.large),
-        ),
+      shape: const WidgetStatePropertyAll<OutlinedBorder>(
+        RoundedSuperellipseBorder(borderRadius: AppBorderRadius.large),
       ),
     );
   }
 
-  /// One type scale on the platform's system font; no font is bundled.
-  /// Titles are semibold and slightly tightened; secondary text steps down
-  /// in color, not only in size.
+  /// System typography for controls and reading, with rounded heavy titles
+  /// that echo the mass and pill ends of the Etonia mark.
   static TextTheme _textTheme(AppColors colors) {
     TextStyle style(
       double size,
@@ -495,32 +506,37 @@ abstract final class AppTheme {
       );
     }
 
+    TextStyle title(
+      double size,
+      double height,
+      FontWeight weight, {
+      double letterSpacing = 0,
+    }) => style(
+      size,
+      height,
+      weight,
+      letterSpacing: letterSpacing,
+    ).copyWith(fontFamily: '.SF Pro Rounded');
+
     return TextTheme(
-      displaySmall: style(32, 1.2, FontWeight.w600, letterSpacing: -0.6),
-      headlineMedium: style(28, 1.2, FontWeight.w600, letterSpacing: -0.5),
-      headlineSmall: style(24, 1.25, FontWeight.w600, letterSpacing: -0.4),
-      titleLarge: style(20, 1.3, FontWeight.w600, letterSpacing: -0.2),
-      titleMedium: style(16, 1.3, FontWeight.w600, letterSpacing: -0.1),
-      titleSmall: style(14, 1.3, FontWeight.w600),
-      bodyLarge: style(15, 1.45, FontWeight.w400),
-      bodyMedium: style(14, 1.45, FontWeight.w400),
-      bodySmall: style(12, 1.4, FontWeight.w400, color: colors.textSecondary),
-      labelLarge: style(14, 1.3, FontWeight.w500),
+      displaySmall: title(34, 1.15, FontWeight.w800, letterSpacing: -1),
+      headlineMedium: title(28, 1.18, FontWeight.w800, letterSpacing: -0.6),
+      headlineSmall: title(22, 1.2, FontWeight.w700, letterSpacing: -0.3),
+      titleLarge: title(22, 1.2, FontWeight.w700, letterSpacing: -0.3),
+      titleMedium: title(17, 1.25, FontWeight.w600),
+      titleSmall: title(17, 1.25, FontWeight.w600),
+      bodyLarge: style(17, 1.4, FontWeight.w400),
+      bodyMedium: style(16, 1.4, FontWeight.w400),
+      bodySmall: style(15, 1.4, FontWeight.w400, color: colors.textSecondary),
+      labelLarge: style(16, 1.3, FontWeight.w600),
       labelMedium: style(
-        12,
+        13,
         1.3,
         FontWeight.w500,
         letterSpacing: 0.1,
         color: colors.textSecondary,
       ),
-      // Uppercase micro-copy, tracked out so the capitals breathe.
-      labelSmall: style(
-        11,
-        1.3,
-        FontWeight.w600,
-        letterSpacing: 0.6,
-        color: colors.textSecondary,
-      ),
+      labelSmall: style(12, 1.3, FontWeight.w600, color: colors.textSecondary),
     );
   }
 }

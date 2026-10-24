@@ -6,6 +6,7 @@ import {
   outputBudget,
   providerAnswer,
   providerRequest,
+  answerReserve,
   reservationCap,
   stepMessage,
   twoStep,
@@ -24,7 +25,7 @@ const input = {
   requestId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
   model: "sol",
   prompt: "Current question",
-  systemInstruction: "Return JSON",
+  systemInstruction: "Return SVG",
   selectedImage: png,
 };
 const config = {
@@ -35,7 +36,7 @@ const config = {
   maxOutputTokens: 8192,
 };
 
-Deno.test("AI accepts bounded conversation history and rejects documents and URLs", () => {
+Deno.test("AI accepts complete conversation history and rejects documents and URLs", () => {
   assert.deepEqual(validateInput(input), input);
   const withHistory = {
     ...input,
@@ -70,15 +71,14 @@ Deno.test("AI accepts bounded conversation history and rejects documents and URL
       }],
     ]
   ) assert.throws(() => validateInput({ ...input, history }));
-  assert.throws(() =>
-    validateInput({
-      ...input,
-      history: [{ role: "user", content: "x".repeat(128000) }, {
-        role: "assistant",
-        content: "answer",
-      }],
-    })
-  );
+  const longHistory = {
+    ...input,
+    history: [{ role: "user" as const, content: "x".repeat(128000) }, {
+      role: "assistant" as const,
+      content: "answer",
+    }],
+  };
+  assert.throws(() => validateInput(longHistory));
   assert.throws(() =>
     validateInput({ ...input, selectedImage: btoa("%PDF-secret") })
   );
@@ -140,7 +140,7 @@ Deno.test("providers receive conversation history and use server model and limit
     }
   }
 });
-Deno.test("a response schema holds each provider to the answer's shape", () => {
+Deno.test("providers request SVG text without a JSON response schema", () => {
   const responseSchema = {
     type: "object",
     additionalProperties: false,
@@ -165,14 +165,12 @@ Deno.test("a response schema holds each provider to the answer's shape", () => {
   assert.throws(() =>
     validateInput({ ...input, responseSchema: { type: "array" } })
   );
-  assert.throws(() =>
-    validateInput({
-      ...input,
-      responseSchema: { type: "object", pad: "x".repeat(70000) },
-    })
-  );
+  const largeSchema = {
+    ...input,
+    responseSchema: { type: "object", pad: "x".repeat(70000) },
+  };
+  assert.deepEqual(validateInput(largeSchema), largeSchema);
 
-  // Claude refuses the notation schema as too large a grammar: JSON mode.
   const claude = providerRequest(
     { ...config, provider: "claude" },
     withSchema,
@@ -187,14 +185,7 @@ Deno.test("a response schema holds each provider to the answer's shape", () => {
     1234,
     "k",
   );
-  assert.deepEqual(openai.body.response_format, {
-    type: "json_schema",
-    json_schema: {
-      name: "etonia_answer",
-      schema: responseSchema,
-      strict: false,
-    },
-  });
+  assert.equal(openai.body.response_format, undefined);
 
   const gemini = providerRequest(
     { ...config, provider: "gemini" },
@@ -202,22 +193,21 @@ Deno.test("a response schema holds each provider to the answer's shape", () => {
     1234,
     "k",
   );
-  assert.deepEqual(
-    (gemini.body.generationConfig as Record<string, unknown>)
-      .responseJsonSchema,
-    responseSchema,
-  );
+  const generation = gemini.body.generationConfig as Record<string, unknown>;
+  assert.equal(generation.responseMimeType, "text/plain");
+  assert.equal(generation.responseJsonSchema, undefined);
 
-  // Without one, JSON mode as before.
+  // The legacy client field is accepted for compatibility, but never reaches
+  // a provider now that the response contract is SVG.
   const plain = providerRequest(
     { ...config, provider: "openai" },
     input,
     1234,
     "k",
   );
-  assert.deepEqual(plain.body.response_format, { type: "json_object" });
+  assert.equal(plain.body.response_format, undefined);
 });
-Deno.test("with Notation on, Claude explains first, then draws following it", () => {
+Deno.test("with Notation on, the chosen model writes the words and a second model draws them", () => {
   const notationContext = {
     width: 800,
     height: 1100,
@@ -227,75 +217,110 @@ Deno.test("with Notation on, Claude explains first, then draws following it", ()
     bottom: 0.5,
   };
   const claude = { ...config, provider: "claude" as const };
-  assert(twoStep(claude, { ...input, notationContext }));
+  const notationOptions = {
+    notationInstruction: "Notation is on. Return the drawing SVG.",
+    animationAllowed: true,
+    notationImage: png,
+  };
+  assert(twoStep(claude, { ...input, ...notationOptions, notationContext }));
   assert(!twoStep(claude, input));
-  assert(
-    !twoStep({ ...config, provider: "openai" }, { ...input, notationContext }),
-  );
+  assert(twoStep(
+    { ...config, provider: "openai" },
+    { ...input, ...notationOptions, notationContext },
+  ));
+
+  for (const provider of ["openai", "claude", "gemini"] as const) {
+    const routed = {
+      ...input,
+      ...notationOptions,
+      notationContext,
+      noteMetadata: "EXPENSIVE_NOTE_METADATA",
+    };
+    const firstBody = JSON.stringify(
+      providerRequest(
+        { ...config, provider },
+        routed,
+        1234,
+        "k",
+        { step: "text" },
+      ).body,
+    );
+    assert(firstBody.includes("Return SVG"));
+    assert(!firstBody.includes("Notation is on"));
+    assert(!firstBody.includes("EXPENSIVE_NOTE_METADATA"));
+
+    const drawingBody = JSON.stringify(
+      providerRequest(
+        { ...config, provider },
+        routed,
+        1234,
+        "k",
+        { step: "notation", message: "Answer.", visual: "static" },
+      ).body,
+    );
+    assert(drawingBody.includes("Notation is on"));
+    assert(drawingBody.includes("EXPENSIVE_NOTE_METADATA"));
+  }
 
   const text = providerRequest(
     claude,
-    { ...input, notationContext },
+    { ...input, ...notationOptions, notationContext },
     1234,
     "k",
     {
       step: "text",
     },
   );
-  assert(JSON.stringify(text.body.system).includes("step 1 of 2"));
-  const format =
-    (text.body.output_config as { format: Record<string, unknown> }).format;
-  assert.deepEqual((format.schema as Record<string, unknown>).required, [
-    "message",
-  ]);
+  assert(JSON.stringify(text.body.system).includes("Answer fully"));
+  assert.equal(text.body.output_config, undefined);
   assert.equal((text.body.messages as unknown[]).length, 1);
 
   const notation = providerRequest(
     claude,
-    { ...input, notationContext },
+    { ...input, ...notationOptions, notationContext },
     1234,
     "k",
     {
       step: "notation",
       message: "The hypotenuse is 5.",
+      visual: "static",
     },
   );
-  assert(JSON.stringify(notation.body.system).includes("step 2 of 2"));
+  assert(
+    JSON.stringify(notation.body.system).includes("self-contained SVG"),
+  );
   assert.equal(notation.body.output_config, undefined);
   const turns = notation.body.messages as { role: string; content: unknown }[];
   assert.deepEqual(turns.map((t) => t.role), ["user", "assistant", "user"]);
   assert.equal(turns[1].content, "The hypotenuse is 5.");
 
+  const answerSvg =
+    '<svg xmlns="http://www.w3.org/2000/svg" data-etonia-version="1" viewBox="0 0 1 1"><title>Answer</title><desc data-etonia-role="message">The hypotenuse is 5.</desc></svg>';
   assert.equal(
-    stepMessage('{"message":"The hypotenuse is 5."}'),
+    stepMessage(answerSvg),
     "The hypotenuse is 5.",
   );
-  assert.throws(() => stepMessage('{"message":""}'));
-  assert.throws(() => stepMessage("not json"));
+  assert.throws(() => stepMessage('<svg viewBox="0 0 1 1"><desc data-etonia-role="message"></desc></svg>'));
+  assert.throws(() => stepMessage("not svg"));
+  assert.equal(
+    stepMessage('```svg\n<svg viewBox="0 0 1 1"><desc data-etonia-role="message">Flow.</desc></svg>\n```'),
+    "Flow.",
+  );
 
-  const drawn = { label: "Sides", items: [{ type: "text" }] };
-  assert.deepEqual(
-    JSON.parse(combineSteps("Words.", JSON.stringify({ notation: drawn }))),
-    {
-      version: 2,
-      message: "Words.",
-      notation: drawn,
-    },
-  );
-  // The notation without its wrapper, or in a code fence, is still read.
-  assert.deepEqual(
-    JSON.parse(
-      combineSteps("Words.", "```json\n" + JSON.stringify(drawn) + "\n```"),
-    ).notation,
-    drawn,
-  );
-  // A drawing that cannot be read, or none, keeps the words.
-  for (const broken of [undefined, "", '{"notation": {"items": [', "Sorry."]) {
-    assert.deepEqual(JSON.parse(combineSteps("Words.", broken)), {
-      version: 2,
-      message: "Words.",
-      notation: null,
-    });
+  const drawn =
+    '<svg xmlns="http://www.w3.org/2000/svg" data-etonia-version="1" viewBox="0 0 10 10"><desc data-etonia-role="message">Draft.</desc><path d="M0 0L10 10"/></svg>';
+  const combined = combineSteps("Words & symbols.", drawn);
+  assert(combined.includes('<path d="M0 0L10 10"/>'));
+  assert(combined.includes("Words &amp; symbols."));
+  assert(!combined.includes("Draft."));
+  assert(combineSteps("Words.", `\`\`\`svg\n${drawn}\n\`\`\``).includes("<path"));
+
+  // A drawing that cannot be read, or none, becomes a message-only SVG.
+  for (const broken of [undefined, "", "<svg><path", "Sorry."]) {
+    const fallback = combineSteps("Words.", broken);
+    assert(fallback.startsWith("<svg"));
+    assert(fallback.includes('data-etonia-role="message">Words.</desc>'));
+    assert(!fallback.includes("<path"));
   }
 });
 Deno.test("the fixed instructions are a cacheable prefix, billed at the cached rate", () => {
@@ -307,25 +332,52 @@ Deno.test("the fixed instructions are a cacheable prefix, billed at the cached r
     right: 0.4,
     bottom: 0.5,
   };
-  const withNote = { ...input, notationContext, noteMetadata: "Metadata: {}" };
+  const withNote = {
+    ...input,
+    notationContext,
+    noteMetadata: "Metadata: {}",
+    notationInstruction: "Notation is on.",
+    animationAllowed: true,
+    notationImage: png,
+  };
   assert.deepEqual(validateInput(withNote), withNote);
   assert.throws(() => validateInput({ ...input, noteMetadata: 7 }));
 
   // OpenAI: the fixed part first, then this request's; image read in full.
-  const openai = providerRequest(config, withNote, 1234, "k");
+  const openai = providerRequest(config, withNote, 1234, "k", {
+    step: "notation",
+    message: "Answer.",
+    visual: "static",
+  });
   const system = (openai.body.messages as { content: string }[])[0].content;
-  assert(system.startsWith("Return JSON"));
-  assert(system.indexOf("Return JSON") < system.indexOf("Metadata: {}"));
+  assert(system.startsWith("Notation is on."));
+  assert(system.indexOf("Notation is on.") < system.indexOf("Metadata: {}"));
   assert(JSON.stringify(openai.body).includes('"detail":"high"'));
   assert.equal(openai.body.reasoning_effort, undefined);
-  const low = providerRequest({ ...config, reasoningEffort: "low" }, input, 1234, "k");
+  const low = providerRequest(
+    { ...config, reasoningEffort: "low" },
+    input,
+    1234,
+    "k",
+  );
   assert.equal(low.body.reasoning_effort, "low");
-  assert.throws(() => modelConfig({ sol: { ...config, reasoningEffort: "max" } }, "sol"));
+  assert.throws(() =>
+    modelConfig({ sol: { ...config, reasoningEffort: "max" } }, "sol")
+  );
 
   // Claude: the fixed block carries the cache marker, the rest does not.
-  const claude = providerRequest({ ...config, provider: "claude" }, withNote, 1234, "k");
-  const blocks = claude.body.system as { text: string; cache_control?: unknown }[];
-  assert(blocks[0].text.startsWith("Return JSON"));
+  const claude = providerRequest(
+    { ...config, provider: "claude" },
+    withNote,
+    1234,
+    "k",
+    { step: "notation", message: "Answer.", visual: "static" },
+  );
+  const blocks = claude.body.system as {
+    text: string;
+    cache_control?: unknown;
+  }[];
+  assert(blocks[0].text.startsWith("Notation is on."));
   assert.deepEqual(blocks[0].cache_control, { type: "ephemeral" });
   assert(!blocks[0].text.includes("Metadata: {}"));
   assert(blocks[1].text.includes("Metadata: {}"));
@@ -363,10 +415,47 @@ Deno.test("credit budget and usage include image allowance and reasoning tokens"
   assert.throws(() => outputBudget(config, input, 1, false));
   assert(outputBudget(config, input, 5000000, false) <= 8192);
   assert.equal(outputBudget(config, input, 0, true), config.maxOutputTokens);
-  // A cap-sized hold always affords the full output, twice over in two steps.
-  const cap = reservationCap(config, input, false);
+  assert.equal(
+    outputBudget({ ...config, maxOutputTokens: 64000 }, input, 0, true),
+    16384,
+  );
+  // A cap-sized hold always affords the full output.
+  const cap = reservationCap(config, input);
   assert.equal(outputBudget(config, input, cap, false), config.maxOutputTokens);
-  assert(reservationCap(config, input, true) > 2 * cap);
+  // With Notation on, the hold also covers the cheaper drawing model, and
+  // the answer is left what remains, which still affords its full output.
+  const drawer = {
+    ...config,
+    inputMicroPerKilo: 100,
+    outputMicroPerKilo: 500,
+    maxOutputTokens: 16384,
+  };
+  const noted = {
+    ...input,
+    notationContext: {
+      width: 800,
+      height: 1100,
+      left: 0.1,
+      top: 0.2,
+      right: 0.4,
+      bottom: 0.5,
+    },
+    notationInstruction: "N".repeat(40000),
+    noteMetadata: "M".repeat(40000),
+    responseSchema: { type: "object", pad: "x".repeat(40000) },
+  };
+  const both = reservationCap(config, noted, drawer);
+  // The notation grammar and note are read by the drawer, not billed at the
+  // answering model's price, so this costs far less than the old two passes
+  // of the answering model.
+  assert(both < 2 * reservationCap(config, noted));
+  assert(both > reservationCap(config, input));
+  const left = answerReserve(both, drawer, noted);
+  assert.equal(outputBudget(config, noted, left, false, true), 8192);
+  assert.equal(outputBudget(config, noted, 0, true, true), 8192);
+  assert.throws(() =>
+    outputBudget(config, noted, answerReserve(0, drawer, noted), false, true)
+  );
   assert.equal(costOf(config, 1000, 100), 3000);
   assert.throws(() => costOf(config, undefined as unknown as number, 10));
   assert.throws(() => modelConfig({}, "sol"));

@@ -292,7 +292,9 @@ abstract final class NotationFont {
                 InkVector(flat[i], flat[i + 1]),
             ],
         ]),
-      ' ': const _Glyph(3, <List<InkVector>>[]),
+      // As wide as the built-in hand's space, so a line is measured as it
+      // is written.
+      ' ': _Glyph(HandwritingStyle.standard.wordSpacing, <List<InkVector>>[]),
     };
     glyphs['−'] = glyphs['-']!;
     glyphs['²'] = _small(glyphs['2']!);
@@ -358,7 +360,855 @@ abstract final class NotationFont {
       ..['✓'] = _Glyph(7, <List<InkVector>>[
         <InkVector>[_p(0, 5.5), _p(2.5, 9.5), _p(7, 0.5)],
       ]);
+    _addGreek(glyphs);
+    _addSymbols(glyphs);
     return glyphs;
+  }
+
+  /// The Greek letters LaTeX names, lowercase on the x-height like the
+  /// Latin ones.
+  static void _addGreek(Map<String, _Glyph> glyphs) {
+    _Glyph lines(double width, List<List<double>> strokes) {
+      return _Glyph(width, <List<InkVector>>[
+        for (final List<double> flat in strokes)
+          <InkVector>[
+            for (int i = 0; i < flat.length; i += 2) _p(flat[i], flat[i + 1]),
+          ],
+      ]);
+    }
+
+    glyphs
+      ..['α'] = lines(5.5, <List<double>>[
+        <double>[
+          5.3,
+          3.9,
+          4.6,
+          6.5,
+          3.8,
+          8.6,
+          2.6,
+          10,
+          1.2,
+          9.8,
+          0.2,
+          8.4,
+          0.1,
+          6.2,
+          0.9,
+          4.4,
+          2.2,
+          3.8,
+          3.4,
+          4.3,
+          4.2,
+          6.3,
+          4.8,
+          8.8,
+          5.5,
+          10,
+        ],
+      ])
+      ..['β'] = lines(4.8, <List<double>>[
+        <double>[
+          0.4,
+          13,
+          0.4,
+          2.5,
+          1,
+          0.6,
+          2.2,
+          0,
+          3.4,
+          0.4,
+          3.9,
+          1.6,
+          3.6,
+          3,
+          2.4,
+          4.4,
+          1.4,
+          4.6,
+          2.6,
+          4.7,
+          4.2,
+          5.6,
+          4.8,
+          7.2,
+          4.4,
+          8.9,
+          3.2,
+          10,
+          1.8,
+          10,
+          0.4,
+          9,
+        ],
+      ])
+      ..['γ'] = lines(5, <List<double>>[
+        <double>[
+          0,
+          4.2,
+          0.9,
+          3.8,
+          1.7,
+          4.6,
+          2.8,
+          8.2,
+          2.8,
+          12.2,
+          2.4,
+          13,
+          2,
+          12.2,
+          2.4,
+          10,
+          5,
+          3.8,
+        ],
+      ])
+      ..['δ'] = lines(4.6, <List<double>>[
+        <double>[
+          3.8,
+          0.6,
+          2.4,
+          0,
+          1.2,
+          0.4,
+          1.2,
+          1.6,
+          2.6,
+          2.8,
+          4.2,
+          4.4,
+          4.6,
+          6.6,
+          4.2,
+          8.8,
+          2.8,
+          10,
+          1.4,
+          9.8,
+          0.2,
+          8.4,
+          0.2,
+          6.4,
+          1.2,
+          4.8,
+          2.6,
+          3.4,
+        ],
+      ])
+      ..['ε'] = lines(4, <List<double>>[
+        <double>[
+          3.8,
+          4.4,
+          2.6,
+          3.8,
+          1,
+          4,
+          0.4,
+          5,
+          1,
+          6.4,
+          2.6,
+          6.8,
+          1,
+          7,
+          0.1,
+          8.2,
+          0.6,
+          9.6,
+          2.2,
+          10,
+          3.9,
+          9.4,
+        ],
+      ])
+      ..['ϵ'] = lines(4, <List<double>>[
+        <double>[4, 4, 2.4, 3.8, 0.8, 4.6, 0.1, 6.8, 0.6, 9, 2.2, 10, 3.8, 9.6],
+        <double>[0.2, 6.9, 3.2, 6.9],
+      ])
+      ..['ζ'] = lines(4.2, <List<double>>[
+        <double>[
+          0.8,
+          0,
+          3.6,
+          0,
+          1.4,
+          2.4,
+          0.2,
+          5,
+          0.2,
+          7.8,
+          1.2,
+          9.4,
+          3,
+          10,
+          3.6,
+          11,
+          3.2,
+          12.4,
+          2.4,
+          13,
+        ],
+      ])
+      ..['η'] = lines(4.4, <List<double>>[
+        <double>[0, 4, 0.4, 3.8, 0.6, 4.6, 0.6, 10],
+        <double>[0.6, 5.4, 1.6, 4.1, 2.8, 3.8, 3.8, 4.4, 4.2, 5.6, 4.2, 13],
+      ])
+      ..['ι'] = lines(1.6, <List<double>>[
+        <double>[0.4, 3.8, 0.4, 9.2, 0.9, 10, 1.6, 9.6],
+      ])
+      ..['κ'] = lines(4.4, <List<double>>[
+        <double>[0.4, 3.8, 0.4, 10],
+        <double>[4.2, 3.9, 0.4, 7.2],
+        <double>[1.6, 6.2, 4.4, 10],
+      ])
+      ..['λ'] = lines(5, <List<double>>[
+        <double>[0.6, 0.2, 1.4, 0, 2.2, 0.8, 5, 10],
+        <double>[2.9, 4.2, 0, 10],
+      ])
+      ..['μ'] = lines(4.6, <List<double>>[
+        <double>[0.4, 13, 0.4, 3.8],
+        <double>[0.4, 8.2, 1, 9.6, 2.2, 10, 3.4, 9.5, 4, 8.2],
+        <double>[4, 3.8, 4, 9.4, 4.6, 10],
+      ])
+      ..['ν'] = lines(4.4, <List<double>>[
+        <double>[0, 3.8, 1.6, 10, 3.6, 7, 4.4, 3.8],
+      ])
+      ..['ξ'] = lines(4.2, <List<double>>[
+        <double>[
+          3.6,
+          0.2,
+          1.6,
+          0.2,
+          0.8,
+          1.2,
+          1,
+          2.6,
+          2.6,
+          3.4,
+          1,
+          3.8,
+          0.2,
+          5.2,
+          0.4,
+          7.6,
+          1.6,
+          9.2,
+          3.4,
+          10,
+          3.8,
+          11.2,
+          3.2,
+          12.6,
+          2.4,
+          13,
+        ],
+      ])
+      ..['ρ'] = lines(4.6, <List<double>>[
+        <double>[
+          0.4,
+          13,
+          0.4,
+          6.6,
+          0.9,
+          4.6,
+          2.2,
+          3.8,
+          3.6,
+          4.1,
+          4.4,
+          5.4,
+          4.6,
+          7.2,
+          4.1,
+          9,
+          2.8,
+          10,
+          1.4,
+          9.8,
+          0.4,
+          8.8,
+        ],
+      ])
+      ..['σ'] = lines(5.4, <List<double>>[
+        <double>[
+          5.4,
+          3.8,
+          2.4,
+          3.8,
+          0.8,
+          4.6,
+          0.1,
+          6.6,
+          0.4,
+          8.8,
+          1.8,
+          10,
+          3.2,
+          9.8,
+          4.2,
+          8.4,
+          4.3,
+          6.2,
+          3.6,
+          4.4,
+          2.4,
+          3.8,
+        ],
+      ])
+      ..['ς'] = lines(4, <List<double>>[
+        <double>[
+          4,
+          4.2,
+          2.4,
+          3.8,
+          0.8,
+          4.8,
+          0.2,
+          6.8,
+          1,
+          8.6,
+          3,
+          9.6,
+          3.6,
+          11,
+          3,
+          12.6,
+          2.2,
+          13,
+        ],
+      ])
+      ..['τ'] = lines(4.6, <List<double>>[
+        <double>[0, 3.8, 4.6, 3.8],
+        <double>[2.3, 3.8, 2.1, 9, 2.6, 10, 3.6, 9.6],
+      ])
+      ..['υ'] = lines(4.4, <List<double>>[
+        <double>[
+          0,
+          4.4,
+          0.5,
+          3.8,
+          0.8,
+          4.4,
+          0.8,
+          7.8,
+          1.6,
+          9.6,
+          2.6,
+          10,
+          3.6,
+          9.4,
+          4.3,
+          7.6,
+          4.4,
+          5.6,
+          3.9,
+          3.8,
+        ],
+      ])
+      ..['φ'] = lines(5.4, <List<double>>[
+        <double>[
+          1.4,
+          4.2,
+          0.2,
+          5.8,
+          0.3,
+          8,
+          1.6,
+          9.6,
+          3,
+          10,
+          4.6,
+          9.4,
+          5.4,
+          7.6,
+          5.2,
+          5.4,
+          4.2,
+          4,
+          3.2,
+          4.2,
+          2.6,
+          6,
+          2.4,
+          13,
+        ],
+      ])
+      ..['ϕ'] = _Glyph(5.4, <List<InkVector>>[
+        <InkVector>[_p(2.7, 0.5), _p(2.7, 13)],
+        _arc(2.7, 6.9, 2.7, 3.1, 0, 360),
+      ])
+      ..['χ'] = lines(5, <List<double>>[
+        <double>[0, 4, 0.8, 3.8, 1.6, 4.6, 3.6, 12, 4.4, 13, 5, 12.8],
+        <double>[4.8, 4, 0.2, 13],
+      ])
+      ..['ψ'] = lines(5.6, <List<double>>[
+        <double>[2.8, 0.6, 2.8, 13],
+        <double>[
+          0,
+          4,
+          0.4,
+          3.8,
+          0.7,
+          4.6,
+          0.8,
+          7.4,
+          1.6,
+          9.4,
+          2.8,
+          10,
+          4,
+          9.4,
+          4.8,
+          7.4,
+          5,
+          4.6,
+          5.6,
+          3.8,
+        ],
+      ])
+      ..['ω'] = lines(6.6, <List<double>>[
+        <double>[
+          1.2,
+          3.9,
+          0.2,
+          5.6,
+          0.2,
+          8.2,
+          1,
+          9.8,
+          2.2,
+          10,
+          3,
+          9,
+          3.3,
+          7,
+          3.6,
+          9,
+          4.4,
+          10,
+          5.6,
+          9.8,
+          6.4,
+          8.2,
+          6.4,
+          5.6,
+          5.4,
+          3.9,
+        ],
+      ])
+      ..['Γ'] = lines(5, <List<double>>[
+        <double>[5, 0, 0.4, 0, 0.4, 10],
+      ])
+      ..['Θ'] = _Glyph(7, <List<InkVector>>[
+        _arc(3.5, 5, 3.5, 5, 0, 360),
+        <InkVector>[_p(1.8, 5), _p(5.2, 5)],
+      ])
+      ..['Λ'] = lines(6, <List<double>>[
+        <double>[0, 10, 3, 0, 6, 10],
+      ])
+      ..['Ξ'] = lines(5.6, <List<double>>[
+        <double>[0.2, 0, 5.4, 0],
+        <double>[1, 5, 4.6, 5],
+        <double>[0, 10, 5.6, 10],
+      ])
+      ..['Π'] = lines(6, <List<double>>[
+        <double>[0, 0, 6, 0],
+        <double>[0.8, 0, 0.8, 10],
+        <double>[5.2, 0, 5.2, 10],
+      ])
+      ..['Σ'] = lines(5.6, <List<double>>[
+        <double>[5.4, 0.8, 5.4, 0, 0, 0, 3, 5, 0, 10, 5.6, 10, 5.6, 9.2],
+      ])
+      ..['Υ'] = lines(6, <List<double>>[
+        <double>[0, 1, 1, 0, 2.2, 0.6, 3, 2.6, 3, 10],
+        <double>[3, 2.6, 3.8, 0.6, 5, 0, 6, 1],
+      ])
+      ..['Φ'] = _Glyph(7, <List<InkVector>>[
+        <InkVector>[_p(3.5, 0), _p(3.5, 10)],
+        _arc(3.5, 5, 3.5, 2.8, 0, 360),
+      ])
+      ..['Ψ'] = lines(6.4, <List<double>>[
+        <double>[3.2, 0, 3.2, 10],
+        <double>[
+          0,
+          0.4,
+          0.4,
+          3.6,
+          1.4,
+          5.6,
+          3.2,
+          6.4,
+          5,
+          5.6,
+          6,
+          3.6,
+          6.4,
+          0.4,
+        ],
+      ])
+      ..['Ω'] = lines(7.4, <List<double>>[
+        <double>[
+          0,
+          10,
+          2.4,
+          10,
+          2.4,
+          9.2,
+          1,
+          7.6,
+          0.4,
+          5.4,
+          0.8,
+          2.6,
+          2,
+          0.8,
+          3.7,
+          0,
+          5.4,
+          0.8,
+          6.6,
+          2.6,
+          7,
+          5.4,
+          6.4,
+          7.6,
+          5,
+          9.2,
+          5,
+          10,
+          7.4,
+          10,
+        ],
+      ]);
+    glyphs
+      ..['ϑ'] = glyphs['θ']!
+      ..['ϱ'] = glyphs['ρ']!
+      ..['ϖ'] = glyphs['π']!;
+  }
+
+  /// The operators, relations, arrows, and other symbols of mathematics
+  /// that LaTeX names, drawn round the math axis, the height of the middle
+  /// of a plus sign.
+  static void _addSymbols(Map<String, _Glyph> glyphs) {
+    const double axis = 4.95;
+    List<InkVector> line(double x0, double y0, double x1, double y1) =>
+        <InkVector>[_p(x0, y0), _p(x1, y1)];
+    List<InkVector> dot(double x, double y) => <InkVector>[_p(x, y)];
+    List<InkVector> wave(double y) => <InkVector>[
+      _p(0, y + 0.65),
+      _p(0.9, y - 0.35),
+      _p(1.9, y - 0.65),
+      _p(3.4, y + 0.55),
+      _p(4.5, y + 0.65),
+      _p(5.4, y - 0.55),
+    ];
+    List<InkVector> slash(double width) => line(width - 0.8, 0, 0.8, 11);
+    List<InkVector> head(double x, double y, double dx) => <InkVector>[
+      _p(x - dx, y - 2.6),
+      _p(x, y),
+      _p(x - dx, y + 2.6),
+    ];
+    final _Glyph element = _Glyph(5, <List<InkVector>>[
+      _arc(5, 5.6, 4.6, 4, 270, 90),
+      line(0.4, 5.6, 5, 5.6),
+    ]);
+    final _Glyph subset = _Glyph(5.4, <List<InkVector>>[
+      <InkVector>[_p(5.4, 1.6), ..._arc(3, 5.6, 3, 4, 270, 90), _p(5.4, 9.6)],
+    ]);
+    final _Glyph superset = _Glyph(5.4, <List<InkVector>>[
+      <InkVector>[_p(0, 1.6), ..._arc(2.4, 5.6, 3, 4, 270, 450), _p(0, 9.6)],
+    ]);
+    glyphs
+      ..['−'] = _Glyph(5.32, <List<InkVector>>[line(0, axis, 5.32, axis)])
+      ..['±'] = _Glyph(5.4, <List<InkVector>>[
+        line(0, 3.9, 5.4, 3.9),
+        line(2.7, 1.2, 2.7, 6.6),
+        line(0, 9, 5.4, 9),
+      ])
+      ..['∓'] = _Glyph(5.4, <List<InkVector>>[
+        line(0, 1.6, 5.4, 1.6),
+        line(0, 6.6, 5.4, 6.6),
+        line(2.7, 3.9, 2.7, 9.3),
+      ])
+      ..['≡'] = _Glyph(5.4, <List<InkVector>>[
+        line(0, 2.9, 5.4, 2.9),
+        line(0, axis, 5.4, axis),
+        line(0, 7, 5.4, 7),
+      ])
+      ..['∼'] = _Glyph(5.4, <List<InkVector>>[wave(axis)])
+      ..['≃'] = _Glyph(5.4, <List<InkVector>>[wave(3.9), line(0, 7, 5.4, 7)])
+      ..['≅'] = _Glyph(5.4, <List<InkVector>>[
+        wave(2.6),
+        line(0, 5.4, 5.4, 5.4),
+        line(0, 8, 5.4, 8),
+      ])
+      ..['∝'] = _Glyph(6.4, <List<InkVector>>[
+        <InkVector>[
+          _p(6.4, 3.4),
+          _p(5, 3.2),
+          _p(3.8, 4),
+          _p(2.4, 6.2),
+          _p(1.2, 6.8),
+          _p(0.2, 6.2),
+          _p(0, 5),
+          _p(0.2, 3.8),
+          _p(1.2, 3.2),
+          _p(2.4, 3.8),
+          _p(3.8, 6),
+          _p(5, 6.8),
+          _p(6.4, 6.6),
+        ],
+      ])
+      ..['≪'] = _Glyph(7.4, <List<InkVector>>[
+        <InkVector>[_p(4.6, 7.4), _p(0, axis), _p(4.6, 2.5)],
+        <InkVector>[_p(7.4, 7.4), _p(2.8, axis), _p(7.4, 2.5)],
+      ])
+      ..['≫'] = _Glyph(7.4, <List<InkVector>>[
+        <InkVector>[_p(0, 7.4), _p(4.6, axis), _p(0, 2.5)],
+        <InkVector>[_p(2.8, 7.4), _p(7.4, axis), _p(2.8, 2.5)],
+      ])
+      ..['∈'] = element
+      ..['∉'] = _Glyph(5, <List<InkVector>>[...element.strokes, slash(5)])
+      ..['∋'] = _Glyph(5, <List<InkVector>>[
+        _arc(0, 5.6, 4.6, 4, 270, 450),
+        line(0, 5.6, 4.6, 5.6),
+      ])
+      ..['⊂'] = subset
+      ..['⊃'] = superset
+      ..['⊆'] = _Glyph(5.4, <List<InkVector>>[
+        <InkVector>[_p(5.4, 1), ..._arc(3, 4.4, 3, 3.4, 270, 90), _p(5.4, 7.8)],
+        line(0, 10, 5.4, 10),
+      ])
+      ..['⊇'] = _Glyph(5.4, <List<InkVector>>[
+        <InkVector>[_p(0, 1), ..._arc(2.4, 4.4, 3, 3.4, 270, 450), _p(0, 7.8)],
+        line(0, 10, 5.4, 10),
+      ])
+      ..['∪'] = _Glyph(5.4, <List<InkVector>>[
+        <InkVector>[_p(0, 2), ..._arc(2.7, 6.6, 2.7, 3.4, 180, 0), _p(5.4, 2)],
+      ])
+      ..['∩'] = _Glyph(5.4, <List<InkVector>>[
+        <InkVector>[
+          _p(0, 10),
+          ..._arc(2.7, 5.4, 2.7, 3.4, 180, 360),
+          _p(5.4, 10),
+        ],
+      ])
+      ..['∧'] = _Glyph(5, <List<InkVector>>[
+        <InkVector>[_p(0, 10), _p(2.5, 2), _p(5, 10)],
+      ])
+      ..['∨'] = _Glyph(5, <List<InkVector>>[
+        <InkVector>[_p(0, 2), _p(2.5, 10), _p(5, 2)],
+      ])
+      ..['⊕'] = _Glyph(6.6, <List<InkVector>>[
+        _arc(3.3, axis, 3.3, 3.3, 0, 360),
+        line(0, axis, 6.6, axis),
+        line(3.3, axis - 3.3, 3.3, axis + 3.3),
+      ])
+      ..['⊗'] = _Glyph(6.6, <List<InkVector>>[
+        _arc(3.3, axis, 3.3, 3.3, 0, 360),
+        line(0.97, axis - 2.33, 5.63, axis + 2.33),
+        line(0.97, axis + 2.33, 5.63, axis - 2.33),
+      ])
+      ..['∘'] = _Glyph(3, <List<InkVector>>[_arc(1.5, axis, 1.5, 1.5, 0, 360)])
+      ..['∂'] = _Glyph(5, <List<InkVector>>[
+        <InkVector>[
+          _p(0.8, 1.2),
+          _p(2, 0.2),
+          _p(3.4, 0.2),
+          _p(4.6, 1.6),
+          _p(5, 4.4),
+          _p(4.6, 7.6),
+          _p(3.4, 9.6),
+          _p(2, 10),
+          _p(0.6, 9.4),
+          _p(0.2, 7.8),
+          _p(0.8, 6.2),
+          _p(2.2, 5.4),
+          _p(3.6, 5.6),
+          _p(4.8, 6.6),
+        ],
+      ])
+      ..['∇'] = _Glyph(6, <List<InkVector>>[
+        <InkVector>[_p(0, 0), _p(6, 0), _p(3, 10), _p(0, 0)],
+      ])
+      ..['∀'] = _Glyph(6, <List<InkVector>>[
+        <InkVector>[_p(0, 0), _p(3, 10), _p(6, 0)],
+        line(1.1, 3.7, 4.9, 3.7),
+      ])
+      ..['∃'] = _Glyph(5, <List<InkVector>>[
+        <InkVector>[_p(0, 0), _p(5, 0), _p(5, 10), _p(0, 10)],
+        line(1, 5, 5, 5),
+      ])
+      ..['∄'] = _Glyph(5, <List<InkVector>>[
+        <InkVector>[_p(0, 0), _p(5, 0), _p(5, 10), _p(0, 10)],
+        line(1, 5, 5, 5),
+        slash(5),
+      ])
+      ..['∅'] = _Glyph(6, <List<InkVector>>[
+        _arc(3, 5, 2.8, 4, 0, 360),
+        line(5.4, 0, 0.6, 10),
+      ])
+      ..['∠'] = _Glyph(6.4, <List<InkVector>>[
+        <InkVector>[_p(6, 1.6), _p(0, 10), _p(6.4, 10)],
+      ])
+      ..['⊥'] = _Glyph(6, <List<InkVector>>[
+        line(3, 1, 3, 10),
+        line(0, 10, 6, 10),
+      ])
+      ..['∥'] = _Glyph(1.6, <List<InkVector>>[
+        line(0, -0.5, 0, 12.5),
+        line(1.6, -0.5, 1.6, 12.5),
+      ])
+      ..['¬'] = _Glyph(5, <List<InkVector>>[
+        <InkVector>[_p(0, 4.2), _p(5, 4.2), _p(5, 6.8)],
+      ])
+      ..['ℓ'] = _Glyph(3, <List<InkVector>>[
+        <InkVector>[
+          _p(0.2, 8.8),
+          _p(1.6, 7),
+          _p(2.6, 4.6),
+          _p(2.8, 2),
+          _p(2.4, 0.4),
+          _p(1.8, 0),
+          _p(1.2, 0.6),
+          _p(0.9, 3),
+          _p(0.8, 7),
+          _p(1, 9.2),
+          _p(1.8, 10),
+          _p(2.8, 9.6),
+        ],
+      ])
+      ..['∫'] = _Glyph(3.6, <List<InkVector>>[
+        <InkVector>[
+          _p(3.6, 0.4),
+          _p(3, -0.4),
+          _p(2.2, -0.2),
+          _p(1.8, 1.4),
+          _p(1.8, 10.6),
+          _p(1.4, 12.4),
+          _p(0.6, 12.6),
+          _p(0, 11.8),
+        ],
+      ])
+      ..['∮'] = _Glyph(3.6, <List<InkVector>>[
+        <InkVector>[
+          _p(3.6, 0.4),
+          _p(3, -0.4),
+          _p(2.2, -0.2),
+          _p(1.8, 1.4),
+          _p(1.8, 10.6),
+          _p(1.4, 12.4),
+          _p(0.6, 12.6),
+          _p(0, 11.8),
+        ],
+        _arc(1.8, 6.1, 1.5, 1.5, 0, 360),
+      ])
+      ..['⇒'] = _Glyph(8.4, <List<InkVector>>[
+        line(0, 3.6, 7, 3.6),
+        line(0, 6.3, 7, 6.3),
+        head(8.4, axis, 3),
+      ])
+      ..['⇐'] = _Glyph(8.4, <List<InkVector>>[
+        line(1.4, 3.6, 8.4, 3.6),
+        line(1.4, 6.3, 8.4, 6.3),
+        head(0, axis, -3),
+      ])
+      ..['⇔'] = _Glyph(10, <List<InkVector>>[
+        line(1.4, 3.6, 8.6, 3.6),
+        line(1.4, 6.3, 8.6, 6.3),
+        head(0, axis, -3),
+        head(10, axis, 3),
+      ])
+      ..['↔'] = _Glyph(9, <List<InkVector>>[
+        line(0, axis, 9, axis),
+        head(0, axis, -2.5),
+        head(9, axis, 2.5),
+      ])
+      ..['↦'] = _Glyph(8, <List<InkVector>>[
+        line(0, axis - 2, 0, axis + 2),
+        line(0, axis, 8, axis),
+        head(8, axis, 2.5),
+      ])
+      ..['↑'] = _Glyph(4, <List<InkVector>>[
+        line(2, 10, 2, 0),
+        <InkVector>[_p(0, 2.5), _p(2, 0), _p(4, 2.5)],
+      ])
+      ..['↓'] = _Glyph(4, <List<InkVector>>[
+        line(2, 0, 2, 10),
+        <InkVector>[_p(0, 7.5), _p(2, 10), _p(4, 7.5)],
+      ])
+      ..['⋯'] = _Glyph(6, <List<InkVector>>[
+        dot(0.4, axis),
+        dot(3, axis),
+        dot(5.6, axis),
+      ])
+      ..['…'] = _Glyph(6, <List<InkVector>>[
+        dot(0.4, 9.6),
+        dot(3, 9.6),
+        dot(5.6, 9.6),
+      ])
+      ..['⋮'] = _Glyph(0.8, <List<InkVector>>[
+        dot(0.4, 1.4),
+        dot(0.4, 5.4),
+        dot(0.4, 9.4),
+      ])
+      ..['⋱'] = _Glyph(6, <List<InkVector>>[
+        dot(0.4, 1.4),
+        dot(3, 5.4),
+        dot(5.6, 9.4),
+      ])
+      ..['′'] = _Glyph(1.6, <List<InkVector>>[line(1.6, -0.2, 0.4, 3.4)])
+      ..['″'] = _Glyph(3, <List<InkVector>>[
+        line(1.6, -0.2, 0.4, 3.4),
+        line(3, -0.2, 1.8, 3.4),
+      ])
+      ..['⟨'] = _Glyph(2.6, <List<InkVector>>[
+        <InkVector>[_p(2.6, -0.4), _p(0, 6), _p(2.6, 12.4)],
+      ])
+      ..['⟩'] = _Glyph(2.6, <List<InkVector>>[
+        <InkVector>[_p(0, -0.4), _p(2.6, 6), _p(0, 12.4)],
+      ])
+      ..['ℤ'] = _Glyph(5.4, <List<InkVector>>[
+        line(0.2, 0, 5.4, 0),
+        line(5.4, 0, 1.4, 10),
+        line(4, 0, 0, 10),
+        line(0, 10, 5.4, 10),
+      ]);
+    glyphs
+      ..['∑'] = glyphs['Σ']!
+      ..['∏'] = glyphs['Π']!
+      ..['△'] = glyphs['Δ']!
+      ..['‖'] = glyphs['∥']!
+      ..['∖'] = glyphs['\\']!
+      ..['∗'] = glyphs['*']!
+      ..['⋅'] = glyphs['·']!
+      ..['ℏ'] = glyphs['ħ'] = _Glyph(glyphs['h']!.width, <List<InkVector>>[
+        ...glyphs['h']!.strokes,
+        line(-0.6, 2.6, 2.4, 1.2),
+      ]);
+    // Blackboard bold: the letter with a second stem beside its first.
+    for (final (String letter, String bold) in <(String, String)>[
+      ('R', 'ℝ'),
+      ('N', 'ℕ'),
+      ('Q', 'ℚ'),
+      ('C', 'ℂ'),
+    ]) {
+      final _Glyph glyph = glyphs[letter]!;
+      double left = double.infinity;
+      for (final List<InkVector> stroke in glyph.strokes) {
+        for (final InkVector p in stroke) {
+          left = math.min(left, p.x);
+        }
+      }
+      final bool round = letter == 'Q' || letter == 'C';
+      glyphs[bold] = _Glyph(glyph.width, <List<InkVector>>[
+        ...glyph.strokes,
+        line(left + 1.1, round ? 1.6 : 0, left + 1.1, round ? 8.4 : 10),
+      ]);
+    }
   }
 
   /// [glyph] at half size, raised, as an exponent.

@@ -13,6 +13,8 @@ import 'package:greatnote/features/library/cloud/google_drive_client.dart';
 import 'package:greatnote/features/library/cloud/google_drive_sheet.dart';
 import 'package:greatnote/features/library/library_screen.dart';
 import 'package:greatnote/features/library/note_repository.dart';
+import 'package:greatnote/features/payment/account_page.dart';
+import 'package:greatnote/shared/widgets/processing.dart';
 
 import '../../../helpers/document_io_fakes.dart';
 import '../../../helpers/goodnotes_fixtures.dart';
@@ -97,56 +99,28 @@ void main() {
       tester.widget<ButtonStyleButton>(button(label)).onPressed != null;
 
   group('connection', () {
-    testDrive('connects and shows the account', (WidgetTester tester) async {
+    testDrive('signed out, points to the Account button', (
+      WidgetTester tester,
+    ) async {
       await pumpSheet(tester);
       expect(find.text('Not connected'), findsOneWidget);
+      expect(button('Connect'), findsNothing);
+      expect(button('Disconnect'), findsNothing);
       expect(enabled(tester, 'Back up library now'), isFalse);
       expect(enabled(tester, 'Import Goodnotes folder from Drive'), isFalse);
+    });
 
-      await tester.tap(button('Connect'));
-      await tester.pumpAndSettle();
-
+    testDrive('shows the signed-in account', (WidgetTester tester) async {
+      await drive.signIn();
+      await pumpSheet(tester);
       expect(find.text('Ada Lovelace'), findsOneWidget);
       expect(find.text('ada@example.com'), findsOneWidget);
-      expect(button('Disconnect'), findsOneWidget);
+      expect(button('Disconnect'), findsNothing);
       expect(enabled(tester, 'Back up library now'), isTrue);
       expect(
         find.bySemanticsLabel('Connected to Google Drive as ada@example.com'),
         findsOneWidget,
       );
-    });
-
-    testDrive('a cancelled sign-in stays disconnected', (
-      WidgetTester tester,
-    ) async {
-      drive.account = null;
-      await pumpSheet(tester);
-      await tester.tap(button('Connect'));
-      await tester.pumpAndSettle();
-      expect(find.text('Not connected'), findsOneWidget);
-      expect(find.text('Sign-in was cancelled'), findsOneWidget);
-    });
-
-    testDrive('disconnects', (WidgetTester tester) async {
-      await drive.signIn();
-      await pumpSheet(tester);
-      expect(find.text('Ada Lovelace'), findsOneWidget);
-      await tester.tap(button('Disconnect'));
-      await tester.pumpAndSettle();
-      expect(find.text('Not connected'), findsOneWidget);
-      expect(drive.currentAccount, isNull);
-    });
-
-    testDrive('a sign-in error is explained', (WidgetTester tester) async {
-      drive.signInError = const GoogleDriveException(
-        GoogleDriveErrorKind.unauthorized,
-        "Couldn't sign in to Google",
-      );
-      await pumpSheet(tester);
-      await tester.tap(button('Connect'));
-      await tester.pumpAndSettle();
-      expect(find.text("Couldn't sign in to Google"), findsOneWidget);
-      expect(find.text('Not connected'), findsOneWidget);
     });
 
     testDrive('being offline is explained', (WidgetTester tester) async {
@@ -181,10 +155,8 @@ void main() {
       await tester.pump();
 
       expect(find.text('Backing up'), findsOneWidget);
-      final LinearProgressIndicator bar = tester.widget(
-        find.byType(LinearProgressIndicator),
-      );
-      expect(bar.value, isNotNull);
+      final ProgressCount count = tester.widget(find.byType(ProgressCount));
+      expect(count.value, isNotNull);
       expect(
         find.bySemanticsLabel(RegExp('Google Drive progress')),
         findsOneWidget,
@@ -199,7 +171,7 @@ void main() {
       await tester.pumpAndSettle();
 
       expect(find.text('Cancelled'), findsOneWidget);
-      expect(find.byType(LinearProgressIndicator), findsNothing);
+      expect(find.byType(ProgressCount), findsNothing);
       expect(find.text('Not backed up yet'), findsOneWidget);
     });
 
@@ -356,7 +328,7 @@ void main() {
           await tester.pump();
           await tester.drag(find.byType(ListView), const Offset(0, -600));
           await tester.pump();
-          expect(find.byType(LinearProgressIndicator), findsOneWidget);
+          expect(find.byType(ProgressCount), findsOneWidget);
           expect(tester.takeException(), isNull);
           drive.uploadGate!.complete();
           await tester.pumpAndSettle();
@@ -372,12 +344,12 @@ void main() {
       await pumpSheet(tester, viewport: TestViewport.compact);
       await expectLater(tester, meetsGuideline(androidTapTargetGuideline));
       await expectLater(tester, meetsGuideline(labeledTapTargetGuideline));
-      await tester.tap(button('Connect'));
-      await tester.pumpAndSettle();
+      await tester.pumpWidget(const SizedBox());
+      await drive.signIn();
+      await pumpSheet(tester, viewport: TestViewport.compact);
       await expectLater(tester, meetsGuideline(androidTapTargetGuideline));
       await expectLater(tester, meetsGuideline(labeledTapTargetGuideline));
       for (final String label in <String>[
-        'Disconnect',
         'Back up library now',
         'Import Goodnotes folder from Drive',
       ]) {
@@ -400,46 +372,53 @@ void main() {
   });
 
   group('library button', () {
-    testDrive('opens the sheet from a labeled 48 x 48 button', (
-      WidgetTester tester,
-    ) async {
-      for (final TestViewport viewport in <TestViewport>[
-        TestViewport.compact,
-        TestViewport.tabletLandscape,
-      ]) {
-        setViewportSize(tester, viewport.size);
-        await tester.pumpWidget(
-          GreatnoteApp(
-            home: LibraryScreen(
-              key: ValueKey<TestViewport>(viewport),
-              repository: repository,
-              clock: () => _now,
-              googleDriveClient: drive,
-              cloudStateStore: state,
+    testDrive(
+      'opens the account page, with backup in it, from a labeled 48 x 48 button',
+      (WidgetTester tester) async {
+        for (final TestViewport viewport in <TestViewport>[
+          TestViewport.compact,
+          TestViewport.tabletLandscape,
+        ]) {
+          setViewportSize(tester, viewport.size);
+          await tester.pumpWidget(
+            GreatnoteApp(
+              home: LibraryScreen(
+                key: ValueKey<TestViewport>(viewport),
+                repository: repository,
+                clock: () => _now,
+                googleDriveClient: drive,
+                cloudStateStore: state,
+              ),
             ),
-          ),
-        );
-        await tester.pumpAndSettle();
+          );
+          await tester.pumpAndSettle();
 
-        final Finder driveButton = find.ancestor(
-          of: find.byTooltip('Google Drive'),
-          matching: find.byType(IconButton),
-        );
-        expect(driveButton, findsOneWidget);
-        final Size size = tester.getSize(driveButton);
-        expect(size.width, greaterThanOrEqualTo(48));
-        expect(size.height, greaterThanOrEqualTo(48));
-        expect(tester.getSemantics(driveButton).tooltip, 'Google Drive');
+          final Finder driveButton = find.ancestor(
+            of: find.byTooltip('Account'),
+            matching: find.byType(IconButton),
+          );
+          expect(driveButton, findsOneWidget);
+          final Size size = tester.getSize(driveButton);
+          expect(size.width, greaterThanOrEqualTo(48));
+          expect(size.height, greaterThanOrEqualTo(48));
+          expect(tester.getSemantics(driveButton).tooltip, 'Account');
 
-        await tester.tap(driveButton);
-        await tester.pumpAndSettle();
-        expect(find.byType(GoogleDriveSheet), findsOneWidget);
-        expect(find.text('Not connected'), findsOneWidget);
-        expect(tester.takeException(), isNull);
-        Navigator.of(tester.element(find.byType(GoogleDriveSheet))).pop();
-        await tester.pumpAndSettle();
-      }
-    });
+          await tester.tap(driveButton);
+          await tester.pumpAndSettle();
+          expect(find.byType(AccountPage), findsOneWidget);
+          // Backup is its own tab of the account page.
+          await tester.tap(
+            find.byKey(const ValueKey<String>('account-tab-backup')),
+          );
+          await tester.pumpAndSettle();
+          expect(find.byType(GoogleDriveSheet), findsOneWidget);
+          expect(find.text('Not connected'), findsOneWidget);
+          expect(tester.takeException(), isNull);
+          Navigator.of(tester.element(find.byType(GoogleDriveSheet))).pop();
+          await tester.pumpAndSettle();
+        }
+      },
+    );
 
     testDrive('takes keyboard focus', (WidgetTester tester) async {
       setViewportSize(tester, TestViewport.tabletLandscape.size);
@@ -456,7 +435,7 @@ void main() {
       await tester.pumpAndSettle();
       // The button's own focus, the nearest above its icon.
       final FocusNode focus = Focus.of(
-        tester.element(find.byIcon(AppIcons.cloud)),
+        tester.element(find.byIcon(AppIcons.account)),
       );
       expect(focus.canRequestFocus, isTrue);
       focus.requestFocus();

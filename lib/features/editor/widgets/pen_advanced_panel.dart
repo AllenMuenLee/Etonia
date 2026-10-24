@@ -21,7 +21,7 @@ Future<void> showPenAdvancedPanel(
 }) {
   final Duration duration = AppMotion.resolve(
     context,
-    const Duration(milliseconds: 260),
+    AppMotion.snappy.duration,
   );
   return showGeneralDialog<void>(
     context: context,
@@ -50,8 +50,8 @@ Future<void> showPenAdvancedPanel(
         ) {
           final Animation<double> curved = CurvedAnimation(
             parent: animation,
-            curve: Curves.easeOutCubic,
-            reverseCurve: Curves.easeInCubic,
+            curve: AppMotion.fadeInCurve,
+            reverseCurve: AppMotion.fadeOutCurve,
           );
           return FadeTransition(
             opacity: curved,
@@ -105,7 +105,7 @@ class PenAdvancedPanel extends StatelessWidget {
           child: ConstrainedBox(
             constraints: const BoxConstraints(maxWidth: width),
             child: GlassSurface(
-              borderRadius: BorderRadius.circular(AppRadii.xl),
+              borderRadius: AppBorderRadius.xl,
               boxShadow: AppShadows.floating(colors),
               child: Material(
                 key: const ValueKey<String>('pen-advanced'),
@@ -159,7 +159,9 @@ class PenAdvancedPanel extends StatelessWidget {
                                   'pen-stabilization',
                                 ),
                                 label: 'Stroke stabilization',
-                                hint: 'How much shaky lines are smoothed',
+                                hint:
+                                    'How much shaky lines are smoothed, '
+                                    'most when drawing slowly',
                                 value: settings.stabilization,
                                 onChanged: (double value) => onChanged(
                                   settings.copyWith(stabilization: value),
@@ -187,17 +189,6 @@ class PenAdvancedPanel extends StatelessWidget {
                                 value: settings.scribbleToErase,
                                 onChanged: (bool value) => onChanged(
                                   settings.copyWith(scribbleToErase: value),
-                                ),
-                              ),
-                              ToggleSetting(
-                                key: const ValueKey<String>(
-                                  'pen-follow-stroke',
-                                ),
-                                label: 'Follow nearby strokes',
-                                hint: 'Ease onto ink you draw alongside',
-                                value: settings.followStroke,
-                                onChanged: (bool value) => onChanged(
-                                  settings.copyWith(followStroke: value),
                                 ),
                               ),
                               const SizedBox(height: AppSpacing.md),
@@ -283,7 +274,7 @@ class _Preview extends StatelessWidget {
         height: 112,
         decoration: BoxDecoration(
           color: colors.writingSurface,
-          borderRadius: BorderRadius.circular(AppRadii.large),
+          borderRadius: AppBorderRadius.large,
           border: Border.all(color: colors.divider, width: AppSizes.hairline),
         ),
         child: CustomPaint(
@@ -324,8 +315,9 @@ class _PreviewPainter extends CustomPainter {
       );
     }
 
+    final StrokeStyle style = settings.strokeStyle();
     final ActiveStroke active = ActiveStroke(
-      style: StrokeStyle(ink: settings.ink, width: settings.width),
+      style: style,
       first: sample(0),
       dynamics: settings.dynamics,
     );
@@ -336,11 +328,12 @@ class _PreviewPainter extends CustomPainter {
     paintInkStroke(
       canvas,
       color: color,
-      width: settings.width,
+      width: style.width,
       path: stroke.path,
       origin: stroke.points.first,
       isDot: stroke.isDot,
       outline: stroke.outline,
+      writing: style.writing,
     );
   }
 

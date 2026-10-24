@@ -152,7 +152,7 @@ void main() {
     expect(body['model'], 'gpt-6.1-sol');
     expect(body['stream'], isTrue);
     expect(body['stream_options'], <String, Object?>{'include_usage': true});
-    expect(body['response_format'], <String, Object?>{'type': 'json_object'});
+    expect(body, isNot(contains('response_format')));
   });
 
   test('the selected ink rides in the first user turn and the note, only as '
@@ -172,13 +172,12 @@ void main() {
       'type': 'image_url',
       'image_url': <String, Object?>{
         'url': 'data:image/png;base64,${base64Encode(_ink)}',
+        'detail': 'high',
       },
     });
     expect(messages[2], <String, Object?>{
       'role': 'assistant',
-      'content': const AiAssistantResponse(
-        message: 'A circuit.',
-      ).toJsonString(),
+      'content': 'A circuit.',
     });
     final List<Object?> last =
         (messages[3]! as Map<String, Object?>)['content']! as List<Object?>;

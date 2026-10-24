@@ -155,13 +155,13 @@ void main() {
     expect(body['max_tokens'], const AiNotationConfig().maxOutputTokens);
   });
 
-  test('max_tokens is cut to the model limit', () {
+  test('max_tokens is not cut by the app', () {
     final Map<String, Object?> body = ClaudeAiClient.buildBody(
       _request(),
       model: 'claude-opus-5-5',
       notationConfig: const AiNotationConfig(maxOutputTokens: 200000),
     );
-    expect(body['max_tokens'], ClaudeAiClient.defaultOutputLimit);
+    expect(body['max_tokens'], 200000);
   });
 
   test('the ink is a base64 image block in the first turn; the note is '

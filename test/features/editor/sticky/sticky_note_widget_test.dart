@@ -7,6 +7,7 @@ import 'package:greatnote/features/editor/ink/eraser_settings.dart';
 import 'package:greatnote/features/editor/ink/ink_canvas.dart';
 import 'package:greatnote/features/editor/ink/ink_controller.dart';
 import 'package:greatnote/features/editor/ink/ink_palette.dart';
+import 'package:greatnote/features/editor/ink/ink_painter.dart';
 import 'package:greatnote/features/editor/ink/ink_sample.dart';
 import 'package:greatnote/features/editor/ink/input_defaults.dart';
 import 'package:greatnote/features/editor/ink/stroke.dart';
@@ -151,12 +152,13 @@ void main() {
     controller.exitStickyEditing();
     await tester.pumpAndSettle();
 
-    // A single tap is just a dot of page ink over the note.
+    // A single tap is just a dot, and it belongs to the note.
     await _tapPage(tester, const InkVector(300, 300));
-    expect(controller.strokes, hasLength(1));
+    expect(controller.strokes, isEmpty);
+    expect(controller.stickyNotes.single.strokes, hasLength(1));
     await _tapPage(tester, const InkVector(302, 301));
     await tester.pumpAndSettle();
-    expect(controller.strokes, isEmpty);
+    expect(controller.stickyNotes.single.strokes, isEmpty);
     expect(controller.editingSticky?.id, 'n');
   });
 
@@ -186,6 +188,41 @@ void main() {
       const InkVector(300, 260),
       const InkVector(300, 340),
     );
+    expect(controller.stickyNotes.single.strokes.length, isNot(1));
+    expect(controller.stickyNotes, hasLength(1));
+  });
+
+  testWidgets('eraser removes ink from a sticky note that is not selected', (
+    WidgetTester tester,
+  ) async {
+    final InkController controller = await pumpEditor(tester);
+    controller.insertStickyNote(
+      StickyNoteElement(
+        id: 'n',
+        center: const InkVector(300, 300),
+        size: const Size(240, 180),
+        colorId: 'yellow',
+        strokes: <Stroke>[
+          Stroke.fromPoints(
+            style: const StrokeStyle(ink: InkPalette.ink, width: 3),
+            points: const <InkVector>[InkVector(40, 90), InkVector(200, 90)],
+          ),
+        ],
+      ),
+    );
+    controller.exitStickyEditing();
+    await tester.pumpAndSettle();
+    expect(controller.selection, isNull);
+    expect(controller.editingSticky, isNull);
+
+    await tester.tap(find.byTooltip('Eraser'));
+    await tester.pumpAndSettle();
+    await _drawOnPage(
+      tester,
+      const InkVector(300, 260),
+      const InkVector(300, 340),
+    );
+
     expect(controller.stickyNotes.single.strokes.length, isNot(1));
     expect(controller.stickyNotes, hasLength(1));
   });
@@ -330,7 +367,7 @@ void main() {
       final Stroke stroke = controller.strokes.single;
       expect(stroke.style.isHighlighter, isTrue);
       expect(stroke.style.opacity, 0.35);
-      expect(stroke.style.width, 12);
+      expect(stroke.style.width, 6);
       expect(stroke.widths, isNull);
 
       // Back to the pen: its own settings.
@@ -366,6 +403,38 @@ void main() {
         const InkVector(300, 300),
       );
       expect(controller.strokes, hasLength(1));
+    });
+
+    testWidgets('sticky note layer is stacked above completed strokes layer', (
+      WidgetTester tester,
+    ) async {
+      final InkController controller = InkController();
+      addTearDown(controller.dispose);
+      await pumpApp(tester, home: EditorScreen(inkController: controller));
+
+      final Stack stack = tester.widget<Stack>(
+        find
+            .descendant(
+              of: find.byType(InkCanvas).first,
+              matching: find.byType(Stack),
+            )
+            .first,
+      );
+      int stickyLayerIndex = -1;
+      int completedStrokesIndex = -1;
+      for (int i = 0; i < stack.children.length; i++) {
+        final Widget child = stack.children[i];
+        if (child is RepaintBoundary && child.child is CustomPaint) {
+          final CustomPaint cp = child.child! as CustomPaint;
+          if (cp.key == const ValueKey<String>('sticky-notes-layer')) {
+            stickyLayerIndex = i;
+          } else if (cp.painter is CompletedStrokesPainter) {
+            completedStrokesIndex = i;
+          }
+        }
+      }
+      expect(completedStrokesIndex, isNonNegative);
+      expect(stickyLayerIndex, greaterThan(completedStrokesIndex));
     });
   });
 }

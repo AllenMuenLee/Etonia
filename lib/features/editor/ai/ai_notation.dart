@@ -2,12 +2,15 @@ import 'dart:convert';
 import 'dart:math' as math;
 
 import 'package:flutter/foundation.dart' show immutable;
+import 'package:xml/xml.dart';
 
 import '../ink/stroke.dart' show Stroke;
 import 'ai_config.dart';
 import 'chat_math.dart';
 import 'notation_font.dart';
 import 'notation_formula.dart';
+import 'notation_math.dart';
+import '../document_io/svg_document.dart';
 
 /// One normalized point on the note: (0, 0) is its top-left corner and
 /// (1, 1) its bottom-right.
@@ -65,6 +68,43 @@ class AiNotationText extends AiNotationItem {
   Map<String, Object?> toJson() => <String, Object?>{
     'type': type,
     'text': text,
+    'x': x,
+    'y': y,
+    'size': size,
+    'ink': ink,
+    'width': width,
+  };
+}
+
+/// A formula in LaTeX, laid out by the app as it is written by hand and
+/// written in [NotationFont].
+class AiNotationMath extends AiNotationItem {
+  const AiNotationMath({
+    required this.math,
+    required this.x,
+    required this.y,
+    required this.size,
+    required super.ink,
+    required super.width,
+  });
+
+  @override
+  String get type => 'math';
+
+  final NotationMath math;
+
+  /// The top-left corner of the formula, normalized.
+  final double x;
+  final double y;
+
+  /// The height of a capital letter at the formula's full size, in logical
+  /// pixels.
+  final double size;
+
+  @override
+  Map<String, Object?> toJson() => <String, Object?>{
+    'type': type,
+    'latex': math.source,
     'x': x,
     'y': y,
     'size': size,
@@ -743,6 +783,7 @@ class AiNotationTimeline {
                     .where((int rune) => rune != 0x20 && rune != 0x0A)
                     .length)
             .clamp(300, 2400),
+      AiNotationMath() => (140 * item.math.marks).clamp(300, 3600),
       AiNotationLine() => travel(
         polyline(<AiNotationPoint>[item.from, item.to]),
         250,
@@ -798,8 +839,15 @@ class AiNotation {
     required List<AiNotationItem> items,
     this.timeline,
     this.sticky,
+    this.vector,
   }) : assert(timeline == null || timeline.items.length == items.length),
        items = List<AiNotationItem>.unmodifiable(items);
+
+  factory AiNotation.vector(EditableSvg vector) => AiNotation(
+    label: vector.label,
+    items: const <AiNotationItem>[],
+    vector: vector,
+  );
 
   static const String coordinateSpace = 'note_normalized';
 
@@ -811,6 +859,10 @@ class AiNotation {
   /// and its coordinates are [stickyCoordinateSpace].
   final AiStickySize? sticky;
 
+  /// The SVG-native notation returned by current models. Legacy structured
+  /// items remain readable so existing notes and conversations still load.
+  final EditableSvg? vector;
+
   final String label;
 
   /// Drawn in order, each above the ones before.
@@ -821,6 +873,9 @@ class AiNotation {
   final AiNotationTimeline? timeline;
 
   Map<String, Object?> toJson() {
+    if (vector != null) {
+      return <String, Object?>{'svg': vector!.source};
+    }
     final List<int>? steps = timeline?.steps;
     return <String, Object?>{
       'label': label,
@@ -873,8 +928,20 @@ class AiAssistantResponse {
     String source, {
     AiNotationConfig config = const AiNotationConfig(),
   }) {
-    if (utf8.encode(source).length > config.maxResponseBytes) {
-      throw const FormatException('AI response is too large');
+    final String trimmed = source.trim();
+    if (_looksLikeSvgResponse(trimmed)) {
+      try {
+        final EditableSvg svg = EditableSvg.parse(trimmed, modelResponse: true);
+        return AiAssistantResponse(
+          message: svg.message!,
+          notation: svg.hasVisualContent ? AiNotation.vector(svg) : null,
+        );
+      } on FormatException {
+        return AiAssistantResponse(
+          message: EditableSvg.messageFromResponse(trimmed),
+          notationRejected: true,
+        );
+      }
     }
     final Object? decoded;
     try {
@@ -1033,8 +1100,7 @@ class AiAssistantResponse {
         final Object? text = item['text'];
         if (text is! String ||
             text.trim().isEmpty ||
-            text.runes.length > config.maxTextRunes ||
-            !NotationFont.canWrite(text)) {
+            text.runes.length > config.maxTextRunes) {
           throw const FormatException('Invalid AI response');
         }
         budget.text(text.runes.length);
@@ -1042,8 +1108,53 @@ class AiAssistantResponse {
         if (size < config.minTextSize || size > config.maxTextSize) {
           throw const FormatException('Invalid AI response');
         }
+        // Text with LaTeX in it, as models often write, is laid out as
+        // the formula it means rather than written out as its source.
+        final String delimited = delimitBareMath(text);
+        if (NotationMath.hasMath(delimited)) {
+          return AiNotationMath(
+            math: NotationMath.parse(NotationMath.fromText(delimited)),
+            x: _unit(item['x']),
+            y: _unit(item['y']),
+            size: size,
+            ink: _ink(item['ink'], config),
+            width: _width(item['width'], config),
+          );
+        }
+        if (!NotationFont.canWrite(text)) {
+          throw const FormatException('Invalid AI response');
+        }
         return AiNotationText(
           text: text,
+          x: _unit(item['x']),
+          y: _unit(item['y']),
+          size: size,
+          ink: _ink(item['ink'], config),
+          width: _width(item['width'], config),
+        );
+      case 'math':
+        final Map<String, Object?> item = _object(raw, const <String>{
+          'type',
+          'latex',
+          'x',
+          'y',
+          'size',
+          'ink',
+          'width',
+        });
+        final Object? latex = item['latex'];
+        if (latex is! String ||
+            latex.trim().isEmpty ||
+            latex.runes.length > config.maxMathRunes) {
+          throw const FormatException('Invalid AI response');
+        }
+        budget.text(latex.runes.length);
+        final double size = _number(item['size']);
+        if (size < config.minTextSize || size > config.maxTextSize) {
+          throw const FormatException('Invalid AI response');
+        }
+        return AiNotationMath(
+          math: NotationMath.parse(latex),
           x: _unit(item['x']),
           y: _unit(item['y']),
           size: size,
@@ -1527,6 +1638,20 @@ class AiAssistantResponse {
   /// [partialMessage], and whether its closing quote has arrived: after
   /// that, only the notation is still to come.
   static (String, bool)? partialMessageState(String source) {
+    if (_looksLikeSvgResponse(source)) {
+      final RegExp start = RegExp(
+        r'''<desc\b[^>]*data-etonia-role=["']message["'][^>]*>''',
+        caseSensitive: false,
+      );
+      final RegExpMatch? match = start.firstMatch(source);
+      if (match == null) return null;
+      final int bodyStart = match.end;
+      final int end = source.indexOf('</desc>', bodyStart);
+      final String raw = end < 0
+          ? source.substring(bodyStart)
+          : source.substring(bodyStart, end);
+      return (_decodeXmlText(raw), end >= 0);
+    }
     source = repairLatexEscapes(source);
     int depth = 0;
     String? key;
@@ -1564,6 +1689,30 @@ class AiAssistantResponse {
       i++;
     }
     return null;
+  }
+
+  static bool _looksLikeSvgResponse(String source) {
+    String head = source.trimLeft().replaceFirst('\uFEFF', '');
+    if (head.startsWith('```')) {
+      final int lineEnd = head.indexOf('\n');
+      if (lineEnd < 0) return false;
+      head = head.substring(lineEnd + 1).trimLeft();
+    }
+    return RegExp(
+      r'^(?:<\?xml\b[^>]*>\s*)?<svg\b',
+      caseSensitive: false,
+    ).hasMatch(head);
+  }
+
+  static String _decodeXmlText(String source) {
+    try {
+      return XmlDocument.parse('<text>$source</text>').rootElement.innerText;
+    } on Object {
+      return source
+          .replaceAll('&lt;', '<')
+          .replaceAll('&gt;', '>')
+          .replaceAll('&amp;', '&');
+    }
   }
 
   /// Decodes the JSON string whose contents start at [start]: its text, the
@@ -1897,7 +2046,11 @@ Map<String, Object?> aiResponseJsonSchema([
     object(
       <String, Object?>{
         'type': type('text'),
-        'text': <String, Object?>{'type': 'string', 'minLength': 1},
+        'text': <String, Object?>{
+          'type': 'string',
+          'minLength': 1,
+          'maxLength': config.maxTextRunes,
+        },
         'x': unit(),
         'y': unit(),
         'size': <String, Object?>{
@@ -1909,7 +2062,32 @@ Map<String, Object?> aiResponseJsonSchema([
         'width': width,
       },
       optional: itemTiming,
-      description: 'Words, written in the app handwriting.',
+      description:
+          'A short label or key step, written in the app handwriting; at '
+          'most ${config.maxTextRunes} characters.',
+    ),
+    object(
+      <String, Object?>{
+        'type': type('math'),
+        'latex': <String, Object?>{
+          'type': 'string',
+          'minLength': 1,
+          'maxLength': config.maxMathRunes,
+        },
+        'x': unit(),
+        'y': unit(),
+        'size': <String, Object?>{
+          'type': 'number',
+          'minimum': config.minTextSize,
+          'maximum': config.maxTextSize,
+        },
+        'ink': ink,
+        'width': width,
+      },
+      optional: itemTiming,
+      description:
+          'A formula in LaTeX, without \$, laid out and handwritten by the '
+          'app; x and y are its top-left corner.',
     ),
     object(
       <String, Object?>{

@@ -10,6 +10,7 @@ import 'package:greatnote/features/editor/editor_screen.dart';
 import 'package:greatnote/features/editor/handwriting/handwriting_calibration.dart';
 import 'package:greatnote/features/editor/ink/ink_canvas.dart';
 import 'package:greatnote/features/editor/ink/ink_controller.dart';
+import 'package:greatnote/features/editor/ink/pen_settings.dart';
 import 'package:greatnote/features/editor/ink/stroke.dart';
 import 'package:greatnote/features/payment/subscription_controller.dart';
 
@@ -30,6 +31,8 @@ Future<InkController> pumpEditor(
   bool initialNotationEnabled = false,
   SubscriptionController? subscription,
   HandwritingProfileStore? handwritingProfileStore,
+  // Tests that measure pixels pass a strokeWidthScale of 1.
+  PenConfig penConfig = const PenConfig(),
 }) async {
   final InkController controller = InkController(strokes: strokes);
   addTearDown(controller.dispose);
@@ -44,6 +47,7 @@ Future<InkController> pumpEditor(
       initialNotationEnabled: initialNotationEnabled,
       subscription: subscription,
       handwritingProfileStore: handwritingProfileStore,
+      penConfig: penConfig,
     ),
   );
   return controller;

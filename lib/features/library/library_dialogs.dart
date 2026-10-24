@@ -1,11 +1,13 @@
-import 'package:flutter/material.dart';
+﻿import 'package:flutter/material.dart';
 
 import '../../app/theme/app_tokens.dart';
 import '../../app/theme/app_icons.dart';
 import '../../shared/widgets/app_controls.dart';
 import '../editor/page/page_background.dart';
 import '../editor/page/page_setup.dart';
+import '../editor/widgets/color_palette_dialog.dart';
 import 'library_models.dart';
+import '../../shared/navigation/app_dialogs.dart';
 
 /// How wide a dialog that asks for a name is.
 const double _fieldDialogWidth = 360;
@@ -18,7 +20,7 @@ Future<String?> askForName(
   required String action,
   String initial = '',
 }) async {
-  final String? result = await showDialog<String>(
+  final String? result = await showAppDialog<String>(
     context: context,
     builder: (BuildContext context) =>
         _NameDialog(title: title, action: action, initial: initial),
@@ -102,7 +104,7 @@ Future<bool> confirmAction(
   required String message,
   required String action,
 }) async {
-  final bool? confirmed = await showDialog<bool>(
+  final bool? confirmed = await showAppDialog<bool>(
     context: context,
     builder: (BuildContext context) {
       final AppColors colors = AppColors.of(context);
@@ -166,7 +168,7 @@ Future<FolderChoice?> pickFolder(
   }
 
   walk(null, 0);
-  return showDialog<FolderChoice>(
+  return showAppDialog<FolderChoice>(
     context: context,
     builder: (BuildContext context) {
       return SimpleDialog(
@@ -226,7 +228,7 @@ class _FolderRow extends StatelessWidget {
     final AppColors colors = AppColors.of(context);
     return InkWell(
       onTap: onTap,
-      borderRadius: BorderRadius.circular(AppRadii.medium),
+      borderRadius: AppBorderRadius.medium,
       child: ConstrainedBox(
         constraints: const BoxConstraints(minHeight: AppSizes.minTouchTarget),
         child: Padding(
@@ -264,9 +266,20 @@ class _FolderRow extends StatelessWidget {
 
 /// [color] as shown in the current theme.
 Color resolveFolderColor(BuildContext context, FolderColor color) {
-  final bool dark = Theme.of(context).brightness == Brightness.dark;
-  final int? value = dark ? color.dark : color.light;
-  return value == null ? AppColors.of(context).accent : Color(value);
+  final AppColors colors = AppColors.of(context);
+  // Folders sit on a pale desk; the palette is deepened so they read as
+  // objects there, the neutral most of all as it is the pale one.
+  Color deepen(Color base, double amount) =>
+      Color.lerp(base, Colors.black, amount)!;
+  return switch (color) {
+    FolderColor.accent || FolderColor.gray => deepen(colors.surfaceMuted, 0.4),
+    FolderColor.yellow => deepen(colors.highlighters[0], 0.18),
+    FolderColor.orange => deepen(colors.highlighters[1], 0.18),
+    FolderColor.red || FolderColor.pink => deepen(colors.highlighters[2], 0.18),
+    FolderColor.purple => deepen(colors.highlighters[3], 0.18),
+    FolderColor.teal => deepen(colors.highlighters[4], 0.18),
+    FolderColor.green => deepen(colors.highlighters[5], 0.18),
+  };
 }
 
 /// A folder's name and color, as entered.
@@ -285,7 +298,7 @@ Future<FolderDraft?> askForFolder(
   String initialName = '',
   FolderColor initialColor = FolderColor.accent,
 }) async {
-  final FolderDraft? result = await showDialog<FolderDraft>(
+  final FolderDraft? result = await showAppDialog<FolderDraft>(
     context: context,
     builder: (BuildContext context) => _FolderDialog(
       title: title,
@@ -394,7 +407,7 @@ Future<FolderColor?> pickFolderColor(
   required String title,
   required FolderColor initial,
 }) {
-  return showDialog<FolderColor>(
+  return showAppDialog<FolderColor>(
     context: context,
     builder: (BuildContext context) {
       return AlertDialog(
@@ -417,7 +430,8 @@ Future<FolderColor?> pickFolderColor(
   );
 }
 
-/// A row of color swatches, the chosen one ringed and checked.
+/// A row of color swatches, the chosen one ringed and checked. Includes
+/// a color palette button (色盤) to pick or match colors.
 class FolderColorPicker extends StatelessWidget {
   const FolderColorPicker({
     super.key,
@@ -427,6 +441,36 @@ class FolderColorPicker extends StatelessWidget {
 
   final FolderColor selected;
   final ValueChanged<FolderColor> onSelected;
+
+  Future<void> _openPalette(BuildContext context) async {
+    final Map<FolderColor, Color> folderColors = <FolderColor, Color>{
+      for (final FolderColor color in FolderColor.values)
+        color: resolveFolderColor(context, color),
+    };
+    final Color current =
+        folderColors[selected] ?? AppColors.of(context).accent;
+    final Color? picked = await showColorPaletteDialog(
+      context,
+      initialColor: current,
+      title: 'Folder color',
+    );
+    if (picked != null) {
+      FolderColor closest = FolderColor.accent;
+      double minDistance = double.infinity;
+      for (final MapEntry<FolderColor, Color> entry in folderColors.entries) {
+        final Color c = entry.value;
+        final double dr = c.r - picked.r;
+        final double dg = c.g - picked.g;
+        final double db = c.b - picked.b;
+        final double dist = dr * dr + dg * dg + db * db;
+        if (dist < minDistance) {
+          minDistance = dist;
+          closest = entry.key;
+        }
+      }
+      onSelected(closest);
+    }
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -452,8 +496,8 @@ class FolderColorPicker extends StatelessWidget {
                   dimension: AppSizes.minTouchTarget,
                   child: Center(
                     child: AnimatedContainer(
-                      duration: AppMotion.resolve(context, AppMotion.fast),
-                      curve: AppMotion.standard,
+                      duration: AppMotion.resolve(context, AppMotion.fadeIn),
+                      curve: AppMotion.fadeInCurve,
                       width: 38,
                       height: 38,
                       alignment: Alignment.center,
@@ -488,6 +532,11 @@ class FolderColorPicker extends StatelessWidget {
               ),
             ),
           ),
+        ColorPaletteButton(
+          onTap: () => _openPalette(context),
+          tooltip: 'Folder color palette',
+          size: 28,
+        ),
       ],
     );
   }
@@ -517,7 +566,7 @@ Future<NoteDraft?> pickNoteTemplate(
   PageSetup initial = const PageSetup(),
   String initialName = 'Untitled note',
 }) {
-  return showDialog<NoteDraft>(
+  return showAppDialog<NoteDraft>(
     context: context,
     builder: (BuildContext context) =>
         _TemplateDialog(initial: initial, initialName: initialName),
@@ -678,7 +727,7 @@ class _TemplateTile extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final AppColors colors = AppColors.of(context);
-    final BorderRadius radius = BorderRadius.circular(AppRadii.medium);
+    const BorderRadius radius = AppBorderRadius.medium;
     return Semantics(
       button: true,
       inMutuallyExclusiveGroup: true,
@@ -690,8 +739,8 @@ class _TemplateTile extends StatelessWidget {
         onTap: onTap,
         borderRadius: radius,
         child: AnimatedContainer(
-          duration: AppMotion.resolve(context, AppMotion.fast),
-          curve: AppMotion.standard,
+          duration: AppMotion.resolve(context, AppMotion.fadeIn),
+          curve: AppMotion.fadeInCurve,
           width: width,
           padding: const EdgeInsets.fromLTRB(
             AppSpacing.xs,

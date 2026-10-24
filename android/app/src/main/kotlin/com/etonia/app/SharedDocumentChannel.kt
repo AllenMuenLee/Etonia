@@ -4,19 +4,25 @@ import android.content.Context
 import android.content.Intent
 import android.net.Uri
 import android.os.Build
+import android.os.Handler
+import android.os.Looper
 import android.provider.OpenableColumns
 import io.flutter.plugin.common.BinaryMessenger
 import io.flutter.plugin.common.MethodCall
 import io.flutter.plugin.common.MethodChannel
+import java.util.concurrent.ExecutorService
+import java.util.concurrent.Executors
 
 /**
  * Receives PDFs shared into Etonia from another app's share sheet or "Open
  * with" menu and forwards their name and bytes to Dart.
  *
  * URIs granted by a share intent may only be readable while the intent is
- * being handled, so bytes are read immediately and queued until the Flutter
- * library screen asks for initial documents, after which new arrivals are
- * pushed directly over the channel.
+ * being handled, so bytes are read at once, though off the main thread: a
+ * large PDF, or one its provider must first download, would otherwise
+ * freeze the app. They are queued until the Flutter library screen asks for
+ * initial documents, after which new arrivals are pushed directly over the
+ * channel, in the order they were shared.
  */
 class SharedDocumentChannel(
     messenger: BinaryMessenger,
@@ -31,6 +37,9 @@ class SharedDocumentChannel(
     private val channel = MethodChannel(messenger, NAME)
     private val pending = mutableListOf<Map<String, Any>>()
     private var dartReady = false
+    private val reader: ExecutorService = Executors.newSingleThreadExecutor()
+    private val main = Handler(Looper.getMainLooper())
+    private var disposed = false
 
     init {
         channel.setMethodCallHandler(this)
@@ -49,7 +58,7 @@ class SharedDocumentChannel(
     }
 
     fun handleIntent(intent: Intent?) {
-        if (intent == null || intent.getBooleanExtra(CONSUMED_EXTRA, false)) {
+        if (disposed || intent == null || intent.getBooleanExtra(CONSUMED_EXTRA, false)) {
             return
         }
         val uris: List<Uri> = when (intent.action) {
@@ -68,13 +77,21 @@ class SharedDocumentChannel(
         if (uris.isEmpty()) return
         intent.putExtra(CONSUMED_EXTRA, true)
 
-        for (uri in uris) {
-            val payload = readDocument(uri) ?: continue
-            if (dartReady) {
-                channel.invokeMethod("onDocumentShared", payload)
-            } else {
-                pending.add(payload)
+        reader.execute {
+            for (uri in uris) {
+                val payload = readDocument(uri) ?: continue
+                main.post { deliver(payload) }
             }
+        }
+    }
+
+    /** On the main thread, where the channel and the queue live. */
+    private fun deliver(payload: Map<String, Any>) {
+        if (disposed) return
+        if (dartReady) {
+            channel.invokeMethod("onDocumentShared", payload)
+        } else {
+            pending.add(payload)
         }
     }
 
@@ -143,6 +160,8 @@ class SharedDocumentChannel(
     }
 
     fun dispose() {
+        disposed = true
+        reader.shutdownNow()
         channel.setMethodCallHandler(null)
     }
 }

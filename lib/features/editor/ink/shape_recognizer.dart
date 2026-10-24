@@ -154,9 +154,72 @@ class ShapeRecognizer {
     final bool closed = gap <= config.closedGapFraction * length;
     if (closed) {
       resampled = _resample(_trimOverlap(resampled), config.resampleCount);
-      return _closed(resampled, size);
+      return _alignClosed(
+        _closed(resampled, size),
+        points.first,
+        _orientation(resampled),
+      );
     }
-    return _open(resampled, size);
+    return _alignOpen(_open(resampled, size), points.first, points.last);
+  }
+
+  /// Rotates a closed [shape] to start, and so end, at its vertex nearest the
+  /// stroke's [start], and runs it the way the stroke went ([orientation] is
+  /// the stroke's signed area).
+  RecognizedShape? _alignClosed(
+    RecognizedShape? shape,
+    InkVector start,
+    double orientation,
+  ) {
+    if (shape == null || shape.points.length < 4) {
+      return shape;
+    }
+    List<InkVector> ring = shape.points.sublist(0, shape.points.length - 1);
+    if (_orientation(ring) * orientation < 0) {
+      ring = ring.reversed.toList();
+    }
+    int nearest = 0;
+    double best = double.infinity;
+    for (int i = 0; i < ring.length; i++) {
+      final double d = (ring[i] - start).length;
+      if (d < best) {
+        best = d;
+        nearest = i;
+      }
+    }
+    final List<InkVector> rotated = <InkVector>[
+      ...ring.sublist(nearest),
+      ...ring.sublist(0, nearest),
+    ];
+    return RecognizedShape(
+      kind: shape.kind,
+      points: <InkVector>[...rotated, rotated.first],
+      sides: shape.sides,
+    );
+  }
+
+  /// Runs an open [shape] from the stroke's [start] to its [end]. An arrow is
+  /// already drawn from its tail.
+  RecognizedShape? _alignOpen(
+    RecognizedShape? shape,
+    InkVector start,
+    InkVector end,
+  ) {
+    if (shape == null || shape.kind == ShapeKind.arrow) {
+      return shape;
+    }
+    final InkVector first = shape.points.first;
+    final InkVector last = shape.points.last;
+    final double forward = (first - start).length + (last - end).length;
+    final double backward = (last - start).length + (first - end).length;
+    if (backward >= forward) {
+      return shape;
+    }
+    return RecognizedShape(
+      kind: shape.kind,
+      points: shape.points.reversed.toList(),
+      sides: shape.sides,
+    );
   }
 
   // ---------------------------------------------------------------------
@@ -673,14 +736,16 @@ class ShapeRecognizer {
     );
   }
 
-  /// A sine wave along the stroke's principal axis.
+  /// A sine wave along the stroke's axis, defaulting to horizontal.
   RecognizedShape? _sine(List<InkVector> p) {
-    final _Frame frame = _Frame.of(p);
-    InkVector axis = _snapDirection(frame.major);
-    if ((p.last - p.first).dot(axis) < 0) {
-      axis = -axis;
-    }
+    final double dx = (p.last.x - p.first.x).abs();
+    final double dy = (p.last.y - p.first.y).abs();
+    final bool isVertical = dy > 1.5 * dx;
+    final InkVector axis = isVertical
+        ? InkVector(0, p.last.y >= p.first.y ? 1 : -1)
+        : InkVector(p.last.x >= p.first.x ? 1 : -1, 0);
     final InkVector across = axis.perpendicular;
+    final _Frame frame = _Frame.of(p);
     final List<double> u = <double>[];
     final List<double> w = <double>[];
     for (final InkVector point in p) {
@@ -688,9 +753,9 @@ class ShapeRecognizer {
       u.add(d.dot(axis));
       w.add(d.dot(across));
     }
-    final double uMin = u.reduce(math.min);
-    final double uMax = u.reduce(math.max);
-    final double range = uMax - uMin;
+    final double uStart = (p.first - frame.center).dot(axis);
+    final double uEnd = (p.last - frame.center).dot(axis);
+    final double range = uEnd - uStart;
     if (!(range > 0)) {
       return null;
     }
@@ -751,16 +816,27 @@ class ShapeRecognizer {
     if (best == null) {
       return null;
     }
-    final double halfWaves = range * best.k / math.pi;
+    final _SineFit fit = best;
+    final double halfWaves = range * fit.k / math.pi;
     final int count = (halfWaves * 12).ceil().clamp(24, config.maxPoints - 1);
     final InkVector origin = frame.center + across * mean;
+    final double wFirst = (p.first - frame.center).dot(across) - mean;
+    final double wLast = (p.last - frame.center).dot(across) - mean;
+    final double delta0 = wFirst - fit.at(uStart);
+    final double delta1 = wLast - fit.at(uEnd);
     return RecognizedShape(
       kind: ShapeKind.sineWave,
       points: <InkVector>[
-        for (int i = 0; i <= count; i++)
-          origin +
-              axis * (uMin + range * i / count) +
-              across * best.at(uMin + range * i / count),
+        p.first,
+        for (int i = 1; i < count; i++) ...<InkVector>[
+          () {
+            final double t = i / count;
+            final double uPos = uStart + range * t;
+            final double wPos = fit.at(uPos) + delta0 * (1 - t) + delta1 * t;
+            return origin + axis * uPos + across * wPos;
+          }(),
+        ],
+        p.last,
       ],
     );
   }

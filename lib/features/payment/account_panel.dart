@@ -1,10 +1,12 @@
-import 'package:flutter/material.dart';
+﻿import 'package:flutter/material.dart';
 
 import '../../app/theme/app_icons.dart';
 import '../../app/theme/app_tokens.dart';
+import '../../shared/widgets/processing.dart';
 import 'billing_backend.dart';
 import 'subscription_controller.dart';
 
+/// Who is signed in, or the way to sign in with Google.
 class AccountPanel extends StatefulWidget {
   const AccountPanel({
     super.key,
@@ -48,7 +50,7 @@ class _AccountPanelState extends State<AccountPanel> {
       builder: (BuildContext context, Widget? _) {
         if (!widget.backend.isConfigured) {
           return Padding(
-            padding: const EdgeInsets.only(bottom: AppSpacing.md),
+            padding: const EdgeInsets.symmetric(vertical: AppSpacing.xs),
             child: Text(
               'Account services are not configured in this build.',
               style: text.bodyMedium?.copyWith(color: colors.textPrimary),
@@ -56,43 +58,68 @@ class _AccountPanelState extends State<AccountPanel> {
           );
         }
         if (widget.backend.userId != null) {
+          final String email = widget.backend.email ?? 'Signed in';
           return Container(
-            margin: const EdgeInsets.only(bottom: AppSpacing.md),
-            padding: const EdgeInsets.all(AppSpacing.md),
+            padding: const EdgeInsets.all(AppSpacing.lg),
             decoration: BoxDecoration(
               color: AppGlass.surface(colors),
-              borderRadius: BorderRadius.circular(AppRadii.xl),
+              borderRadius: AppBorderRadius.xl,
               boxShadow: AppShadows.paper(colors),
               border: Border.all(
                 color: colors.glassEdge,
                 width: AppSizes.hairline,
               ),
             ),
-            child: Wrap(
-              spacing: AppSpacing.sm,
-              runSpacing: AppSpacing.xs,
-              crossAxisAlignment: WrapCrossAlignment.center,
-              alignment: WrapAlignment.spaceBetween,
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
               children: <Widget>[
                 Row(
-                  mainAxisSize: MainAxisSize.min,
                   children: <Widget>[
-                    Icon(
-                      AppIcons.account,
-                      size: AppSizes.icon,
-                      color: colors.textPrimary,
-                    ),
-                    const SizedBox(width: AppSpacing.xs),
-                    Flexible(
-                      child: Text(
-                        widget.backend.email ?? 'Signed in',
-                        style: text.titleMedium?.copyWith(
-                          color: colors.textPrimary,
+                    // The first letter, in ink: the account's face.
+                    ExcludeSemantics(
+                      child: Container(
+                        width: 52,
+                        height: 52,
+                        alignment: Alignment.center,
+                        decoration: BoxDecoration(
+                          color: colors.accent,
+                          shape: BoxShape.circle,
                         ),
+                        child: Text(
+                          email.characters.first.toUpperCase(),
+                          style: text.titleLarge?.copyWith(
+                            color: colors.onAccent,
+                            fontWeight: FontWeight.w800,
+                          ),
+                        ),
+                      ),
+                    ),
+                    const SizedBox(width: AppSpacing.sm),
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: <Widget>[
+                          Text(
+                            email,
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: text.titleMedium?.copyWith(
+                              color: colors.textPrimary,
+                              fontWeight: FontWeight.w700,
+                            ),
+                          ),
+                          Text(
+                            'Signed in with Google',
+                            style: text.bodySmall?.copyWith(
+                              color: colors.textSecondary,
+                            ),
+                          ),
+                        ],
                       ),
                     ),
                   ],
                 ),
+                const SizedBox(height: AppSpacing.md),
                 Wrap(
                   spacing: AppSpacing.xs,
                   runSpacing: AppSpacing.xs,
@@ -132,11 +159,10 @@ class _AccountPanelState extends State<AccountPanel> {
           );
         }
         return Container(
-          margin: const EdgeInsets.only(bottom: AppSpacing.md),
-          padding: const EdgeInsets.all(AppSpacing.md),
+          padding: const EdgeInsets.all(AppSpacing.lg),
           decoration: BoxDecoration(
             color: AppGlass.surface(colors),
-            borderRadius: BorderRadius.circular(AppRadii.xl),
+            borderRadius: AppBorderRadius.xl,
             boxShadow: AppShadows.paper(colors),
             border: Border.all(
               color: colors.glassEdge,
@@ -169,7 +195,11 @@ class _AccountPanelState extends State<AccountPanel> {
                     ? null
                     : () => _run(widget.backend.signInWithGoogle),
                 icon: const Icon(AppIcons.account, size: 18),
-                label: Text(_busy ? 'Please wait…' : 'Continue with Google'),
+                label: GentleSwitcher(
+                  value: _busy,
+                  alignment: Alignment.center,
+                  child: Text(_busy ? 'Please wait…' : 'Continue with Google'),
+                ),
                 style: FilledButton.styleFrom(
                   backgroundColor: colors.accent,
                   foregroundColor: colors.onAccent,

@@ -1,4 +1,4 @@
-import 'dart:math' as math;
+﻿import 'dart:math' as math;
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/gestures.dart';
@@ -7,6 +7,7 @@ import 'package:flutter/scheduler.dart';
 
 import '../../../app/theme/app_tokens.dart';
 import '../../../app/theme/app_icons.dart';
+import '../ink/pointer_claims.dart';
 import 'page_setup.dart';
 
 /// Maps page coordinates to the viewport: `page * scale + origin`.
@@ -66,8 +67,9 @@ class PageViewport extends StatefulWidget {
     this.onScrollStart,
     this.onScrollEnd,
     this.fingersNavigate,
+    this.pointerClaims,
     this.onPullToAddPage,
-    this.pullToAddDistance = 96,
+    this.pullToAddDistance = 180,
     this.pageGap = AppSpacing.md,
     this.minZoom = 0.5,
     this.maxZoom = 4,
@@ -95,6 +97,10 @@ class PageViewport extends StatefulWidget {
   /// of theirs to drop, and a resting palm must not stop the pen. A finger
   /// is ignored while a stylus is down.
   final ValueListenable<bool>? fingersNavigate;
+
+  /// Touches a canvas has taken, such as a finger moving the ruler: they
+  /// neither pan nor zoom the column.
+  final PointerClaims? pointerClaims;
 
   /// How far a pinch can zoom the column out and in.
   final double minZoom;
@@ -210,6 +216,10 @@ class PageViewportState extends State<PageViewport>
   @override
   void didUpdateWidget(PageViewport oldWidget) {
     super.didUpdateWidget(oldWidget);
+    // The editor raises the minimum to one for an infinite canvas. Apply a
+    // changed bound immediately when a page is converted while this viewport
+    // keeps its state.
+    _zoom = _zoom.clamp(widget.minZoom, widget.maxZoom).toDouble();
     if (widget.currentPage != oldWidget.currentPage &&
         widget.currentPage != _shownPage) {
       _shownPage = widget.currentPage;
@@ -292,6 +302,9 @@ class PageViewportState extends State<PageViewport>
       return;
     }
     if (event.kind != PointerDeviceKind.touch) {
+      return;
+    }
+    if (widget.pointerClaims?.contains(event.pointer) ?? false) {
       return;
     }
     _touches[event.pointer] = event.localPosition;
@@ -802,7 +815,7 @@ class _PullToAddIndicator extends StatelessWidget {
                 key: const ValueKey<String>('pull-to-add-page'),
                 decoration: BoxDecoration(
                   color: ready ? colors.accent : colors.surface,
-                  borderRadius: BorderRadius.circular(AppRadii.large),
+                  borderRadius: AppBorderRadius.large,
                   border: Border.all(
                     color: ready ? colors.accent : colors.divider,
                     width: AppSizes.hairline,

@@ -65,6 +65,13 @@ class AiMessage {
   String get wireText => role == AiRole.user
       ? text
       : AiAssistantResponse(message: text, notation: notation).toJsonString();
+
+  /// What a later turn needs from this message.
+  ///
+  /// Notation is an action already applied to the note, not conversational
+  /// context. Resending its often-thousands of coordinates wastes tokens and
+  /// can make the model repeat an old drawing.
+  String get historyText => text;
 }
 
 /// Everything one stateless `generateContent` call needs. Immutable.
@@ -74,8 +81,10 @@ class AiRequest {
     required this.imagePng,
     required List<AiMessage> messages,
     this.noteImage,
+    this.notationImagePng,
     this.notationEnabled = false,
     this.animationEnabled = false,
+    this.notationInstruction,
     this.model,
   }) : messages = List<AiMessage>.unmodifiable(messages);
 
@@ -85,8 +94,22 @@ class AiRequest {
 
   final String systemInstruction;
 
+  /// The large drawing contract. Backend requests keep this separate: it goes
+  /// only to the model that draws the finished answer. Direct provider
+  /// clients use it as their effective system instruction.
+  final String? notationInstruction;
+
+  String get providerSystemInstruction =>
+      notationInstruction ?? systemInstruction;
+
   /// The selected ink, sent with the first user message of every request.
   final Uint8List imagePng;
+
+  /// Coordinate-gridded form of [imagePng], used only by a drawing pass.
+  /// Direct clients use it immediately; the backend defers it until needed.
+  final Uint8List? notationImagePng;
+
+  Uint8List get providerImagePng => notationImagePng ?? imagePng;
 
   /// Present only for a request submitted with Notation enabled.
   final NoteImage? noteImage;
@@ -217,9 +240,9 @@ class AiTokenUsage {
   /// A deterministic guess from what was sent and what came back, for a
   /// provider that reported no usage.
   factory AiTokenUsage.estimate(AiRequest request, String answer) {
-    int characters = request.systemInstruction.length;
+    int characters = request.providerSystemInstruction.length;
     for (final AiMessage message in request.messages) {
-      characters += message.wireText.length;
+      characters += message.historyText.length;
     }
     return AiTokenUsage(
       inputTokens: (characters / charactersPerToken).ceil() + imageTokens,

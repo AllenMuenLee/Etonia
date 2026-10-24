@@ -5,6 +5,7 @@ import 'dart:math' as math;
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:greatnote/features/editor/ai/ai_config.dart';
 import 'package:greatnote/features/editor/ai/ai_notation.dart';
 import 'package:greatnote/features/editor/ai/notation_font.dart';
 import 'package:greatnote/features/editor/ai/notation_layout.dart';
@@ -190,7 +191,7 @@ void main() {
 
   test('the custom font asks for the key letters, and others if wanted', () {
     expect(customFontPages.first.join(), keyLetters);
-    expect(keyLetters, hasLength(15));
+    expect(keyLetters, hasLength(18));
     final List<String> all = customFontPages
         .expand((List<String> p) => p)
         .join()
@@ -285,6 +286,123 @@ void main() {
     ]).style!.glyphs!;
     expect(more['q']!.strokes, isNot(loopy['q']!.strokes));
     expect(more['Q'], isNotNull);
+  });
+
+  test('a swoop off the foot of the n stays out of the u and m', () {
+    // Down the stem, back up it, over the arch, down the leg, and off in a
+    // long swoop below the line.
+    final List<InkVector> n = <InkVector>[
+      for (double y = 4.5; y <= 10; y += 0.5) InkVector(0, y),
+      for (double y = 9.5; y >= 6; y -= 0.5) InkVector(0.1, y),
+      const InkVector(1, 4.8),
+      const InkVector(2.5, 4.3),
+      const InkVector(4, 5),
+      for (double y = 5.5; y <= 10; y += 0.5) InkVector(4.6, y),
+      const InkVector(5, 11.2),
+      const InkVector(6.5, 12),
+      const InkVector(8, 11.6),
+      const InkVector(9.5, 10.8),
+    ];
+    final Map<String, HandGlyph> glyphs = buildMissingGlyphs(
+      <String, HandGlyph>{
+        'n': HandGlyph(9.5, <List<InkVector>>[n]),
+      },
+      slant: 0,
+    );
+    for (final String letter in 'um'.split('')) {
+      final Rect bounds = _inkBounds(glyphs[letter]!.strokes);
+      expect(bounds.top, greaterThan(4), reason: letter);
+      expect(bounds.bottom, lessThan(10.3), reason: letter);
+    }
+    // Two arches, each about as wide as the n's without its swoop.
+    final double m = _inkBounds(glyphs['m']!.strokes).width;
+    expect(m, greaterThan(4.6 * 1.4));
+    expect(m, lessThan(4.6 * 2.1));
+  });
+
+  test('letters are written on one line, tails half below it', () {
+    List<List<InkVector>> box(double top, double bottom) => <List<InkVector>>[
+      <InkVector>[
+        InkVector(0, top),
+        InkVector(0, bottom),
+        InkVector(3, bottom),
+        InkVector(3, top),
+      ],
+    ];
+    final HandGlyphs glyphs = HandGlyphs(<String, HandGlyph>{
+      // Written a little above and below the line, as in their boxes.
+      'a': HandGlyph(3, box(4.4, 9.4)),
+      'n': HandGlyph(3, box(5.2, 10.8)),
+      'B': HandGlyph(3, box(0.5, 10.5)),
+      'g': HandGlyph(3, box(4.2, 16)),
+      // A dash over the stem, longer than the stem itself.
+      'i': const HandGlyph(5, <List<InkVector>>[
+        <InkVector>[InkVector(0, 2), InkVector(5, 2)],
+        <InkVector>[InkVector(3, 5), InkVector(3, 10)],
+      ]),
+      ',': HandGlyph(1, box(9, 11)),
+    });
+    for (final String letter in 'anBi'.split('')) {
+      expect(
+        _inkBounds(glyphs.lined(letter)!.strokes).bottom,
+        closeTo(10, 1e-9),
+        reason: letter,
+      );
+    }
+    // Punctuation keeps its place.
+    expect(_inkBounds(glyphs.lined(',')!.strokes).bottom, 11);
+    // The small letters reach up to 5 once on the line, so a tail stands
+    // 5 above it and hangs 5 below.
+    final Rect g = _inkBounds(glyphs.lined('g')!.strokes);
+    expect(g.top, closeTo(5, 1e-9));
+    expect(g.bottom, closeTo(15, 1e-9));
+    // The dash is a dot over the stem.
+    final List<List<InkVector>> i = glyphs.lined('i')!.strokes;
+    expect(i.first, hasLength(1));
+    expect(i.first.single.x, 3);
+    expect(i.first.single.y, lessThan(5));
+  });
+
+  test('an o left open is closed when written', () {
+    // Round from the top left, stopping short of where it began.
+    final List<InkVector> open = <InkVector>[
+      for (int k = 0; k <= 15; k++)
+        InkVector(
+          2.5 + 2.5 * math.cos(math.pi * (1.2 + k * 1.5 / 15)),
+          7 - 2.8 * math.sin(math.pi * (1.2 + k * 1.5 / 15)),
+        ),
+    ];
+    final HandGlyphs glyphs = HandGlyphs(<String, HandGlyph>{
+      'o': HandGlyph(5, <List<InkVector>>[open]),
+    });
+    final List<InkVector> closed = glyphs.lined('o')!.strokes.single;
+    expect((closed.last - closed.first).length, lessThan(0.3));
+    expect(closed.length, greaterThan(open.length));
+  });
+
+  test('built letters are built again when the font is read', () {
+    final HandwritingStyle custom = readCustomFont(<List<List<InkVector>>>[
+      _page(0, _loopy),
+    ]).style!;
+    final HandGlyphs glyphs = custom.glyphs!;
+    expect(glyphs.built, contains('n'));
+    expect(glyphs.built, isNot(contains('m')));
+    // A font saved with an n the builder has since learned to make
+    // better: read back, it has the n the builder makes now.
+    final Map<String, Object?> json = custom.toJson();
+    final Map<String, Object?> saved = Map<String, Object?>.of(
+      json['glyphs']! as Map<String, Object?>,
+    );
+    saved['n'] = <Object?>[
+      1,
+      <Object?>[
+        <double>[0, 0, 1, 1],
+      ],
+    ];
+    final HandwritingStyle reread = HandwritingStyle.fromJson(
+      jsonDecode(jsonEncode(<String, Object?>{...json, 'glyphs': saved})),
+    )!;
+    expect(reread.glyphs, glyphs);
   });
 
   test('cursive joins the letters of a word, and only those', () {
@@ -414,11 +532,11 @@ void main() {
 
   test('key letters left out are asked for, others are not', () {
     final List<List<List<InkVector>>> pages = <List<List<InkVector>>>[
-      _page(0, HandwritingStyle.standard, skip: 'kw'),
+      _page(0, HandwritingStyle.standard, skip: 'hw'),
     ];
     final CalibrationReading reading = readCustomFont(pages);
     expect(reading.complete, isFalse);
-    expect(reading.missing, <String>['k', 'w']);
+    expect(reading.missing, <String>['h', 'w']);
     expect(reading.style, isNull);
     expect(missingLetters(3, const <List<InkVector>>[]), hasLength(10));
 
@@ -435,10 +553,10 @@ void main() {
     final List<List<InkVector>> page = <List<InkVector>>[
       ..._page(0, HandwritingStyle.standard, skip: 'i'),
       <InkVector>[
-        const InkVector(5 * calibrationCell + 0.7, -0.6),
-        const InkVector(5 * calibrationCell + 0.7, 0),
+        const InkVector(7 * calibrationCell + 0.7, -0.6),
+        const InkVector(7 * calibrationCell + 0.7, 0),
       ],
-      const <InkVector>[InkVector(5 * calibrationCell + 0.75, -1.4)],
+      const <InkVector>[InkVector(7 * calibrationCell + 0.75, -1.4)],
     ];
     expect(missingLetters(0, page), isEmpty);
     final List<List<List<List<InkVector>>>> cells = calibrationCells(
@@ -446,13 +564,13 @@ void main() {
       ruledUnits(3),
       customFontPages[0],
     );
-    expect(customFontPages[0][0][5], 'i');
-    expect(cells[0][5], hasLength(2));
+    expect(customFontPages[0][0][7], 'i');
+    expect(cells[0][7], hasLength(2));
   });
 
   test('a row that drifts off its boxes still gives each letter its own', () {
     // Each letter a little further right than the last, the k past the
-    // end of the row, and the nostw all left of their boxes.
+    // end of the row, and the mostvw all left of their boxes.
     final List<String> rows = customFontPages[0];
     List<List<InkVector>> letter(int r, int c, double dx) => NotationFont.write(
       rows[r][c],
@@ -558,11 +676,17 @@ void main() {
     )!;
     expect(reread, custom);
     expect(reread.glyphs, isNotNull);
+    // A saved space is the built-in hand's of its day, never measured: it
+    // follows the built-in hand's as that changes.
     final HandwritingStyle cursive = HandwritingFont.cursive.style!;
+    final HandwritingStyle cursiveReread = HandwritingStyle.fromJson(
+      jsonDecode(jsonEncode(cursive.toJson())),
+    )!;
     expect(
-      HandwritingStyle.fromJson(jsonDecode(jsonEncode(cursive.toJson()))),
-      cursive,
+      cursiveReread.toJson()..remove('wordSpacing'),
+      cursive.toJson()..remove('wordSpacing'),
     );
+    expect(cursiveReread.wordSpacing, HandwritingStyle.standard.wordSpacing);
 
     final HandwritingStyle partial = HandwritingStyle.fromJson(
       <String, Object?>{
@@ -600,6 +724,7 @@ void main() {
                     style: custom,
                     font: HandwritingFont.custom,
                     chatReminderDismissed: true,
+                    textSize: AiTextSize.large,
                   ).toJson(),
                 ),
               )
@@ -609,6 +734,19 @@ void main() {
     expect(state.font, HandwritingFont.custom);
     expect(state.skipped, isFalse);
     expect(state.chatReminderDismissed, isTrue);
+    expect(state.textSize, AiTextSize.large);
+    // Choosing another font keeps the other choices.
+    final HandwritingCalibrationState rechosen = state.withStyle(
+      HandwritingFont.print.style,
+      HandwritingFont.print,
+    );
+    expect(rechosen.font, HandwritingFont.print);
+    expect(rechosen.chatReminderDismissed, isTrue);
+    expect(rechosen.textSize, AiTextSize.large);
+    expect(
+      HandwritingCalibrationState.fromJson(<String, Object?>{}).textSize,
+      AiTextSize.medium,
+    );
   });
 
   test('a preset is read back as the font is now', () {

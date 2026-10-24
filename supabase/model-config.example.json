@@ -1,6 +1,6 @@
 {
   "haiku": { "provider": "claude", "model": "YOUR_HAIKU_MODEL_ID", "inputMicroPerKilo": 100, "outputMicroPerKilo": 500, "maxOutputTokens": 16384 },
-  "luna": { "provider": "openai", "model": "YOUR_LUNA_MODEL_ID", "inputMicroPerKilo": 100, "outputMicroPerKilo": 500, "maxOutputTokens": 16384 },
+  "luna": { "provider": "openai", "model": "YOUR_LUNA_MODEL_ID", "inputMicroPerKilo": 100, "outputMicroPerKilo": 500, "maxOutputTokens": 16384, "reasoningEffort": "medium" },
   "sonnet": { "provider": "claude", "model": "YOUR_SONNET_MODEL_ID", "inputMicroPerKilo": 2000, "outputMicroPerKilo": 10000, "maxOutputTokens": 16384 },
   "sol": { "provider": "openai", "model": "YOUR_SOL_MODEL_ID", "inputMicroPerKilo": 2000, "cachedInputMicroPerKilo": 200, "outputMicroPerKilo": 10000, "maxOutputTokens": 16384, "reasoningEffort": "low" },
   "opus": { "provider": "claude", "model": "YOUR_OPUS_MODEL_ID", "inputMicroPerKilo": 4000, "outputMicroPerKilo": 20000, "maxOutputTokens": 16384 },

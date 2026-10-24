@@ -222,6 +222,19 @@ class PdfPageRenderCache {
         });
   }
 
+  /// Starts reading and parsing the PDF of [source], so that its first render
+  /// does not wait on that.
+  void warm(PdfPageSource source) {
+    final PdfRasterizer rasterizer = this.rasterizer;
+    if (rasterizer is! PdfDocumentRasterizer) return;
+    final Future<OpenPdf> opening = _open(
+      source.assetId,
+      rasterizer as PdfDocumentRasterizer,
+    );
+    // A failure surfaces through the render that needs the document.
+    opening.then<void>((_) {}, onError: (Object _) {});
+  }
+
   /// Ranks [pages], the PDF pages around the one in view, nearest first,
   /// so that they render in that order, and has each one rendered ahead of
   /// being shown: in preview, and the first [sharpPages] also sharp.
@@ -479,6 +492,28 @@ class PdfPageRenderCache {
     );
   }
 
+  /// Under memory pressure: lets go of every finished render no page is
+  /// waiting on, of the PDF bytes kept to render again, and of the PDFs
+  /// kept open, once any render using one is done. Pages on screen hold
+  /// clones of their own, so none goes blank; a page scrolled back to is
+  /// rendered again.
+  void releaseMemory() {
+    for (final LinkedHashMap<String, _PdfRenderEntry> tier
+        in <LinkedHashMap<String, _PdfRenderEntry>>[_entries, _previews]) {
+      tier.removeWhere((String _, _PdfRenderEntry entry) {
+        // Borrowers hold clones; an image is disposed once theirs are made.
+        if (!entry.isReady || entry.waiters > 0) return false;
+        entry.evict();
+        return true;
+      });
+    }
+    _sources.clear();
+    for (final Future<OpenPdf> document in _documents.values) {
+      _closeWhenIdle(document);
+    }
+    _documents.clear();
+  }
+
   void clear() {
     _generation++;
     _settle?.cancel();
@@ -688,8 +723,7 @@ class _PdfPageLayerState extends State<PdfPageLayer> {
   /// Renders the page for its present size: blurry at first, then sharp. A
   /// page that is only resized, as when the AI panel opens or closes beside
   /// it, keeps showing what it had, stretched to fit, until the new render
-  /// arrives; only another page or another cache starts from the progress
-  /// indicator.
+  /// arrives; only another page or another cache starts from blank paper.
   void _load({bool keepShown = false}) {
     _ticket?.cancel();
     _error = null;
@@ -740,15 +774,23 @@ class _PdfPageLayerState extends State<PdfPageLayer> {
     return Semantics(
       image: true,
       label: 'Page ${widget.source.pageIndex + 1}, from PDF',
-      child: _image != null
-          ? RawImage(
-              image: _image,
-              fit: BoxFit.fill,
-              filterQuality: FilterQuality.medium,
-            )
-          : _error != null
-          ? const Center(child: Text('PDF page unavailable'))
-          : const ShimmerPlaceholder(semanticsLabel: 'Loading PDF page'),
+      // The page fades in where it lies, so it never shifts under its ink;
+      // a sharper render later replaces it without fading again.
+      child: LoadingReveal(
+        timing: LoadTimings.pdfPage,
+        semanticsLabel: 'Loading PDF page',
+        child: _image != null
+            ? SizedBox.expand(
+                child: RawImage(
+                  image: _image,
+                  fit: BoxFit.fill,
+                  filterQuality: FilterQuality.medium,
+                ),
+              )
+            : _error != null
+            ? const Center(child: Text('PDF page unavailable'))
+            : null,
+      ),
     );
   }
 }

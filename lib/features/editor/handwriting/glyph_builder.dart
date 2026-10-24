@@ -2,20 +2,25 @@ import 'dart:math' as math;
 
 import '../ink/ink_sample.dart';
 import 'hand_glyphs.dart';
+import 'pen_smoothing.dart';
 import 'stroke_runs.dart';
 
 /// The letters the writer writes out to make a font of their own. Between
 /// them they hold every part the rest of the alphabet is made of: bowls
-/// (a, o), an arch (n), stems short and tall (i, b, k), a descender (g),
-/// a crossbar (t), diagonals (w, k, A), the loops of e and s, the hook of
-/// f, and the bars and bowl of the capitals (E, R).
-const String keyLetters = 'abefgiknostwAER';
+/// (a, o), an arch (h), stems short and tall (i, b, d, h), a descender (g),
+/// a crossbar (t), diagonals (v, w, A), the loops of e and s, the hook of
+/// f, and the bars and bowl of the capitals (E, R). The m is written
+/// rather than built, as are D, whose closures are personal enough to
+/// keep as the writer made them.
+const String keyLetters = 'abdefghimostvwAERD';
 
 /// Every letter of the alphabet missing from [written], built from the
-/// strokes of the letters that are there: an h is the writer's n with
-/// their b's stem, an m their n's arch twice, a P their R without its leg,
-/// an x their w's diagonals crossed. Nothing is taken from a font: every
-/// line is one the writer drew, laid where the letter needs it.
+/// strokes of the letters that are there: an n is the writer's h with its
+/// stem cut at the top of their small letters, an l their d's stem, a k
+/// their h's stem with their v turned on its side, a j their i run on into
+/// their g's tail, a P their R without its leg, an x their w's diagonals
+/// crossed. Nothing is taken from a font: every line is one the writer
+/// drew, laid where the letter needs it.
 ///
 /// [written] is in the font's grid (see [HandGlyph]), leaning [slant] as
 /// the writer leans: how far right the pen moves per unit it rises. The
@@ -24,6 +29,38 @@ Map<String, HandGlyph> buildMissingGlyphs(
   Map<String, HandGlyph> written, {
   required double slant,
 }) => _Builder(written, slant).build();
+
+/// [glyphs] with the letters it records as built ([HandGlyphs.built])
+/// built again from those written, so a font made before the builder
+/// learned better is written as it would be made now.
+HandGlyphs? rebuiltGlyphs(HandGlyphs? glyphs) {
+  if (glyphs == null || glyphs.built.isEmpty) return glyphs;
+  final Map<String, HandGlyph> written = <String, HandGlyph>{
+    for (final String char in glyphs.characters)
+      if (!glyphs.built.contains(char)) char: glyphs[char]!,
+  };
+  return builtGlyphs(written, slant: glyphs.builtSlant);
+}
+
+/// [written], and every letter missing from it built from it
+/// ([buildMissingGlyphs]), as they are saved, recording which were built.
+HandGlyphs builtGlyphs(
+  Map<String, HandGlyph> written, {
+  required double slant,
+}) {
+  // Built from the letters as they are saved, so building them again when
+  // the font is read gives the same.
+  final HandGlyphs kept = HandGlyphs.rounded(written);
+  final Map<String, HandGlyph> saved = <String, HandGlyph>{
+    for (final String char in kept.characters) char: kept[char]!,
+  };
+  final Map<String, HandGlyph> built = buildMissingGlyphs(saved, slant: slant);
+  return HandGlyphs.rounded(
+    <String, HandGlyph>{...saved, ...built},
+    built: built.keys.join(),
+    builtSlant: built.isEmpty ? 0 : slant,
+  );
+}
 
 typedef _Strokes = List<List<InkVector>>;
 
@@ -59,7 +96,7 @@ class _Builder {
               read(_box(strokes)),
         ]);
     xTop = (measured('aenosw', (_Box b) => b.top) ?? 4).clamp(2.0, 8.0);
-    ascTop = (measured('bkf', (_Box b) => b.top) ?? 0).clamp(-2.0, xTop - 1);
+    ascTop = (measured('bhf', (_Box b) => b.top) ?? 0).clamp(-2.0, xTop - 1);
     descBottom = math.max(
       measured('g', (_Box b) => b.bottom) ?? 13,
       _baseline + 1.5,
@@ -94,6 +131,8 @@ class _Builder {
     // In order: later letters are built from earlier ones.
     final Map<String, _Strokes? Function()> builders =
         <String, _Strokes? Function()>{
+          // An n first: the u, the r, and others are built from it.
+          'n': _n,
           'c': _c,
           'd': () =>
               _extendStem('a', right: true, to: ascTop) ??
@@ -104,6 +143,7 @@ class _Builder {
                 _lay(_stem, InkVector(0, ascTop), const InkVector(0, 10)),
                 ...?_letters['n'],
               ],
+          'k': _k,
           'l': _l,
           'j': _j,
           'm': _m,
@@ -112,13 +152,13 @@ class _Builder {
               _extendStem('a', right: true, to: descBottom) ??
               _onStem(_letters['c'], top: xTop, bottom: descBottom),
           'r': _r,
-          'u': () => _turned(_letters['n']),
+          'u': () => _turned(_footedN()),
           'v': _v,
           'x': _x,
           'y': _y,
           'z': _z,
           'C': () => _capital('c'),
-          'O': () => _capital('o'),
+          'O': () => _tall(_o),
           'S': () => _capital('s'),
           'U': () => _capital('u'),
           'V': () => _capital('v'),
@@ -160,7 +200,7 @@ class _Builder {
     final _Strokes leaning = <List<InkVector>>[
       for (final List<InkVector> stroke in strokes)
         <InkVector>[
-          for (final InkVector p in resampled(stroke, _spacing))
+          for (final InkVector p in penSmoothed(stroke, spacing: _spacing))
             InkVector(p.x + slant * (_baseline - p.y), p.y),
         ],
     ];
@@ -197,7 +237,7 @@ class _Builder {
       _line('i', (_Run r) => r.upright) ??
       _line('n', (_Run r) => r.upright) ??
       _line('b', (_Run r) => r.upright) ??
-      _line('k', (_Run r) => r.upright) ??
+      _line('h', (_Run r) => r.upright) ??
       _anyLine;
 
   /// A capital's stem.
@@ -216,14 +256,14 @@ class _Builder {
   /// A small letter's line falling to the right, as \, from the top.
   late final List<InkVector> _fall =
       _line('w', (_Run r) => _isDiagonal(r) && r.fallsRight) ??
-      _line('k', (_Run r) => _isDiagonal(r) && r.fallsRight) ??
+      _line('v', (_Run r) => _isDiagonal(r) && r.fallsRight) ??
       _line('A', (_Run r) => _isDiagonal(r) && r.fallsRight) ??
       _stem;
 
   /// A small letter's line rising to the right, as /, from the top.
   late final List<InkVector> _rise =
       _line('w', (_Run r) => _isDiagonal(r) && !r.fallsRight) ??
-      _line('k', (_Run r) => _isDiagonal(r) && !r.fallsRight) ??
+      _line('v', (_Run r) => _isDiagonal(r) && !r.fallsRight) ??
       _line('A', (_Run r) => _isDiagonal(r) && !r.fallsRight) ??
       _stem;
 
@@ -291,14 +331,21 @@ class _Builder {
 
   /// The writer's c turned round: a bowl open on its left, as a P's.
   _Strokes get _rightBowl =>
-      _mirrored(_letters['c'] ?? _letters['o'] ?? <List<InkVector>>[_stem]);
+      _mirrored(_letters['c'] ?? _o ?? <List<InkVector>>[_stem]);
+
+  /// The writer's o, closed where they left it open, as an O or a c's
+  /// round needs it.
+  late final _Strokes? _o = switch (_letters['o']) {
+    final _Strokes o => HandGlyphs.closed(HandGlyph(0, o)).strokes,
+    null => null,
+  };
 
   // ---------------------------------------------------------------------
   // Small letters.
 
   /// The o with its right side left open.
   _Strokes? _c() {
-    final _Strokes? o = _letters['o'];
+    final _Strokes? o = _o;
     if (o == null) return null;
     final List<InkVector> loop = _longestStroke(o);
     if (loop.length < 4) return <List<InkVector>>[loop];
@@ -404,9 +451,9 @@ class _Builder {
     ];
   }
 
-  /// The tall stem of the writer's b or k.
+  /// The tall stem of the writer's d, or failing that their b or h.
   _Strokes _l() {
-    for (final String letter in <String>['b', 'k']) {
+    for (final String letter in <String>['d', 'b', 'h']) {
       final List<InkVector>? stem = _line(
         letter,
         (_Run r) => r.upright && r.top < xTop - 1,
@@ -418,11 +465,83 @@ class _Builder {
     ];
   }
 
+  /// The h's stem, from the top of its ascender to the baseline.
+  _Run? _hStem() {
+    final _Strokes? h = _letters['h'];
+    if (h == null) return null;
+    final _Box box = _box(h);
+    return _longest(
+      _runs(h),
+      (_Run r) =>
+          r.upright &&
+          r.top < xTop - 1 &&
+          r.centerX < box.left + box.width * 0.45,
+    );
+  }
+
+  /// The h with its stem cut where the small letters' tops are, so only
+  /// the part of it beside the arch is left. Where the pen went up the
+  /// stem and came back down it, it now turns at the cut.
+  _Strokes? _n() {
+    final _Strokes? h = _letters['h'];
+    if (h == null) return null;
+    final _Box box = _box(h);
+    // The stem's side of the letter, clear of the arch's top.
+    final double stemSide = box.left + box.width * 0.4;
+    bool above(InkVector p) => p.y < xTop && p.x < stemSide;
+    InkVector crossing(InkVector a, InkVector b) =>
+        b.y == a.y ? b : a + (b - a) * ((xTop - a.y) / (b.y - a.y));
+    final _Strokes cut = <List<InkVector>>[];
+    for (final List<InkVector> stroke in h) {
+      final List<InkVector> kept = <InkVector>[];
+      for (int k = 0; k < stroke.length; k++) {
+        final bool out = above(stroke[k]);
+        if (k > 0 && out != above(stroke[k - 1])) {
+          kept.add(crossing(stroke[k - 1], stroke[k]));
+        }
+        if (!out) kept.add(stroke[k]);
+      }
+      if (kept.isNotEmpty) cut.add(kept);
+    }
+    return cut.isEmpty ? null : cut;
+  }
+
+  /// The h's stem, with the v turned on its side, its point to the left,
+  /// for the arm and the leg.
+  _Strokes? _k() {
+    final _Strokes? v = _letters['v'];
+    final _Run? stem = _hStem();
+    final List<InkVector> tall = stem == null
+        ? _l().single
+        : _letters['h']![stem.stroke].sublist(stem.from, stem.to + 1);
+    if (v == null) return null;
+    // A quarter turn: what pointed down points left, and the v's left
+    // arm, drawn first, is the k's arm, its right arm the k's leg.
+    final _Strokes turned = <List<InkVector>>[
+      for (final List<InkVector> stroke in v)
+        <InkVector>[for (final InkVector p in stroke) InkVector(-p.y, p.x)],
+    ];
+    final _Box box = _box(turned);
+    final double sy = _xHeight / math.max(box.height, 0.1);
+    final double sx = math.min(sy, lowWidth * 0.8 / math.max(box.width, 0.1));
+    final double x = _box(<List<InkVector>>[tall]).center.x;
+    return <List<InkVector>>[
+      tall,
+      for (final List<InkVector> stroke in turned)
+        <InkVector>[
+          for (final InkVector p in stroke)
+            InkVector(x + (p.x - box.left) * sx, xTop + (p.y - box.top) * sy),
+        ],
+    ];
+  }
+
   /// The i's stem running on into the g's descender, dotted as the i is.
   _Strokes? _j() {
     final _Strokes? i = _letters['i'];
     if (i == null) return null;
-    List<InkVector> stem = _longestStroke(i);
+    // The tallest stroke: a dash over the i can be longer than its stem.
+    final List<InkVector> written = _tallestStroke(i);
+    List<InkVector> stem = written;
     if (stem.first.y > stem.last.y) stem = stem.reversed.toList();
     int deepest = 0;
     for (int k = 0; k < stem.length; k++) {
@@ -442,7 +561,7 @@ class _Builder {
           ];
     return <List<InkVector>>[
       for (final List<InkVector> stroke in i)
-        identical(stroke, _longestStroke(i)) ? drawn : stroke,
+        identical(stroke, written) ? drawn : stroke,
     ];
   }
 
@@ -474,9 +593,36 @@ class _Builder {
     return (stroke: index, from: from, box: box);
   }
 
+  /// The arch of the n stopped where its right leg reaches the baseline: a
+  /// flick or swoop off its foot belongs at the end of a word, not inside
+  /// an m, nor, turned over, at the top of a u.
+  _Strokes? _footedN() {
+    final _Strokes? n = _letters['n'];
+    final ({int stroke, int from, _Box box})? arch = _arch();
+    if (n == null || arch == null) return n;
+    final List<InkVector> stroke = n[arch.stroke];
+    int peak = arch.from;
+    for (int k = arch.from; k < stroke.length; k++) {
+      if (stroke[k].y < stroke[peak].y) peak = k;
+    }
+    for (int k = peak + 1; k < stroke.length; k++) {
+      if (stroke[k].y < _baseline) continue;
+      final InkVector a = stroke[k - 1];
+      final InkVector b = stroke[k];
+      final InkVector foot = b.y == a.y
+          ? b
+          : a + (b - a) * ((_baseline - a.y) / (b.y - a.y));
+      return <List<InkVector>>[
+        for (int s = 0; s < n.length; s++)
+          s == arch.stroke ? <InkVector>[...stroke.take(k), foot] : n[s],
+      ];
+    }
+    return n;
+  }
+
   /// The n with its arch drawn again beside it, a little narrower.
   _Strokes? _m() {
-    final _Strokes? n = _letters['n'];
+    final _Strokes? n = _footedN();
     final ({int stroke, int from, _Box box})? arch = _arch();
     if (n == null) return null;
     if (arch == null) {
@@ -486,13 +632,27 @@ class _Builder {
       ];
     }
     final List<InkVector> stroke = n[arch.stroke];
-    final List<InkVector> over = stroke.sublist(arch.from);
+    int peak = arch.from;
+    for (int k = arch.from; k < stroke.length; k++) {
+      if (stroke[k].y < stroke[peak].y) peak = k;
+    }
+    // Where the pen turns at the foot of the stem to go back up it, when
+    // the n is one stroke: the second arch sets off from the first's foot
+    // just as the first set off from the stem's.
+    int turn = 0;
+    for (int k = 1; k < peak; k++) {
+      if (stroke[k].y > stroke[turn].y) turn = k;
+    }
+    final bool retraced =
+        turn > 0 && stroke[turn].y > _baseline - _xHeight * 0.3;
+    final List<InkVector> over = stroke.sublist(retraced ? turn : arch.from);
     final double step = over.last.x - over.first.x;
     if (step < 1) return null;
     // Back up the arch's right side, and over again.
     final List<InkVector> twice = <InkVector>[
       ...stroke,
-      for (final InkVector p in over) p + InkVector(step, 0),
+      for (final InkVector p in over.skip(retraced ? 1 : 0))
+        p + InkVector(step, 0),
     ];
     final double left = arch.box.left;
     return <List<InkVector>>[
@@ -506,16 +666,19 @@ class _Builder {
 
   /// The n stopped at the shoulder of its arch.
   _Strokes? _r() {
-    final _Strokes? n = _letters['n'];
+    final _Strokes? n = _footedN();
     final ({int stroke, int from, _Box box})? arch = _arch();
     if (n == null || arch == null) return n;
     final List<InkVector> stroke = n[arch.stroke];
+    // Measured without a swoop off the n's foot, which would carry the
+    // shoulder on down the leg, so the r reads as an n.
+    final _Box box = _box(n);
     int peak = arch.from;
     int end = stroke.length - 1;
     for (int k = arch.from; k < stroke.length; k++) {
       if (stroke[k].y < stroke[peak].y) peak = k;
-      if (stroke[k].x - arch.box.left >= arch.box.width * 0.62 ||
-          (k > peak && stroke[k].y > stroke[peak].y + _xHeight * 0.3)) {
+      if (stroke[k].x - box.left >= box.width * 0.6 ||
+          (k > peak && stroke[k].y > stroke[peak].y + _xHeight * 0.15)) {
         end = k;
         break;
       }
@@ -679,8 +842,10 @@ class _Builder {
   // Capitals.
 
   /// The small [letter], as tall as a capital.
-  _Strokes? _capital(String letter) {
-    final _Strokes? strokes = _letters[letter];
+  _Strokes? _capital(String letter) => _tall(_letters[letter]);
+
+  /// [strokes], a small letter, as tall as a capital.
+  _Strokes? _tall(_Strokes? strokes) {
     if (strokes == null) return null;
     final double f = _baseline / _xHeight;
     return <List<InkVector>>[
@@ -1203,6 +1368,17 @@ _Run? _longest(List<_Run> runs, bool Function(_Run run) test) {
     if (test(run) && (best == null || run.length > best.length)) best = run;
   }
   return best;
+}
+
+List<InkVector> _tallestStroke(_Strokes strokes) {
+  List<InkVector> tallest = strokes.first;
+  for (final List<InkVector> stroke in strokes) {
+    if (_box(<List<InkVector>>[stroke]).height >
+        _box(<List<InkVector>>[tallest]).height) {
+      tallest = stroke;
+    }
+  }
+  return tallest;
 }
 
 List<InkVector> _longestStroke(_Strokes strokes) {

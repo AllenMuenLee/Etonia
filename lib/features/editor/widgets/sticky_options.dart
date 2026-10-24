@@ -1,10 +1,11 @@
-import 'package:flutter/material.dart';
+﻿import 'package:flutter/material.dart';
 
 import '../../../app/theme/app_icons.dart';
 import '../../../app/theme/app_tokens.dart';
 import '../../../shared/widgets/app_controls.dart';
 import '../sticky/sticky_note.dart';
 import '../sticky/sticky_note_painter.dart';
+import 'color_palette_dialog.dart';
 
 /// The Sticky note tool's options: the paper color and the paper style,
 /// each marked by a check and its name, never by color or pattern alone.
@@ -31,6 +32,9 @@ class StickyOptions extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final AppColors colors = AppColors.of(context);
+    final bool hasCustomSelected = !StickyPalette.colors.any(
+      (StickyPaperColor c) => c.id == settings.color.id,
+    );
     return Column(
       mainAxisSize: MainAxisSize.min,
       crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -47,6 +51,29 @@ class StickyOptions extends StatelessWidget {
                 selected: color.id == settings.color.id,
                 onTap: () => onChanged(settings.copyWith(color: color)),
               ),
+            if (hasCustomSelected)
+              _PaperSwatch(
+                key: ValueKey<String>('sticky-color-${settings.color.id}'),
+                color: settings.color,
+                selected: true,
+                onTap: () =>
+                    onChanged(settings.copyWith(color: settings.color)),
+              ),
+            ColorPaletteButton(
+              onTap: () async {
+                final Color? picked = await showColorPaletteDialog(
+                  context,
+                  initialColor: settings.color.paper,
+                  title: 'Paper color',
+                );
+                if (picked != null) {
+                  onChanged(
+                    settings.copyWith(color: StickyPalette.custom(picked)),
+                  );
+                }
+              },
+              tooltip: 'Paper color palette',
+            ),
           ],
         ),
         const SizedBox(height: AppSpacing.md),
@@ -177,7 +204,7 @@ class _PaperStyleTile extends StatelessWidget {
       onTap: onTap,
       child: InkWell(
         onTap: onTap,
-        borderRadius: BorderRadius.circular(AppRadii.medium),
+        borderRadius: AppBorderRadius.medium,
         child: Padding(
           padding: const EdgeInsets.all(AppSpacing.xxs),
           child: Column(

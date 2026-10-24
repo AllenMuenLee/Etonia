@@ -134,6 +134,25 @@ void main() {
     expect(find.text('4,99 € / month'), findsOneWidget);
   });
 
+  testWidgets('toggle switches between monthly and yearly billing', (
+    WidgetTester tester,
+  ) async {
+    await _pumpPage(tester);
+
+    expect(find.text('\$4.99 / month'), findsOneWidget);
+    expect(find.text('\$12.99 / month'), findsOneWidget);
+    expect(find.text('\$29.99 / month'), findsOneWidget);
+
+    await tester.tap(
+      find.byKey(const ValueKey<String>('billing-cycle-yearly')),
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.text('\$49.99 / year'), findsOneWidget);
+    expect(find.text('\$129.99 / year'), findsOneWidget);
+    expect(find.text('\$299.99 / year'), findsOneWidget);
+  });
+
   for (final (SubscriptionPlan plan, String meter)
       in <(SubscriptionPlan, String)>[
         (SubscriptionPlan.starter499, '100%'),
@@ -228,6 +247,8 @@ void main() {
       tester,
       gateway: gateway,
     );
+    await tester.ensureVisible(find.text('Restore Purchases'));
+    await tester.pumpAndSettle();
     await tester.tap(find.text('Restore Purchases'));
     await tester.pumpAndSettle();
 
@@ -320,11 +341,13 @@ void main() {
             if (color == null) {
               continue;
             }
-            final Color background = color == colors.onAccent
+            // Text in the paper colour, quieter or not, is on the ink card.
+            final Color background =
+                color.withValues(alpha: 1) == colors.onAccent
                 ? colors.accent
                 : colors.surface;
             expect(
-              contrastRatio(color, background),
+              contrastRatio(Color.alphaBlend(color, background), background),
               greaterThanOrEqualTo(4.5),
               reason: '${text.text.toPlainText()} in ${plan.name}',
             );
@@ -332,7 +355,7 @@ void main() {
         }
         // Badges and chips sit on tinted fills.
         for (final Color fill in <Color>[
-          colors.selected,
+          Color.alphaBlend(colors.selected, colors.surface),
           colors.surfaceMuted,
         ]) {
           expect(

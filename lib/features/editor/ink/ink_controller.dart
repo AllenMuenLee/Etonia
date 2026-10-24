@@ -19,9 +19,34 @@ import 'shape_recognizer.dart';
 import 'smoothing_config.dart';
 import 'stroke.dart';
 import 'stroke_spatial_index.dart';
-import 'stroke_follower.dart';
 import '../document_io/document_models.dart';
 import '../sticky/sticky_note.dart';
+
+@immutable
+class InkRecordingContext {
+  const InkRecordingContext({
+    required this.recordingId,
+    required this.elapsedMs,
+  });
+
+  final String recordingId;
+  final int elapsedMs;
+}
+
+@immutable
+class ErasedStrokeRecord {
+  const ErasedStrokeRecord({
+    required this.stroke,
+    required this.erasedAtMs,
+    required this.recordingId,
+  });
+
+  final Stroke stroke;
+  final int erasedAtMs;
+  final String recordingId;
+
+  String get strokeId => stroke.id;
+}
 
 /// In-memory ink for one editor session.
 ///
@@ -43,17 +68,20 @@ import '../sticky/sticky_note.dart';
 /// gesture, the selection, and the clipboard are never part of it.
 class InkController {
   InkController({
-    this.smoothing = const SmoothingConfig(),
+    this.smoothing = const SmoothingConfig(slowCutoffScale: 0.25),
     this.selectionConfig = const SelectionConfig(),
     this.stickyConfig = const StickyNoteConfig(),
     this.historyLimit = 100,
     Iterable<Stroke> strokes = const <Stroke>[],
     Iterable<NoteImageElement> images = const <NoteImageElement>[],
     Iterable<StickyNoteElement> stickyNotes = const <StickyNoteElement>[],
+    Iterable<ErasedStrokeRecord> erasedStrokeRecords =
+        const <ErasedStrokeRecord>[],
   }) : assert(historyLimit >= 0),
        _strokes = List<Stroke>.of(strokes),
        _images = List<NoteImageElement>.of(images),
-       _stickies = List<StickyNoteElement>.of(stickyNotes) {
+       _stickies = List<StickyNoteElement>.of(stickyNotes),
+       _erasedStrokeRecords = List<ErasedStrokeRecord>.of(erasedStrokeRecords) {
     _committed = _snapshot();
   }
 
@@ -67,8 +95,7 @@ class InkController {
   /// The document as of the last committed change: what an undo returns
   /// to once a gesture has changed [_strokes] in place.
   late _InkSnapshot _committed;
-  final List<_InkSnapshot> _undoStack = <_InkSnapshot>[];
-  final List<_InkSnapshot> _redoStack = <_InkSnapshot>[];
+  late InkHistory _history = InkHistory(limit: historyLimit);
 
   final _Notifier _activeChanged = _Notifier();
   final _Notifier _completedChanged = _Notifier();
@@ -77,18 +104,20 @@ class InkController {
   final _Notifier _revisionChanged = _Notifier();
   final _Notifier _playbackChanged = _Notifier();
   final _Notifier _playbackFrame = _Notifier();
+  final _Notifier _svgAnimationChanged = _Notifier();
   final _Notifier _hiddenChanged = _Notifier();
   final _Notifier _stickyEditChanged = _Notifier();
   final Set<Stroke> _hidden = HashSet<Stroke>.identity();
   final List<ValueChanged<Map<Stroke, Stroke>>> _replacementListeners =
       <ValueChanged<Map<Stroke, Stroke>>>[];
   List<Stroke> _strokes;
+  final List<ErasedStrokeRecord> _erasedStrokeRecords;
   StrokeSpatialIndex? _strokeIndex;
   final Map<String, (List<Stroke>, StrokeSpatialIndex)> _stickyStrokeIndices =
       <String, (List<Stroke>, StrokeSpatialIndex)>{};
   List<NoteImageElement> _images;
 
-  /// The page's sticky notes, in paint order: above images, below page ink.
+  /// The page's sticky notes, in paint order: above images and completed page ink.
   List<StickyNoteElement> _stickies;
 
   /// The sticky note open for writing, if any: strokes and erasing that
@@ -97,13 +126,13 @@ class InkController {
 
   /// The sticky note the active stroke is drawn into, if any.
   String? _activeStickyId;
+
+  /// The sticky note the latest finished stroke was written on, if any.
+  String? _lastStrokeStickyId;
   StickyPlacementGesture? _placement;
   StickyDragGesture? _stickyDrag;
   int _documentRevision = 0;
   ActiveStroke? _active;
-
-  /// Draws the active stroke onto nearby ink, when the pen asks for it.
-  StrokeFollower? _follower;
 
   /// How the active stroke may scribble ink out, when the pen asks for it.
   ScribbleConfig? _scribble;
@@ -119,6 +148,7 @@ class InkController {
   final List<NotationPlayback> _playbacks = <NotationPlayback>[];
   Duration _notationClock = Duration.zero;
   bool _disposed = false;
+  bool _svgAnimationsEnabled = true;
 
   Listenable get activeStrokeListenable => _activeChanged;
 
@@ -132,6 +162,12 @@ class InkController {
   Listenable get eraserListenable => _eraserChanged;
 
   List<Stroke> get strokes => UnmodifiableListView<Stroke>(_strokes);
+  List<ErasedStrokeRecord> get erasedStrokeRecords =>
+      UnmodifiableListView<ErasedStrokeRecord>(_erasedStrokeRecords);
+
+  /// Supplied by the editor. Null while no recording is running or it is
+  /// paused, so ordinary ink remains untimed.
+  ValueGetter<InkRecordingContext?>? recordingContext;
   List<NoteImageElement> get images =>
       UnmodifiableListView<NoteImageElement>(_images);
 
@@ -148,6 +184,9 @@ class InkController {
   /// The sticky note the active stroke is being drawn into, if any. The
   /// stroke's points are in its local coordinates.
   StickyNoteElement? get activeStrokeSticky => _stickyById(_activeStickyId);
+
+  /// The sticky note the latest finished stroke was written on, if any.
+  StickyNoteElement? get lastWrittenSticky => _stickyById(_lastStrokeStickyId);
 
   /// The sticky note being placed, while its pointer is down.
   StickyPlacementGesture? get activePlacement => _placement;
@@ -300,6 +339,15 @@ class InkController {
   /// Fires each time the playbacks' clock moves on.
   Listenable get notationFrameListenable => _playbackFrame;
 
+  Listenable get svgAnimationListenable => _svgAnimationChanged;
+  bool get svgAnimationsEnabled => _svgAnimationsEnabled;
+
+  void setSvgAnimationsEnabled(bool enabled) {
+    if (_disposed || enabled == _svgAnimationsEnabled) return;
+    _svgAnimationsEnabled = enabled;
+    _svgAnimationChanged.notify();
+  }
+
   /// The clock every playback is timed by: how long playbacks have been
   /// running, in total. Only moves forward.
   Duration get notationClock => _notationClock;
@@ -443,23 +491,30 @@ class InkController {
   }
 
   /// Whether [undo] would change anything.
-  bool get canUndo => _undoStack.isNotEmpty;
+  bool get canUndo => _history.canUndo;
 
   /// Whether [redo] would change anything.
-  bool get canRedo => _redoStack.isNotEmpty;
+  bool get canRedo => _history.canRedo;
+
+  /// The history this page's changes are recorded in. Pages of one document
+  /// share it, so undo and redo walk their changes in the order they were
+  /// made, whichever page each was on.
+  InkHistory get history => _history;
+
+  /// Records this page's changes in [history] from now on. The page's own
+  /// earlier steps are not carried over.
+  set history(InkHistory history) {
+    if (identical(history, _history)) return;
+    _history.forget(this);
+    _history = history;
+  }
 
   /// Records one committed change as a step of history, which also drops
   /// anything that could have been redone.
   ///
   /// With [amendLast], the change is folded into the last step instead.
   void _documentChanged({bool amendLast = false}) {
-    if (!amendLast && historyLimit > 0) {
-      _undoStack.add(_committed);
-      if (_undoStack.length > historyLimit) {
-        _undoStack.removeAt(0);
-      }
-    }
-    _redoStack.clear();
+    _history._record(this, _committed, amend: amendLast);
     _committed = _snapshot();
     _revisionBumped();
   }
@@ -482,22 +537,16 @@ class InkController {
   /// Puts the document back as it was before the last committed change.
   /// Returns false, and changes nothing, while a gesture is in progress or
   /// there is nothing to undo. The selection is dropped.
-  bool undo() => _travel(from: _undoStack, to: _redoStack);
+  bool undo() => !_isBusy && _history.undo() != null;
 
   /// Applies again the change [undo] last took back. Returns false, and
   /// changes nothing, while a gesture is in progress or there is nothing to
   /// redo. The selection is dropped.
-  bool redo() => _travel(from: _redoStack, to: _undoStack);
+  bool redo() => !_isBusy && _history.redo() != null;
 
-  bool _travel({
-    required List<_InkSnapshot> from,
-    required List<_InkSnapshot> to,
-  }) {
-    if (_disposed || _isBusy || from.isEmpty) {
-      return false;
-    }
-    to.add(_committed);
-    _committed = from.removeLast();
+  /// Puts this page back to [snapshot], one of its own steps of history.
+  void _restore(_InkSnapshot snapshot) {
+    _committed = snapshot;
     _strokes = List<Stroke>.of(_committed.strokes);
     _images = List<NoteImageElement>.of(_committed.images);
     _stickies = List<StickyNoteElement>.of(_committed.stickies);
@@ -511,15 +560,13 @@ class InkController {
     _revisionBumped();
     _completedChanged.notify();
     _selectionChanged.notify();
-    return true;
   }
 
   /// Starts a stroke for [pointer]. Returns false, and changes nothing, when
   /// another pointer already owns the page, or the sample is unusable.
   ///
   /// [dynamics] vary the stroke's width along it; [smoothingConfig], when
-  /// given, replaces [smoothing] for this stroke. A [follower] draws the
-  /// pen onto the ink it passes close alongside. With [scribbleErase], a
+  /// given, replaces [smoothing] for this stroke. With [scribbleErase], a
   /// stroke that ends up a scribble over ink erases that ink instead of
   /// being added: see [ScribbleErase.targets].
   ///
@@ -534,7 +581,6 @@ class InkController {
     required StrokeStyle style,
     StrokeDynamics dynamics = StrokeDynamics.none,
     SmoothingConfig? smoothingConfig,
-    StrokeFollower? follower,
     ScribbleConfig? scribbleErase,
     StickyNoteElement? intoSticky,
   }) {
@@ -548,10 +594,9 @@ class InkController {
       return false;
     }
     _activeStickyId = sticky?.id;
-    _follower = sticky == null ? follower : null;
     _scribble = scribbleErase;
     final RawInkSample first = sticky == null
-        ? (follower?.follow(sample) ?? sample)
+        ? sample
         : _toSticky(sticky, sample);
     _active = ActiveStroke(
       style: sticky == null
@@ -576,14 +621,11 @@ class InkController {
     );
   }
 
-  /// [sample] as the active stroke takes it: followed onto nearby ink, or
-  /// into the sticky note it is drawn into.
+  /// [sample] as the active stroke takes it: in the sticky note's
+  /// coordinates when it is drawn into one.
   RawInkSample _forActive(RawInkSample sample) {
     final StickyNoteElement? sticky = activeStrokeSticky;
-    if (sticky != null) {
-      return _toSticky(sticky, sample);
-    }
-    return _follower?.follow(sample) ?? sample;
+    return sticky == null ? sample : _toSticky(sticky, sample);
   }
 
   void addSamples(int pointer, Iterable<RawInkSample> samples) {
@@ -636,10 +678,14 @@ class InkController {
       return 0;
     }
     final String? stickyId = _activeStickyId;
+    _lastStrokeStickyId = stickyId;
     final ScribbleConfig? scribble = _scribble;
-    final Stroke stroke = active.finish();
+    final InkRecordingContext? timeline = recordingContext?.call();
+    final Stroke stroke = active.finish(
+      completedAtMs: timeline?.elapsedMs,
+      recordingId: timeline?.recordingId,
+    );
     _active = null;
-    _follower = null;
     _scribble = null;
     _activePointer = null;
     _activeStickyId = null;
@@ -649,6 +695,9 @@ class InkController {
       if (out.isEmpty) {
         _strokes.add(stroke);
       } else {
+        _recordErasedStrokes(<Stroke>[
+          for (final int index in out) _strokes[index],
+        ], timeline);
         clearSelection();
         _strokes = _without(_strokes, out);
         // Scribbled-out notation ink is let go, like erased ink.
@@ -662,6 +711,9 @@ class InkController {
       if (index >= 0) {
         final StickyNoteElement note = _stickies[index];
         final List<int> out = _scribbledOut(stroke, note.strokes, scribble);
+        _recordErasedStrokes(<Stroke>[
+          for (final int erasedIndex in out) note.strokes[erasedIndex],
+        ], timeline);
         erased = out.length;
         _stickies = List<StickyNoteElement>.of(_stickies)
           ..[index] = note.copyWith(
@@ -704,6 +756,22 @@ class InkController {
       for (int i = 0; i < strokes.length; i++)
         if (!drop.contains(i)) strokes[i],
     ];
+  }
+
+  void _recordErasedStrokes(
+    Iterable<Stroke> strokes,
+    InkRecordingContext? timeline,
+  ) {
+    if (timeline == null) return;
+    for (final Stroke stroke in strokes) {
+      _erasedStrokeRecords.add(
+        ErasedStrokeRecord(
+          stroke: stroke,
+          erasedAtMs: timeline.elapsedMs,
+          recordingId: timeline.recordingId,
+        ),
+      );
+    }
   }
 
   /// Turns the stroke owned by [pointer] into the shape it was meant to be,
@@ -827,7 +895,17 @@ class InkController {
       return;
     }
     _shapeAdjust = null;
-    _strokes.add(gesture.preview);
+    final InkRecordingContext? timeline = recordingContext?.call();
+    final Stroke preview = gesture.preview;
+    _strokes.add(
+      Stroke.fromPoints(
+        style: preview.style,
+        points: preview.points,
+        widths: preview.widths,
+        completedAtMs: timeline?.elapsedMs,
+        recordingId: timeline?.recordingId,
+      ),
+    );
     _documentChanged();
     _completedChanged.notify();
     _activeChanged.notify();
@@ -905,6 +983,7 @@ class InkController {
               : config.strokeHitRadius) /
           scale,
       minPieceLength: config.minPieceLength,
+      scale: scale,
       stickyId: sticky?.id,
     );
     _erase = erase;
@@ -1306,8 +1385,20 @@ class InkController {
         indices.isNotEmpty ||
         imageIndices.isNotEmpty ||
         stickyIndices.isNotEmpty;
+    // A selection drawn well clear of the ink inside it means the paper
+    // too; one hugging the ink means the ink alone.
+    final bool clearOfForeground =
+        selectedForeground &&
+        clippedPdfBounds != null &&
+        _outlineClearOf(outline, <Rect>[
+          for (final int index in indices) _strokes[index].bounds,
+          for (final int index in imageIndices) _images[index].bounds,
+          for (final int index in stickyIndices) _stickies[index].bounds,
+        ], selectionConfig.pdfSelectionMargin);
     final Rect? selectedPdf =
-        (!includePdfWithForeground && selectedForeground) ||
+        (!includePdfWithForeground &&
+                selectedForeground &&
+                !clearOfForeground) ||
             clippedPdfBounds == null ||
             clippedPdfBounds.isEmpty
         ? null
@@ -1415,19 +1506,20 @@ class InkController {
 
   /// Opens the sticky note [id] for writing: strokes and erasing that start
   /// on it then go to its own ink. With [removingTap], the dot the first
-  /// tap of a double tap left on the page, when it is the latest change,
+  /// tap of a double tap left on the note, when it is the latest change,
   /// is taken back without a trace in the history.
   bool enterStickyEditing(String id, {Stroke? removingTap}) {
     if (_disposed || _isBusy || _stickyById(id) == null) {
       return false;
     }
     if (removingTap != null &&
-        _strokes.isNotEmpty &&
-        identical(_strokes.last, removingTap) &&
-        _undoStack.isNotEmpty &&
-        identical(_committed.strokes.lastOrNull, removingTap)) {
-      _committed = _undoStack.removeLast();
+        _history._lastIsOf(this, 1) &&
+        (identical(_stickyById(id)?.strokes.lastOrNull, removingTap) ||
+            (identical(_strokes.lastOrNull, removingTap) &&
+                identical(_committed.strokes.lastOrNull, removingTap)))) {
+      _committed = _history._dropLast(1);
       _strokes = List<Stroke>.of(_committed.strokes);
+      _stickies = List<StickyNoteElement>.of(_committed.stickies);
       _syncPlaybacks();
       _revisionBumped();
       _completedChanged.notify();
@@ -2082,10 +2174,8 @@ class InkController {
     _transform = null;
     _removeSelected(selection);
     // Passing through, it leaves this page's history as it found it.
-    if (gesture._carriedIn && _undoStack.length >= 2) {
-      _undoStack
-        ..removeLast()
-        ..removeLast();
+    if (gesture._carriedIn && _history._lastIsOf(this, 2)) {
+      _history._dropLast(2);
     }
     return content;
   }
@@ -2209,6 +2299,10 @@ class InkController {
             : stroke.style.withWidth(stroke.style.width * transform.scale),
         points: stroke.points.map(transform.apply).toList(),
         widths: stroke.widths,
+        id: stroke.id,
+        completedAtMs: stroke.completedAtMs,
+        recordingId: stroke.recordingId,
+        sampleDeltasMs: stroke.sampleDeltasMs,
       );
       strokes[selection.indices[i]] = replacement;
       transformed.add(replacement);
@@ -2697,6 +2791,27 @@ class InkController {
       erase._changedInk = true;
       _completedChanged.notify();
     }
+    final List<int> erasedVectors = <int>[
+      for (int i = 0; i < _images.length; i++)
+        if (_images[i].isVector &&
+            _segmentTouchesRect(
+              from,
+              to,
+              _images[i].bounds.inflate(erase.radius),
+            ))
+          i,
+    ];
+    if (erasedVectors.isNotEmpty) {
+      final Set<int> removed = erasedVectors.toSet();
+      _images = <NoteImageElement>[
+        for (int i = 0; i < _images.length; i++)
+          if (!removed.contains(i)) _images[i],
+      ];
+      _selection = null;
+      erase._changedInk = true;
+      _completedChanged.notify();
+      _selectionChanged.notify();
+    }
   }
 
   /// [strokes] after an eraser of [radius] sweeps from [from] to [to], or
@@ -2791,6 +2906,7 @@ class InkController {
         to,
         reach,
       );
+      if (hit) _recordEraseTombstone(stroke, erase);
       return hit ? const <Stroke>[] : null;
     }
     switch (erase.mode) {
@@ -2801,6 +2917,7 @@ class InkController {
           to,
           reach,
         );
+        if (hit) _recordEraseTombstone(stroke, erase);
         return hit ? const <Stroke>[] : null;
       case EraserMode.area:
         final List<List<InkVector>>? pieces = EraseGeometry.cutPolyline(
@@ -2813,19 +2930,30 @@ class InkController {
         if (pieces == null) {
           return null;
         }
+        _recordEraseTombstone(stroke, erase);
         return <Stroke>[
           for (final List<InkVector> piece in pieces)
             Stroke.fromPoints(
               style: stroke.style,
               points: piece,
               widths: stroke.widthsAlong(piece),
+              completedAtMs: stroke.completedAtMs,
+              recordingId: stroke.recordingId,
+              sampleDeltasMs: stroke.sampleDeltasMs,
             ),
         ];
     }
   }
 
+  void _recordEraseTombstone(Stroke stroke, EraseGesture erase) {
+    final InkRecordingContext? timeline = recordingContext?.call();
+    if (timeline == null || !erase._recordedStrokeIds.add(stroke.id)) return;
+    _recordErasedStrokes(<Stroke>[stroke], timeline);
+  }
+
   void dispose() {
     _disposed = true;
+    _history.forget(this);
     // Whoever waits on the playback hears that it has ended.
     finishNotationPlayback();
     _activeChanged.dispose();
@@ -2835,6 +2963,7 @@ class InkController {
     _revisionChanged.dispose();
     _playbackChanged.dispose();
     _playbackFrame.dispose();
+    _svgAnimationChanged.dispose();
     _hiddenChanged.dispose();
     _stickyEditChanged.dispose();
   }
@@ -3042,6 +3171,7 @@ class EraseGesture {
     required this.mode,
     required this.radius,
     required this.minPieceLength,
+    this.scale = 1,
     this.stickyId,
   });
 
@@ -3060,8 +3190,12 @@ class EraseGesture {
 
   final double minPieceLength;
 
+  /// Screen scale captured when the gesture began.
+  final double scale;
+
   InkVector _position;
   bool _changedInk = false;
+  final Set<String> _recordedStrokeIds = <String>{};
 
   /// Where the eraser is now.
   InkVector get position => _position;
@@ -3072,6 +3206,137 @@ class EraseGesture {
 
 /// The page's strokes and images at one step of history. Strokes and
 /// images are immutable, so a snapshot shares them with the document.
+/// The changes made to a document's pages, in order: what undo and redo
+/// walk. Pages record into one history, so a change on one page is undone
+/// before the changes made on another page before it.
+class InkHistory extends ChangeNotifier {
+  InkHistory({this.limit = 100}) : assert(limit >= 0);
+
+  /// How many steps undo can go back. The oldest are forgotten first.
+  final int limit;
+
+  final List<_HistoryStep> _undoSteps = <_HistoryStep>[];
+  final List<_HistoryStep> _redoSteps = <_HistoryStep>[];
+
+  bool get canUndo => _undoSteps.isNotEmpty;
+  bool get canRedo => _redoSteps.isNotEmpty;
+
+  /// The page whose change is undone next, if any.
+  InkController? get nextUndoPage => _undoSteps.lastOrNull?.page;
+
+  /// Takes back the latest change. Returns the page it was on, or null,
+  /// changing nothing, when there is nothing to undo or that page is busy.
+  InkController? undo() => _travel(from: _undoSteps, to: _redoSteps);
+
+  /// Makes again the change [undo] last took back. Returns the page it is
+  /// on, or null, changing nothing, when there is nothing to redo.
+  InkController? redo() => _travel(from: _redoSteps, to: _undoSteps);
+
+  InkController? _travel({
+    required List<_HistoryStep> from,
+    required List<_HistoryStep> to,
+  }) {
+    if (from.isEmpty) return null;
+    final InkController page = from.last.page;
+    if (page._disposed || page._isBusy) return null;
+    final _HistoryStep step = from.removeLast();
+    to.add(_HistoryStep(page, page._committed));
+    page._restore(step.snapshot);
+    notifyListeners();
+    return page;
+  }
+
+  void _record(InkController page, _InkSnapshot before, {required bool amend}) {
+    if (!amend && limit > 0) {
+      _undoSteps.add(_HistoryStep(page, before));
+      if (_undoSteps.length > limit) _undoSteps.removeAt(0);
+    }
+    _redoSteps.clear();
+    notifyListeners();
+  }
+
+  bool _lastIsOf(InkController page, int count) {
+    if (_undoSteps.length < count) return false;
+    for (int i = 1; i <= count; i++) {
+      if (!identical(_undoSteps[_undoSteps.length - i].page, page)) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  /// Forgets the latest [count] steps, returning the snapshot of the
+  /// oldest of them.
+  _InkSnapshot _dropLast(int count) {
+    late _InkSnapshot oldest;
+    for (int i = 0; i < count; i++) {
+      oldest = _undoSteps.removeLast().snapshot;
+    }
+    return oldest;
+  }
+
+  /// Forgets every step on [page], as when it is gone.
+  void forget(InkController page) {
+    final int before = _undoSteps.length + _redoSteps.length;
+    _undoSteps.removeWhere((_HistoryStep step) => identical(step.page, page));
+    _redoSteps.removeWhere((_HistoryStep step) => identical(step.page, page));
+    if (before != _undoSteps.length + _redoSteps.length) notifyListeners();
+  }
+}
+
+/// Whether no part of the closed [outline] comes within [margin] of any of
+/// [bounds].
+bool _outlineClearOf(
+  List<InkVector> outline,
+  List<Rect> bounds,
+  double margin,
+) {
+  if (outline.length < 2) return false;
+  for (final Rect rect in bounds) {
+    final Rect near = rect.inflate(margin);
+    for (int i = 0; i < outline.length; i++) {
+      final InkVector a = outline[i];
+      final InkVector b = outline[(i + 1) % outline.length];
+      if (_segmentTouchesRect(a, b, near)) return false;
+    }
+  }
+  return true;
+}
+
+/// Whether the segment from [a] to [b] meets [rect] (Liang-Barsky).
+bool _segmentTouchesRect(InkVector a, InkVector b, Rect rect) {
+  double t0 = 0;
+  double t1 = 1;
+  final double dx = b.x - a.x;
+  final double dy = b.y - a.y;
+  bool clip(double p, double q) {
+    if (p == 0) return q >= 0;
+    final double t = q / p;
+    if (p < 0) {
+      if (t > t1) return false;
+      if (t > t0) t0 = t;
+    } else {
+      if (t < t0) return false;
+      if (t < t1) t1 = t;
+    }
+    return true;
+  }
+
+  return clip(-dx, a.x - rect.left) &&
+      clip(dx, rect.right - a.x) &&
+      clip(-dy, a.y - rect.top) &&
+      clip(dy, rect.bottom - a.y);
+}
+
+class _HistoryStep {
+  const _HistoryStep(this.page, this.snapshot);
+
+  final InkController page;
+
+  /// The page as it was before the change, or after it for a redo.
+  final _InkSnapshot snapshot;
+}
+
 class _InkSnapshot {
   const _InkSnapshot(this.strokes, this.images, this.stickies);
 

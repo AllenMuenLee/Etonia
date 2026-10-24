@@ -1,4 +1,6 @@
-import 'package:flutter/gestures.dart';
+﻿import 'package:flutter/gestures.dart';
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -17,6 +19,7 @@ import 'package:greatnote/features/library/library_models.dart';
 import 'package:greatnote/features/library/library_screen.dart';
 import 'package:greatnote/features/library/note_content.dart';
 import 'package:greatnote/features/library/note_repository.dart';
+import 'package:leak_tracker_flutter_testing/leak_tracker_flutter_testing.dart';
 
 import '../../helpers/ai_fakes.dart';
 import '../../helpers/document_io_fakes.dart';
@@ -24,6 +27,47 @@ import '../../helpers/google_drive_fakes.dart';
 import '../../helpers/pump_app.dart';
 
 final DateTime _now = DateTime(2026, 10, 14, 15, 30);
+
+class _RefreshProbeRepository extends InMemoryNoteRepository {
+  final Completer<void> gate = Completer<void>();
+  final Set<String> started = <String>{};
+
+  Future<T> _probe<T>(String name, Future<T> Function() read) async {
+    started.add(name);
+    await gate.future;
+    return read();
+  }
+
+  @override
+  Future<List<NoteEntry>> trash() =>
+      _probe<List<NoteEntry>>('trash', super.trash);
+
+  @override
+  Future<FolderListing> list(String? folderId) =>
+      _probe<FolderListing>('list', () => super.list(folderId));
+
+  @override
+  Future<List<Folder>> pathTo(String? folderId) =>
+      _probe<List<Folder>>('path', () => super.pathTo(folderId));
+
+  @override
+  Future<List<Folder>> allFolders() =>
+      _probe<List<Folder>>('folders', super.allFolders);
+
+  @override
+  Future<Map<String, int>> itemCounts() =>
+      _probe<Map<String, int>>('counts', super.itemCounts);
+}
+
+class _SearchProbeRepository extends InMemoryNoteRepository {
+  int searches = 0;
+
+  @override
+  Future<FolderListing> search(String query) {
+    searches++;
+    return super.search(query);
+  }
+}
 
 /// A repository whose clock moves on a minute per change, so modified
 /// times are distinct and ordered.
@@ -132,6 +176,54 @@ Future<void> _drawLine(WidgetTester tester, Offset from, Offset to) async {
 }
 
 void main() {
+  testWidgets(
+    'library refresh starts independent reads together',
+    (WidgetTester tester) async {
+      final _RefreshProbeRepository repository = _RefreshProbeRepository();
+      addTearDown(() {
+        if (!repository.gate.isCompleted) repository.gate.complete();
+        repository.dispose();
+      });
+
+      await tester.pumpWidget(
+        GreatnoteApp(
+          home: LibraryScreen(repository: repository, clock: () => _now),
+        ),
+      );
+      await tester.pump();
+
+      expect(
+        repository.started,
+        containsAll(<String>{'trash', 'list', 'path', 'folders', 'counts'}),
+      );
+      repository.gate.complete();
+      await tester.pumpAndSettle();
+    },
+    experimentalLeakTesting: LeakTesting.settings.withTrackedAll(),
+  );
+
+  testWidgets(
+    'library search coalesces rapid typing',
+    (WidgetTester tester) async {
+      final _SearchProbeRepository repository = _SearchProbeRepository();
+      addTearDown(repository.dispose);
+      await _pumpLibrary(tester, repository);
+
+      final Finder search = find.byType(TextField);
+      await tester.enterText(search, 'a');
+      await tester.enterText(search, 'ab');
+      await tester.enterText(search, 'abc');
+      expect(repository.searches, 0);
+
+      await tester.pump(const Duration(milliseconds: 119));
+      expect(repository.searches, 0);
+      await tester.pump(const Duration(milliseconds: 1));
+      expect(repository.searches, 1);
+      await tester.pumpAndSettle();
+    },
+    experimentalLeakTesting: LeakTesting.settings.withTrackedAll(),
+  );
+
   testWidgets('notes open side by side in tabs', (WidgetTester tester) async {
     final InMemoryNoteRepository repository = _repository();
     final NoteEntry alpha = await repository.createNote(title: 'Alpha');
@@ -264,8 +356,6 @@ void main() {
       origin + const Offset(300, 120),
     );
     await tester.tap(find.byTooltip('Add'));
-    await tester.pumpAndSettle();
-    await tester.tap(find.text('Add new page'));
     await tester.pumpAndSettle();
     await tester.tap(find.text('Add blank page'));
     await tester.pumpAndSettle();
@@ -593,6 +683,58 @@ void main() {
       expect((await repository.list(archive.id)).notes, isEmpty);
     });
 
+    testWidgets('the feedback icon, not the stylus, selects a destination', (
+      WidgetTester tester,
+    ) async {
+      final InMemoryNoteRepository repository = _repository();
+      final Folder archive = await repository.createFolder('Archive');
+      await repository.createNote(title: 'Old');
+      await _pumpLibrary(tester, repository);
+
+      final Finder sidebarFolder = find.byKey(
+        ValueKey<String>('sidebar-folder-${archive.id}'),
+      );
+      final Rect destination = tester.getRect(sidebarFolder);
+      final TestGesture drag = await tester.startGesture(
+        tester.getCenter(_items(find.text('Old'))),
+      );
+      await tester.pump(kLongPressTimeout + const Duration(milliseconds: 50));
+      // The stylus stays below the row while the feedback icon, which rides
+      // 16 px above it, is visibly inside the destination.
+      await drag.moveTo(Offset(destination.center.dx, destination.bottom + 8));
+      await tester.pump();
+      await drag.up();
+      await tester.pumpAndSettle();
+
+      expect((await repository.list(archive.id)).notes.single.title, 'Old');
+      expect((await repository.list(null)).notes, isEmpty);
+    });
+
+    testWidgets('a searched folder drops into the active breadcrumb', (
+      WidgetTester tester,
+    ) async {
+      final InMemoryNoteRepository repository = _repository();
+      final Folder destination = await repository.createFolder('Destination');
+      final Folder source = await repository.createFolder('Source');
+      await _pumpLibrary(tester, repository);
+      await tester.tap(_items(find.text('Destination')));
+      await tester.pumpAndSettle();
+      await tester.enterText(find.byType(TextField), 'Source');
+      await tester.pumpAndSettle();
+
+      await dragOnto(
+        tester,
+        _items(find.text('Source')),
+        find.byKey(ValueKey<String>('breadcrumb-${destination.id}')),
+      );
+
+      expect(
+        (await repository.list(destination.id)).folders.single.id,
+        source.id,
+      );
+      expect((await repository.list(null)).folders, <Folder>[destination]);
+    });
+
     testWidgets('a quick tap still opens, and a short drag moves nothing', (
       WidgetTester tester,
     ) async {
@@ -824,7 +966,11 @@ void main() {
     final Icon icon = tester.widget<Icon>(
       _sidebar(find.byIcon(AppIcons.folder)).first,
     );
-    expect(icon.color, Color(FolderColor.purple.light!));
+    // Folder colors are deepened a little on the pale desk.
+    expect(
+      icon.color,
+      Color.lerp(AppColors.light.highlighters[3], Colors.black, 0.18),
+    );
 
     await tester.tap(find.byTooltip('Expand Physics'));
     await tester.pumpAndSettle();
@@ -912,12 +1058,14 @@ void main() {
     await _pumpLibrary(tester, repository);
 
     await tester.enterText(find.byType(TextField), 'calc');
+    await tester.pump(const Duration(milliseconds: 120));
     await tester.pumpAndSettle();
     expect(find.text('Calculus'), findsOneWidget);
     expect(find.textContaining('In Maths'), findsOneWidget);
     expect(find.text('History'), findsNothing);
 
     await tester.enterText(find.byType(TextField), 'zzz');
+    await tester.pump(const Duration(milliseconds: 120));
     await tester.pumpAndSettle();
     expect(find.text('No notes match "zzz"'), findsOneWidget);
   });
@@ -968,7 +1116,7 @@ void main() {
     await _pumpLibrary(tester, repository);
     for (final Finder target in <Finder>[
       find.byType(TextField),
-      find.byTooltip('Google Drive'),
+      find.byTooltip('Account'),
       find.byTooltip('Sort'),
       find.byTooltip('Show as list'),
       find.byTooltip('Select'),
@@ -1038,7 +1186,7 @@ void main() {
       ),
     );
     await tester.pumpAndSettle();
-    await tester.pump(AppMotion.gentle);
+    await tester.pump(AppMotion.smooth.duration);
     await tester.pumpAndSettle();
 
     expect(find.byType(EditorScreen), findsOneWidget);

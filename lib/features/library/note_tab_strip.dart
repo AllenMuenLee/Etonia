@@ -8,6 +8,8 @@ import 'open_notes.dart';
 /// The open notes as a row of tabs across the top bar. Tapping a tab shows
 /// its note, tapping the shown tab renames it, and each tab closes with its
 /// own button. The row scrolls sideways when there are more than fit.
+/// Holding a tab and dragging it to the left or right of the window shows
+/// its note beside the one shown.
 class NoteTabStrip extends StatelessWidget {
   const NoteTabStrip({
     super.key,
@@ -15,10 +17,15 @@ class NoteTabStrip extends StatelessWidget {
     required this.onRename,
     required this.onClose,
     this.onOpenAnother,
+    this.pane,
   });
 
   final OpenNotes notes;
-  final VoidCallback onRename;
+
+  /// The pane this strip belongs to, in a split window; null for the one
+  /// strip of a window with a single pane.
+  final int? pane;
+  final ValueChanged<String> onRename;
   final ValueChanged<NoteEntry> onClose;
 
   /// Goes to the library to open another note beside these.
@@ -29,7 +36,11 @@ class NoteTabStrip extends StatelessWidget {
     return ListenableBuilder(
       listenable: notes,
       builder: (BuildContext context, Widget? _) {
-        final List<NoteEntry> open = notes.notes;
+        // A pane's strip holds that pane's own tabs, as a window of its own.
+        final List<NoteEntry> open = notes.tabsOf(pane);
+        final String? shownHere = pane == null || !notes.isSplit
+            ? notes.active?.id
+            : notes.paneNoteIds[pane!];
         return Semantics(
           container: true,
           explicitChildNodes: true,
@@ -40,7 +51,7 @@ class NoteTabStrip extends StatelessWidget {
               children: <Widget>[
                 Flexible(
                   child: ListView.separated(
-                    key: const ValueKey<String>('note-tabs'),
+                    key: ValueKey<String>('note-tabs-${pane ?? 'single'}'),
                     scrollDirection: Axis.horizontal,
                     shrinkWrap: true,
                     padding: const EdgeInsets.symmetric(vertical: 6),
@@ -49,15 +60,25 @@ class NoteTabStrip extends StatelessWidget {
                         const SizedBox(width: AppSpacing.xxs),
                     itemBuilder: (BuildContext context, int index) {
                       final NoteEntry note = open[index];
-                      final bool active = index == notes.activeIndex;
+                      final bool active = note.id == shownHere;
                       return _NoteTab(
                         key: ValueKey<String>('note-tab-${note.id}'),
+                        noteId: note.id,
                         title: note.title,
                         active: active,
+                        shown: false,
                         onPressed: active
-                            ? onRename
-                            : () => notes.activate(index),
+                            ? () => onRename(note.id)
+                            : pane == null || !notes.isSplit
+                            ? () => notes.activate(
+                                notes.notes.indexWhere(
+                                  (NoteEntry n) => n.id == note.id,
+                                ),
+                              )
+                            : () => notes.showInPane(pane!, note.id),
                         onClose: () => onClose(note),
+                        onDragStarted: () => notes.draggedTab.value = note.id,
+                        onDragEnded: () => notes.draggedTab.value = null,
                       );
                     },
                   ),
@@ -80,38 +101,64 @@ class NoteTabStrip extends StatelessWidget {
 class _NoteTab extends StatelessWidget {
   const _NoteTab({
     super.key,
+    required this.noteId,
     required this.title,
     required this.active,
+    this.shown = false,
     required this.onPressed,
     required this.onClose,
+    required this.onDragStarted,
+    required this.onDragEnded,
   });
 
   static const double _maxWidth = 220;
 
+  final String noteId;
   final String title;
   final bool active;
+
+  /// Whether its note is in a pane without being the one in focus.
+  final bool shown;
   final VoidCallback onPressed;
   final VoidCallback onClose;
+  final VoidCallback onDragStarted;
+  final VoidCallback onDragEnded;
 
   @override
   Widget build(BuildContext context) {
+    return LongPressDraggable<String>(
+      data: noteId,
+      delay: const Duration(milliseconds: 250),
+      onDragStarted: onDragStarted,
+      onDragEnd: (DraggableDetails _) => onDragEnded(),
+      feedback: Material(
+        color: Colors.transparent,
+        child: _DragChip(title: title),
+      ),
+      childWhenDragging: Opacity(opacity: 0.4, child: _tab(context)),
+      child: _tab(context),
+    );
+  }
+
+  Widget _tab(BuildContext context) {
     final AppColors colors = AppColors.of(context);
     final TextStyle style = Theme.of(context).textTheme.labelLarge!.copyWith(
       color: active ? colors.textPrimary : colors.textSecondary,
-      fontWeight: active ? FontWeight.w600 : FontWeight.w500,
+      fontWeight: FontWeight.w600,
     );
-    final BorderRadius radius = BorderRadius.circular(AppRadii.medium);
+    final BorderRadius radius = BorderRadius.circular(999);
     return AnimatedContainer(
-      duration: AppMotion.resolve(context, AppMotion.fast),
+      duration: AppMotion.resolve(context, AppMotion.snappy.duration),
+      curve: AppMotion.fadeInCurve,
       constraints: const BoxConstraints(maxWidth: _maxWidth),
       decoration: BoxDecoration(
-        color: active ? AppGlass.surface(colors) : Colors.transparent,
+        // A selected capsule behind the title; its text never changes weight.
+        color: active ? colors.selected : colors.selected.withValues(alpha: 0),
         borderRadius: radius,
         border: Border.all(
-          color: active ? colors.divider : Colors.transparent,
+          color: shown ? colors.divider : colors.divider.withValues(alpha: 0),
           width: AppSizes.hairline,
         ),
-        boxShadow: active ? AppShadows.paper(colors) : null,
       ),
       child: Material(
         type: MaterialType.transparency,
@@ -136,14 +183,28 @@ class _NoteTab extends StatelessWidget {
                         start: AppSpacing.sm,
                         end: AppSpacing.xxs,
                       ),
-                      child: Align(
-                        widthFactor: 1,
-                        child: Text(
-                          title,
-                          style: style,
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                        ),
+                      child: Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: <Widget>[
+                          Flexible(
+                            child: Align(
+                              widthFactor: 1,
+                              child: AnimatedDefaultTextStyle(
+                                duration: AppMotion.resolve(
+                                  context,
+                                  AppMotion.snappy.duration,
+                                ),
+                                curve: AppMotion.fadeInCurve,
+                                style: style,
+                                child: Text(
+                                  title,
+                                  maxLines: 1,
+                                  overflow: TextOverflow.ellipsis,
+                                ),
+                              ),
+                            ),
+                          ),
+                        ],
                       ),
                     ),
                   ),
@@ -165,6 +226,41 @@ class _NoteTab extends StatelessWidget {
             ),
             const SizedBox(width: 2),
           ],
+        ),
+      ),
+    );
+  }
+}
+
+/// What follows the finger while a tab is dragged.
+class _DragChip extends StatelessWidget {
+  const _DragChip({required this.title});
+
+  final String title;
+
+  @override
+  Widget build(BuildContext context) {
+    final AppColors colors = AppColors.of(context);
+    return DecoratedBox(
+      decoration: BoxDecoration(
+        color: AppGlass.surface(colors),
+        borderRadius: AppBorderRadius.medium,
+        border: Border.all(color: colors.accent),
+        boxShadow: AppShadows.floating(colors),
+      ),
+      child: ConstrainedBox(
+        constraints: const BoxConstraints(maxWidth: 220),
+        child: Padding(
+          padding: const EdgeInsets.symmetric(
+            horizontal: AppSpacing.sm,
+            vertical: AppSpacing.xs,
+          ),
+          child: Text(
+            title,
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            style: Theme.of(context).textTheme.labelLarge,
+          ),
         ),
       ),
     );

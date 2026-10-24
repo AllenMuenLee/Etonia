@@ -148,6 +148,10 @@ void main() {
     await _pump(tester, const PageSetup());
     await tester.tap(find.byTooltip('Pen'));
     await tester.pumpAndSettle();
+    await tester.tap(
+      find.byKey(const ValueKey<String>('writing-style-pencil')),
+    );
+    await tester.pumpAndSettle();
     await expectLater(
       find.byType(GreatnoteApp),
       matchesGoldenFile('goldens/pen_options_tablet_landscape_light.png'),

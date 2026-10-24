@@ -52,7 +52,7 @@ List<GeneratedInkTrace> _placed(
   List<GeneratedInkTrace> traces,
   NotationClearance? clearance,
 ) {
-  return clearance != null && item is AiNotationText
+  return clearance != null && (item is AiNotationText || item is AiNotationMath)
       ? clearance.place(traces)
       : traces;
 }
@@ -195,6 +195,14 @@ List<GeneratedInkTrace> _layoutItem(
           size: item.size,
           handwriting: handwriting,
         ).forEach(add);
+      case AiNotationMath():
+        item.math
+            .write(
+              origin: _mathOrigin(item, size),
+              size: item.size,
+              style: handwriting?.calibration ?? HandwritingStyle.standard,
+            )
+            .forEach(add);
       case AiNotationGraph():
         _graph(item, size, config, add);
       case AiNotationPlot():
@@ -236,6 +244,24 @@ List<GeneratedInkTrace> _layoutItem(
     }
   }
   return traces;
+}
+
+/// Where [item]'s top-left corner goes: where the model put it, moved left
+/// or up as little as keeps it on the paper. The model cannot measure a
+/// laid-out formula, so it often runs one past the edge.
+InkVector _mathOrigin(AiNotationMath item, Size size) {
+  final double margin = math.max(4, item.size * 0.3);
+  final double width = item.math.width * item.size;
+  final double height = item.math.height * item.size;
+  double x = item.x * size.width;
+  double y = item.y * size.height;
+  if (x + width > size.width - margin) {
+    x = math.max(margin, size.width - margin - width);
+  }
+  if (y + height > size.height - margin) {
+    y = math.max(margin, size.height - margin - height);
+  }
+  return InkVector(x, y);
 }
 
 /// Writes text in the writer's hand: as their own samples of the exact
@@ -336,7 +362,9 @@ List<List<InkVector>> _fitted(
     origin.x,
     origin.y - size * 0.1,
     origin.x + math.max(NotationFont.width(text, size), size * 0.2),
-    origin.y + NotationFont.height(text, size),
+    // A writer's tails may hang as deep as their letters stand tall,
+    // deeper than the built-in hand's.
+    origin.y + NotationFont.height(text, size) + size * 0.3,
   );
   if (left >= box.left &&
       right <= box.right &&

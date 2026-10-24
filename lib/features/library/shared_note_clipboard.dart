@@ -27,7 +27,8 @@ class SharedNoteClipboard {
     _clipboard = clipboard;
     _destinations.clear();
     final Set<String> ids = <String>{
-      for (final image in clipboard.images) image.assetId,
+      for (final image in clipboard.images)
+        if (!image.isVector) image.assetId,
     };
     _assets =
         Future.wait(<Future<NoteAssetData?>>[
@@ -65,7 +66,8 @@ class SharedNoteClipboard {
       }
       final Map<String, String> remapped = <String, String>{};
       for (final String sourceId in <String>{
-        for (final image in clipboard.images) image.assetId,
+        for (final image in clipboard.images)
+          if (!image.isVector) image.assetId,
       }) {
         final NoteAssetData? source = assets[sourceId];
         if (source == null) continue;

@@ -3,6 +3,7 @@ import 'package:flutter/semantics.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:greatnote/app/theme/app_theme.dart';
 import 'package:greatnote/app/theme/app_tokens.dart';
+import 'package:greatnote/shared/layout/breakpoints.dart';
 import 'package:greatnote/features/editor/editor_screen.dart';
 import 'package:greatnote/features/editor/ink/eraser_settings.dart';
 import 'package:greatnote/features/editor/ink/ink_controller.dart';
@@ -27,28 +28,35 @@ ToolPalette _palette(WidgetTester tester) {
 }
 
 void main() {
-  group('undo and redo', () {
+  group('undo, redo, and the page controls', () {
     for (final TestViewport viewport in <TestViewport>[
       TestViewport.tabletLandscape,
       TestViewport.tabletPortrait,
       TestViewport.compact,
     ]) {
       testWidgets(
-        '${viewport.name}: float top right, as tall as the palette, apart',
+        '${viewport.name}: history card hanging at the left, page controls at the right',
         (WidgetTester tester) async {
           await pumpApp(tester, viewport: viewport);
           final Rect palette = _paletteRect(tester);
           final Rect surface = _surfaceRect(tester);
-          final Rect history = tester.getRect(
-            find.byKey(const ValueKey<String>('history-card')),
+          final Finder card = find.byKey(
+            const ValueKey<String>('history-card'),
           );
+          final Rect history = tester.getRect(card);
 
           expect(history.height, palette.height);
-          expect(history.top, palette.top);
-          expect(history.right, lessThanOrEqualTo(surface.right));
-          expect(surface.right - history.right, lessThan(AppSpacing.md));
+          // Joined to the bar, and to the screen's left edge.
+          expect(history.top, surface.top);
+          expect(history.left, surface.left);
           expect(history.overlaps(palette), isFalse);
-          // Not in the top bar any more.
+          if (viewport == TestViewport.compact) {
+            // No room beside the card: the palette has the row below it.
+            expect(palette.top, greaterThanOrEqualTo(history.bottom));
+          } else {
+            expect(palette.left, greaterThanOrEqualTo(history.right));
+          }
+          // Not in the top bar.
           expect(
             find.descendant(
               of: find.byType(EditorAppBar),
@@ -56,13 +64,31 @@ void main() {
             ),
             findsNothing,
           );
-          expect(
-            find.descendant(
-              of: find.byKey(const ValueKey<String>('history-card')),
-              matching: find.byTooltip('Undo'),
-            ),
-            findsOneWidget,
+          // In the left card: undo, then redo.
+          final Rect undo = tester.getRect(
+            find.descendant(of: card, matching: find.byTooltip('Undo')),
           );
+          final Rect redo = tester.getRect(
+            find.descendant(of: card, matching: find.byTooltip('Redo')),
+          );
+          expect(undo.right, lessThanOrEqualTo(redo.left + 0.5));
+          expect(history.contains(undo.center), isTrue);
+          expect(history.contains(redo.center), isTrue);
+
+          // On the right: page controls card hanging from the top bar.
+          final Finder pageCard = find.byKey(
+            const ValueKey<String>('page-controls-card'),
+          );
+          final Rect pageControls = tester.getRect(pageCard);
+          expect(pageControls.height, palette.height);
+          expect(pageControls.top, surface.top);
+          expect(pageControls.right, surface.right);
+          expect(pageControls.overlaps(palette), isFalse);
+
+          final Rect add = tester.getRect(
+            find.descendant(of: pageCard, matching: find.byTooltip('Add')),
+          );
+          expect(pageControls.contains(add.center), isTrue);
           expect(tester.takeException(), isNull);
         },
       );
@@ -92,6 +118,31 @@ void main() {
       );
       expect(tester.takeException(), isNull);
     });
+
+    test(
+      'when AI chat is opened, toolbar is centered between top left and top right boxes',
+      () {
+        const Rect region = Rect.fromLTWH(0, 0, 900, 600);
+        const double historyWidth = 100;
+        const double pageControlsWidth = 260;
+        final EditorLayout layout = EditorLayout.compute(
+          WindowSizeClass.expanded,
+          region,
+          const PalettePlacement(edge: PaletteEdge.top),
+          historyWidth: historyWidth,
+          pageControlsWidth: pageControlsWidth,
+          isAiOpen: true,
+        );
+        final double leftEdgeOfRightBox = layout.pageControls.left;
+        final double rightEdgeOfLeftBox = layout.history.right;
+        final double middleBetweenBoxes =
+            (leftEdgeOfRightBox + rightEdgeOfLeftBox) / 2;
+        final double paletteCenter =
+            layout.paletteOrigin.dx +
+            ToolPalette.sizeFor(Axis.horizontal).width / 2;
+        expect(paletteCenter, closeTo(middleBetweenBoxes, 0.5));
+      },
+    );
 
     testWidgets('medium: dense palette and smaller margins', (
       WidgetTester tester,
@@ -124,14 +175,12 @@ void main() {
 
       expect(_palette(tester).axis, Axis.horizontal);
       expect(surface.bottom, screen.height);
-      expect(palette.top, surface.top + AppSpacing.xxs);
-      // Centered, unless that would put it under Undo and Redo: then just
-      // clear of them.
-      final Rect history = tester.getRect(
+      // On the row below the card hanging from the bar.
+      final Rect card = tester.getRect(
         find.byKey(const ValueKey<String>('history-card')),
       );
-      expect(palette.right, lessThanOrEqualTo(history.left));
-      expect(palette.center.dx, lessThanOrEqualTo(screen.width / 2 + 0.5));
+      expect(palette.top, card.bottom + AppSpacing.xxs);
+      expect(palette.center.dx, closeTo(screen.width / 2, 0.5));
       expect(palette.left, greaterThanOrEqualTo(surface.left));
       expect(tester.takeException(), isNull);
     });
@@ -300,7 +349,9 @@ void main() {
       );
       await tester.pump(const Duration(milliseconds: 200));
       expect(scale(), 1);
-      await tester.pump(const Duration(milliseconds: 150));
+      await tester.pump(
+        ToolPalette.liftDelay - const Duration(milliseconds: 150),
+      );
       expect(scale(), greaterThan(1));
       await drag.up();
       await tester.pumpAndSettle();
@@ -367,14 +418,14 @@ void main() {
     ) async {
       await pumpApp(tester);
       final TestGesture drag = await lift(tester);
-      await drag.moveBy(const Offset(-300, 0));
+      await drag.moveBy(const Offset(300, 0));
       await drag.up();
       await tester.pumpAndSettle();
 
       expect(_palette(tester).edge, PaletteEdge.top);
       expect(
         _paletteRect(tester).center.dx,
-        closeTo(_surfaceRect(tester).center.dx - 300, 1),
+        closeTo(_surfaceRect(tester).center.dx + 300, 1),
       );
     });
 
@@ -529,7 +580,7 @@ void main() {
               find.byKey(const ValueKey<String>('tool-palette-position')),
             )
             .duration,
-        Duration.zero,
+        AppMotion.reduced,
       );
       expect(
         tester
@@ -537,8 +588,9 @@ void main() {
               find.byKey(const ValueKey<String>('history-position')),
             )
             .duration,
-        Duration.zero,
+        AppMotion.reduced,
       );
+      await tester.pumpAndSettle(AppMotion.reduced);
       expect(tester.hasRunningAnimations, isFalse);
     });
   });
@@ -549,7 +601,11 @@ void main() {
     ) async {
       await pumpApp(tester);
 
-      expect(find.byType(PaletteButton), findsNWidgets(6));
+      // The six tools and the arrow that unfolds the recordings and the ruler.
+      expect(find.byType(PaletteButton), findsNWidgets(7));
+      expect(find.byTooltip('Expand toolbar'), findsOneWidget);
+      expect(find.byTooltip('Recordings'), findsNothing);
+      expect(find.byTooltip('Show ruler'), findsNothing);
       expect(find.byTooltip('Sticky note'), findsOneWidget);
       expect(
         find.byKey(const ValueKey<String>('palette-surface')),

@@ -45,7 +45,14 @@ flutter {
 }
 
 dependencies {
-    implementation("androidx.graphics:graphics-core:1.0.4")
+    // Jetpack Ink owns the latency-critical wet-ink layer. Keep the preview
+    // native while Flutter remains the document model and dry-ink renderer.
+    implementation("androidx.ink:ink-authoring:1.1.0-alpha10")
+    implementation("androidx.ink:ink-brush:1.1.0-alpha10")
+    implementation("androidx.ink:ink-geometry:1.1.0-alpha10")
+    implementation("androidx.ink:ink-nativeloader:1.1.0-alpha10")
+    implementation("androidx.ink:ink-rendering:1.1.0-alpha10")
+    implementation("androidx.ink:ink-strokes:1.1.0-alpha10")
     implementation("androidx.input:input-motionprediction:1.0.0")
     // On-device recognition for handwriting written in AI mode. Digital ink
     // reads the strokes themselves; its language model is downloaded on

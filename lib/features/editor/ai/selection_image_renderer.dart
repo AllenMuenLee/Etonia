@@ -70,6 +70,7 @@ class SnapshotStroke {
     required this.width,
     required this.color,
     required this.isDot,
+    this.writing = WritingStyle.pen,
     this.widths,
   }) : points = List<InkVector>.unmodifiable(points);
 
@@ -82,6 +83,7 @@ class SnapshotStroke {
   /// Already resolved for the snapshot's brightness.
   final ui.Color color;
   final bool isDot;
+  final WritingStyle writing;
 }
 
 /// The selected ink, copied out of the document. Immutable: nothing the
@@ -116,6 +118,7 @@ class SelectionInkSnapshot {
             width: stroke.style.width,
             color: stroke.style.resolve(brightness),
             isDot: stroke.isDot,
+            writing: stroke.style.writing,
             widths: stroke.widths,
           ),
       ]),
@@ -132,17 +135,53 @@ class SelectionInkSnapshot {
   /// [base] with those of [strokes] it does not already hold drawn over it,
   /// in [base]'s theme, so the image keeps one look. Null when [strokes]
   /// add nothing.
+  ///
+  /// The pictures, notes, and paper chosen along with them are taken in too,
+  /// each with the [bitmaps] it is drawn over.
   static SelectionInkSnapshot? merged(
     SelectionInkSnapshot base,
-    Iterable<Stroke> strokes,
-  ) {
+    Iterable<Stroke> strokes, {
+    Iterable<NoteImageElement> images = const <NoteImageElement>[],
+    Iterable<StickyNoteElement> stickies = const <StickyNoteElement>[],
+    ui.Rect? pdfBounds,
+    List<SnapshotBitmap> bitmaps = const <SnapshotBitmap>[],
+  }) {
     final List<Stroke> added = <Stroke>[
       for (final Stroke stroke in strokes)
         if (!base.contains(stroke)) stroke,
     ];
-    if (added.isEmpty) {
+    final List<NoteImageElement> addedImages = <NoteImageElement>[
+      for (final NoteImageElement image in images)
+        if (!base._sourceImages.any(
+          (NoteImageElement it) => identical(it, image),
+        ))
+          image,
+    ];
+    final List<StickyNoteElement> addedStickies = <StickyNoteElement>[
+      for (final StickyNoteElement sticky in stickies)
+        if (!base.stickies.any((StickyNoteElement it) => identical(it, sticky)))
+          sticky,
+    ];
+    final ui.Rect? paper = pdfBounds == null || pdfBounds == base.explicitBounds
+        ? null
+        : pdfBounds;
+    if (added.isEmpty &&
+        addedImages.isEmpty &&
+        addedStickies.isEmpty &&
+        paper == null) {
       return null;
     }
+    // A bitmap already drawn is not drawn twice.
+    final List<SnapshotBitmap> addedBitmaps = <SnapshotBitmap>[
+      for (final SnapshotBitmap bitmap in bitmaps)
+        if (!base.bitmaps.any(
+          (SnapshotBitmap it) =>
+              it.bounds == bitmap.bounds &&
+              it.source?.assetId == bitmap.source?.assetId &&
+              it.source?.pdfPageIndex == bitmap.source?.pdfPageIndex,
+        ))
+          bitmap,
+    ];
     return SelectionInkSnapshot._(
       strokes: List<SnapshotStroke>.unmodifiable(<SnapshotStroke>[
         ...base.strokes,
@@ -152,16 +191,25 @@ class SelectionInkSnapshot {
             width: stroke.style.width,
             color: stroke.style.resolve(base.brightness),
             isDot: stroke.isDot,
+            writing: stroke.style.writing,
             widths: stroke.widths,
           ),
       ]),
-      bitmaps: base.bitmaps,
+      bitmaps: List<SnapshotBitmap>.unmodifiable(<SnapshotBitmap>[
+        ...base.bitmaps,
+        ...addedBitmaps,
+      ]),
       brightness: base.brightness,
       background: base.background,
       source: List<Stroke>.unmodifiable(<Stroke>[...base._source, ...added]),
-      sourceImages: base._sourceImages,
-      explicitBounds: base.explicitBounds,
-      stickies: base.stickies,
+      sourceImages: List<NoteImageElement>.unmodifiable(<NoteImageElement>[
+        ...base._sourceImages,
+        ...addedImages,
+      ]),
+      explicitBounds: paper == null
+          ? base.explicitBounds
+          : base.explicitBounds?.expandToInclude(paper) ?? paper,
+      stickies: <StickyNoteElement>[...base.stickies, ...addedStickies],
     );
   }
 
@@ -226,7 +274,7 @@ class SelectionInkSnapshot {
   final List<SnapshotStroke> strokes;
   final List<SnapshotBitmap> bitmaps;
 
-  /// Selected sticky notes, each with its own ink, drawn under [strokes].
+  /// Selected sticky notes, each with its own ink, drawn above [strokes].
   /// Immutable, so they are shared with the document. Not saved with a
   /// conversation: a restored snapshot has none.
   final List<StickyNoteElement> stickies;
@@ -510,8 +558,10 @@ class SelectionImageRenderer {
       config.pixelRatio,
       config.maxDimension / math.max(bounds.width, bounds.height),
     );
-    if (!scale.isFinite || scale < config.minPixelRatio) {
-      throw const SelectionImageException(SelectionImageFailure.tooLarge);
+    if (!scale.isFinite || scale <= 0) {
+      throw const SelectionImageException(
+        SelectionImageFailure.invalidGeometry,
+      );
     }
     return SelectionImageLayout(
       logicalBounds: bounds,
@@ -543,17 +593,21 @@ class SelectionImageRenderer {
         if (image.png.lengthInBytes <= config.maxPngBytes) {
           return image;
         }
-        // Too many bytes for the backend: smaller, never lossy.
-        final double scale = layout.scale * 0.75;
-        if (scale < config.minPixelRatio) {
-          throw const SelectionImageException(SelectionImageFailure.tooLarge);
-        }
+        // Leave images already under the transport target byte-for-byte
+        // alone. Oversized PNGs are reduced a little at a time until they
+        // fit; even an enormous logical selection is still sendable.
+        final double scale = layout.scale * 0.9;
         final ui.Rect bounds = layout.logicalBounds;
+        final int width = _pixels(bounds.width * scale);
+        final int height = _pixels(bounds.height * scale);
+        if (width == layout.width && height == layout.height) {
+          return image;
+        }
         layout = SelectionImageLayout(
           logicalBounds: bounds,
           scale: scale,
-          width: _pixels(bounds.width * scale),
-          height: _pixels(bounds.height * scale),
+          width: width,
+          height: height,
         );
       }
     } on SelectionImageException {
@@ -611,9 +665,6 @@ class SelectionImageRenderer {
         );
       canvas.restore();
     }
-    for (final StickyNoteElement note in snapshot.stickies) {
-      paintStickyNote(canvas, note);
-    }
     for (final SnapshotStroke stroke in snapshot.strokes) {
       final InkVector origin = stroke.points.first;
       final ui.Path path = ui.Path()..moveTo(origin.x, origin.y);
@@ -627,10 +678,15 @@ class SelectionImageRenderer {
         path: path,
         origin: origin,
         isDot: stroke.isDot,
+        writing: stroke.writing,
         outline: stroke.widths == null
             ? null
             : buildInkOutline(stroke.points, stroke.widths!, stroke.width),
       );
+    }
+    // Sticky notes above page strokes.
+    for (final StickyNoteElement note in snapshot.stickies) {
+      paintStickyNote(canvas, note);
     }
     final ui.Picture picture = recorder.endRecording();
     ui.Image? image;

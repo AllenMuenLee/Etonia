@@ -1,20 +1,22 @@
 package com.etonia.app
 
 import android.app.Activity
-import android.graphics.Canvas
 import android.graphics.Color
-import android.graphics.Paint
+import android.graphics.Matrix
 import android.graphics.RectF
-import android.graphics.PixelFormat
-import android.os.Build
 import android.os.Handler
 import android.os.Looper
 import android.view.MotionEvent
 import android.view.View
 import android.view.ViewGroup
-import android.view.SurfaceView
 import android.widget.FrameLayout
-import androidx.graphics.lowlatency.CanvasFrontBufferedRenderer
+import androidx.ink.authoring.InProgressStrokeId
+import androidx.ink.authoring.InProgressStrokesFinishedListener
+import androidx.ink.authoring.InProgressStrokesView
+import androidx.ink.brush.Brush
+import androidx.ink.brush.BrushFamily
+import androidx.ink.brush.StockBrushes
+import androidx.ink.strokes.Stroke
 import androidx.input.motionprediction.MotionEventPredictor
 import io.flutter.embedding.android.FlutterView
 import io.flutter.plugin.common.BinaryMessenger
@@ -146,7 +148,7 @@ class NativeInkChannel(
         view.requestUnbufferedDispatch(event)
         val samples = samples(event, index, surface, includeHistory = false)
         if (surface.previewEnabled && !inverted) {
-            overlay?.begin(pointer, previewPoints(event, index, view, includeHistory = false), surface)
+            overlay?.begin(pointer, event, surface, view)
         }
         emit(surface.id, pointer, "down", inverted, samples)
     }
@@ -162,12 +164,12 @@ class NativeInkChannel(
         val samples = samples(event, index, stroke.surface, includeHistory = true)
         if (samples.isEmpty()) return
         if (stroke.surface.previewEnabled && !stroke.inverted && !stroke.previewSuppressed) {
-            overlay?.append(
-                stroke.pointer,
-                previewPoints(event, index, view, includeHistory = true),
-                predictedPreviewPoints(stroke.pointer, view),
-                stroke.surface,
-            )
+            val predicted = predictor?.predict()
+            try {
+                overlay?.append(stroke.pointer, event, predicted)
+            } finally {
+                predicted?.recycle()
+            }
         }
         emit(stroke.surface.id, stroke.pointer, "move", stroke.inverted, samples)
     }
@@ -177,17 +179,13 @@ class NativeInkChannel(
         val index = event.actionIndex
         if (event.getPointerId(index) != stroke.pointer) return
         val samples = samples(event, index, stroke.surface, includeHistory = true)
+        var strokeId: InProgressStrokeId? = null
         if (stroke.surface.previewEnabled && !stroke.inverted && !stroke.previewSuppressed) {
-            overlay?.append(
-                stroke.pointer,
-                previewPoints(event, index, view, includeHistory = true),
-                emptyList(),
-                stroke.surface,
-            )
+            strokeId = overlay?.end(stroke.pointer, event)
         }
         emit(stroke.surface.id, stroke.pointer, "up", stroke.inverted, samples)
         active = null
-        handler.postDelayed({ overlay?.finish(stroke.pointer) }, PREVIEW_TIMEOUT_MS)
+        handler.postDelayed({ overlay?.finish(stroke.pointer, strokeId) }, PREVIEW_TIMEOUT_MS)
     }
 
     private fun cancelActive(sendPacket: Boolean) {
@@ -232,48 +230,6 @@ class NativeInkChannel(
             output.add(event.getPressure(pointerIndex).toDouble().coerceIn(0.0, 1.0))
         }
         return output
-    }
-
-    private fun previewPoints(
-        event: MotionEvent,
-        pointerIndex: Int,
-        view: FlutterView,
-        includeHistory: Boolean,
-    ): List<PreviewPoint> {
-        val output = ArrayList<PreviewPoint>(event.historySize + 1)
-        val location = IntArray(2)
-        view.getLocationInWindow(location)
-        if (includeHistory) {
-            for (history in 0 until event.historySize) {
-                output.add(
-                    PreviewPoint(
-                        event.getHistoricalX(pointerIndex, history) - location[0],
-                        event.getHistoricalY(pointerIndex, history) - location[1],
-                        event.getHistoricalPressure(pointerIndex, history).coerceIn(0f, 1f),
-                    ),
-                )
-            }
-        }
-        output.add(
-            PreviewPoint(
-                event.getX(pointerIndex) - location[0],
-                event.getY(pointerIndex) - location[1],
-                event.getPressure(pointerIndex).coerceIn(0f, 1f),
-            ),
-        )
-        return output
-    }
-
-    /** Prediction is native-preview-only and is never emitted to Dart. */
-    private fun predictedPreviewPoints(pointer: Int, view: FlutterView): List<PreviewPoint> {
-        val predicted = predictor?.predict() ?: return emptyList()
-        return try {
-            val index = predicted.findPointerIndex(pointer)
-            if (index < 0) emptyList()
-            else previewPoints(predicted, index, view, includeHistory = true)
-        } finally {
-            predicted.recycle()
-        }
     }
 
     private fun emit(
@@ -357,6 +313,8 @@ class NativeInkChannel(
         val color: Int,
         val strokeWidth: Double,
         val pressureSensitivity: Double,
+        val stabilization: Double,
+        val writingStyle: String,
         val exclusionRects: List<RectF> = emptyList(),
     ) {
         private val determinant = xx * yy - xy * yx
@@ -420,244 +378,161 @@ class NativeInkChannel(
                     color = (arguments["color"] as? Number)?.toLong()?.toInt() ?: Color.BLACK,
                     strokeWidth = number("strokeWidth") ?: 1.0,
                     pressureSensitivity = number("pressureSensitivity") ?: 0.0,
+                    stabilization = number("stabilization")?.coerceIn(0.0, 1.0) ?: 0.0,
+                    writingStyle = arguments["writingStyle"] as? String ?: "pen",
                     exclusionRects = exclusion,
                 )
             }
         }
     }
 
-    private data class PreviewPoint(val x: Float, val y: Float, val pressure: Float)
-
+    /** Jetpack Ink's authoring view owns wet-ink modeling and low-latency rendering. */
     private class NativeInkOverlay(context: android.content.Context) : FrameLayout(context) {
-        private val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            style = Paint.Style.STROKE
-            strokeCap = Paint.Cap.ROUND
-            strokeJoin = Paint.Join.ROUND
-        }
-        private val actual = ArrayList<PreviewPoint>()
-        private val predicted = ArrayList<PreviewPoint>()
+        private val ink = InProgressStrokesView(context)
         private var pointer: Int? = null
-        private var surface: InkSurface? = null
-        private var frontRenderer: CanvasFrontBufferedRenderer<PreviewSegment>? = null
-        private val frontSurface: SurfaceView? = if (Build.VERSION.SDK_INT >= 29) {
-            SurfaceView(context).also { view ->
-                view.setZOrderOnTop(true)
-                view.holder.setFormat(PixelFormat.TRANSLUCENT)
-                view.setBackgroundColor(Color.TRANSPARENT)
-                addView(
-                    view,
-                    LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.MATCH_PARENT),
-                )
-            }
-        } else null
+        private var strokeId: InProgressStrokeId? = null
+        private var strokeEnded = false
+        private val removeWhenFinished = HashSet<InProgressStrokeId>()
+        private val families = HashMap<FamilyKey, BrushFamily>()
 
         init {
             isClickable = false
             isFocusable = false
             importantForAccessibility = IMPORTANT_FOR_ACCESSIBILITY_NO
-            setWillNotDraw(false)
+            addView(
+                ink,
+                LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.MATCH_PARENT),
+            )
+            ink.addFinishedStrokesListener(
+                object : InProgressStrokesFinishedListener {
+                    override fun onStrokesFinished(
+                        strokes: Map<InProgressStrokeId, Stroke>,
+                    ) {
+                        val removable = strokes.keys.filterTo(HashSet()) {
+                            removeWhenFinished.remove(it)
+                        }
+                        if (removable.isNotEmpty()) ink.removeFinishedStrokes(removable)
+                    }
+                },
+            )
         }
 
         override fun onAttachedToWindow() {
             super.onAttachedToWindow()
-            if (Build.VERSION.SDK_INT >= 29 && frontRenderer == null) {
-                val target = frontSurface ?: return
-                frontRenderer = CanvasFrontBufferedRenderer(
-                    target,
-                    object : CanvasFrontBufferedRenderer.Callback<PreviewSegment> {
-                        override fun onDrawFrontBufferedLayer(
-                            canvas: Canvas,
-                            bufferWidth: Int,
-                            bufferHeight: Int,
-                            param: PreviewSegment,
-                        ) {
-                            drawSegment(canvas, param)
-                        }
-
-                        override fun onDrawMultiBufferedLayer(
-                            canvas: Canvas,
-                            bufferWidth: Int,
-                            bufferHeight: Int,
-                            params: Collection<PreviewSegment>,
-                        ) {
-                            for (segment in params) drawSegment(canvas, segment)
-                        }
-                    },
-                )
-            }
+            // Avoid a visible first-stroke initialization hitch.
+            ink.eagerInit()
         }
 
-        override fun onDetachedFromWindow() {
-            frontRenderer?.release(cancelPending = true, onReleaseComplete = null)
-            frontRenderer = null
-            super.onDetachedFromWindow()
-        }
-
-        fun begin(pointer: Int, incoming: List<PreviewPoint>, surface: InkSurface) {
+        fun begin(pointer: Int, event: MotionEvent, surface: InkSurface, source: View) {
+            clear()
             this.pointer = pointer
-            this.surface = surface
-            val dirty = dirtyBounds(actual + predicted, this.surface)
-            actual.clear()
-            actual.addAll(incoming)
-            predicted.clear()
-            frontRenderer?.clear()
-            renderActual(incoming, surface)
-            invalidateDirty(union(dirty, dirtyBounds(actual, surface)))
+            val location = IntArray(2)
+            source.getLocationInWindow(location)
+            val motionToWorld = Matrix().apply {
+                setTranslate(-location[0].toFloat(), -location[1].toFloat())
+            }
+            strokeId = ink.startStroke(
+                event,
+                pointer,
+                brushFor(surface),
+                motionToWorld,
+                Matrix(),
+            )
         }
 
-        fun append(
-            pointer: Int,
-            incoming: List<PreviewPoint>,
-            prediction: List<PreviewPoint>,
-            surface: InkSurface,
-        ) {
-            if (this.pointer != pointer) begin(pointer, incoming, surface)
-            else {
-                val oldPrediction = dirtyBounds(predicted, this.surface)
-                val previous = actual.lastOrNull()
-                val added: List<PreviewPoint>
-                if (incoming.isNotEmpty() && actual.isNotEmpty() && incoming.first() == actual.last()) {
-                    added = incoming.drop(1)
-                    actual.addAll(added)
-                } else {
-                    added = incoming
-                    actual.addAll(incoming)
-                }
-                predicted.clear()
-                predicted.addAll(prediction)
-                this.surface = surface
-                renderActual(
-                    if (previous == null) added else listOf(previous) + added,
-                    surface,
-                )
-                val changed = if (previous == null) incoming else listOf(previous) + incoming
-                invalidateDirty(
-                    union(
-                        oldPrediction,
-                        union(dirtyBounds(changed, surface), dirtyBounds(predicted, surface)),
-                    ),
-                )
+        fun append(pointer: Int, event: MotionEvent, prediction: MotionEvent?) {
+            val id = strokeId ?: return
+            if (this.pointer != pointer) return
+            ink.addToStroke(event, pointer, id, prediction)
+        }
+
+        /** Returns the id of the stroke that was finished, for a targeted [finish]. */
+        fun end(pointer: Int, event: MotionEvent): InProgressStrokeId? {
+            val id = strokeId ?: return null
+            if (this.pointer != pointer) return null
+            ink.finishStroke(event, pointer, id)
+            strokeEnded = true
+            return id
+        }
+
+        /**
+         * Hides the stroke. [only] pins the call to one stroke so a delayed
+         * finish cannot hit a newer stroke that reuses the same pointer id.
+         */
+        fun finish(pointer: Int, only: InProgressStrokeId? = null) {
+            if (only != null && only != strokeId) {
+                release(only)
+                return
+            }
+            if (only == null && this.pointer != null && this.pointer != pointer) return
+            val id = strokeId
+            if (id != null) {
+                // A stroke that never got finishStroke would stay on screen
+                // forever, so cancel it instead of waiting for a callback.
+                if (strokeEnded) release(id) else ink.cancelUnfinishedStrokes()
+            }
+            this.pointer = null
+            strokeId = null
+            strokeEnded = false
+        }
+
+        private fun release(id: InProgressStrokeId) {
+            if (ink.getFinishedStrokes().containsKey(id)) {
+                ink.removeFinishedStrokes(setOf(id))
+            } else {
+                removeWhenFinished.add(id)
             }
         }
 
         fun clear() {
-            val dirty = dirtyBounds(actual + predicted, surface)
-            this.pointer = null
-            surface = null
-            actual.clear()
-            predicted.clear()
-            frontRenderer?.clear()
-            invalidateDirty(dirty)
+            ink.cancelUnfinishedStrokes()
+            val finished = ink.getFinishedStrokes().keys.toSet()
+            if (finished.isNotEmpty()) ink.removeFinishedStrokes(finished)
+            removeWhenFinished.clear()
+            pointer = null
+            strokeId = null
+            strokeEnded = false
         }
 
-        fun finish(pointer: Int) {
-            if (this.pointer == null || this.pointer == pointer) {
-                clear()
-            }
-        }
-
-        override fun onDraw(canvas: Canvas) {
-            super.onDraw(canvas)
-            val config = surface ?: return
-            val points = if (frontRenderer == null) actual + predicted else predicted
-            if (points.isEmpty()) return
-            paint.color = config.color
-            if (points.size == 1) {
-                paint.style = Paint.Style.FILL
-                val width = widthFor(points[0].pressure, config).toFloat()
-                canvas.drawCircle(points[0].x, points[0].y, width / 2f, paint)
-                paint.style = Paint.Style.STROKE
-                return
-            }
-            for (index in 1 until points.size) {
-                val before = points[index - 1]
-                val current = points[index]
-                paint.strokeWidth = widthFor((before.pressure + current.pressure) / 2f, config).toFloat()
-                val clip = canvas.clipBounds
-                val padding = paint.strokeWidth
-                if (maxOf(before.x, current.x) + padding < clip.left ||
-                    minOf(before.x, current.x) - padding > clip.right ||
-                    maxOf(before.y, current.y) + padding < clip.top ||
-                    minOf(before.y, current.y) - padding > clip.bottom
-                ) continue
-                canvas.drawLine(before.x, before.y, current.x, current.y, paint)
-            }
-        }
-
-        private fun renderActual(points: List<PreviewPoint>, surface: InkSurface) {
-            val renderer = frontRenderer ?: return
-            if (points.size == 1) {
-                renderer.renderFrontBufferedLayer(PreviewSegment(points[0], points[0], surface))
-                return
-            }
-            for (index in 1 until points.size) {
-                renderer.renderFrontBufferedLayer(
-                    PreviewSegment(points[index - 1], points[index], surface),
-                )
-            }
-        }
-
-        private fun drawSegment(canvas: Canvas, segment: PreviewSegment) {
-            val before = segment.before
-            val current = segment.current
-            paint.color = segment.surface.color
-            if (before == current) {
-                paint.style = Paint.Style.FILL
-                val width = widthFor(current.pressure, segment.surface).toFloat()
-                canvas.drawCircle(current.x, current.y, width / 2f, paint)
-                paint.style = Paint.Style.STROKE
+        private fun brushFor(surface: InkSurface): Brush {
+            val windowMillis = if (surface.stabilization <= 0.001) {
+                0
             } else {
-                paint.strokeWidth = widthFor(
-                    (before.pressure + current.pressure) / 2f,
-                    segment.surface,
-                ).toFloat()
-                canvas.drawLine(before.x, before.y, current.x, current.y, paint)
+                // 0-32 ms keeps the low end nearly raw while making the top
+                // of the existing meter visibly steady. Prediction masks most
+                // of the added visual lag.
+                kotlin.math.ceil(surface.stabilization * 32.0).toInt()
             }
-        }
-
-        private fun dirtyBounds(points: List<PreviewPoint>, surface: InkSurface?): RectF? {
-            if (points.isEmpty() || surface == null) return null
-            var left = points.first().x
-            var top = points.first().y
-            var right = left
-            var bottom = top
-            var widest = 0f
-            for (point in points) {
-                left = minOf(left, point.x)
-                top = minOf(top, point.y)
-                right = maxOf(right, point.x)
-                bottom = maxOf(bottom, point.y)
-                widest = maxOf(widest, widthFor(point.pressure, surface).toFloat())
+            val pressure = surface.pressureSensitivity > 0.001
+            val key = FamilyKey(surface.writingStyle, pressure, windowMillis)
+            val family = families.getOrPut(key) {
+                val stock = when {
+                    surface.writingStyle == "highlighter" -> StockBrushes.highlighter()
+                    pressure -> StockBrushes.pressurePen()
+                    else -> StockBrushes.marker()
+                }
+                val inputModel = if (windowMillis == 0) {
+                    BrushFamily.InputModel.PASSTHROUGH_MODEL
+                } else {
+                    BrushFamily.InputModel.SlidingWindowModel(windowMillis.toLong(), 240)
+                }
+                stock.toBuilder().setInputModel(inputModel).build()
             }
-            return RectF(left - widest, top - widest, right + widest, bottom + widest)
-        }
-
-        private fun union(a: RectF?, b: RectF?): RectF? = when {
-            a == null -> b
-            b == null -> a
-            else -> RectF(a).apply { union(b) }
-        }
-
-        private fun invalidateDirty(rect: RectF?) {
-            if (rect == null) return
-            invalidate(
-                kotlin.math.floor(rect.left.toDouble()).toInt(),
-                kotlin.math.floor(rect.top.toDouble()).toInt(),
-                kotlin.math.ceil(rect.right.toDouble()).toInt(),
-                kotlin.math.ceil(rect.bottom.toDouble()).toInt(),
+            val physicalWidth = (
+                surface.strokeWidth * surface.scale * resources.displayMetrics.density
+            ).toFloat().coerceAtLeast(0.5f)
+            return Brush.createWithColorIntArgb(
+                family,
+                surface.color,
+                physicalWidth,
+                0.1f,
             )
         }
 
-        private fun widthFor(pressure: Float, surface: InkSurface): Double {
-            val pressureFactor = 1.0 + surface.pressureSensitivity * 0.75 * (2.0 * pressure - 1.0)
-            return (surface.strokeWidth * surface.scale * resources.displayMetrics.density * pressureFactor)
-                .coerceAtLeast(0.5)
-        }
-
-        private data class PreviewSegment(
-            val before: PreviewPoint,
-            val current: PreviewPoint,
-            val surface: InkSurface,
+        private data class FamilyKey(
+            val writingStyle: String,
+            val pressure: Boolean,
+            val windowMillis: Int,
         )
     }
 }

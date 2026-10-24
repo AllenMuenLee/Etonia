@@ -1,4 +1,4 @@
-import 'dart:async';
+﻿import 'dart:async';
 import 'dart:math' as math;
 import 'dart:typed_data';
 import 'dart:ui' as ui;
@@ -7,6 +7,7 @@ import 'package:flutter/material.dart';
 
 import '../../app/theme/app_tokens.dart';
 import '../../shared/layout/breakpoints.dart';
+import '../../shared/widgets/processing.dart';
 import '../editor/ai/ai_assistant_controller.dart';
 import '../editor/ai/ai_client.dart';
 import '../editor/editor_screen.dart';
@@ -57,7 +58,13 @@ class NoteEditorPage extends StatefulWidget {
     this.tabsBuilder,
     this.onRenamed,
     this.onBack,
+    this.onSaved,
   });
+
+  /// Called after each save, the last on the way out included, with the
+  /// entry as saved and what was saved, while those pages are still in
+  /// memory: the library draws the note's picture from them.
+  final void Function(NoteEntry note, NoteContent content)? onSaved;
 
   /// Builds the open notes' tabs for the top bar, given how to rename this
   /// note; without it the bar shows the title alone.
@@ -137,7 +144,7 @@ class _NoteEditorPageState extends State<NoteEditorPage> {
   void didChangeDependencies() {
     super.didChangeDependencies();
     if (!_entered && _enter == null) {
-      final Duration slide = AppMotion.resolve(context, AppMotion.gentle);
+      final Duration slide = AppMotion.resolve(context, noteEntrance());
       if (slide == Duration.zero) {
         _entered = true;
       } else {
@@ -164,6 +171,7 @@ class _NoteEditorPageState extends State<NoteEditorPage> {
         (_editor.currentState?.requiresRetention ?? true)) {
       return false;
     }
+    await _editor.currentState?.finalizeRecording();
     await _autosaver?.flush();
     if (!mounted ||
         _autosaver!.isDirty ||
@@ -175,6 +183,7 @@ class _NoteEditorPageState extends State<NoteEditorPage> {
   }
 
   Future<bool> _prepareToClose() async {
+    await _editor.currentState?.finalizeRecording();
     await _autosaver?.flush();
     return mounted && !(_autosaver?.isDirty ?? false);
   }
@@ -207,8 +216,14 @@ class _NoteEditorPageState extends State<NoteEditorPage> {
 
   Future<void> _load() async {
     try {
+      final Duration since = LoadTimings.clock();
       final NoteContent content = await widget.repository.loadNote(
         widget.note.id,
+      );
+      // So the next note slides in for about as long as it takes to read.
+      LoadTimings.instance.record(
+        LoadTimings.noteOpen,
+        LoadTimings.clock() - since,
       );
       if (!mounted) {
         return;
@@ -261,8 +276,12 @@ class _NoteEditorPageState extends State<NoteEditorPage> {
     _autosaver = NoteAutosaver(
       document: document,
       delay: widget.saveDelay,
-      save: (NoteContent content) {
-        return widget.repository.saveNote(widget.note.id, content);
+      save: (NoteContent content) async {
+        final NoteEntry saved = await widget.repository.saveNote(
+          widget.note.id,
+          content,
+        );
+        widget.onSaved?.call(saved, content);
       },
       onError: _onSaveFailed,
     );
@@ -323,16 +342,26 @@ class _NoteEditorPageState extends State<NoteEditorPage> {
   }
 
   void _leave() {
-    _autosaver?.flush();
+    unawaited(_leaveAfterFinalizingAudio());
+  }
+
+  Future<void> _leaveAfterFinalizingAudio() async {
+    await _editor.currentState?.finalizeRecording();
+    await _autosaver?.flush();
+    if (!mounted) return;
     if (widget.onBack != null) {
       widget.onBack!();
     } else {
-      Navigator.of(context).maybePop();
+      await Navigator.of(context).maybePop();
     }
   }
 
   @override
   void dispose() {
+    // Left before the note was read: the rest of the reading is let go.
+    if (_document == null && _pending == null && _error == null) {
+      widget.repository.abandonLoad(widget.note.id);
+    }
     _lease?.prepareToEvict = null;
     _lease?.prepareToClose = null;
     _enter?.cancel();
@@ -364,11 +393,14 @@ class _NoteEditorPageState extends State<NoteEditorPage> {
       for (final image in page.images) image.assetId,
     // What saved AI conversations were drawn over, read again on reopening.
     ...AiAssistantController.referencedAssets(content.aiSession),
+    for (final recording in content.recordings) recording.assetPath,
   };
 
   @override
   Widget build(BuildContext context) {
     final NoteDocument? document = _document;
+    // Under tabs this also tells them how to rename this note.
+    final Widget? tabs = widget.tabsBuilder?.call(_rename);
     if (document != null) {
       final Widget editor = EditorScreen(
         key: _editor,
@@ -376,7 +408,7 @@ class _NoteEditorPageState extends State<NoteEditorPage> {
         title: _title,
         onBack: _leave,
         onTitlePressed: _rename,
-        tabs: widget.tabsBuilder?.call(_rename),
+        tabs: tabs,
         aiClient: widget.aiClient,
         subscription: widget.subscription,
         handwritingProfileStore: widget.handwritingProfileStore,
@@ -411,16 +443,12 @@ class _NoteEditorPageState extends State<NoteEditorPage> {
             child: ExcludeSemantics(
               child: AnimatedOpacity(
                 opacity: _uncovering ? 0 : 1,
-                duration: AppMotion.resolve(context, AppMotion.fast),
+                duration: AppMotion.resolve(context, AppMotion.fadeIn),
                 onEnd: () {
                   if (mounted && _uncovering) setState(_uncovered);
                 },
                 child: Scaffold(
                   backgroundColor: Colors.transparent,
-                  appBar: const PreferredSize(
-                    preferredSize: Size.fromHeight(AppSizes.appBarHeight),
-                    child: SizedBox.shrink(),
-                  ),
                   body: SafeArea(top: false, child: _openingPage(context)),
                 ),
               ),
@@ -435,14 +463,17 @@ class _NoteEditorPageState extends State<NoteEditorPage> {
     // The editor as it will be, its page pictured, so the note slides in
     // looking open while it is read.
     return Scaffold(
-      appBar: EditorAppBar(
-        title: _title,
-        centerTitle: sizeClass == WindowSizeClass.expanded,
-        onMenuPressed: _leave,
-        leadingIsBack: true,
-        onTitlePressed: _rename,
-        tabs: widget.tabsBuilder?.call(_rename),
-      ),
+      // Under tabs, the bar is theirs, and already there.
+      appBar: NoteTabScope.of(context) != null
+          ? null
+          : EditorAppBar(
+              title: _title,
+              centerTitle: sizeClass == WindowSizeClass.expanded,
+              onMenuPressed: _leave,
+              leadingIsBack: true,
+              onTitlePressed: _rename,
+              tabs: tabs,
+            ),
       body: SafeArea(
         top: false,
         child: _error == null
@@ -527,6 +558,9 @@ class _NoteEditorPageState extends State<NoteEditorPage> {
     );
   }
 }
+
+/// The shared visual duration for opening a note.
+Duration noteEntrance() => AppMotion.smooth.duration;
 
 /// Stretches [image], a note's pictured page, over the whole canvas.
 class PagePicturePainter extends CustomPainter {

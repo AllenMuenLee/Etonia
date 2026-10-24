@@ -31,7 +31,7 @@
 	<key>NSCameraUsageDescription</key>
 	<string>Take a photo to place in a note.</string>
 	<key>NSMicrophoneUsageDescription</key>
-	<string>Use your voice to dictate a prompt for the AI assistant.</string>
+	<string>Record audio with your handwritten notes or dictate a prompt.</string>
 	<key>NSSpeechRecognitionUsageDescription</key>
 	<string>Convert a spoken AI prompt into text.</string>
 	<key>UIApplicationSceneManifest</key>

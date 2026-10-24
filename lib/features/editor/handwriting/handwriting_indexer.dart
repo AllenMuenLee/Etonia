@@ -36,7 +36,10 @@ class HandwritingIndexer {
           .map((RecognizedTextSegment value) => value.text.trim())
           .where((String value) => value.isNotEmpty)
           .join(' ');
-      if (text.isEmpty) continue;
+      final List<String> alternatives = <String>{
+        for (final RecognizedTextSegment reading in readings)
+          ...reading.alternatives,
+      }.where((String value) => value != text).toList();
       final List<double> confidences = <double>[
         for (final RecognizedTextSegment value in readings)
           if (value.confidence != null) value.confidence!,
@@ -51,6 +54,7 @@ class HandwritingIndexer {
         RecognizedInkWord.fromStrokes(
           text: text,
           confidence: confidence,
+          alternatives: alternatives,
           strokes: group,
           stickyId: stickyId,
         ),

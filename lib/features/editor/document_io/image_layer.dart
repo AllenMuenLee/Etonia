@@ -3,12 +3,15 @@ import 'dart:typed_data';
 import 'dart:ui' as ui;
 
 import 'package:flutter/material.dart';
+import 'package:flutter_svg/flutter_svg.dart';
 
+import '../../../shared/widgets/processing.dart';
 import '../ink/ink_canvas.dart';
 import '../ink/ink_controller.dart';
 import '../ink/ink_selection.dart';
 import 'document_models.dart';
 import 'page_image_cache.dart';
+import 'svg_document.dart';
 
 typedef NoteAssetReader = Future<Uint8List?> Function(String assetId);
 
@@ -17,14 +20,14 @@ class PageImageLayer extends StatefulWidget {
   const PageImageLayer({
     super.key,
     required this.controller,
-    required this.readAsset,
+    this.readAsset,
     this.maxDecodeDimension = 4096,
     this.cache,
     this.carry,
   });
 
   final InkController controller;
-  final NoteAssetReader readAsset;
+  final NoteAssetReader? readAsset;
   final int maxDecodeDimension;
   final PageImageCache? cache;
   final SelectionCarry? carry;
@@ -35,9 +38,13 @@ class PageImageLayer extends StatefulWidget {
 
 class _PageImageLayerState extends State<PageImageLayer> {
   PageImageCache? _ownedCache;
-  PageImageCache get _cache =>
-      widget.cache ??
-      (_ownedCache ??= PageImageCache(readAsset: widget.readAsset));
+  PageImageCache? get _cache {
+    if (widget.cache != null) return widget.cache;
+    final NoteAssetReader? reader = widget.readAsset;
+    return reader == null
+        ? null
+        : (_ownedCache ??= PageImageCache(readAsset: reader));
+  }
 
   @override
   void didUpdateWidget(PageImageLayer oldWidget) {
@@ -61,6 +68,7 @@ class _PageImageLayerState extends State<PageImageLayer> {
       animation: Listenable.merge(<Listenable>[
         widget.controller.completedStrokesListenable,
         widget.controller.selectionListenable,
+        widget.controller.svgAnimationListenable,
         if (widget.carry != null) widget.carry!,
       ]),
       builder: (BuildContext context, Widget? child) {
@@ -86,6 +94,7 @@ class _PageImageLayerState extends State<PageImageLayer> {
                 selected: selected.contains(i),
                 cache: _cache,
                 maxDecodeDimension: widget.maxDecodeDimension,
+                animateSvg: widget.controller.svgAnimationsEnabled,
               ),
             for (final NoteImageElement element in foreignImages)
               _PlacedImage(
@@ -94,6 +103,7 @@ class _PageImageLayerState extends State<PageImageLayer> {
                 selected: true,
                 cache: _cache,
                 maxDecodeDimension: widget.maxDecodeDimension,
+                animateSvg: widget.controller.svgAnimationsEnabled,
               ),
           ],
         );
@@ -109,12 +119,14 @@ class _PlacedImage extends StatelessWidget {
     required this.selected,
     required this.cache,
     required this.maxDecodeDimension,
+    required this.animateSvg,
   });
 
   final NoteImageElement element;
   final bool selected;
-  final PageImageCache cache;
+  final PageImageCache? cache;
   final int maxDecodeDimension;
+  final bool animateSvg;
 
   @override
   Widget build(BuildContext context) {
@@ -131,16 +143,110 @@ class _PlacedImage extends StatelessWidget {
         selected: selected,
         child: Transform.rotate(
           angle: element.rotation,
-          child: _ImageContents(
-            assetId: element.assetId,
-            size: element.size,
-            cache: cache,
-            maxDimension: maxDecodeDimension,
-          ),
+          child: element.vector != null
+              ? _SvgContents(vector: element.vector!, animate: animateSvg)
+              : cache == null
+              ? const Center(child: Text('Image unavailable'))
+              : _ImageContents(
+                  assetId: element.assetId,
+                  size: element.size,
+                  cache: cache!,
+                  maxDimension: maxDecodeDimension,
+                ),
         ),
       ),
     );
   }
+}
+
+/// Renders the retained SVG source. Animation changes only at semantic SVG
+/// steps, keeping parsing and widget work off per-frame paths.
+class _SvgContents extends StatefulWidget {
+  const _SvgContents({required this.vector, required this.animate});
+
+  final EditableSvg vector;
+  final bool animate;
+
+  @override
+  State<_SvgContents> createState() => _SvgContentsState();
+}
+
+class _SvgContentsState extends State<_SvgContents>
+    with SingleTickerProviderStateMixin {
+  AnimationController? _controller;
+  late List<String> _frames;
+  int _step = -1;
+
+  @override
+  void initState() {
+    super.initState();
+    _prepare();
+  }
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    _syncMotion();
+  }
+
+  @override
+  void didUpdateWidget(_SvgContents oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.vector.source != widget.vector.source) {
+      _controller?.dispose();
+      _controller = null;
+      _prepare();
+      _syncMotion();
+    } else if (oldWidget.animate != widget.animate) {
+      _syncMotion();
+    }
+  }
+
+  void _prepare() {
+    _frames = <String>[
+      for (int step = 0; step <= widget.vector.stepCount; step++)
+        widget.vector.frame(step),
+    ];
+    _step = widget.vector.isAnimated ? 0 : widget.vector.stepCount;
+  }
+
+  void _syncMotion() {
+    final bool reduce = MediaQuery.disableAnimationsOf(context);
+    if (!widget.vector.isAnimated || reduce || !widget.animate) {
+      _controller?.stop();
+      final int last = widget.vector.stepCount;
+      if (_step != last) setState(() => _step = last);
+      return;
+    }
+    final AnimationController controller = _controller ??= AnimationController(
+      vsync: this,
+      duration: widget.vector.duration,
+    )..addListener(_tick);
+    if (!controller.isAnimating) controller.repeat();
+  }
+
+  void _tick() {
+    final AnimationController? controller = _controller;
+    if (controller == null || !mounted) return;
+    final int next = (controller.value * (widget.vector.stepCount + 1))
+        .floor()
+        .clamp(0, widget.vector.stepCount);
+    if (next != _step) setState(() => _step = next);
+  }
+
+  @override
+  void dispose() {
+    _controller?.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) => SvgPicture.string(
+    _frames[_step.clamp(0, _frames.length - 1)],
+    key: ValueKey<int>(_step),
+    fit: BoxFit.fill,
+    clipBehavior: Clip.hardEdge,
+  );
 }
 
 class _ImageContents extends StatefulWidget {
@@ -218,14 +324,22 @@ class _ImageContentsState extends State<_ImageContents> {
     super.dispose();
   }
 
+  // The picture fades in over its faint frame once decoded; a resize keeps
+  // showing the old one until the new size is ready.
   @override
-  Widget build(BuildContext context) => _image != null
-      ? RawImage(
-          image: _image,
-          fit: BoxFit.fill,
-          filterQuality: FilterQuality.medium,
-        )
-      : _failed
-      ? const Center(child: Text('Image unavailable'))
-      : const ColoredBox(color: Color(0x08000000));
+  Widget build(BuildContext context) => LoadingReveal(
+    timing: LoadTimings.image,
+    placeholder: const ColoredBox(color: Color(0x08000000)),
+    child: _image != null
+        ? SizedBox.expand(
+            child: RawImage(
+              image: _image,
+              fit: BoxFit.fill,
+              filterQuality: FilterQuality.medium,
+            ),
+          )
+        : _failed
+        ? const Center(child: Text('Image unavailable'))
+        : null,
+  );
 }

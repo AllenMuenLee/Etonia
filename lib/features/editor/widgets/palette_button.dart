@@ -15,6 +15,7 @@ class PaletteButton extends StatefulWidget {
     this.selected = false,
     this.toggled,
     this.dense = false,
+    this.hostsSelection = false,
   });
 
   final String tooltip;
@@ -32,14 +33,53 @@ class PaletteButton extends StatefulWidget {
   /// Shrinks the painted body, never the touch target.
   final bool dense;
 
+  /// Whether a shared [SelectionCapsule] behind the buttons draws the selected
+  /// fill, gliding between them. The button then only recolors its glyph.
+  final bool hostsSelection;
+
   final Widget child;
 
   @override
   State<PaletteButton> createState() => _PaletteButtonState();
 }
 
-class _PaletteButtonState extends State<PaletteButton> {
+class _PaletteButtonState extends State<PaletteButton>
+    with SingleTickerProviderStateMixin {
   bool _focused = false;
+
+  /// The glyph's 1.0 to 1.12 to 1.0 pop as it becomes the chosen tool.
+  late final AnimationController _pop = AnimationController(
+    vsync: this,
+    duration: AppMotion.snappy.duration,
+  );
+
+  static final Animatable<double> _popScale =
+      TweenSequence<double>(<TweenSequenceItem<double>>[
+        TweenSequenceItem<double>(
+          tween: Tween<double>(begin: 1, end: 1.12),
+          weight: 1,
+        ),
+        TweenSequenceItem<double>(
+          tween: Tween<double>(begin: 1.12, end: 1),
+          weight: 1,
+        ),
+      ]);
+
+  @override
+  void didUpdateWidget(PaletteButton oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (widget.selected &&
+        !oldWidget.selected &&
+        !MediaQuery.disableAnimationsOf(context)) {
+      _pop.forward(from: 0);
+    }
+  }
+
+  @override
+  void dispose() {
+    _pop.dispose();
+    super.dispose();
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -51,7 +91,7 @@ class _PaletteButtonState extends State<PaletteButton> {
     final bool showFocusRing =
         _focused &&
         FocusManager.instance.highlightMode == FocusHighlightMode.traditional;
-    final BorderRadius radius = BorderRadius.circular(AppRadii.medium);
+    const BorderRadius radius = AppBorderRadius.medium;
 
     return Tooltip(
       message: widget.tooltip,
@@ -75,17 +115,21 @@ class _PaletteButtonState extends State<PaletteButton> {
             child: Center(
               child: Pressable(
                 enabled: enabled,
+                type: PressableType.icon,
                 child: AnimatedContainer(
-                  duration: AppMotion.resolve(context, AppMotion.fast),
-                  curve: AppMotion.standard,
+                  duration: AppMotion.resolve(
+                    context,
+                    AppMotion.snappy.duration,
+                  ),
+                  curve: AppMotion.fadeInCurve,
                   width: visual,
                   height: visual,
                   alignment: Alignment.center,
                   decoration: BoxDecoration(
-                    color: widget.selected
-                        ? colors.selected
-                        : colors.selected.withValues(alpha: 0),
-                    borderRadius: radius,
+                    color: widget.selected && !widget.hostsSelection
+                        ? colors.accent
+                        : colors.accent.withValues(alpha: 0),
+                    borderRadius: BorderRadius.circular(999),
                     border: Border.all(
                       color: showFocusRing
                           ? colors.focus
@@ -95,14 +139,25 @@ class _PaletteButtonState extends State<PaletteButton> {
                   ),
                   // Dimmed by its color, not an Opacity: a translucent layer
                   // would be drawn offscreen on every frame it is shown.
-                  child: IconTheme.merge(
-                    data: IconThemeData(
-                      color:
-                          (widget.selected ? colors.accent : colors.textPrimary)
+                  child: TweenAnimationBuilder<Color?>(
+                    tween: ColorTween(
+                      end:
+                          (widget.selected
+                                  ? colors.onAccent
+                                  : colors.textPrimary)
                               .withValues(alpha: enabled ? 1 : 0.38),
-                      size: AppSizes.icon,
                     ),
-                    child: ExcludeSemantics(child: widget.child),
+                    duration: AppMotion.resolve(context, AppMotion.fadeIn),
+                    curve: AppMotion.fadeInCurve,
+                    builder: (BuildContext context, Color? tone, Widget? _) {
+                      return IconTheme.merge(
+                        data: IconThemeData(color: tone, size: AppSizes.icon),
+                        child: ScaleTransition(
+                          scale: _pop.drive(_popScale),
+                          child: ExcludeSemantics(child: widget.child),
+                        ),
+                      );
+                    },
                   ),
                 ),
               ),

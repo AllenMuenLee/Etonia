@@ -127,6 +127,19 @@ void main() {
       expect(cutoff(0), closeTo(base.minCutoff * 60, 1e-9));
     });
 
+    test('the slow-drawing steadiness fades out with the slider', () {
+      const SmoothingConfig base = SmoothingConfig(slowCutoffScale: 0.25);
+      final PenSettings pen = PenSettings.defaults();
+      double scale(double stabilization) => pen
+          .copyWith(stabilization: stabilization)
+          .smoothing(base)
+          .slowCutoffScale;
+      expect(scale(0), 1);
+      expect(scale(0.25), closeTo(0.625, 1e-9));
+      expect(scale(0.5), 0.25);
+      expect(scale(1), 0.25);
+    });
+
     test('pressure at 0% leaves only the taper', () {
       final PenSettings pen = PenSettings.defaults().copyWith(
         tipSharpness: 0.5,
@@ -317,7 +330,6 @@ void main() {
         'Pressure sensitivity',
         'Stroke stabilization',
         'Draw and hold for shapes',
-        'Follow nearby strokes',
       ]) {
         expect(find.text(label), findsOneWidget, reason: label);
       }

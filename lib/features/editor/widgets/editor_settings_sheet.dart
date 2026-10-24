@@ -1,9 +1,11 @@
+﻿import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 
 import '../../../app/theme/app_tokens.dart';
 import '../../../app/theme/app_icons.dart';
 import '../../../shared/widgets/app_controls.dart';
 import '../ai/ai_assistant_controller.dart';
+import '../ai/ai_config.dart';
 
 /// Opens the editor's settings as a floating card under the top bar's
 /// trailing corner, beside the gear that opened it. A tap outside, or
@@ -17,7 +19,7 @@ Future<void> showEditorSettings(
     barrierDismissible: true,
     barrierLabel: 'Close settings',
     barrierColor: AppColors.of(context).shadow.withValues(alpha: 0.12),
-    transitionDuration: AppMotion.resolve(context, AppMotion.fast),
+    transitionDuration: AppMotion.resolve(context, AppMotion.snappy.duration),
     pageBuilder:
         (
           BuildContext context,
@@ -52,12 +54,13 @@ Future<void> showEditorSettings(
         ) {
           final Animation<double> curved = CurvedAnimation(
             parent: animation,
-            curve: AppMotion.standard,
+            curve: AppMotion.fadeInCurve,
+            reverseCurve: AppMotion.fadeOutCurve,
           );
           return FadeTransition(
             opacity: curved,
             child: ScaleTransition(
-              scale: Tween<double>(begin: 0.96, end: 1).animate(curved),
+              scale: Tween<double>(begin: 0.94, end: 1).animate(curved),
               alignment: AlignmentDirectional.topEnd.resolve(
                 Directionality.of(context),
               ),
@@ -76,7 +79,7 @@ class _SettingsCard extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final AppColors colors = AppColors.of(context);
-    final BorderRadius radius = BorderRadius.circular(AppRadii.large);
+    const BorderRadius radius = AppBorderRadius.large;
     return GlassSurface(
       borderRadius: radius,
       boxShadow: AppShadows.floating(colors),
@@ -91,7 +94,11 @@ class EditorSettingsSheet extends StatelessWidget {
     super.key,
     required this.controller,
     this.stylusOnly,
+    this.textSize,
+    this.onTextSizeChanged,
+    this.onChooseHandwriting,
     this.onExportPdf,
+    this.onExportSvg,
   });
 
   static const double width = 380;
@@ -101,7 +108,18 @@ class EditorSettingsSheet extends StatelessWidget {
   /// Whether fingers are kept from writing; the switch is hidden without
   /// it.
   final ValueNotifier<bool>? stylusOnly;
+
+  /// How large the assistant writes on the note; the choice is hidden
+  /// without it.
+  final ValueListenable<AiTextSize>? textSize;
+  final ValueChanged<AiTextSize>? onTextSizeChanged;
+
+  /// Opens the handwriting the assistant writes in, to choose another or
+  /// write the letters again; hidden without it.
+  final VoidCallback? onChooseHandwriting;
+
   final VoidCallback? onExportPdf;
+  final VoidCallback? onExportSvg;
 
   @override
   Widget build(BuildContext context) {
@@ -146,6 +164,14 @@ class EditorSettingsSheet extends StatelessWidget {
                 ),
                 const SizedBox(height: AppSpacing.sm),
               ],
+              if (onExportSvg != null) ...<Widget>[
+                _ActionRow(
+                  icon: AppIcons.share,
+                  label: 'Export page vectors as SVG',
+                  onTap: onExportSvg!,
+                ),
+                const SizedBox(height: AppSpacing.sm),
+              ],
               if (stylusOnly != null) ...<Widget>[
                 const SectionLabel('Writing'),
                 ValueListenableBuilder<bool>(
@@ -164,32 +190,32 @@ class EditorSettingsSheet extends StatelessWidget {
                 ),
                 const SizedBox(height: AppSpacing.md),
               ],
-              const SectionLabel('Assistant'),
-              AnimatedBuilder(
-                animation: controller,
-                builder: (BuildContext context, Widget? child) {
-                  return Column(
-                    children: <Widget>[
-                      ToggleSetting(
-                        label: 'Enable notation',
-                        hint:
-                            'Allow the assistant to add static drawings to '
-                            'the note.',
-                        value: controller.notationEnabled,
-                        onChanged: controller.setNotationEnabled,
-                      ),
-                      ToggleSetting(
-                        label: 'Enable animation',
-                        hint:
-                            'Allow useful motion explanations to loop on the '
-                            'note.',
-                        value: controller.animationEnabled,
-                        onChanged: controller.setAnimationEnabled,
-                      ),
-                    ],
-                  );
-                },
-              ),
+              // What the assistant may draw is chosen from the palette's AI
+              // button; here is only how its writing looks.
+              if (onChooseHandwriting != null) ...<Widget>[
+                const SectionLabel('Assistant'),
+                _ActionRow(
+                  icon: AppIcons.pen,
+                  label: 'Handwriting font',
+                  onTap: onChooseHandwriting!,
+                ),
+              ],
+              if (textSize != null && onTextSizeChanged != null) ...<Widget>[
+                const SizedBox(height: AppSpacing.md),
+                const SectionLabel('Text size'),
+                ValueListenableBuilder<AiTextSize>(
+                  valueListenable: textSize!,
+                  builder:
+                      (BuildContext context, AiTextSize size, Widget? child) {
+                        return SegmentedChoice<AiTextSize>(
+                          options: AiTextSize.values,
+                          selected: size,
+                          labelOf: (AiTextSize size) => size.label,
+                          onSelected: onTextSizeChanged!,
+                        );
+                      },
+                ),
+              ],
               const SizedBox(height: AppSpacing.md),
               const SectionLabel('Panel side'),
               ValueListenableBuilder<AiPanelPlacement>(
@@ -240,10 +266,10 @@ class _ActionRow extends StatelessWidget {
     final AppColors colors = AppColors.of(context);
     return Material(
       color: AppGlass.muted(colors),
-      borderRadius: BorderRadius.circular(AppRadii.medium),
+      borderRadius: AppBorderRadius.medium,
       child: InkWell(
         onTap: onTap,
-        borderRadius: BorderRadius.circular(AppRadii.medium),
+        borderRadius: AppBorderRadius.medium,
         child: SizedBox(
           height: AppSizes.minTouchTarget,
           child: Row(

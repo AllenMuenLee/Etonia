@@ -5,6 +5,7 @@ import 'package:flutter/foundation.dart';
 
 import '../ink/ink_sample.dart';
 import '../ink/selection_transform.dart';
+import 'svg_document.dart';
 
 @immutable
 class PdfPageSource {
@@ -36,7 +37,7 @@ class PdfPageSource {
   int get hashCode => Object.hash(assetId, pageIndex, pageSize);
 }
 
-/// A bitmap placed below ink. List order is its paint order among images.
+/// A bitmap or editable SVG placed below ink. List order is paint order.
 @immutable
 class NoteImageElement {
   const NoteImageElement({
@@ -47,6 +48,8 @@ class NoteImageElement {
     required this.size,
     this.rotation = 0,
     this.fileName,
+    this.vector,
+    this.aiGenerated = false,
   });
 
   final String id;
@@ -57,9 +60,16 @@ class NoteImageElement {
   final double rotation;
   final String? fileName;
 
+  /// Inline editable SVG source. Bitmap elements leave this null and use
+  /// [assetId]. Keeping it inline makes copy, save, import, and export lossless.
+  final EditableSvg? vector;
+  final bool aiGenerated;
+
+  bool get isVector => vector != null;
+
   bool get isValid =>
       id.isNotEmpty &&
-      assetId.isNotEmpty &&
+      (assetId.isNotEmpty || vector != null) &&
       pixelSize.isFinite &&
       pixelSize.width > 0 &&
       pixelSize.height > 0 &&
@@ -118,6 +128,8 @@ class NoteImageElement {
       size: Size(size.width * scale, size.height * scale),
       rotation: rotation + transform.angle,
       fileName: fileName,
+      vector: vector,
+      aiGenerated: aiGenerated,
     );
   }
 
@@ -130,6 +142,8 @@ class NoteImageElement {
       size: size,
       rotation: rotation,
       fileName: fileName,
+      vector: vector,
+      aiGenerated: aiGenerated,
     );
   }
 
@@ -142,9 +156,20 @@ class NoteImageElement {
       other.center == center &&
       other.size == size &&
       other.rotation == rotation &&
-      other.fileName == fileName;
+      other.fileName == fileName &&
+      other.vector?.source == vector?.source &&
+      other.aiGenerated == aiGenerated;
 
   @override
-  int get hashCode =>
-      Object.hash(id, assetId, pixelSize, center, size, rotation, fileName);
+  int get hashCode => Object.hash(
+    id,
+    assetId,
+    pixelSize,
+    center,
+    size,
+    rotation,
+    fileName,
+    vector?.source,
+    aiGenerated,
+  );
 }

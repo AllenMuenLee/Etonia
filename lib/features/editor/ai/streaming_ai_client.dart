@@ -230,7 +230,6 @@ abstract class SseAnswerReader {
 
   int _status = 200;
   final StringBuffer _text = StringBuffer();
-  int _textBytes = 0;
   final List<String> _data = <String>[];
   String? _event;
   bool _done = false;
@@ -253,7 +252,6 @@ abstract class SseAnswerReader {
   void start(int status) {
     _status = status;
     _text.clear();
-    _textBytes = 0;
     _data.clear();
     _event = null;
     _done = false;
@@ -289,11 +287,6 @@ abstract class SseAnswerReader {
   /// Adds a piece of the answer.
   void addText(String piece) {
     if (piece.isEmpty) {
-      return;
-    }
-    _textBytes += utf8.encode(piece).length;
-    if (_textBytes > config.maxResponseBytes) {
-      malformed = true;
       return;
     }
     _text.write(piece);
@@ -483,19 +476,10 @@ abstract class SseAiClient implements AiClient {
       );
     }
     reader.start(status);
-    final int maxBytes = notationConfig.maxResponseBytes * 2;
-    int bytes = 0;
     try {
       await for (final String line
           in response.stream
               .timeout(timing.timeout)
-              .map((List<int> chunk) {
-                bytes += chunk.length;
-                if (bytes > maxBytes) {
-                  throw const FormatException('Too large');
-                }
-                return chunk;
-              })
               .transform(utf8.decoder)
               .transform(const LineSplitter())) {
         if (!reader.addLine(line)) {
@@ -503,9 +487,7 @@ abstract class SseAiClient implements AiClient {
         }
       }
     } on FormatException {
-      if (!abort.isCompleted) {
-        abort.complete();
-      }
+      if (!abort.isCompleted) abort.complete();
       return AiError(AiFailure(AiFailureKind.malformed, statusCode: status));
     }
     return reader.finish();

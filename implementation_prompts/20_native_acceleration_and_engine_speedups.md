@@ -106,7 +106,7 @@ Run existing tests before making changes to establish a clean baseline.
 - Use it in `InkController` (and `LassoRegion` / erase passes) to quickly query candidate strokes whose `bounds` intersect:
   - the eraser capsule bounding box `(minX - radius, minY - radius, maxX + radius, maxY + radius)` during `updateErase` / area and stroke erasing;
   - the lasso bounding box / edge cells during `selectWithOutline`;
-  - `StrokeFollower` nearby-stroke queries and `ScribbleErase` overlap checks.
+  - `ScribbleErase` overlap checks.
 - Keep index maintenance incremental or lazily built per committed stroke list so undo/redo, transforms, and erases never return stale stroke references or alter paint/selection order (indices must still be returned in ascending document order).
 
 ---

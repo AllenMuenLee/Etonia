@@ -166,7 +166,7 @@ class _EraserIconPainter extends CustomPainter {
     final Paint paint = Paint()
       ..color = color
       ..style = PaintingStyle.stroke
-      ..strokeWidth = 1.8 * unit
+      ..strokeWidth = 1.2 * unit
       ..strokeJoin = StrokeJoin.round
       ..strokeCap = StrokeCap.round
       ..isAntiAlias = true;

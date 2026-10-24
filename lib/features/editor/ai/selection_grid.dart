@@ -16,6 +16,7 @@ class SelectionGridRenderer {
   const SelectionGridRenderer({
     this.targetLines = 8,
     this.maxPngBytes = 3500000,
+    this.maxDimension = 2048,
   });
 
   /// About how many lines cross each side.
@@ -23,6 +24,9 @@ class SelectionGridRenderer {
 
   /// A gridded image larger than this is not sent; the plain one is.
   final int maxPngBytes;
+
+  /// The longest side of the gridded image, in pixels.
+  final int maxDimension;
 
   static const ui.Color _paper = ui.Color(0xFFFFFFFF);
   static const ui.Color _line = ui.Color(0x593B82F6);
@@ -147,12 +151,14 @@ class SelectionGridRenderer {
       final ByteData? bytes = await gridded.toByteData(
         format: ui.ImageByteFormat.png,
       );
-      if (bytes == null ||
-          bytes.lengthInBytes == 0 ||
-          bytes.lengthInBytes > maxPngBytes) {
+      if (bytes == null || bytes.lengthInBytes == 0) {
         return image.png;
       }
-      return bytes.buffer.asUint8List(bytes.offsetInBytes, bytes.lengthInBytes);
+      final Uint8List png = bytes.buffer.asUint8List(
+        bytes.offsetInBytes,
+        bytes.lengthInBytes,
+      );
+      return await _shrinkIfNeeded(png, outWidth, outHeight);
     } on Object {
       return image.png;
     } finally {
@@ -220,5 +226,65 @@ class SelectionGridRenderer {
     } finally {
       codec.dispose();
     }
+  }
+
+  /// Returns [png] untouched when it already fits within [maxDimension] and
+  /// [maxPngBytes]. Otherwise it is resized gently until the encoded request
+  /// fits, so a large grid is not silently discarded and a small image is
+  /// never recompressed.
+  Future<Uint8List> _shrinkIfNeeded(
+    Uint8List png,
+    int originalWidth,
+    int originalHeight,
+  ) async {
+    if (png.lengthInBytes <= maxPngBytes &&
+        originalWidth <= maxDimension &&
+        originalHeight <= maxDimension) {
+      return png;
+    }
+    int width = originalWidth;
+    int height = originalHeight;
+    if (width > maxDimension || height > maxDimension) {
+      final double dimScale = math.min(
+        maxDimension / width,
+        maxDimension / height,
+      );
+      width = math.max(1, (width * dimScale).floor());
+      height = math.max(1, (height * dimScale).floor());
+    }
+    Uint8List current = png;
+    bool needsResize =
+        width != originalWidth ||
+        height != originalHeight ||
+        current.lengthInBytes > maxPngBytes;
+    while (needsResize && (width > 1 || height > 1)) {
+      final ui.Codec codec = await ui.instantiateImageCodec(
+        png,
+        targetWidth: width,
+        targetHeight: height,
+      );
+      ui.Image? resized;
+      try {
+        resized = (await codec.getNextFrame()).image;
+        final ByteData? data = await resized.toByteData(
+          format: ui.ImageByteFormat.png,
+        );
+        if (data == null || data.lengthInBytes == 0) return current;
+        current = data.buffer.asUint8List(
+          data.offsetInBytes,
+          data.lengthInBytes,
+        );
+      } finally {
+        resized?.dispose();
+        codec.dispose();
+      }
+      if (current.lengthInBytes > maxPngBytes) {
+        width = math.max(1, (width * 0.9).floor());
+        height = math.max(1, (height * 0.9).floor());
+      } else {
+        needsResize = false;
+      }
+    }
+    return current;
   }
 }

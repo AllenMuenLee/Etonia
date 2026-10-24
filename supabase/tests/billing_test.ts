@@ -228,3 +228,58 @@ Deno.test("Postgres billing: permissions, ownership, renewals, expiry and atomic
     await db.close();
   }
 });
+
+Deno.test("gift codes: $3 of free credit per account, all free credit lasts a month", async () => {
+  const db = await migrated();
+  try {
+    const phone = "dddddddd-dddd-4ddd-8ddd-dddddddddddd";
+    await db.exec(`insert into billing_private.accounts(user_id) values ('${user}'), ('${other}');
+      insert into billing_private.gift_codes(code, max_redemptions) values ('WELCOME3', 1);`);
+    await db.exec("set role service_role");
+    const state = async (id: string) =>
+      (await db.query<{ s: any }>("select public.billing_state($1) s", [id])).rows[0].s;
+    const redeem = (id: string, anonymous: boolean, code: string) =>
+      db.query<{ s: any }>("select public.billing_redeem_gift($1,$2,$3) s", [id, anonymous, code]);
+
+    await assert.rejects(() => redeem(user, true, "WELCOME3"), /unauthorized/);
+    await assert.rejects(() => redeem(user, false, "NOPE-NOPE"), /invalid_code/);
+
+    // Free credit ($0.50) first, then the gift stacks on it; the month restarts.
+    await db.query("select public.billing_touch($1, false, $2)", [user, phone]);
+    const first = await state(user);
+    assert.equal(first.remainingCreditsMicroUsd, 500000);
+    const expiry = new Date(first.freeCreditExpiresAt).getTime();
+    assert.ok(Math.abs(expiry - Date.now() - 30 * 86400000) < 2 * 86400000);
+    const gifted = (await redeem(user, false, " welcome3 ")).rows[0].s;
+    assert.equal(gifted.remainingCreditsMicroUsd, 3500000);
+    assert.equal(gifted.freeCreditMicroUsd, 3500000);
+    await assert.rejects(() => redeem(user, false, "WELCOME3"), /code_redeemed/);
+    await assert.rejects(() => redeem(other, false, "WELCOME3"), /code_exhausted/);
+
+    // A gift needs no earlier grant: it creates the free credit.
+    await db.exec("reset role");
+    await db.exec(`update billing_private.gift_codes set max_redemptions = null`);
+    await db.exec("set role service_role");
+    assert.equal((await redeem(other, false, "WELCOME3")).rows[0].s.remainingCreditsMicroUsd, 3000000);
+
+    // After a month the credit is none and cannot be reserved.
+    await db.exec("reset role");
+    await db.exec(`update billing_private.grants set expires_at = now() - interval '1 second'
+      where transaction_key = 'free:${user}'`);
+    await db.exec("set role service_role");
+    assert.equal((await state(user)).remainingCreditsMicroUsd, 0);
+    await assert.rejects(
+      () => db.query("select public.ai_reserve($1,$2,$3)", [user, req1, "haiku"]),
+      /insufficient_credits/,
+    );
+    // A new gift after expiry starts fresh rather than reviving the old balance.
+    await db.exec("reset role");
+    await db.exec(`insert into billing_private.gift_codes(code) values ('SECOND3')`);
+    await db.exec("set role service_role");
+    const renewed = (await redeem(user, false, "SECOND3")).rows[0].s;
+    assert.equal(renewed.remainingCreditsMicroUsd, 3000000);
+    assert.equal(renewed.freeCreditMicroUsd, 3000000);
+  } finally {
+    await db.close();
+  }
+});

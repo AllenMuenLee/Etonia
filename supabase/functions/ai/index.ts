@@ -9,8 +9,10 @@ import {
   userFor,
 } from "../_shared/common.ts";
 import {
+  answerReserve,
   combineSteps,
   costOf,
+  drawingModel,
   modelConfig,
   outputBudget,
   providerAnswer,
@@ -22,27 +24,32 @@ import {
 } from "../_shared/ai_policy.ts";
 import { reconcile } from "../_shared/stores.ts";
 
+const providerKeys = {
+  openai: "OPENAI_API_KEY",
+  claude: "ANTHROPIC_API_KEY",
+  gemini: "GEMINI_API_KEY",
+};
+
 Deno.serve(endpoint(async (req) => {
   const db = admin();
   const user = await userFor(req, db);
   await rpc(db, "billing_rate_limit", { p_user: user });
-  const input = validateInput(await readBody(req, 6200000));
-  const model = modelConfig(JSON.parse(secret("AI_MODEL_CONFIG")), input.model);
-  const key = secret(
-    {
-      openai: "OPENAI_API_KEY",
-      claude: "ANTHROPIC_API_KEY",
-      gemini: "GEMINI_API_KEY",
-    }[model.provider],
-  );
+  const input = validateInput(await readBody(req, null));
+  const catalog = JSON.parse(secret("AI_MODEL_CONFIG"));
+  const model = modelConfig(catalog, input.model);
+  const key = secret(providerKeys[model.provider]);
+  // With Notation on, the user's model writes the words and a cheap fixed
+  // model turns them into the drawing.
+  const two = twoStep(model, input);
+  const drawer = two ? modelConfig(catalog, drawingModel) : undefined;
+  const drawerKey = drawer ? secret(providerKeys[drawer.provider]) : "";
   // Live store verification fails closed, including renewals, refunds and expiry.
   await reconcile(db, user);
-  const two = twoStep(model, input);
   const reservation = await rpc(db, "ai_reserve", {
     p_user: user,
     p_request: input.requestId,
     p_model: input.model,
-    p_max: reservationCap(model, input, two),
+    p_max: reservationCap(model, input, drawer),
   });
   const settle = (cost: number, tokensIn = 0, tokensOut = 0, release = false) =>
     rpc(db, "ai_settle", {
@@ -57,7 +64,11 @@ Deno.serve(endpoint(async (req) => {
   let settled = false;
   /** Sends one provider request: its answer and usage, or null when the
    * provider refused it outright (nothing to bill). Never retried. */
-  const ask = async (provider: ReturnType<typeof providerRequest>, timeoutMs = 90000) => {
+  const ask = async (
+    provider: ReturnType<typeof providerRequest>,
+    answerer: typeof model,
+    timeoutMs = 90000,
+  ) => {
     sent = true;
     const response = await fetch(provider.url, {
       method: "POST",
@@ -72,23 +83,29 @@ Deno.serve(endpoint(async (req) => {
     }
     return {
       result: providerAnswer(
-        model,
+        answerer,
         await readBody(
           new Request("https://local.invalid", {
             method: "POST",
             body: response.body,
             duplex: "half",
           } as RequestInit),
-          512000,
+          null,
         ),
       ),
     };
   };
   try {
-    const maxOutput = outputBudget(model, input, reservation.reserved, reservation.unlimited);
+    // The drawing step is paid for out of the hold too, so the answer gets
+    // what is left of it.
+    const answerHold = drawer && !reservation.unlimited
+      ? answerReserve(reservation.reserved, drawer, input)
+      : reservation.reserved;
+    const maxOutput = outputBudget(model, input, answerHold, reservation.unlimited, two);
     const started = Date.now();
     const first = await ask(
       providerRequest(model, input, maxOutput, key, two ? { step: "text" } : undefined),
+      model,
     );
     if (!first.result) {
       // A definitive rejection has no answer to bill.
@@ -98,21 +115,22 @@ Deno.serve(endpoint(async (req) => {
     }
     let tokensIn = first.result.input;
     let tokensOut = first.result.output;
-    let cached = first.result.cached;
-    let cacheWrites = first.result.cacheWrites;
+    let cost = costOf(
+      model,
+      tokensIn,
+      tokensOut,
+      first.result.cached,
+      first.result.cacheWrites,
+    );
     let answer = first.result.answer;
-    if (two && typeof answer === "string" && answer) {
-      // Step 2: the notation, following the explanation. Its failure costs
-      // only the drawing: the words are kept.
+    if (drawer && typeof answer === "string" && answer) {
+      // The user's model has written the words from the clean crop; the
+      // drawing model reads them with the gridded crop and draws them.
       let message: string;
       try {
         message = stepMessage(answer);
       } catch (error) {
-        await settle(
-          costOf(model, tokensIn, tokensOut, cached, cacheWrites),
-          tokensIn,
-          tokensOut,
-        );
+        await settle(cost, tokensIn, tokensOut);
         settled = true;
         throw error;
       }
@@ -121,14 +139,25 @@ Deno.serve(endpoint(async (req) => {
         // Within the app's wait for the whole answer, so the words still
         // arrive when the drawing runs long.
         const second = await ask(
-          providerRequest(model, input, maxOutput, key, { step: "notation", message }),
+          providerRequest(
+            drawer,
+            input,
+            outputBudget(drawer, input, 0, true),
+            drawerKey,
+            {
+              step: "notation",
+              message,
+              visual: input.animationAllowed === true ? undefined : "static",
+            },
+          ),
+          drawer,
           Math.max(5000, 105000 - (Date.now() - started)),
         );
         if (second.result) {
-          tokensIn += second.result.input;
-          tokensOut += second.result.output;
-          cached += second.result.cached;
-          cacheWrites += second.result.cacheWrites;
+          const { input: used, output, cached, cacheWrites } = second.result;
+          cost += costOf(drawer, used, output, cached, cacheWrites);
+          tokensIn += used;
+          tokensOut += output;
           notationAnswer = second.result.answer;
         }
       } catch {
@@ -137,7 +166,6 @@ Deno.serve(endpoint(async (req) => {
       }
       answer = combineSteps(message, notationAnswer);
     }
-    const cost = costOf(model, tokensIn, tokensOut, cached, cacheWrites);
     await settle(cost, tokensIn, tokensOut);
     settled = true;
     if (typeof answer !== "string" || !answer) throw new Failure("server", 503);

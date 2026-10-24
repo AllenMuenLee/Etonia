@@ -946,7 +946,16 @@ void main() {
       expect(client.requests.single.animationEnabled, isFalse);
       expect(client.requests.single.noteImage, same(note));
       expect(
+        client.requests.single.imagePng,
+        same(assistant.context!.image!.png),
+      );
+      expect(client.requests.single.notationImagePng, isNotNull);
+      expect(
         client.requests.single.systemInstruction,
+        contains('Answer in words only'),
+      );
+      expect(
+        client.requests.single.notationInstruction,
         contains('Notation is on'),
       );
       client.answerResponse(

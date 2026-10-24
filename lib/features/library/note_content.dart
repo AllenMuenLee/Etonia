@@ -4,6 +4,7 @@ import 'dart:ui';
 import 'package:flutter/foundation.dart';
 
 import '../editor/document_io/document_models.dart';
+import '../editor/document_io/svg_document.dart';
 import '../editor/handwriting/recognized_handwriting.dart';
 import '../editor/ink/ink_controller.dart';
 import '../editor/ink/ink_palette.dart';
@@ -13,13 +14,24 @@ import '../editor/ink/stroke.dart';
 import '../editor/page/note_document.dart';
 import '../editor/page/page_setup.dart';
 import '../editor/sticky/sticky_note.dart';
+import 'note_recording_track.dart';
 
 /// Schema 2 adds PDF sources, images, fixed custom sizes, and Fit history.
 /// Schema 3 adds AI notation playbacks and the AI assistant's conversations.
 /// Schema 4 adds sticky notes per page, and highlighter strokes (a `style`
 /// and `opacity` on a stroke; without them a stroke is a pen stroke).
 /// Schema 5 adds searchable handwriting and its reusable normalized strokes.
-const int storageSchema = 5;
+/// Schema 6 adds local audio tracks and synchronized stroke/erase timing.
+/// Schema 7 keeps editable SVG source inline with vector page elements.
+const int storageSchema = 7;
+
+/// A note's reading was dropped part way: no one waited for it any more.
+class LoadAbandoned implements Exception {
+  const LoadAbandoned();
+
+  @override
+  String toString() => 'LoadAbandoned';
+}
 
 class StorageFormatException implements Exception {
   const StorageFormatException(this.message);
@@ -102,6 +114,7 @@ class StoredRecognizedInkWord {
   const StoredRecognizedInkWord({
     required this.text,
     required this.confidence,
+    this.alternatives = const <String>[],
     required this.strokeIndices,
     required this.normalizedStrokes,
     required this.aspectRatio,
@@ -110,6 +123,7 @@ class StoredRecognizedInkWord {
 
   final String text;
   final double? confidence;
+  final List<String> alternatives;
   final List<int> strokeIndices;
   final List<List<InkVector>> normalizedStrokes;
   final double aspectRatio;
@@ -136,7 +150,6 @@ class StoredRecognizedInkWord {
     if (stickyId != null && sticky == null) return null;
     final int strokeCount = sticky?.strokes.length ?? pageStrokes.length;
     if (text is! String ||
-        text.trim().isEmpty ||
         indices is! List ||
         indices.isEmpty ||
         ratio is! num ||
@@ -156,6 +169,11 @@ class StoredRecognizedInkWord {
         rawConfidence <= 1) {
       confidence = rawConfidence.toDouble();
     }
+    final List<String> alternatives = <String>[
+      for (final Object? value
+          in (raw['alternatives'] as List?) ?? const <Object?>[])
+        if (value is String && value.trim().isNotEmpty) value.trim(),
+    ];
     final List<List<InkVector>> normalized = <List<InkVector>>[];
     int points = 0;
     final Object? rawStrokes = raw['normalizedStrokes'];
@@ -188,6 +206,7 @@ class StoredRecognizedInkWord {
     return StoredRecognizedInkWord(
       text: text.trim(),
       confidence: confidence,
+      alternatives: List<String>.unmodifiable(alternatives),
       strokeIndices: List<int>.unmodifiable(parsedIndices),
       normalizedStrokes: List<List<InkVector>>.unmodifiable(normalized),
       aspectRatio: ratio.toDouble(),
@@ -198,6 +217,7 @@ class StoredRecognizedInkWord {
   Map<String, Object?> toJson() => <String, Object?>{
     'text': text,
     if (confidence != null) 'confidence': confidence,
+    if (alternatives.isNotEmpty) 'alternatives': alternatives,
     'strokeIndices': strokeIndices,
     'aspectRatio': aspectRatio,
     if (stickyId != null) 'stickyId': stickyId,
@@ -223,10 +243,35 @@ class StoredPage {
     this.playbacks = const <StoredPlayback>[],
     this.stickyNotes = const <StickyNoteElement>[],
     this.recognizedWords = const <StoredRecognizedInkWord>[],
+    this.erasedStrokeRecords = const <ErasedStrokeRecord>[],
   });
 
   factory StoredPage.fromJson(Map<String, Object?> json) {
     return StoredPage._fromJson(json);
+  }
+
+  /// Like [StoredPage.fromJson], but its strokes are made in batches of
+  /// about 4ms that yield in between, so frames keep being drawn while a
+  /// long page is read. [slice] times the batch, and may be shared across
+  /// pages. Once [cancelled] says so, the rest is dropped with
+  /// [LoadAbandoned].
+  static Future<StoredPage> fromJsonIncrementally(
+    Map<String, Object?> json, {
+    Stopwatch? slice,
+    bool Function()? cancelled,
+  }) async {
+    final Stopwatch timer = slice ?? (Stopwatch()..start());
+    final strokes = <Stroke>[];
+    for (final rawStroke in (json['strokes'] as List?) ?? const []) {
+      final stroke = _strokeFromJson(rawStroke! as Map<String, Object?>);
+      if (stroke != null) strokes.add(stroke);
+      if (timer.elapsedMicroseconds >= 4000) {
+        await Future<void>.delayed(Duration.zero);
+        if (cancelled?.call() ?? false) throw const LoadAbandoned();
+        timer.reset();
+      }
+    }
+    return StoredPage._fromJson(json, decodedStrokes: strokes);
   }
 
   factory StoredPage._fromJson(
@@ -294,6 +339,11 @@ class StoredPage {
                 ?StoredRecognizedInkWord.fromJson(word, strokes, stickyNotes),
             ]
           : const <StoredRecognizedInkWord>[],
+      erasedStrokeRecords: <ErasedStrokeRecord>[
+        for (final Object? raw
+            in (json['erasedStrokes'] as List?) ?? const <Object?>[])
+          ?_erasedStrokeFromJson(raw),
+      ],
     );
   }
 
@@ -305,6 +355,7 @@ class StoredPage {
   final List<Stroke> strokes;
   final List<StoredPlayback> playbacks;
   final List<StoredRecognizedInkWord> recognizedWords;
+  final List<ErasedStrokeRecord> erasedStrokeRecords;
 
   /// In paint order, each with its ink in its own coordinates.
   final List<StickyNoteElement> stickyNotes;
@@ -462,6 +513,8 @@ class StoredPage {
           'size': _sizeJson(image.size),
           'rotation': image.rotation,
           'fileName': image.fileName,
+          if (image.vector != null) 'svg': image.vector!.source,
+          if (image.aiGenerated) 'aiGenerated': true,
         },
     ],
     'strokes': <Object?>[
@@ -476,29 +529,74 @@ class StoredPage {
       'stickyNotes': <Object?>[
         for (final StickyNoteElement note in stickyNotes) _stickyToJson(note),
       ],
+    if (erasedStrokeRecords.isNotEmpty)
+      'erasedStrokes': <Object?>[
+        for (final ErasedStrokeRecord record in erasedStrokeRecords)
+          <String, Object?>{
+            'stroke': strokeToJson(record.stroke),
+            'erasedAtMs': record.erasedAtMs,
+            'recId': record.recordingId,
+          },
+      ],
   };
 
-  /// One stroke as stored. Pen strokes carry no style field, as before
-  /// highlighters existed.
-  static Map<String, Object?> strokeToJson(Stroke stroke) => <String, Object?>{
-    'ink': stroke.style.ink.id,
-    'width': stroke.style.width,
-    if (stroke.style.isHighlighter) ...<String, Object?>{
-      'style': stroke.style.writing.name,
-      'opacity': stroke.style.opacity,
-    },
-    'points': <double>[
-      for (final InkVector point in stroke.points) ...<double>[
-        point.x,
-        point.y,
-      ],
-    ],
-    if (stroke.widths != null)
-      'widths': <double>[
-        for (final double factor in stroke.widths!)
-          (factor * 1000).roundToDouble() / 1000,
-      ],
-  };
+  /// One stroke as stored. Plain pen strokes carry no style field, as before
+  /// the other writing styles existed.
+  ///
+  /// Coordinates go into one typed buffer per stroke, not a boxed number
+  /// each: every save writes every stroke of the note, and typed data
+  /// crosses to the isolate that encodes a large note as a single copy.
+  /// It is written out as the same JSON list.
+  static Map<String, Object?> strokeToJson(Stroke stroke) {
+    final List<InkVector> points = stroke.points;
+    final Float64List flat = Float64List(points.length * 2);
+    for (int i = 0; i < points.length; i++) {
+      flat[2 * i] = points[i].x;
+      flat[2 * i + 1] = points[i].y;
+    }
+    final List<double>? factors = stroke.widths;
+    Float64List? widths;
+    if (factors != null) {
+      widths = Float64List(factors.length);
+      for (int i = 0; i < factors.length; i++) {
+        widths[i] = (factors[i] * 1000).roundToDouble() / 1000;
+      }
+    }
+    return <String, Object?>{
+      'ink': stroke.style.ink.id,
+      'width': stroke.style.width,
+      if (stroke.style.writing != WritingStyle.pen)
+        'style': stroke.style.writing.name,
+      if (stroke.style.isHighlighter) 'opacity': stroke.style.opacity,
+      'points': flat,
+      'widths': ?widths,
+      if (stroke.completedAtMs != null || stroke.recordingId != null)
+        'id': stroke.id,
+      if (stroke.completedAtMs != null) 'cAt': stroke.completedAtMs,
+      if (stroke.recordingId != null) 'recId': stroke.recordingId,
+      if (stroke.sampleDeltasMs != null)
+        'sampleDeltasMs': stroke.sampleDeltasMs,
+    };
+  }
+
+  static ErasedStrokeRecord? _erasedStrokeFromJson(Object? raw) {
+    if (raw is! Map<String, Object?>) return null;
+    final Stroke? stroke = strokeFromJson(raw['stroke']);
+    final Object? erasedAt = raw['erasedAtMs'];
+    final Object? recordingId = raw['recId'];
+    if (stroke == null ||
+        erasedAt is! int ||
+        erasedAt < 0 ||
+        recordingId is! String ||
+        recordingId.isEmpty) {
+      return null;
+    }
+    return ErasedStrokeRecord(
+      stroke: stroke,
+      erasedAtMs: erasedAt,
+      recordingId: recordingId,
+    );
+  }
 
   static List<double>? _sizeJson(Size? size) =>
       size == null ? null : <double>[size.width, size.height];
@@ -508,9 +606,13 @@ class StoredPage {
 
   static NoteImageElement _imageFromJson(Map<String, Object?> json) {
     final List<Object?> center = json['center']! as List<Object?>;
+    final Object? rawSvg = json['svg'];
+    final EditableSvg? vector = rawSvg is String
+        ? EditableSvg.parse(rawSvg)
+        : null;
     return NoteImageElement(
       id: json['id']! as String,
-      assetId: json['assetId']! as String,
+      assetId: json['assetId'] as String? ?? '',
       pixelSize: _size(json['pixelSize']! as List),
       center: InkVector(
         (center[0] as num).toDouble(),
@@ -519,6 +621,8 @@ class StoredPage {
       size: _size(json['size']! as List),
       rotation: (json['rotation'] as num?)?.toDouble() ?? 0,
       fileName: json['fileName'] as String?,
+      vector: vector,
+      aiGenerated: json['aiGenerated'] == true,
     );
   }
 
@@ -559,14 +663,14 @@ class StoredPage {
       WritingStyle.pen,
     );
     final Object? rawOpacity = json['opacity'];
-    final double opacity = writing == WritingStyle.pen
+    final double opacity = writing != WritingStyle.highlighter
         ? 1
         : rawOpacity is num && rawOpacity > 0 && rawOpacity <= 1
         ? rawOpacity.toDouble()
         : StrokeStyle.defaultHighlighterOpacity;
     return Stroke.fromPoints(
       // A highlighter is even along its length.
-      widths: writing == WritingStyle.pen ? widths : null,
+      widths: writing == WritingStyle.highlighter ? null : widths,
       style: StrokeStyle(
         ink: InkPalette.byId(json['ink'] as String? ?? '') ?? InkPalette.ink,
         width: width,
@@ -574,6 +678,17 @@ class StoredPage {
         opacity: opacity,
       ),
       points: points,
+      id: json['id'] is String ? json['id']! as String : null,
+      completedAtMs: json['cAt'] is int && (json['cAt']! as int) >= 0
+          ? json['cAt']! as int
+          : null,
+      recordingId: json['recId'] is String ? json['recId']! as String : null,
+      sampleDeltasMs: json['sampleDeltasMs'] is List
+          ? <int>[
+              for (final Object? value in json['sampleDeltasMs']! as List)
+                if (value is int && value >= 0) value,
+            ]
+          : null,
     );
   }
 
@@ -594,11 +709,18 @@ class StoredPage {
 
 @immutable
 class NoteContent {
-  const NoteContent(this.pages, {this.aiSession});
+  const NoteContent(
+    this.pages, {
+    this.aiSession,
+    this.isImportedPdf = false,
+    this.recordings = const <NoteRecordingTrack>[],
+  });
 
   NoteContent.blank([PageSetup setup = const PageSetup()])
     : pages = <StoredPage>[StoredPage(setup: setup, strokes: const <Stroke>[])],
-      aiSession = null;
+      aiSession = null,
+      isImportedPdf = false,
+      recordings = const <NoteRecordingTrack>[];
 
   factory NoteContent.fromJson(Map<String, Object?> json) {
     checkSchema(json);
@@ -610,58 +732,81 @@ class NoteContent {
       return NoteContent.blank();
     }
     final Object? ai = json['ai'];
+    final bool isImportedPdf =
+        json['isImportedPdf'] == true ||
+        pages.any((StoredPage page) => page.pdfSource != null);
     return NoteContent(
       pages,
       aiSession: ai is Map<String, Object?> ? ai : null,
+      isImportedPdf: isImportedPdf,
+      recordings: <NoteRecordingTrack>[
+        for (final Object? raw
+            in (json['recordings'] as List?) ?? const <Object?>[])
+          ?NoteRecordingTrack.fromJson(raw),
+      ],
     );
   }
 
   factory NoteContent.fromDocument(NoteDocument document) {
-    return NoteContent(<StoredPage>[
-      for (final NotePage page in document.pages)
-        StoredPage(
-          setup: page.setup,
-          extent: page.extent,
-          lastFitSize: page.lastFitSize,
-          pdfSource: page.pdfSource,
-          images: List<NoteImageElement>.of(page.ink.images),
-          strokes: List<Stroke>.of(page.ink.strokes),
-          stickyNotes: List<StickyNoteElement>.of(page.ink.stickyNotes),
-          playbacks: _playbacksOf(page.ink),
-          recognizedWords: _recognizedWordsOf(page),
-        ),
-    ], aiSession: document.currentAiSession);
+    return NoteContent(
+      <StoredPage>[
+        for (final NotePage page in document.pages)
+          StoredPage(
+            setup: page.setup,
+            extent: page.extent,
+            lastFitSize: page.lastFitSize,
+            pdfSource: page.pdfSource,
+            images: List<NoteImageElement>.of(page.ink.images),
+            strokes: List<Stroke>.of(page.ink.strokes),
+            stickyNotes: List<StickyNoteElement>.of(page.ink.stickyNotes),
+            playbacks: _playbacksOf(page.ink),
+            recognizedWords: _recognizedWordsOf(page),
+            erasedStrokeRecords: List<ErasedStrokeRecord>.of(
+              page.ink.erasedStrokeRecords,
+            ),
+          ),
+      ],
+      aiSession: document.currentAiSession,
+      isImportedPdf: document.isImportedPdf,
+      recordings: List<NoteRecordingTrack>.of(document.recordings),
+    );
   }
 
   /// UI-native Paths cannot cross isolates. Materialize large notes here in
   /// short batches, yielding between strokes so a page shell can keep drawing.
   /// No partially hydrated document is exposed to editing or autosave.
+  ///
+  /// Once [cancelled] says so, the rest is dropped with [LoadAbandoned].
   static Future<NoteContent> fromJsonIncrementally(
-    Map<String, Object?> json,
-  ) async {
+    Map<String, Object?> json, {
+    bool Function()? cancelled,
+  }) async {
     checkSchema(json);
     final pages = <StoredPage>[];
     final slice = Stopwatch()..start();
     for (final rawPage in (json['pages'] as List?) ?? const []) {
-      final page = rawPage! as Map<String, Object?>;
-      final strokes = <Stroke>[];
-      for (final rawStroke in (page['strokes'] as List?) ?? const []) {
-        final stroke = StoredPage._strokeFromJson(
-          rawStroke! as Map<String, Object?>,
-        );
-        if (stroke != null) strokes.add(stroke);
-        if (slice.elapsedMicroseconds >= 4000) {
-          await Future<void>.delayed(Duration.zero);
-          slice.reset();
-        }
-      }
-      pages.add(StoredPage._fromJson(page, decodedStrokes: strokes));
+      pages.add(
+        await StoredPage.fromJsonIncrementally(
+          rawPage! as Map<String, Object?>,
+          slice: slice,
+          cancelled: cancelled,
+        ),
+      );
     }
     if (pages.isEmpty) return NoteContent.blank();
     final ai = json['ai'];
+    final bool isImportedPdf =
+        json['isImportedPdf'] == true ||
+        pages.any((StoredPage page) => page.pdfSource != null);
     return NoteContent(
       pages,
       aiSession: ai is Map<String, Object?> ? ai : null,
+      isImportedPdf: isImportedPdf,
+      recordings: <NoteRecordingTrack>[
+        for (final Object? raw
+            in (json['recordings'] as List?) ?? const <Object?>[])
+          ?NoteRecordingTrack.fromJson(raw),
+      ],
     );
   }
 
@@ -671,10 +816,18 @@ class NoteContent {
   /// them. Null when there are none.
   final Map<String, Object?>? aiSession;
 
+  /// Whether this note was imported from a PDF.
+  final bool isImportedPdf;
+
+  final List<NoteRecordingTrack> recordings;
+
   NoteDocument toDocument({InkController Function()? createInk}) {
     final InkController Function() create = createInk ?? InkController.new;
     return NoteDocument(
       createInk: create,
+      recordings: recordings,
+      isImportedPdf:
+          isImportedPdf || pages.any((StoredPage p) => p.pdfSource != null),
       pages: <NotePage>[
         for (final StoredPage page in pages)
           NotePage(
@@ -733,6 +886,7 @@ class NoteContent {
             StoredRecognizedInkWord(
               text: word.text,
               confidence: word.confidence,
+              alternatives: word.alternatives,
               strokeIndices: <int>[
                 for (final Stroke stroke in word.sourceStrokes)
                   indices[stroke]!,
@@ -750,6 +904,7 @@ class NoteContent {
           RecognizedInkWord(
             text: word.text,
             confidence: word.confidence,
+            alternatives: word.alternatives,
             sourceStrokes: <Stroke>[
               for (final int index in word.strokeIndices)
                 (word.stickyId == null
@@ -808,6 +963,7 @@ class NoteContent {
       strokes: page.strokes,
       images: page.images,
       stickyNotes: page.stickyNotes,
+      erasedStrokeRecords: page.erasedStrokeRecords,
     );
     blank.dispose();
     for (final StoredPlayback playback in page.playbacks) {
@@ -830,7 +986,13 @@ class NoteContent {
 
   Map<String, Object?> toJson() => <String, Object?>{
     'schema': storageSchema,
+    if (isImportedPdf) 'isImportedPdf': true,
     'pages': <Object?>[for (final StoredPage page in pages) page.toJson()],
+    if (recordings.isNotEmpty)
+      'recordings': <Object?>[
+        for (final NoteRecordingTrack recording in recordings)
+          recording.toJson(),
+      ],
     'ai': ?aiSession,
   };
 

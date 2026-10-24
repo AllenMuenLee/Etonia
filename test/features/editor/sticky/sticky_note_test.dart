@@ -721,7 +721,7 @@ void main() {
     });
 
     test('schema 3 notes still open; the schema is now 5', () {
-      expect(storageSchema, 5);
+      expect(storageSchema, 6);
       final NoteContent content = NoteContent.fromJson(<String, Object?>{
         'schema': 3,
         'pages': <Object?>[

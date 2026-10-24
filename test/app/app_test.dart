@@ -4,10 +4,28 @@ import 'package:greatnote/app/greatnote_app.dart';
 import 'package:greatnote/features/editor/editor_screen.dart';
 import 'package:greatnote/features/library/library_screen.dart';
 import 'package:greatnote/features/library/note_repository.dart';
+import 'package:greatnote/main.dart';
 
 import '../helpers/pump_app.dart';
 
 void main() {
+  testWidgets('starting page strictly uses the logo provided in assets', (
+    WidgetTester tester,
+  ) async {
+    await tester.pumpWidget(
+      const MaterialApp(
+        home: StartupWordmark(),
+      ),
+    );
+
+    final Scaffold scaffold = tester.widget<Scaffold>(find.byType(Scaffold));
+    expect(scaffold.backgroundColor, Colors.black);
+
+    final Image image = tester.widget<Image>(find.byType(Image));
+    expect(image.image, isA<AssetImage>());
+    final AssetImage asset = image.image as AssetImage;
+    expect(asset.assetName, 'assets/icon/etonia.png');
+  });
   testWidgets('launches into the library', (WidgetTester tester) async {
     setViewportSize(tester, TestViewport.tabletLandscape.size);
     final InMemoryNoteRepository repository = InMemoryNoteRepository();

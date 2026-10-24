@@ -119,6 +119,38 @@ void main() {
   });
 
   test(
+    'unrecognized ink remains indexed for shape search and storage',
+    () async {
+      final Stroke stroke = _stroke(5, 8, 45, 28);
+      const HandwritingIndexer indexer = HandwritingIndexer(
+        recognizer: _DetailedRecognizer('', 0),
+        renderer: HandwritingImageRenderer(),
+      );
+      final RecognizedInkWord entry = (await indexer.recognize(<Stroke>[
+        stroke,
+      ])).single;
+      final NoteDocument document = NoteDocument(
+        pages: <NotePage>[
+          NotePage(
+            ink: InkController(strokes: <Stroke>[stroke]),
+            recognizedWords: <RecognizedInkWord>[entry],
+          ),
+        ],
+      );
+
+      expect(entry.text, isEmpty);
+      expect(entry.isSearchable, isFalse);
+      final NoteDocument restored = NoteContent.fromJson(
+        NoteContent.fromDocument(document).toJson(),
+      ).toDocument();
+      expect(restored.current.recognizedWords, hasLength(1));
+      expect(restored.current.recognizedWords.single.text, isEmpty);
+      restored.dispose();
+      document.dispose();
+    },
+  );
+
+  test(
     'storage preserves word links and library search includes ink',
     () async {
       final Stroke stroke = _stroke(5, 8, 45, 28);
@@ -260,12 +292,14 @@ void main() {
     await tester.pumpAndSettle();
     await tester.enterText(find.byType(TextField), 'false-positive');
     await tester.pump();
-    expect(find.text('No high-confidence handwritten text found.'), findsOne);
-    await tester.tap(find.widgetWithText(TextButton, 'Done'));
+    // Confidence ranks a match; it does not keep one out.
+    expect(find.textContaining('1 of 1'), findsOneWidget);
+    // The find button toggles the panel.
+    await tester.tap(find.byTooltip('Find handwriting'));
     await tester.pumpAndSettle();
   });
 
-  testWidgets('find filters low confidence, highlights, and closes safely', (
+  testWidgets('find ranks low confidence last, highlights, and closes safely', (
     WidgetTester tester,
   ) async {
     final Stroke stroke = _stroke(5, 8, 45, 28);
@@ -296,20 +330,22 @@ void main() {
     await tester.pumpAndSettle();
     await tester.enterText(find.byType(TextField), 'quadratic');
     await tester.pump();
-    expect(find.textContaining('1 of 1'), findsOneWidget);
+    expect(find.textContaining('1 of 2'), findsOneWidget);
     expect(
       find.byKey(const ValueKey<String>('handwriting-search-highlight-0')),
       findsOneWidget,
     );
 
-    await tester.tap(find.widgetWithText(TextButton, 'Done'));
+    // The find button toggles the panel.
+    await tester.tap(find.byTooltip('Find handwriting'));
     await tester.pump();
     expect(tester.takeException(), isNull);
     await tester.pumpAndSettle();
     expect(find.text('Find handwriting'), findsNothing);
+    // Closing the panel clears its highlight.
     expect(
       find.byKey(const ValueKey<String>('handwriting-search-highlight-0')),
-      findsOneWidget,
+      findsNothing,
     );
     expect(tester.takeException(), isNull);
   });

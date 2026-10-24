@@ -7,13 +7,335 @@ import '../../app/theme/app_tokens.dart';
 // These resolve their colors without requiring the app theme, since they
 // stand in for content that may be shown on its own.
 //
-// Work in progress is shown as light moving through a surface, never as a
-// spinner: a glow sweeping a slim track, a sheen crossing a placeholder,
-// or a soft pulse around a panel that is busy.
+// Content loading uses a fixed, calm shimmer and content itself enters with
+// the shared fade. Long branded work uses EtoniaBarsLoader; tiny inline waits
+// remain platform activity indicators.
 
-/// Runs a repeating 0→1 cycle, or holds still under reduced motion.
-mixin _LoopingAnimation<T extends StatefulWidget>
-    on State<T>, SingleTickerProviderStateMixin<T> {
+/// How long each kind of loading has taken lately, so the transition that
+/// covers the next one can last about as long.
+class LoadTimings {
+  LoadTimings._();
+
+  static final LoadTimings instance = LoadTimings._();
+
+  /// The kinds of loading the app times.
+  static const String startup = 'startup';
+  static const String library = 'library';
+  static const String noteOpen = 'note.open';
+  static const String thumbnail = 'thumbnail';
+  static const String pdfPage = 'pdf.page';
+  static const String image = 'image';
+  static const String aiReply = 'ai.reply';
+
+  /// What is expected of a kind of loading not yet timed.
+  static const Duration unknown = Duration(milliseconds: 300);
+
+  /// How much the latest time counts against those before it: recent
+  /// loading counts most, but one slow read does not swing the next
+  /// transition.
+  static const double _weight = 0.3;
+
+  static final Stopwatch _watch = Stopwatch()..start();
+
+  /// A monotonic clock. Tests set it to the test binding's fake clock, so
+  /// timings, and the transitions planned from them, do not depend on how
+  /// fast the machine running them is.
+  static Duration Function() clock = () => _watch.elapsed;
+
+  final Map<String, Duration> _typical = <String, Duration>{};
+
+  /// How long [kind] of loading usually takes, or [fallback] before it has
+  /// been timed.
+  Duration expected(String kind, {Duration fallback = unknown}) =>
+      _typical[kind] ?? fallback;
+
+  /// [kind] of loading just took [took].
+  void record(String kind, Duration took) {
+    if (took.isNegative) return;
+    final Duration? typical = _typical[kind];
+    _typical[kind] = typical == null
+        ? took
+        : typical + (took - typical) * _weight;
+  }
+
+  @visibleForTesting
+  void reset() => _typical.clear();
+}
+
+/// How something that has loaded comes into view.
+enum RevealEffect {
+  /// Fades in where it is: for what must stay in register with what is
+  /// around it, such as a PDF page under its ink.
+  fade,
+
+  /// Fades in while coming forward from just smaller.
+  zoom,
+
+  /// Fades in while rising a little into place.
+  slideUp,
+
+  /// Fades in while sliding a little in from the leading edge.
+  slideIn,
+}
+
+/// Shows [child] once there is one, arriving with the shared content fade.
+///
+/// While [child] is null, [placeholder], if any, drifts in with the same
+/// effect over about as long as this [timing] of loading usually takes, so
+/// the wait reads as the transition already under way; it fades out as
+/// [child] arrives. A [child] there from the start is shown at once:
+/// nothing was waited for.
+class LoadingReveal extends StatefulWidget {
+  const LoadingReveal({
+    super.key,
+    required this.child,
+    this.placeholder,
+    this.effect = RevealEffect.fade,
+    this.timing,
+    this.semanticsLabel,
+  });
+
+  /// What was loaded, or null while it is still on its way.
+  final Widget? child;
+
+  /// Stands in for [child] until it arrives.
+  final Widget? placeholder;
+
+  final RevealEffect effect;
+
+  /// The [LoadTimings] kind this loading is: the transition is planned
+  /// from it, and it learns how long this loading took.
+  final String? timing;
+
+  /// Read out while [child] is still on its way.
+  final String? semanticsLabel;
+
+  @override
+  State<LoadingReveal> createState() => _LoadingRevealState();
+}
+
+class _LoadingRevealState extends State<LoadingReveal>
+    with TickerProviderStateMixin {
+  late final AnimationController _reveal = AnimationController(
+    vsync: this,
+    value: widget.child == null ? 0 : 1,
+  )..addStatusListener(_revealed);
+  late final AnimationController _arrive = AnimationController(vsync: this);
+  late final CurvedAnimation _revealCurve = CurvedAnimation(
+    parent: _reveal,
+    curve: AppMotion.fadeInCurve,
+  );
+  late final Animation<double> _leaving = ReverseAnimation(_revealCurve);
+
+  /// Decelerates throughout, so a wait longer than planned settles to
+  /// stillness instead of stopping short.
+  late final CurvedAnimation _arriveCurve = CurvedAnimation(
+    parent: _arrive,
+    curve: AppMotion.fadeInCurve,
+  );
+
+  /// When the wait for the child began, while it goes on.
+  Duration? _since;
+  bool _started = false;
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    if (_started) return;
+    _started = true;
+    if (widget.child == null) _wait();
+  }
+
+  @override
+  void didUpdateWidget(LoadingReveal oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    final bool had = oldWidget.child != null;
+    final bool has = widget.child != null;
+    if (!had && has) {
+      _arrived();
+    } else if (had && !has) {
+      _wait();
+    }
+  }
+
+  @override
+  void dispose() {
+    _revealCurve.dispose();
+    _arriveCurve.dispose();
+    _reveal.dispose();
+    _arrive.dispose();
+    super.dispose();
+  }
+
+  void _wait() {
+    _since = LoadTimings.clock();
+    _reveal.value = 0;
+    _arrive.value = 0;
+    if (widget.placeholder == null) return;
+    _run(_arrive, AppMotion.fadeIn);
+  }
+
+  void _arrived() {
+    final Duration? since = _since;
+    _since = null;
+    final Duration took = since == null
+        ? Duration.zero
+        : LoadTimings.clock() - since;
+    final String? timing = widget.timing;
+    if (timing != null && since != null) {
+      LoadTimings.instance.record(timing, took);
+    }
+    _run(_reveal, AppMotion.fadeIn);
+  }
+
+  void _run(AnimationController controller, Duration duration) {
+    final Duration resolved = AppMotion.resolve(context, duration);
+    if (resolved == Duration.zero) {
+      controller.value = 1;
+    } else {
+      controller.animateTo(1, duration: resolved);
+    }
+  }
+
+  /// Once the child is fully in, its placeholder goes.
+  void _revealed(AnimationStatus status) {
+    if (status == AnimationStatus.completed && mounted) setState(() {});
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final Widget? child = widget.child;
+    final Widget? placeholder = widget.placeholder;
+    final Widget? arriving = child == null
+        ? null
+        : _Arrival(
+            key: const ValueKey<String>('loaded'),
+            animation: _revealCurve,
+            effect: widget.effect,
+            child: child,
+          );
+    if (placeholder == null) {
+      return arriving ??
+          Semantics(
+            label: widget.semanticsLabel,
+            child: const SizedBox.shrink(),
+          );
+    }
+    // Keyed, so the child keeps its state as the placeholder goes.
+    return Stack(
+      fit: StackFit.passthrough,
+      children: <Widget>[
+        if (child == null || !_reveal.isCompleted)
+          _Arrival(
+            key: const ValueKey<String>('placeholder'),
+            animation: _arriveCurve,
+            effect: widget.effect,
+            child: IgnorePointer(
+              child: Semantics(
+                label: child == null ? widget.semanticsLabel : null,
+                child: ExcludeSemantics(
+                  excluding: child != null,
+                  child: FadeTransition(opacity: _leaving, child: placeholder),
+                ),
+              ),
+            ),
+          ),
+        ?arriving,
+      ],
+    );
+  }
+}
+
+/// [child], as far along [animation] as it has come into view by [effect].
+class _Arrival extends StatelessWidget {
+  const _Arrival({
+    super.key,
+    required this.animation,
+    required this.effect,
+    required this.child,
+  });
+
+  final Animation<double> animation;
+  final RevealEffect effect;
+  final Widget child;
+
+  /// How far a sliding surface travels, in logical pixels: enough to read
+  /// as arriving, too little to read as moving.
+  static const double _rise = 14;
+  static const double _slide = 22;
+  static final Animatable<double> _zoom = Tween<double>(begin: 0.96, end: 1);
+
+  @override
+  Widget build(BuildContext context) {
+    final Widget faded = FadeTransition(opacity: animation, child: child);
+    final double toward = Directionality.of(context) == TextDirection.rtl
+        ? -1
+        : 1;
+    return switch (effect) {
+      RevealEffect.fade => faded,
+      RevealEffect.zoom => ScaleTransition(
+        scale: animation.drive(_zoom),
+        child: faded,
+      ),
+      RevealEffect.slideUp => AnimatedBuilder(
+        animation: animation,
+        builder: (BuildContext context, Widget? child) => Transform.translate(
+          offset: Offset(0, (1 - animation.value) * _rise),
+          child: child,
+        ),
+        child: faded,
+      ),
+      RevealEffect.slideIn => AnimatedBuilder(
+        animation: animation,
+        builder: (BuildContext context, Widget? child) => Transform.translate(
+          offset: Offset(-(1 - animation.value) * _slide * toward, 0),
+          child: child,
+        ),
+        child: faded,
+      ),
+    };
+  }
+}
+
+/// Swaps what it shows with a quick fade and a short rise. Only the newest
+/// outgoing child is kept, so values that change quickly, such as a count
+/// of pages, never pile up on each other.
+class GentleSwitcher extends StatelessWidget {
+  const GentleSwitcher({
+    super.key,
+    required this.value,
+    required this.child,
+    this.alignment = AlignmentDirectional.centerStart,
+  });
+
+  /// What [child] shows: a new value switches.
+  final Object? value;
+  final Widget child;
+  final AlignmentGeometry alignment;
+
+  @override
+  Widget build(BuildContext context) {
+    return AnimatedSwitcher(
+      duration: AppMotion.resolve(context, AppMotion.snappy.duration),
+      switchInCurve: AppMotion.fadeInCurve,
+      switchOutCurve: AppMotion.fadeOutCurve,
+      layoutBuilder: (Widget? current, List<Widget> previous) => Stack(
+        alignment: alignment,
+        children: <Widget>[if (previous.isNotEmpty) previous.last, ?current],
+      ),
+      transitionBuilder: (Widget child, Animation<double> animation) =>
+          _Arrival(
+            animation: animation,
+            effect: RevealEffect.slideUp,
+            child: child,
+          ),
+      child: KeyedSubtree(key: ValueKey<Object?>(value), child: child),
+    );
+  }
+}
+
+/// Runs a repeating 0–1 cycle, or holds still under reduced motion.
+mixin _LoopingAnimation<T extends StatefulWidget> on State<T>, TickerProvider {
   late final AnimationController loop = AnimationController(
     vsync: this,
     duration: loopDuration,
@@ -27,17 +349,20 @@ mixin _LoopingAnimation<T extends StatefulWidget>
   @override
   void didChangeDependencies() {
     super.didChangeDependencies();
-    _sync();
+    syncLoop();
   }
 
   @override
   void didUpdateWidget(T oldWidget) {
     super.didUpdateWidget(oldWidget);
-    _sync();
+    syncLoop();
   }
 
-  void _sync() {
-    final bool run = looping && !MediaQuery.disableAnimationsOf(context);
+  void syncLoop() {
+    final bool run =
+        looping &&
+        TickerMode.valuesOf(context).enabled &&
+        !MediaQuery.disableAnimationsOf(context);
     if (run && !loop.isAnimating) {
       loop.repeat();
     } else if (!run && loop.isAnimating) {
@@ -54,218 +379,209 @@ mixin _LoopingAnimation<T extends StatefulWidget>
   }
 }
 
-/// A slim progress track. With a [value] it fills to it, with a sheen
-/// running over the filled part; without one, a glowing band flows along
-/// it for as long as the work takes.
-class ShimmerTrack extends StatefulWidget {
-  const ShimmerTrack({
-    super.key,
-    this.value,
-    this.semanticsLabel,
-    this.height = AppSpacing.xxs,
-  });
+/// From 1 down to [low] and back once per cycle, eased at both ends.
+class _Breath extends Animatable<double> {
+  const _Breath(this.low);
 
-  /// From 0 to 1, or null when how much is left is unknown.
-  final double? value;
-  final String? semanticsLabel;
-  final double height;
+  final double low;
 
   @override
-  State<ShimmerTrack> createState() => _ShimmerTrackState();
+  double transform(double t) =>
+      low + (1 - low) * (0.5 + 0.5 * math.cos(t * 2 * math.pi));
 }
 
-class _ShimmerTrackState extends State<ShimmerTrack>
-    with SingleTickerProviderStateMixin, _LoopingAnimation<ShimmerTrack> {
+/// While [active], breathes [child]'s opacity softly, for a status that
+/// stays up while work runs on, such as waiting on the store.
+class Breathe extends StatefulWidget {
+  const Breathe({super.key, this.active = true, required this.child});
+
+  final bool active;
+  final Widget child;
+
+  @override
+  State<Breathe> createState() => _BreatheState();
+}
+
+class _BreatheState extends State<Breathe>
+    with SingleTickerProviderStateMixin, _LoopingAnimation<Breathe> {
+  late final Animation<double> _opacity = loop.drive(const _Breath(0.5));
+
+  @override
+  Duration get loopDuration => AppMotion.pulse;
+
+  @override
+  bool get looping => widget.active;
+
+  @override
+  Widget build(BuildContext context) =>
+      FadeTransition(opacity: _opacity, child: widget.child);
+}
+
+/// Holds the place of something on its way, such as the assistant's
+/// reply: a few quiet lines, as text will stand there, that slide up into
+/// place one after another over about as long as the wait usually takes,
+/// then breathe softly until they are replaced. How long they stood is
+/// learned as that [timing], for next time.
+class PendingLines extends StatefulWidget {
+  const PendingLines({
+    super.key,
+    this.lines = const <double>[0.86, 0.58],
+    this.timing,
+    this.semanticsLabel,
+  });
+
+  /// How much of the width each line takes.
+  final List<double> lines;
+  final String? timing;
+  final String? semanticsLabel;
+
+  @override
+  State<PendingLines> createState() => _PendingLinesState();
+}
+
+class _PendingLinesState extends State<PendingLines>
+    with TickerProviderStateMixin, _LoopingAnimation<PendingLines> {
+  late final AnimationController _arrive = AnimationController(vsync: this);
+  late final Animation<double> _breath = loop.drive(const _Breath(0.55));
+
+  /// Each line starts a little after the one above it.
+  late final List<CurvedAnimation> _lineArrivals = <CurvedAnimation>[
+    for (int i = 0; i < widget.lines.length; i++)
+      CurvedAnimation(
+        parent: _arrive,
+        curve: Interval(
+          i / (widget.lines.length + 1),
+          (i + 2) / (widget.lines.length + 1),
+          curve: AppMotion.fadeInCurve,
+        ),
+      ),
+  ];
+  final Duration _since = LoadTimings.clock();
+  bool _started = false;
+
   @override
   Duration get loopDuration => AppMotion.shimmer;
 
+  // Breathing waits for the lines to have arrived.
+  @override
+  bool get looping => _arrive.isCompleted;
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    if (_started) return;
+    _started = true;
+    final Duration duration = AppMotion.resolve(context, AppMotion.shimmer);
+    if (duration == Duration.zero) {
+      _arrive.value = 1;
+    } else {
+      _arrive.animateTo(1, duration: duration).whenComplete(() {
+        if (mounted) syncLoop();
+      });
+    }
+  }
+
+  @override
+  void dispose() {
+    final String? timing = widget.timing;
+    if (timing != null) {
+      LoadTimings.instance.record(timing, LoadTimings.clock() - _since);
+    }
+    for (final CurvedAnimation arrival in _lineArrivals) {
+      arrival.dispose();
+    }
+    _arrive.dispose();
+    super.dispose();
+  }
+
   @override
   Widget build(BuildContext context) {
-    final AppColors colors = AppColors.resolve(context);
-    final double? value = widget.value?.clamp(0.0, 1.0);
+    final Color fill = AppColors.resolve(context).surfaceMuted;
     return Semantics(
       label: widget.semanticsLabel,
-      value: value == null ? null : '${(value * 100).round()}%',
-      child: SizedBox(
-        height: widget.height,
-        width: double.infinity,
-        child: CustomPaint(
-          painter: _TrackPainter(
-            progress: loop,
-            value: value,
-            track: AppGlass.muted(colors),
-            accent: colors.accent,
-            sheen: colors.onAccent,
-          ),
+      child: FadeTransition(
+        opacity: _breath,
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          mainAxisSize: MainAxisSize.min,
+          children: <Widget>[
+            for (int i = 0; i < _lineArrivals.length; i++)
+              Padding(
+                padding: const EdgeInsets.only(top: AppSpacing.xs),
+                child: _Arrival(
+                  animation: _lineArrivals[i],
+                  effect: RevealEffect.slideUp,
+                  child: FractionallySizedBox(
+                    alignment: AlignmentDirectional.centerStart,
+                    widthFactor: widget.lines[i],
+                    child: AnimatedBuilder(
+                      animation: loop,
+                      builder: (BuildContext context, Widget? child) =>
+                          Container(
+                            height: AppSpacing.sm,
+                            decoration: BoxDecoration(
+                              borderRadius: BorderRadius.circular(999),
+                              gradient: LinearGradient(
+                                begin: Alignment(-2 + loop.value * 4, 0),
+                                end: Alignment(-1 + loop.value * 4, 0),
+                                colors: <Color>[
+                                  fill,
+                                  AppColors.resolve(context).surface,
+                                  fill,
+                                ],
+                                stops: const <double>[0, 0.5, 1],
+                              ),
+                            ),
+                          ),
+                    ),
+                  ),
+                ),
+              ),
+          ],
         ),
       ),
     );
   }
 }
 
-class _TrackPainter extends CustomPainter {
-  _TrackPainter({
-    required this.progress,
-    required this.value,
-    required this.track,
-    required this.accent,
-    required this.sheen,
-  }) : super(repaint: progress);
-
-  final Animation<double> progress;
-  final double? value;
-  final Color track;
-  final Color accent;
-  final Color sheen;
-
-  @override
-  void paint(Canvas canvas, Size size) {
-    final Radius radius = Radius.circular(size.height / 2);
-    final Rect bounds = Offset.zero & size;
-    canvas.drawRRect(
-      RRect.fromRectAndRadius(bounds, radius),
-      Paint()..color = track,
-    );
-    final double t = progress.value;
-    final double? value = this.value;
-    if (value != null) {
-      final Rect fill = Rect.fromLTWH(0, 0, size.width * value, size.height);
-      if (fill.width <= 0) return;
-      final RRect filled = RRect.fromRectAndRadius(fill, radius);
-      canvas
-        ..drawRRect(
-          filled,
-          Paint()
-            ..color = accent.withValues(alpha: 0.35)
-            ..maskFilter = const MaskFilter.blur(BlurStyle.normal, 4),
-        )
-        ..drawRRect(filled, Paint()..color = accent)
-        ..save()
-        ..clipRRect(filled);
-      _band(canvas, fill, t, sheen.withValues(alpha: 0.45));
-      canvas.restore();
-      return;
-    }
-    // The band eases in and out of each pass, so it reads as a flow rather
-    // than a conveyor.
-    final double eased = Curves.easeInOutSine.transform(t);
-    final double band = math.max(size.width * 0.4, size.height * 8);
-    final double left = -band + (size.width + band) * eased;
-    final Rect glow = Rect.fromLTWH(left, 0, band, size.height);
-    canvas
-      ..save()
-      ..clipRRect(RRect.fromRectAndRadius(bounds.inflate(6), radius));
-    _band(canvas, glow, 0.5, accent.withValues(alpha: 0.45), blur: 4);
-    canvas.restore();
-    canvas
-      ..save()
-      ..clipRRect(RRect.fromRectAndRadius(bounds, radius));
-    _band(canvas, glow, 0.5, accent);
-    canvas.restore();
-  }
-
-  /// A soft-edged vertical band of [color], centred at [t] across [area].
-  void _band(Canvas canvas, Rect area, double t, Color color, {double? blur}) {
-    final double width = area.width;
-    final double center = area.left + (width * 1.6) * t - width * 0.3;
-    final Rect rect = Rect.fromCenter(
-      center: Offset(center, area.center.dy),
-      width: width,
-      height: area.height,
-    );
-    final Paint paint = Paint()
-      ..shader = LinearGradient(
-        colors: <Color>[
-          color.withValues(alpha: 0),
-          color,
-          color.withValues(alpha: 0),
-        ],
-      ).createShader(rect);
-    if (blur != null) {
-      paint.maskFilter = MaskFilter.blur(BlurStyle.normal, blur);
-    }
-    canvas.drawRect(rect, paint);
-  }
-
-  @override
-  bool shouldRepaint(_TrackPainter old) =>
-      old.value != value ||
-      old.track != track ||
-      old.accent != accent ||
-      old.sheen != sheen ||
-      old.progress != progress;
-}
-
-/// Stands in for content that is still loading, such as a PDF page being
-/// rendered: a quiet fill with a sheen drifting diagonally across it.
-class ShimmerPlaceholder extends StatefulWidget {
-  const ShimmerPlaceholder({
+/// How far work has come, as a figure rather than a bar: the percentage
+/// rises into place as it changes, and nothing shows while the total is
+/// not known yet.
+class ProgressCount extends StatelessWidget {
+  const ProgressCount({
     super.key,
-    this.borderRadius = BorderRadius.zero,
+    required this.value,
     this.semanticsLabel,
+    this.style,
   });
 
-  final BorderRadius borderRadius;
+  /// From 0 to 1, or null while how much is left is unknown.
+  final double? value;
   final String? semanticsLabel;
-
-  @override
-  State<ShimmerPlaceholder> createState() => _ShimmerPlaceholderState();
-}
-
-class _ShimmerPlaceholderState extends State<ShimmerPlaceholder>
-    with SingleTickerProviderStateMixin, _LoopingAnimation<ShimmerPlaceholder> {
-  @override
-  Duration get loopDuration => AppMotion.shimmer * 1.25;
+  final TextStyle? style;
 
   @override
   Widget build(BuildContext context) {
-    final AppColors colors = AppColors.resolve(context);
+    final double? value = this.value;
+    final int? percent = value == null
+        ? null
+        : (value.clamp(0.0, 1.0) * 100).floor();
     return Semantics(
-      label: widget.semanticsLabel,
-      child: ClipRRect(
-        borderRadius: widget.borderRadius,
-        child: CustomPaint(
-          size: Size.infinite,
-          painter: _SheenPainter(
-            progress: loop,
-            sheen: colors.accent.withValues(alpha: 0.06),
+      label: semanticsLabel,
+      value: percent == null ? null : '$percent%',
+      child: ExcludeSemantics(
+        child: GentleSwitcher(
+          value: percent,
+          child: Text(
+            percent == null ? '' : '$percent%',
+            style: (style ?? DefaultTextStyle.of(context).style).copyWith(
+              fontFeatures: const <FontFeature>[FontFeature.tabularFigures()],
+            ),
           ),
         ),
       ),
     );
   }
-}
-
-class _SheenPainter extends CustomPainter {
-  _SheenPainter({required this.progress, required this.sheen})
-    : super(repaint: progress);
-
-  final Animation<double> progress;
-  final Color sheen;
-
-  @override
-  void paint(Canvas canvas, Size size) {
-    final double t = Curves.easeInOutSine.transform(progress.value);
-    final double span = size.width + size.height;
-    final double x = -size.height + span * t;
-    canvas.drawRect(
-      Offset.zero & size,
-      Paint()
-        ..shader = LinearGradient(
-          begin: Alignment.topLeft,
-          end: Alignment.bottomRight,
-          colors: <Color>[
-            sheen.withValues(alpha: 0),
-            sheen,
-            sheen.withValues(alpha: 0),
-          ],
-        ).createShader(Rect.fromLTWH(x, 0, size.height, size.height)),
-    );
-  }
-
-  @override
-  bool shouldRepaint(_SheenPainter old) =>
-      old.sheen != sheen || old.progress != progress;
 }
 
 /// While [active], breathes a soft accent glow around [child], for a panel
@@ -297,7 +613,7 @@ class _AmbientGlowState extends State<AmbientGlow>
 
   @override
   Widget build(BuildContext context) {
-    final Color accent = AppColors.resolve(context).accent;
+    final AppColors colors = AppColors.resolve(context);
     return AnimatedBuilder(
       animation: loop,
       // Always a DecoratedBox, so the child keeps its state as the glow
@@ -311,7 +627,29 @@ class _AmbientGlowState extends State<AmbientGlow>
           decoration: BoxDecoration(
             borderRadius: widget.borderRadius,
             boxShadow: widget.active
-                ? AppShadows.processing(accent, breath)
+                ? <BoxShadow>[
+                    BoxShadow(
+                      color: colors.highlighters[3].withValues(
+                        alpha: 0.14 + breath * 0.10,
+                      ),
+                      blurRadius: 22 + breath * 8,
+                      spreadRadius: -4,
+                    ),
+                    BoxShadow(
+                      color: colors.highlighters[4].withValues(
+                        alpha: 0.10 + (1 - breath) * 0.10,
+                      ),
+                      blurRadius: 28,
+                      spreadRadius: -7,
+                      offset: const Offset(8, 0),
+                    ),
+                    BoxShadow(
+                      color: colors.highlighters[1].withValues(alpha: 0.10),
+                      blurRadius: 24,
+                      spreadRadius: -8,
+                      offset: const Offset(-8, 2),
+                    ),
+                  ]
                 : const <BoxShadow>[],
           ),
           child: child,

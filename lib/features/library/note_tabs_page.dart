@@ -1,9 +1,14 @@
 import 'dart:async';
+import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
 
+import '../../app/theme/app_icons.dart';
 import '../../app/theme/app_tokens.dart';
+import '../../shared/memory/memory_pressure.dart';
 import '../../shared/widgets/ignore_keyboard.dart';
+import '../editor/widgets/editor_app_bar.dart';
+import '../editor/widgets/editor_chrome.dart';
 import 'library_models.dart';
 import 'note_tab_strip.dart';
 import 'open_notes.dart';
@@ -39,6 +44,8 @@ typedef NoteTabBuilder =
 
 /// A small LRU of warm editors. Cold tabs keep only cheap restoration data;
 /// sessions with non-persisted state are safety-pinned until closed.
+/// Draws the one top bar every pane shares, and shows two notes side by side
+/// once a tab is dropped on the left or right of the window.
 class NoteTabsPage extends StatefulWidget {
   const NoteTabsPage({
     super.key,
@@ -52,9 +59,9 @@ class NoteTabsPage extends StatefulWidget {
   final NoteTabBuilder builder;
   final VoidCallback? onBack;
 
-  /// Three recent editors, plus the outgoing transition and sessions that
-  /// cannot safely be evicted (failed saves or non-persisted editing state).
-  /// Safety pins deliberately take precedence over this soft budget.
+  /// Recent editors kept in memory, plus sessions that cannot safely be evicted
+  /// (failed saves or non-persisted editing state).
+  /// Safety pins and all visible panes take precedence over this soft budget.
   final int warmCapacity;
 
   @override
@@ -63,25 +70,37 @@ class NoteTabsPage extends StatefulWidget {
 
 class _NoteTabsPageState extends State<NoteTabsPage> {
   String? _activeId;
-  String? _outgoingId;
-  Timer? _transition;
   final Map<String, NoteTabLease> _leases = {};
   final List<String> _warm = [];
   final Map<String, (NoteEntry, Widget)> _children = {};
   bool _trimming = false;
+
+  /// What each open editor offers the shared top bar.
+  final EditorChromeHost _chrome = EditorChromeHost();
+
+  /// How each open note is renamed, as its editor page has told us.
+  final Map<String, VoidCallback> _renames = {};
+
+  /// How much of a split window the left pane takes.
+  double _split = 0.5;
 
   @override
   void initState() {
     super.initState();
     _activeId = widget.notes.active?.id;
     if (_activeId != null) _warm.add(_activeId!);
+    for (final String id in widget.notes.visibleNoteIds) {
+      if (!_warm.contains(id)) _warm.add(id);
+    }
     widget.notes.addListener(_onNotesChanged);
+    MemoryPressure.instance.addListener(_releaseMemory);
   }
 
   @override
   void dispose() {
-    _transition?.cancel();
+    MemoryPressure.instance.removeListener(_releaseMemory);
     widget.notes.removeListener(_onNotesChanged);
+    _chrome.dispose();
     super.dispose();
   }
 
@@ -94,9 +113,33 @@ class _NoteTabsPageState extends State<NoteTabsPage> {
   Widget _editorFor(NoteEntry note) {
     final cached = _children[note.id];
     if (cached != null && cached.$1 == note) return cached.$2;
-    final child = widget.builder(note, _tabs, _back, widget.notes.update);
+    final child = widget.builder(
+      note,
+      (rename) => _tabsFor(note, rename),
+      _back,
+      widget.notes.update,
+    );
     _children[note.id] = (note, child);
     return child;
+  }
+
+  /// The top bar is ours; the editor page only says how to rename its note.
+  Widget _tabsFor(NoteEntry note, VoidCallback rename) {
+    _renames[note.id] = rename;
+    return const SizedBox.shrink();
+  }
+
+  Future<void> _close(NoteEntry entry) async {
+    final prepare = _leases[entry.id]?.prepareToClose;
+    if (prepare != null && !await prepare()) return;
+    if (mounted) widget.notes.close(entry.id);
+  }
+
+  void _leave() {
+    final String? id = widget.notes.active?.id;
+    final prepare = id == null ? null : _leases[id]?.prepareToClose;
+    if (prepare != null) unawaited(prepare());
+    _back();
   }
 
   void _onNotesChanged() {
@@ -104,12 +147,11 @@ class _NoteTabsPageState extends State<NoteTabsPage> {
       return;
     }
     if (widget.notes.isEmpty) {
-      _transition?.cancel();
       setState(() {
         _activeId = null;
-        _outgoingId = null;
         _warm.clear();
         _leases.clear();
+        _renames.clear();
         _children.clear();
       });
       _back();
@@ -117,29 +159,22 @@ class _NoteTabsPageState extends State<NoteTabsPage> {
     }
     final ids = widget.notes.notes.map((note) => note.id).toSet();
     _warm.removeWhere((id) => !ids.contains(id));
+    _renames.removeWhere((id, _) => !ids.contains(id));
     _leases.removeWhere((id, _) => !ids.contains(id));
     _children.removeWhere((id, _) => !ids.contains(id));
+
+    // Ensure all visible pane notes are in warm cache.
+    for (final String id in widget.notes.visibleNoteIds) {
+      if (!_warm.contains(id)) {
+        _warm.add(id);
+      }
+    }
+
     final String? activeId = widget.notes.active?.id;
     if (activeId != _activeId) {
-      final bool previousStillOpen = widget.notes.notes.any(
-        (NoteEntry note) => note.id == _activeId,
-      );
-      _outgoingId = previousStillOpen ? _activeId : null;
       _activeId = activeId;
       _warm.remove(activeId);
       if (activeId != null) _warm.add(activeId);
-      _transition?.cancel();
-      final Duration duration = AppMotion.resolve(context, AppMotion.medium);
-      if (_outgoingId != null && duration > Duration.zero) {
-        _transition = Timer(duration, () {
-          if (mounted) {
-            setState(() => _outgoingId = null);
-            unawaited(_trim());
-          }
-        });
-      } else {
-        _outgoingId = null;
-      }
     }
     setState(() {});
     WidgetsBinding.instance.addPostFrameCallback((_) {
@@ -147,20 +182,34 @@ class _NoteTabsPageState extends State<NoteTabsPage> {
     });
   }
 
-  Future<void> _trim() async {
+  /// The system is low on memory: only the editors on screen stay warm.
+  /// Those that cannot yet be put away safely stay too.
+  void _releaseMemory() => unawaited(_trim(warmCapacity: 0));
+
+  Future<void> _trim({int? warmCapacity}) async {
     if (_trimming) return;
     _trimming = true;
     try {
+      final Set<String> visibleIds = widget.notes.visibleNoteIds.toSet();
+      final int effectiveCapacity = math.max(
+        warmCapacity ?? widget.warmCapacity,
+        visibleIds.length,
+      );
+
       for (final id in List<String>.of(_warm)) {
-        if (_warm.length <= widget.warmCapacity) break;
-        if (id == _activeId || id == _outgoingId) continue;
+        if (_warm.length <= effectiveCapacity) break;
+        if (id == _activeId || visibleIds.contains(id)) {
+          continue;
+        }
         final lease = _leases[id];
         final prepare = lease?.prepareToEvict;
         // Missing registration means the editor has not mounted yet.
         if (prepare == null || !await prepare()) continue;
         if (!mounted) return;
         // Saving is asynchronous: activation/close can happen meanwhile.
-        if (id == _activeId || id == _outgoingId || _leases[id] != lease) {
+        if (id == _activeId ||
+            visibleIds.contains(id) ||
+            _leases[id] != lease) {
           continue;
         }
         setState(() {
@@ -187,17 +236,236 @@ class _NoteTabsPageState extends State<NoteTabsPage> {
     }
   }
 
-  Widget _tabs(VoidCallback rename) {
-    return NoteTabStrip(
-      notes: widget.notes,
-      onRename: rename,
-      onClose: (NoteEntry note) async {
-        final prepare = _leases[note.id]?.prepareToClose;
-        if (prepare != null && !await prepare()) return;
-        if (mounted) widget.notes.close(note.id);
+  /// The top bar with the tabs of [pane], or of the whole window without one.
+  /// A split window has a bar over each pane, as two windows would.
+  Widget _buildBar(BuildContext context, {int? pane}) {
+    return ListenableBuilder(
+      listenable: Listenable.merge(<Listenable>[widget.notes, _chrome]),
+      builder: (BuildContext context, Widget? _) {
+        final OpenNotes open = widget.notes;
+        final NoteEntry? shown = pane == null
+            ? open.active
+            : open.paneNotes[pane];
+        final EditorChromeEntry? entry = _chrome.entryFor(shown?.id);
+        return EditorAppBar(
+          title: shown?.title ?? '',
+          centerTitle: false,
+          onMenuPressed: _leave,
+          leadingIsBack: true,
+          onSettingsPressed: entry?.onSettings,
+          audioPlayer: entry?.audioPlayer,
+          replayController: entry?.replayController,
+          onCloseReplay: entry?.onCloseReplay,
+          tabs: NoteTabStrip(
+            key: ValueKey<String>('note-strip-${pane ?? 'single'}'),
+            notes: open,
+            pane: pane,
+            onRename: (String id) => _renames[id]?.call(),
+            onClose: _close,
+            onOpenAnother: pane == null || pane == open.splitCount - 1
+                ? _back
+                : null,
+          ),
+        );
       },
-      onOpenAnother: _back,
     );
+  }
+
+  /// A note's editor, told that it is [size] and that the bar above it is not
+  /// its own, under [header] when the pane has a bar of its own. A press
+  /// anywhere in the pane focuses it.
+  Widget _scoped(
+    NoteEntry note,
+    Size size, {
+    Widget? header,
+    double headerHeight = 0,
+  }) {
+    return Listener(
+      behavior: HitTestBehavior.translucent,
+      onPointerDown: (_) {
+        final int? pane = widget.notes.paneOf(note.id);
+        if (pane != null) widget.notes.focusPane(pane);
+      },
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: <Widget>[
+          SizedBox(height: headerHeight, child: header),
+          Expanded(
+            child: Builder(
+              builder: (BuildContext context) {
+                final MediaQueryData media = MediaQuery.of(context);
+                return MediaQuery(
+                  data: media.copyWith(
+                    size: size,
+                    padding: media.padding.copyWith(top: 0),
+                    viewPadding: media.viewPadding.copyWith(top: 0),
+                  ),
+                  child: NoteTabScope(
+                    lease: _leases.putIfAbsent(
+                      note.id,
+                      () => NoteTabLease()..onReady = _queueTrim,
+                    ),
+                    child: EditorChromeScope(
+                      host: _chrome,
+                      noteId: note.id,
+                      child: _editorFor(note),
+                    ),
+                  ),
+                );
+              },
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildPanes(BuildContext context, List<NoteEntry> notes) {
+    final OpenNotes open = widget.notes;
+    return LayoutBuilder(
+      builder: (BuildContext context, BoxConstraints constraints) {
+        final Size size = constraints.biggest;
+        final bool split = open.isSplit;
+        // In a split each half carries its own bar, so it reaches the top.
+        final double headerHeight = split
+            ? AppSizes.appBarHeight + MediaQuery.paddingOf(context).top
+            : 0;
+        final Rect full = Offset.zero & size;
+        final double dividerX = (size.width * _split).roundToDouble();
+        final Rect left = Rect.fromLTRB(0, 0, dividerX, size.height);
+        final Rect right = Rect.fromLTRB(
+          dividerX + 1,
+          0,
+          size.width,
+          size.height,
+        );
+        Rect rectOf(String id) {
+          if (!split) return full;
+          return switch (open.paneOf(id)) {
+            0 => left,
+            1 => right,
+            _ => full,
+          };
+        }
+
+        final int active = open.activeIndex;
+        // The raised pane is painted last so its shadow falls on its neighbour.
+        // In one-pane mode the current note is painted last, so its opaque
+        // surface can slide over the outgoing note without crossfading two
+        // full-resolution editors. Keys keep every editor's state when the
+        // order changes.
+        final List<int> order = <int>[for (int i = 0; i < notes.length; i++) i];
+        if (split) {
+          int rank(int i) =>
+              open.paneOf(notes[i].id) == open.focusedPane ? 1 : 0;
+          order.sort((int a, int b) => rank(a).compareTo(rank(b)));
+        } else {
+          order.sort((int a, int b) {
+            if (a == active) return 1;
+            if (b == active) return -1;
+            return a.compareTo(b);
+          });
+        }
+        return Stack(
+          fit: StackFit.expand,
+          children: <Widget>[
+            // One keyed slot per editor, whatever the layout, so splitting
+            // moves an editor and does not rebuild it.
+            for (final int i in order)
+              if (_warm.contains(notes[i].id))
+                Positioned.fromRect(
+                  key: ValueKey<String>('note-tab-page-${notes[i].id}'),
+                  rect: rectOf(notes[i].id),
+                  child: _TabPage(
+                    visible: split
+                        ? open.isNoteInPane(notes[i].id)
+                        : notes[i].id == _activeId,
+                    current: split
+                        ? open.isNoteInPane(notes[i].id)
+                        : i == active,
+                    direction: split ? 0 : (i < active ? -0.025 : 0.025),
+                    child: _FloatingPane(
+                      key: ValueKey<String>('floating-pane-${notes[i].id}'),
+                      split: split && open.isNoteInPane(notes[i].id),
+                      raised: open.paneOf(notes[i].id) == open.focusedPane,
+                      child: _scoped(
+                        notes[i],
+                        Size(
+                          rectOf(notes[i].id).width,
+                          rectOf(notes[i].id).height - headerHeight,
+                        ),
+                        headerHeight: headerHeight,
+                        header: split && open.paneOf(notes[i].id) != null
+                            ? _buildBar(context, pane: open.paneOf(notes[i].id))
+                            : null,
+                      ),
+                    ),
+                  ),
+                ),
+            if (split) ...<Widget>[
+              // Only the grip takes drags; a full-height strip would steal
+              // the pen from whatever is written along the divider.
+              Positioned(
+                left: dividerX - _handleWidth / 2 + 0.5,
+                top: math.max(0, (size.height - _handleHeight) / 2),
+                height: math.min(_handleHeight, size.height),
+                width: _handleWidth,
+                child: _SplitHandle(
+                  onDragStart: () {},
+                  onDragUpdate: (double dx) => setState(() {
+                    _split = (_split + dx / size.width).clamp(0.12, 0.88);
+                  }),
+                  onDragEnd: _endResize,
+                  onReset: () => setState(() => _split = 0.5),
+                ),
+              ),
+            ],
+            ValueListenableBuilder<String?>(
+              valueListenable: open.draggedTab,
+              builder: (BuildContext context, String? dragged, Widget? _) {
+                if (dragged == null) return const SizedBox.shrink();
+                return Positioned.fill(
+                  child: Row(
+                    children: <Widget>[
+                      Expanded(
+                        child: _DropSide(
+                          key: const ValueKey<String>('drop-left'),
+                          right: false,
+                          onDropped: (String id) =>
+                              open.splitWith(id, right: false),
+                        ),
+                      ),
+                      Expanded(
+                        child: _DropSide(
+                          key: const ValueKey<String>('drop-right'),
+                          right: true,
+                          onDropped: (String id) =>
+                              open.splitWith(id, right: true),
+                        ),
+                      ),
+                    ],
+                  ),
+                );
+              },
+            ),
+          ],
+        );
+      },
+    );
+  }
+
+  static const double _handleWidth = 28;
+  static const double _handleHeight = 72;
+
+  /// Pulled right to an edge, a pane is put away, leaving the other the
+  /// whole window; otherwise the panes stay as they were left.
+  void _endResize() {
+    final double split = _split;
+    setState(() => _split = split.clamp(0.25, 0.75));
+    if (split < 0.2 || split > 0.8) {
+      widget.notes.closePane(split < 0.2 ? 0 : 1);
+      setState(() => _split = 0.5);
+    }
   }
 
   @override
@@ -206,71 +474,220 @@ class _NoteTabsPageState extends State<NoteTabsPage> {
     if (notes.isEmpty) {
       return const SizedBox.shrink();
     }
-    final int active = widget.notes.activeIndex;
-    return Stack(
-      fit: StackFit.expand,
-      children: <Widget>[
-        for (int i = 0; i < notes.length; i++)
-          if (_warm.contains(notes[i].id))
-            _TabPage(
-              key: ValueKey<String>('note-tab-page-${notes[i].id}'),
-              visible: notes[i].id == _activeId || notes[i].id == _outgoingId,
-              active: i == active,
-              direction: i < active ? -0.025 : 0.025,
-              child: NoteTabScope(
-                lease: _leases.putIfAbsent(
-                  notes[i].id,
-                  () => NoteTabLease()..onReady = _queueTrim,
-                ),
-                // The tab strip listens to OpenNotes itself. Switching tabs
-                // need not rebuild the warm editor or schedule PDF preloads.
-                child: _editorFor(notes[i]),
+    return Material(
+      color: AppColors.of(context).background,
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: <Widget>[
+          // A split has a bar over each half instead; the slot stays so the
+          // editors below are not rebuilt when the window splits.
+          widget.notes.isSplit ? const SizedBox.shrink() : _buildBar(context),
+          Expanded(child: _buildPanes(context, notes)),
+        ],
+      ),
+    );
+  }
+}
+
+/// A pane in a split window. The one in use is raised: a soft shadow and full
+/// size, while the other settles back a little, so switching panes reads as
+/// lifting one page off the desk.
+class _FloatingPane extends StatelessWidget {
+  const _FloatingPane({
+    super.key,
+    required this.split,
+    required this.raised,
+    required this.child,
+  });
+
+  final bool split;
+  final bool raised;
+  final Widget child;
+
+  @override
+  Widget build(BuildContext context) {
+    final AppColors colors = AppColors.of(context);
+    final bool dark = Theme.of(context).brightness == Brightness.dark;
+    final Duration duration = AppMotion.resolve(
+      context,
+      AppMotion.snappy.duration,
+    );
+    return TweenAnimationBuilder<double>(
+      // Same widgets whether split or not, so opening a split never rebuilds
+      // the editor below.
+      tween: Tween<double>(end: split && raised ? 1 : 0),
+      duration: duration,
+      // A slight overshoot on the way up gives the lift a little spring.
+      curve: split && raised ? AppMotion.popCurve : AppMotion.fadeInCurve,
+      child: child,
+      builder: (BuildContext context, double lift, Widget? child) {
+        final double t = lift.clamp(0.0, 1.25);
+        final double radius = split ? AppRadii.small : 0;
+        return DecoratedBox(
+          decoration: BoxDecoration(
+            color: colors.background,
+            borderRadius: BorderRadius.circular(radius),
+            boxShadow: <BoxShadow>[
+              BoxShadow(
+                color: Colors.black.withValues(alpha: (dark ? 0.55 : 0.22) * t),
+                blurRadius: 24 * t,
+                spreadRadius: 1 * t,
+                offset: Offset(0, 8 * t),
               ),
+              BoxShadow(
+                color: Colors.black.withValues(alpha: (dark ? 0.4 : 0.12) * t),
+                blurRadius: 4 * t,
+                offset: Offset(0, 1 * t),
+              ),
+            ],
+          ),
+          child: ClipRRect(
+            borderRadius: BorderRadius.circular(radius),
+            child: child,
+          ),
+        );
+      },
+    );
+  }
+}
+
+/// The line between two panes, with a grip to pull it by.
+class _SplitHandle extends StatelessWidget {
+  const _SplitHandle({
+    required this.onDragStart,
+    required this.onDragUpdate,
+    required this.onDragEnd,
+    required this.onReset,
+  });
+
+  final VoidCallback onDragStart;
+  final ValueChanged<double> onDragUpdate;
+  final VoidCallback onDragEnd;
+  final VoidCallback onReset;
+
+  @override
+  Widget build(BuildContext context) {
+    final AppColors colors = AppColors.of(context);
+    return MouseRegion(
+      cursor: SystemMouseCursors.resizeColumn,
+      child: GestureDetector(
+        key: const ValueKey<String>('split-handle'),
+        behavior: HitTestBehavior.translucent,
+        onHorizontalDragStart: (_) => onDragStart(),
+        onHorizontalDragUpdate: (DragUpdateDetails d) =>
+            onDragUpdate(d.delta.dx),
+        onHorizontalDragEnd: (_) => onDragEnd(),
+        onHorizontalDragCancel: onDragEnd,
+        onDoubleTap: onReset,
+        child: Center(
+          child: DecoratedBox(
+            decoration: BoxDecoration(
+              color: colors.divider,
+              borderRadius: BorderRadius.circular(AppRadii.small),
             ),
-      ],
+            child: const SizedBox(width: 6, height: 44),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// Half of the window, ready for a dragged tab to be let go on.
+class _DropSide extends StatelessWidget {
+  const _DropSide({super.key, required this.right, required this.onDropped});
+
+  final bool right;
+  final ValueChanged<String> onDropped;
+
+  @override
+  Widget build(BuildContext context) {
+    final AppColors colors = AppColors.of(context);
+    return DragTarget<String>(
+      onAcceptWithDetails: (DragTargetDetails<String> d) => onDropped(d.data),
+      builder:
+          (
+            BuildContext context,
+            List<String?> candidates,
+            List<dynamic> rejected,
+          ) {
+            final bool over = candidates.isNotEmpty;
+            return AnimatedContainer(
+              duration: AppMotion.resolve(context, AppMotion.fadeIn),
+              decoration: BoxDecoration(
+                color: colors.accent.withValues(alpha: over ? 0.18 : 0.05),
+                border: Border.all(
+                  color: colors.accent.withValues(alpha: over ? 0.9 : 0.25),
+                  width: over ? 3 : 1,
+                ),
+              ),
+              child: Center(
+                child: AnimatedOpacity(
+                  duration: AppMotion.resolve(context, AppMotion.fadeIn),
+                  opacity: over ? 1 : 0.5,
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: <Widget>[
+                      Icon(
+                        right ? AppIcons.next : AppIcons.previous,
+                        size: 32,
+                        color: colors.accent,
+                      ),
+                      const SizedBox(height: AppSpacing.xs),
+                      Text(
+                        right ? 'Open on the right' : 'Open on the left',
+                        style: Theme.of(
+                          context,
+                        ).textTheme.labelLarge!.copyWith(color: colors.accent),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            );
+          },
     );
   }
 }
 
 class _TabPage extends StatelessWidget {
   const _TabPage({
-    super.key,
     required this.visible,
-    required this.active,
+    required this.current,
     required this.direction,
     required this.child,
   });
 
   final bool visible;
-  final bool active;
+
+  /// Whether the page is one to see and use, not one fading away.
+  final bool current;
   final double direction;
   final Widget child;
 
   @override
   Widget build(BuildContext context) {
-    final Duration duration = AppMotion.resolve(context, AppMotion.medium);
+    final Duration duration = AppMotion.resolve(
+      context,
+      AppMotion.smooth.duration,
+    );
     return Offstage(
       offstage: !visible,
       child: IgnorePointer(
-        ignoring: !active,
+        ignoring: !current,
         // A keyed page keeps each editor's page, history, and assistant alive
-        // while its tab is faded just out of view.
+        // while its tab is put just out of view.
         child: TickerMode(
           enabled: visible,
           child: ExcludeFocus(
-            excluding: !active,
+            excluding: !current,
             child: ExcludeSemantics(
-              excluding: !active,
+              excluding: !current,
               child: AnimatedSlide(
-                offset: active ? Offset.zero : Offset(direction, 0),
+                offset: current ? Offset.zero : Offset(direction, 0),
                 duration: duration,
-                curve: AppMotion.standard,
-                child: AnimatedOpacity(
-                  opacity: active ? 1 : 0,
-                  duration: duration,
-                  curve: AppMotion.standard,
-                  child: IgnoreKeyboard(ignoring: !active, child: child),
-                ),
+                curve: AppMotion.fadeInCurve,
+                child: IgnoreKeyboard(ignoring: !current, child: child),
               ),
             ),
           ),

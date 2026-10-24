@@ -141,7 +141,7 @@ class PdfExporter {
     final Map<String, Uint8List> assets = <String, Uint8List>{};
     for (final StoredPage page in content.pages) {
       for (final image in page.images) {
-        if (!assets.containsKey(image.assetId)) {
+        if (!image.isVector && !assets.containsKey(image.assetId)) {
           try {
             assets[image.assetId] = (await repository.readAsset(
               noteId,
@@ -596,7 +596,7 @@ Future<Uint8List> _generatePdf(_PreparedExport export) async {
           ),
         ),
       for (final element in prepared.images)
-        if (images[element.assetId] != null)
+        if (element.vector != null || images[element.assetId] != null)
           pw.Positioned(
             left: (element.center.x - element.size.width / 2) * scale,
             top: (element.center.y - element.size.height / 2) * scale,
@@ -605,11 +605,20 @@ Future<Uint8List> _generatePdf(_PreparedExport export) async {
               child: pw.SizedBox(
                 width: element.size.width * scale,
                 height: element.size.height * scale,
-                child: pw.Image(images[element.assetId]!, fit: pw.BoxFit.fill),
+                child: element.vector != null
+                    ? pw.SvgImage(svg: element.vector!.source)
+                    : pw.Image(images[element.assetId]!, fit: pw.BoxFit.fill),
               ),
             ),
           ),
-      // Sticky notes above images, under the page's ink.
+      pw.Positioned.fill(
+        child: pw.CustomPaint(
+          painter: (PdfGraphics canvas, PdfPoint size) {
+            _paintPreparedStrokes(canvas, prepared.strokes, scale);
+          },
+        ),
+      ),
+      // Sticky notes above images and page ink.
       if (prepared.stickies.isNotEmpty)
         pw.Positioned.fill(
           child: pw.CustomPaint(
@@ -620,13 +629,6 @@ Future<Uint8List> _generatePdf(_PreparedExport export) async {
             },
           ),
         ),
-      pw.Positioned.fill(
-        child: pw.CustomPaint(
-          painter: (PdfGraphics canvas, PdfPoint size) {
-            _paintPreparedStrokes(canvas, prepared.strokes, scale);
-          },
-        ),
-      ),
     ];
     document.addPage(
       pw.Page(

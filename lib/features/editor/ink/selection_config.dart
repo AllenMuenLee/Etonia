@@ -22,6 +22,7 @@ class SelectionConfig {
     this.lassoDashGap = 4,
     this.pasteHoldDuration = const Duration(milliseconds: 500),
     this.pasteHoldSlop = 10,
+    this.pdfSelectionMargin = 32,
   }) : assert(minLassoPointSpacing >= 0),
        assert(minLassoPointSpacing < double.infinity),
        assert(geometryTolerance >= 0),
@@ -48,7 +49,9 @@ class SelectionConfig {
        assert(lassoDashGap > 0),
        assert(lassoDashGap < double.infinity),
        assert(pasteHoldSlop >= 0),
-       assert(pasteHoldSlop < double.infinity);
+       assert(pasteHoldSlop < double.infinity),
+       assert(pdfSelectionMargin >= 0),
+       assert(pdfSelectionMargin < double.infinity);
 
   /// A lasso point is stored only once the pointer is this far from the
   /// previous stored point. The first and the final point are always kept.
@@ -108,4 +111,9 @@ class SelectionConfig {
 
   /// How far a held pointer may drift and still count as still.
   final double pasteHoldSlop;
+
+  /// A selection on a PDF page takes the paper along with the ink inside
+  /// it only when its outline keeps at least this far from all of that ink;
+  /// drawn closer, it picks the ink alone.
+  final double pdfSelectionMargin;
 }

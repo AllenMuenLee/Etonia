@@ -7,7 +7,6 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:greatnote/features/editor/document_io/document_models.dart';
 import 'package:greatnote/features/editor/document_io/document_platform.dart';
 import 'package:greatnote/features/editor/document_io/pdf_page_layer.dart';
-import 'package:greatnote/shared/widgets/processing.dart';
 
 /// Renders a small PNG, and holds every render after the first until
 /// [release] is called.
@@ -174,7 +173,7 @@ void main() {
     await tester.pump();
     expect(rasterizer.renders, 2);
     expect(find.byType(RawImage), findsOneWidget);
-    expect(find.byType(ShimmerPlaceholder), findsNothing);
+    expect(find.bySemanticsLabel('Loading PDF page'), findsNothing);
 
     rasterizer.release();
     await tester.runAsync(

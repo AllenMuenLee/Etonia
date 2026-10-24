@@ -6,8 +6,8 @@ import 'streaming_ai_client.dart';
 
 /// Calls OpenAI's streaming Chat Completions directly from the app.
 ///
-/// The key travels only in the `Authorization` header. The answer is asked
-/// for as a JSON object, in the same version-2 envelope Gemini returns.
+/// The key travels only in the `Authorization` header. The answer is a
+/// self-contained SVG response.
 class OpenAiClient extends SseAiClient {
   OpenAiClient({
     required this.config,
@@ -23,8 +23,6 @@ class OpenAiClient extends SseAiClient {
 
   /// The most output the request asks for; OpenAI's chat models stop at
   /// this.
-  static const int maxOutputTokens = 32768;
-
   @override
   bool get isConfigured => config.openAiKey.isNotEmpty;
 
@@ -56,6 +54,9 @@ class OpenAiClient extends SseAiClient {
       'type': 'image_url',
       'image_url': <String, Object?>{
         'url': 'data:image/png;base64,${base64Encode(png)}',
+        // Handwriting and small mathematical marks must not be downsampled
+        // by the provider's low-detail vision path.
+        'detail': 'high',
       },
     };
     Map<String, Object?> text(String value) => <String, Object?>{
@@ -63,14 +64,17 @@ class OpenAiClient extends SseAiClient {
       'text': value,
     };
     final List<Map<String, Object?>> messages = <Map<String, Object?>>[
-      <String, Object?>{'role': 'system', 'content': request.systemInstruction},
+      <String, Object?>{
+        'role': 'system',
+        'content': request.providerSystemInstruction,
+      },
     ];
     for (int index = 0; index < request.messages.length; index++) {
       final AiMessage message = request.messages[index];
       if (message.role == AiRole.model) {
         messages.add(<String, Object?>{
           'role': 'assistant',
-          'content': message.wireText,
+          'content': message.historyText,
         });
         continue;
       }
@@ -81,7 +85,7 @@ class OpenAiClient extends SseAiClient {
         'content': <Map<String, Object?>>[
           if (withImage) ...<Map<String, Object?>>[
             text('Selected ink image:'),
-            image(request.imagePng),
+            image(request.providerImagePng),
           ],
           if (request.noteImage case final note? when index == lastUser)
             text(aiNoteMetadata(note)),
@@ -93,10 +97,7 @@ class OpenAiClient extends SseAiClient {
       'model': model,
       'stream': true,
       'stream_options': <String, Object?>{'include_usage': true},
-      'response_format': <String, Object?>{'type': 'json_object'},
-      'max_completion_tokens': notationConfig.maxOutputTokens < maxOutputTokens
-          ? notationConfig.maxOutputTokens
-          : maxOutputTokens,
+      'max_completion_tokens': notationConfig.maxOutputTokens,
       'messages': messages,
     };
   }

@@ -327,16 +327,17 @@ void main() {
     });
 
     test('a sine wave', () {
-      final RecognizedShape? shape = recognize(
-        curve(
-          (double t) => InkVector(
-            100 + 400 * t,
-            300 + 50 * math.sin(2 * math.pi * 2.5 * t),
-          ),
-          count: 240,
+      final List<InkVector> points = curve(
+        (double t) => InkVector(
+          100 + 400 * t,
+          300 + 50 * math.sin(2 * math.pi * 2.5 * t),
         ),
+        count: 240,
       );
+      final RecognizedShape? shape = recognize(points);
       expect(shape?.kind, ShapeKind.sineWave);
+      expect(shape!.points.first, points.first);
+      expect(shape.points.last, points.last);
     });
 
     test('a spiral', () {

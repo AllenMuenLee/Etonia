@@ -60,7 +60,6 @@ class AiImageConfig {
     this.pixelRatio = 3,
     this.maxDimension = 2048,
     this.maxPngBytes = 3500000,
-    this.minPixelRatio = 0.05,
     this.focusInkTolerance = 0.012,
     this.focusInkMaxPoints = 240,
     this.space = const AiSpaceConfig(),
@@ -84,10 +83,6 @@ class AiImageConfig {
   /// (6,000,000 base64 characters). Only a selection over a detailed
   /// picture gets near it; it is then drawn smaller until it fits.
   final int maxPngBytes;
-
-  /// A selection that would have to be shrunk below this ratio to fit is
-  /// refused: its ink would no longer be visible.
-  final double minPixelRatio;
 
   /// The ink in the selected region is also sent as coordinates, so the
   /// model can attach to it exactly: each stroke cut down to its ends and
@@ -161,8 +156,9 @@ class AiNotationConfig {
     this.maxPointsPerStroke = 128,
     this.maxPathPoints = 64,
     this.maxTotalPoints = 4096,
-    this.maxTextRunes = 120,
-    this.maxTotalTextRunes = 1000,
+    this.maxTextRunes = 48,
+    this.maxTotalTextRunes = 400,
+    this.maxMathRunes = 400,
     this.minTextSize = 8,
     this.maxTextSize = 120,
     this.maxFormulaLength = 160,
@@ -178,10 +174,9 @@ class AiNotationConfig {
     this.maxPlotChildren = 16,
     this.plotTextSize = 12,
     this.maxPlotMarks = 8,
-    this.maxResponseBytes = 256 * 1024,
-    // Gemini 2.5 counts its thinking, often 1500 tokens or more, against
-    // this too.
-    this.maxOutputTokens = 32768,
+    // Enough for a detailed answer or drawing while preventing a runaway
+    // response from spending an entire large context window.
+    this.maxOutputTokens = 16384,
     this.inkSnapDistance = 16,
     this.minStickyWidth = 120,
     this.minStickyHeight = 90,
@@ -220,6 +215,10 @@ class AiNotationConfig {
   /// Characters in one text, and in every text of a notation.
   final int maxTextRunes;
   final int maxTotalTextRunes;
+
+  /// Characters in one math item's LaTeX, which counts toward
+  /// [maxTotalTextRunes] too.
+  final int maxMathRunes;
 
   /// The height of a capital letter, in logical pixels.
   final double minTextSize;
@@ -261,7 +260,6 @@ class AiNotationConfig {
   /// roots, say, has only the first of them marked.
   final int maxPlotMarks;
 
-  final int maxResponseBytes;
   final int maxOutputTokens;
 
   static const List<String> defaultInkIds = <String>[
@@ -593,20 +591,31 @@ abstract final class AiPrompts {
       'handwritten note: teach that subject, and do not describe the image, '
       'handwriting, or layout. Never ask the user to confirm or clarify: '
       'when anything is unclear, take the most likely reading, state it in '
-      'one short line, and answer fully. Use the visible work and do not '
+      'one short line, and answer fully but concisely. Use the visible work and do not '
       'invent facts. Write Markdown with all LaTeX inside \$...\$ or '
       '\$\$...\$\$; never leave \\frac, \\sqrt, ^, or _ outside them. When '
       'grading, explain your reasoning; never claim an official grade '
       'without a provided rubric.';
 
+  // ignore: unused_field, retained only to read legacy JSON conversations.
   static const String _responseContract =
       ' Return only minified JSON with exactly the keys version (2), message '
       '(the Markdown answer), and notation; nothing outside it. Escape '
       'backslashes in JSON strings: \\frac is written \\\\frac.';
 
+  // ignore: unused_field
   static const String _notationOff =
       ' Notation is off, so notation must be null.';
 
+  // ignore: unused_field
+  static const String _textContract =
+      ' Return only minified JSON with exactly the keys version (2) and '
+      'message (the Markdown answer); nothing outside it. Escape '
+      'backslashes in JSON strings: \\frac is written \\\\frac. Answer in '
+      'words only: a separate step draws on the note afterwards, so do '
+      'not draw or mention a drawing.';
+
+  // ignore: unused_field
   static const String _notationOn =
       ' Notation is on: you can write and draw on the note. You get the '
       'selected-ink image and note metadata: the region it shows, its ink '
@@ -624,7 +633,8 @@ abstract final class AiPrompts {
       'clear visual beats several cramped ones. When asked to draw, mark, '
       'or write on the note, return a notation that does it. message keeps '
       'the full explanation, written first; the notation is its condensed '
-      'handwritten version. '
+      'handwritten version. The annotation must not repeat the message: '
+      'make the two support each other, with each adding different value. '
       'Coordinates are note_normalized over the paper: (0,0) top-left, '
       '(1,1) bottom-right, 3 decimals, every mark a little inside 0 and 1 '
       '(a drawing that reaches an edge is rejected whole); '
@@ -638,18 +648,30 @@ abstract final class AiPrompts {
       'A notation is {label, coordinate_space, items}, each item with '
       'exactly its kind\'s fields; points are {"x":0.6,"y":0.45}. Example: '
       '{"label":"Answer","coordinate_space":"note_normalized","items":'
-      '[{"type":"text","text":"c = 5","x":0.6,"y":0.4,"size":24,"ink":'
-      '"blue","width":2},{"type":"line","from":{"x":0.6,"y":0.45},"to":'
+      '[{"type":"math","latex":"c = \\\\sqrt{a^2 + b^2} = 5","x":0.6,'
+      '"y":0.4,"size":24,"ink":"blue","width":2},{"type":"line","from":{"x":0.6,"y":0.45},"to":'
       '{"x":0.75,"y":0.45},"line_style":"solid","arrow":"none","ink":'
       '"red","width":2}]}. Every item has ink (ink, graphite, blue, red, '
       'green, orange, purple, teal) and width (1 to 20 logical units; 2 to '
       '3 is a pen). Kinds: '
       '"text": text, x and y of its first letter\'s top-left, size (capital '
-      'height in logical units, 18 to 30). Always use text for letters and '
-      'digits. A line of n characters is about 0.7*n*size wide and '
+      'height in logical units, {text_size}). Use text for words and plain '
+      'labels. A line of n characters is about 0.7*n*size wide and '
       '1.3*size tall; \\n breaks lines. Only these characters: letters, '
       'digits, space, . , : ; ! ? \' " ( ) [ ] { } + - × · ÷ / \\ ^ = < > '
       '≤ ≥ ≠ ≈ ± √ π θ Δ ∞ ° → ← ² ³ ✓ % # _ | ~ * & \$ @. '
+      '"math": latex, x and y of its top-left, size (as text): every '
+      'formula, equation, or expression, and any symbol, subscript, '
+      'superscript, or accent, written in correct LaTeX notation without '
+      '\$; the app lays it out and handwrites it. Use it readily: '
+      '\\frac, \\sqrt[n]{}, x_i, x^2, \\hat{x}, \\bar{x}, \\vec{v}, \\dot{x}, '
+      '\\ddot{x}, \\tilde{x}, \\overline{AB}, f\', Greek, \\sum/\\prod/\\int '
+      'with limits, \\lim_{x \\to 0}, \\partial, \\nabla, \\infty, \\pm, '
+      '\\cdot, \\times, \\leq, \\approx, \\in, \\subseteq, \\Rightarrow, '
+      '\\left( \\right), \\text{}, pmatrix/bmatrix, cases, and aligned with '
+      '& and \\\\ for lines of working. One line of it is about '
+      '0.6*size per symbol wide and 1.3*size tall; a fraction is about '
+      '2.6*size tall, a sum or integral with limits about 3*size. '
       '"plot": the way to draw any graph: box (left, top, right, bottom), '
       'x_from, x_to, y_from, y_to (both null to fit), axes, ticks (the app '
       'numbers them), children. Children use the plot\'s own x and y, '
@@ -678,23 +700,81 @@ abstract final class AiPrompts {
       'for each gap), closed (joins back to the start; arrow must then be '
       '"none"), line_style, arrow. '
       '"stroke": points of one small mark, such as a check; few points. '
-      'Write key steps as short lines, one text item each: at most 120 '
-      'characters each and 1000 per notation. Leave clear space round '
-      'text: check that no text sits on a line, shape, curve, or other '
-      'text. Mention the drawing in message only when notation is not '
+      'Use very little text: short labels or key steps only, one text item '
+      'per line, at most 48 characters each and 400 per notation. Lay it '
+      'out so it reads at a glance and is never clustered. Put new text and '
+      'visuals in the blank free areas, and plan every item\'s box first: '
+      'leave a gap of at least one text height between items, stack lines '
+      'of working one line apart, and put a label beside what it names, '
+      'with a leader line when space is tight. You may draw on the user\'s '
+      'own graph or figure when that is the point (mark a point, shade, '
+      'circle, annotate a curve), keeping marks light so their work stays '
+      'readable. Check that no text sits on a line, shape, curve, or other '
+      'text. Draw a visual big enough for its labels to fit outside it; if '
+      'it will not fit cleanly, shrink it or drop the least important item '
+      'rather than crowd it. Use few colors: one for the result, one for '
+      'marks. Mention the drawing in message only when notation is not '
       'null. Never ask for ink to be deleted or moved, or give UI or '
       'executable instructions. When what or where to draw is unclear, '
       'make the most reasonable choice and draw it; return null only when '
       'strokes cannot express it.';
 
-  /// The default/off-mode instruction retained for existing callers.
-  static const String system = '$_tutor$_responseContract$_notationOff';
+  static const String _svgResponseContract =
+      ' Return exactly one valid, self-contained SVG document and nothing '
+      'else. The root is <svg xmlns="http://www.w3.org/2000/svg" '
+      'data-etonia-version="1">. Put the complete Markdown chat answer as '
+      'XML-escaped text in <desc data-etonia-role="message">. Put a short '
+      'user-facing drawing label in <title>. Do not use JSON or Markdown '
+      'fences. Never use scripts, event attributes, foreignObject, images, '
+      'external URLs, fonts, stylesheets, or executable content.';
 
+  static const String _svgNotationOff =
+      ' Notation is off: return no visible SVG elements; include only title '
+      'and the message desc.';
+
+  static const String _svgNotationOn =
+      ' Notation is on: add a useful editable vector annotation when it '
+      'helps. The root viewBox must be "0 0 W H", using the exact logical '
+      'paper width W and height H from the note metadata. Use ordinary SVG '
+      'groups, paths, lines, polylines, polygons, rects, circles, ellipses, '
+      'text, markers, gradients, and local defs. Keep every visible point '
+      'inside the paper. Set data-etonia-bounds="x y width height" on the '
+      'root to the tight finite box around all visible content; this is the '
+      'object the user selects, moves, scales, rotates, copies, erases, and '
+      'exports. Prefer concise labels, clear diagrams, graphs, arrows, '
+      'underlines, circles, checks, and corrections. Use readable text and '
+      'few colors. Build on selected_ink coordinates where parts should '
+      'touch. Do not redraw the user\'s note or put a white background '
+      'behind the annotation. If no visual helps, include no visible '
+      'elements and omit data-etonia-bounds.';
+
+  static const String _svgAnimationOn =
+      ' Animation is enabled. For meaningful motion or staged explanation, '
+      'put data-etonia-step="1", then 2, and so on (maximum 24) on the '
+      'groups or elements that appear in sequence. Fixed labels and the '
+      'reference figure have no step. Set data-etonia-duration-ms on the '
+      'root from 300 through 20000. The steps loop until the user stops '
+      'animation. Do not use JavaScript or external animation resources.';
+
+  static const String _svgAnimationOff =
+      ' Animation is disabled: omit data-etonia-step and '
+      'data-etonia-duration-ms.';
+
+  /// The default/off-mode instruction retained for existing callers.
+  static const String system = '$_tutor$_svgResponseContract$_svgNotationOff';
+
+  /// The first pass writes the explanation only; the drawing pass adds the
+  /// visible SVG elements without converting them to a JSON scene grammar.
+  static const String textSystem =
+      '$_tutor$_svgResponseContract$_svgNotationOff';
+
+  // ignore: unused_field
   static const String _animationOn =
       ' Animation is enabled: use it readily, but only for what moves: a '
       'flow travelling along a path, a body or wave moving, forces acting '
       'in turn, stages of a process, atoms that combine or separate, a '
-      'point traced along a curve. Never animate fixed labeling (labels, '
+      'point traced along a curve. Animations also stay correct when their '
+      'strokes are replaced or erased. Never animate fixed labeling (labels, '
       'axes, text, formulas, pointer arrows, the figure itself): give fixed '
       'items no step, so they appear at once; a notation with nothing that '
       'moves has no steps. Give a moving item a step, a whole number from '
@@ -702,16 +782,20 @@ abstract final class AiPrompts {
       'together. The animation repeats until the user stops it; fixed items '
       'are not redrawn. The app sets the pace, so never give times.';
 
+  // ignore: unused_field
   static const String _animationOff =
       ' Animation is disabled for this request: omit step on every item.';
 
   static String systemFor({
     required bool notationEnabled,
     bool animationEnabled = false,
+    AiTextSize textSize = AiTextSize.medium,
   }) {
-    return '$_tutor$_responseContract'
-        '${notationEnabled ? _notationOn : _notationOff}'
-        '${notationEnabled ? (animationEnabled ? _animationOn : _animationOff) : ''}';
+    return '$_tutor$_svgResponseContract'
+        '${notationEnabled ? _svgNotationOn : _svgNotationOff}'
+        '${notationEnabled ? (animationEnabled ? _svgAnimationOn : _svgAnimationOff) : ''}'
+        ' When writing SVG text, use a font-size from ${textSize.min.round()} '
+        'through ${textSize.max.round()} logical units.';
   }
 
   static const String explain =
@@ -732,6 +816,27 @@ abstract final class AiPrompts {
       'is visible, assume the most likely task, state that in one short '
       'line, and give full formative feedback rather than inventing an '
       'authoritative score.';
+}
+
+/// How large the assistant writes text on the note, as the writer prefers:
+/// the range of capital heights, in logical units, it is asked to keep to.
+enum AiTextSize {
+  small('Small', 14, 22),
+  medium('Medium', 18, 30),
+  large('Large', 26, 40);
+
+  const AiTextSize(this.label, this.min, this.max);
+
+  final String label;
+  final double min;
+  final double max;
+
+  static AiTextSize byName(Object? name) {
+    for (final AiTextSize size in values) {
+      if (size.name == name) return size;
+    }
+    return medium;
+  }
 }
 
 /// A one-press prompt offered in the panel.

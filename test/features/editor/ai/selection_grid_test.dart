@@ -84,4 +84,45 @@ void main() {
     );
     expect(png, same(selection.png));
   });
+
+  test('an oversized grid is gently reduced instead of discarded', () async {
+    final SelectionImage selection = await _solid(
+      600,
+      300,
+      const ui.Rect.fromLTWH(100, 200, 400, 200),
+    );
+    final Uint8List full = await const SelectionGridRenderer(
+      maxPngBytes: 1000000,
+    ).render(selection, const ui.Size(1000, 1000));
+    final Uint8List fitted = await const SelectionGridRenderer(
+      maxPngBytes: 1000,
+    ).render(selection, const ui.Size(1000, 1000));
+    final (ui.Image fullImage, _) = await _decode(full);
+    final (ui.Image fittedImage, _) = await _decode(fitted);
+    addTearDown(fullImage.dispose);
+    addTearDown(fittedImage.dispose);
+
+    expect(fitted.lengthInBytes, lessThanOrEqualTo(1000));
+    expect(fittedImage.width, lessThan(fullImage.width));
+    expect(fittedImage.height, lessThan(fullImage.height));
+  });
+
+  test(
+    'a grid exceeding maxDimension is scaled down within maxDimension',
+    () async {
+      final SelectionImage selection = await _solid(
+        500,
+        300,
+        const ui.Rect.fromLTWH(100, 200, 400, 200),
+      );
+      final Uint8List png = await const SelectionGridRenderer(
+        maxDimension: 400,
+      ).render(selection, const ui.Size(1000, 1000));
+      final (ui.Image image, _) = await _decode(png);
+      addTearDown(image.dispose);
+
+      expect(image.width, lessThanOrEqualTo(400));
+      expect(image.height, lessThanOrEqualTo(400));
+    },
+  );
 }

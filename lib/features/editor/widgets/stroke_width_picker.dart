@@ -2,6 +2,8 @@ import 'package:flutter/material.dart';
 
 import '../../../app/theme/app_tokens.dart';
 import '../../../shared/widgets/app_controls.dart';
+import '../ink/ink_painter.dart';
+import '../ink/ink_sample.dart';
 import '../ink/pen_settings.dart';
 import '../ink/stroke.dart';
 
@@ -42,12 +44,13 @@ class StrokeWidthPicker extends StatelessWidget {
         SectionLabel('Stroke width', trailing: ValuePill(describe(width))),
         ExcludeSemantics(
           child: SizedBox(
-            height: max + AppSpacing.md,
+            height: max * config.strokeWidthScale + AppSpacing.md,
             child: CustomPaint(
               key: const ValueKey<String>('stroke-width-preview'),
               painter: StrokePreviewPainter(
                 color: inkColor,
-                width: width,
+                width: style.width,
+                writing: style.writing,
                 samples: style.isHighlighter
                     ? const <Color>[lightSample, darkSample]
                     : const <Color>[],
@@ -76,11 +79,13 @@ class StrokePreviewPainter extends CustomPainter {
   const StrokePreviewPainter({
     required this.color,
     required this.width,
+    this.writing = WritingStyle.pen,
     this.samples = const <Color>[],
   });
 
   final Color color;
   final double width;
+  final WritingStyle writing;
   final List<Color> samples;
 
   @override
@@ -104,14 +109,17 @@ class StrokePreviewPainter extends CustomPainter {
     }
     final double inset = AppSpacing.md + width / 2;
     final double y = size.height / 2;
-    canvas.drawLine(
-      Offset(inset, y),
-      Offset(size.width - inset, y),
-      Paint()
-        ..color = color
-        ..strokeWidth = width
-        ..strokeCap = StrokeCap.round
-        ..isAntiAlias = true,
+    final InkVector origin = InkVector(inset, y);
+    paintInkStroke(
+      canvas,
+      color: color,
+      width: width,
+      path: Path()
+        ..moveTo(origin.x, origin.y)
+        ..lineTo(size.width - inset, y),
+      origin: origin,
+      isDot: false,
+      writing: writing,
     );
   }
 
@@ -119,6 +127,7 @@ class StrokePreviewPainter extends CustomPainter {
   bool shouldRepaint(StrokePreviewPainter oldDelegate) {
     return oldDelegate.color != color ||
         oldDelegate.width != width ||
+        oldDelegate.writing != writing ||
         oldDelegate.samples.length != samples.length;
   }
 }

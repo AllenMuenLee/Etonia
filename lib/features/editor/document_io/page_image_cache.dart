@@ -79,6 +79,18 @@ class PageImageCache {
     }
   }
 
+  /// Under memory pressure: lets go of every decoded picture not still
+  /// being decoded, and of the bytes kept to decode again. Pictures on
+  /// screen hold clones of their own, so none goes blank.
+  void releaseMemory() {
+    _entries.removeWhere((String key, _ImageEntry entry) {
+      if (_pending.containsKey(key)) return false;
+      entry.evict();
+      return true;
+    });
+    _sources.clear();
+  }
+
   void clear() {
     _generation++;
     for (final entry in _entries.values) {

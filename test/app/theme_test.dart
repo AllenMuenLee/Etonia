@@ -37,8 +37,12 @@ void main() {
       });
 
       test('controls, selection, and focus', () {
+        // `selected` is a translucent tint; judge it as painted on a card.
         expect(
-          contrastRatio(colors.accent, colors.selected),
+          contrastRatio(
+            colors.accent,
+            Color.alphaBlend(colors.selected, colors.surface),
+          ),
           greaterThanOrEqualTo(aaControl),
         );
         expect(
@@ -70,16 +74,13 @@ void main() {
     });
   }
 
-  test('the page is distinct from the chrome and dark is never pure black', () {
+  test('the page is distinct from the chrome', () {
     expect(AppColors.light.writingSurface, isNot(AppColors.light.background));
     expect(AppColors.dark.writingSurface, isNot(AppColors.dark.background));
-    for (final Color color in <Color>[
-      AppColors.dark.background,
-      AppColors.dark.surface,
-      AppColors.dark.writingSurface,
-    ]) {
-      expect(color, isNot(const Color(0xFF000000)));
-    }
+    // Dark is the logo as drawn: true black ground, lifted surfaces.
+    expect(AppColors.dark.background, const Color(0xFF000000));
+    expect(AppColors.dark.surface, isNot(AppColors.dark.background));
+    expect(AppColors.dark.writingSurface, isNot(AppColors.dark.background));
   });
 
   test('themes use Material 3 and expose the color tokens', () {

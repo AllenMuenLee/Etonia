@@ -10,6 +10,10 @@ abstract class BillingBackend extends ChangeNotifier {
   String? get email;
   Future<SubscriptionState> fetchSubscription();
   Future<SubscriptionState> verifyPurchase(StorePurchaseUpdate purchase);
+
+  /// Adds a gift code's free credit to the signed-in account. Throws a
+  /// failure coded `invalid_code`, `code_redeemed` or `code_exhausted`.
+  Future<SubscriptionState> redeemGiftCode(String code);
   Future<void> signInWithGoogle();
   Future<void> signOut();
 }

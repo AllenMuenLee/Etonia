@@ -7,7 +7,7 @@ import 'streaming_ai_client.dart';
 /// Calls Anthropic's streaming Messages API directly from the app.
 ///
 /// The key travels only in the `x-api-key` header. Claude is told to answer
-/// in the version-2 JSON envelope by the system instruction; a code fence
+/// as a self-contained SVG document by the system instruction; a code fence
 /// around it is tolerated.
 class ClaudeAiClient extends SseAiClient {
   ClaudeAiClient({
@@ -23,10 +23,6 @@ class ClaudeAiClient extends SseAiClient {
   final String model;
 
   static const String apiVersion = '2023-06-01';
-
-  /// The most output each model family returns; [AiNotationConfig.
-  /// maxOutputTokens] is cut to it.
-  static const int defaultOutputLimit = 64000;
 
   @override
   bool get isConfigured => config.claudeKey.isNotEmpty;
@@ -78,7 +74,7 @@ class ClaudeAiClient extends SseAiClient {
       if (message.role == AiRole.model) {
         messages.add(<String, Object?>{
           'role': 'assistant',
-          'content': message.wireText,
+          'content': message.historyText,
         });
         continue;
       }
@@ -89,7 +85,7 @@ class ClaudeAiClient extends SseAiClient {
         'content': <Map<String, Object?>>[
           if (withImage) ...<Map<String, Object?>>[
             text('Selected ink image:'),
-            image(request.imagePng),
+            image(request.providerImagePng),
           ],
           if (request.noteImage case final note? when index == lastUser)
             text(aiNoteMetadata(note)),
@@ -99,11 +95,9 @@ class ClaudeAiClient extends SseAiClient {
     }
     return <String, Object?>{
       'model': model,
-      'max_tokens': notationConfig.maxOutputTokens < defaultOutputLimit
-          ? notationConfig.maxOutputTokens
-          : defaultOutputLimit,
+      'max_tokens': notationConfig.maxOutputTokens,
       'stream': true,
-      'system': request.systemInstruction,
+      'system': request.providerSystemInstruction,
       'messages': messages,
     };
   }

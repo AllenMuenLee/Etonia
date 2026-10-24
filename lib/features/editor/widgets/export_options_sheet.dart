@@ -3,16 +3,15 @@ import 'package:flutter/material.dart';
 import '../../../app/theme/app_tokens.dart';
 import '../../../app/theme/app_icons.dart';
 import '../../../shared/widgets/app_controls.dart';
+import '../../../shared/navigation/app_sheets.dart';
 import '../document_io/pdf_exporter.dart';
 
 Future<PdfExportOptions?> showExportOptions(
   BuildContext context, {
   required bool allowCurrentPage,
 }) {
-  return showModalBottomSheet<PdfExportOptions>(
+  return showAppSheet<PdfExportOptions>(
     context: context,
-    showDragHandle: true,
-    isScrollControlled: true,
     builder: (BuildContext context) =>
         _ExportOptionsSheet(allowCurrentPage: allowCurrentPage),
   );

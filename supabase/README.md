@@ -41,6 +41,11 @@ by the provider account's own settings and terms, not by this Supabase code.
    (`plans.one_time_credit`). The credit is granted once per account and once
    per device, never to anonymous accounts, and it never refills. It pays for
    Haiku, Luna, Sonnet and Sol only, and is used only while no paid plan is active. `billing_private.devices` lists every device and its last account.
+   All free credit lasts one month from when it was granted (`grants.expires_at`).
+   Gift codes add $3 (`gift_codes.credit`) to a Google account's free credit, once
+   per account per code, and restart that month. Create one in the SQL editor:
+   `insert into billing_private.gift_codes(code, max_redemptions, expires_at) values ('SPRING-3F9K2Q', 100, '2027-01-01');`
+   (uppercase, 6+ characters; make them long and random, as attempts are only rate limited).
 3. Copy `config/backend.example.json` to ignored `dart_defines.json`, set the HTTPS
    project URL and `sb_publishable_...` key. Preserve any unrelated existing public
    app configuration. Remove AI provider secrets from app build configuration.
@@ -60,10 +65,15 @@ by the provider account's own settings and terms, not by this Supabase code.
      billed as output, usually the largest part of a request; `low` is a good
      start for tutoring. Leave it out for a model that does not reason (or for
      Claude, which ignores it), or the provider rejects the request.
-   - `cachedInputMicroPerKilo`: the provider's price for cached input. The
-     fixed instructions and answer schema (several thousand tokens) are the
-     same on every request, so providers serve them from cache; without this
-     field, users are billed full price for them.
+   - `cachedInputMicroPerKilo`: the provider's price for cached input. Fixed
+     instructions can then be served from cache. With Notation on, a request
+     is two passes: the model the user picked writes the words from the clean
+     crop, then the `luna` entry (required) reads the gridded crop, that answer
+     and the large notation grammar, and returns the drawing JSON. Give
+     `luna` `"reasoningEffort": "medium"`: laying a drawing out cleanly takes
+     some thinking. The
+     picked model never sees the grammar; both passes are billed at their own
+     model's rates against the same hold.
 6. Generate `PURCHASE_TOKEN_ENCRYPTION_KEY` from 32 cryptographically random bytes
    and base64-encode them. Back it up securely. Rotating it requires re-encrypting
    existing locators; changing it alone makes old subscriptions unreadable.
@@ -153,8 +163,9 @@ cannot execute them or read the private tables. UI status is returned by `billin
   cost_micro_usd, input_tokens, output_tokens, false)` or explicitly release it
   with zero values and `true`. No content is stored for replay.
 - AI currently returns a complete response after accounting; it does not stream
-  partial tokens. Up to 100 recent messages (bounded to 128,000 UTF-8 bytes) are
-  sent as provider context with each request.
+  partial tokens. The latest 12 complete turns are sent as provider context,
+  bounded to 24,000 UTF-8 bytes. Older retained turns are compacted, while the
+  latest two remain detailed; applied notation coordinates are never resent.
 
 ## Validation
 

@@ -660,6 +660,34 @@ void main() {
           expect(controller.notationPlayback!.strokes[0], same(moved));
         });
       });
+
+      test('a replacement with a different point count keeps playing', () {
+        final Stroke original = Stroke.fromPoints(
+          style: _blue,
+          points: const <InkVector>[InkVector(20, 20), InkVector(120, 20)],
+        );
+        final Stroke replacement = Stroke.fromPoints(
+          style: _blue,
+          points: const <InkVector>[
+            InkVector(20, 20),
+            InkVector(70, 10),
+            InkVector(120, 20),
+          ],
+        );
+        final NotationPlayback playback = NotationPlayback(
+          <Stroke>[original],
+          timesMs: <List<double>>[
+            <double>[0, 100],
+          ],
+          duration: const Duration(milliseconds: 250),
+          surfaceSize: _surface,
+        );
+
+        playback.replace(original, replacement);
+
+        expect(playback.owns(replacement), isTrue);
+        expect(playback.timesAt(0), <double>[0, 50, 100]);
+      });
     });
 
     test('disposing ends the playback without notifying anyone', () async {

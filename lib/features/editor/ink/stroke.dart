@@ -7,9 +7,15 @@ import 'ink_sample.dart';
 import 'one_euro_smoother.dart';
 import 'smoothing_config.dart';
 
+int _strokeSequence = 0;
+
+String _newStrokeId() =>
+    'stroke-${DateTime.now().microsecondsSinceEpoch.toRadixString(36)}-${++_strokeSequence}';
+
 /// Which kind of mark the writing tool makes.
 enum WritingStyle {
   pen('Pen'),
+  pencil('Pencil'),
   highlighter('Highlighter');
 
   const WritingStyle(this.label);
@@ -46,6 +52,8 @@ class StrokeStyle {
   final double opacity;
 
   bool get isHighlighter => writing == WritingStyle.highlighter;
+
+  bool get isPencil => writing == WritingStyle.pencil;
 
   /// The ink for [brightness], with [opacity] applied.
   Color resolve(Brightness brightness) {
@@ -137,6 +145,7 @@ enum StrokeSource {
 /// its own, and it carries none rather than invented ones.
 class Stroke {
   Stroke._({
+    required this.id,
     required this.style,
     required this.source,
     required this.rawSamples,
@@ -145,6 +154,9 @@ class Stroke {
     required this.isDot,
     required this.bounds,
     this.widths,
+    this.completedAtMs,
+    this.recordingId,
+    this.sampleDeltasMs,
   });
 
   /// A stroke through [points], which are used as given: they are never
@@ -154,6 +166,10 @@ class Stroke {
     required StrokeStyle style,
     required List<InkVector> points,
     List<double>? widths,
+    String? id,
+    int? completedAtMs,
+    String? recordingId,
+    List<int>? sampleDeltasMs,
   }) {
     assert(points.isNotEmpty);
     assert(widths == null || widths.length == points.length);
@@ -166,6 +182,7 @@ class Stroke {
       extent.add(point);
     }
     return Stroke._(
+      id: id ?? _newStrokeId(),
       style: style,
       source: StrokeSource.derived,
       rawSamples: const <RawInkSample>[],
@@ -174,8 +191,16 @@ class Stroke {
       isDot: extent.isDot,
       bounds: extent.bounds(style.width * _widest(widths)),
       widths: widths == null ? null : List<double>.unmodifiable(widths),
+      completedAtMs: completedAtMs,
+      recordingId: recordingId,
+      sampleDeltasMs: sampleDeltasMs == null
+          ? null
+          : List<int>.unmodifiable(sampleDeltasMs),
     );
   }
+
+  /// Stable within saved note content, for replay erasure tombstones.
+  final String id;
 
   /// The largest width factor, never under 1, so bounds are never smaller
   /// than those of an even stroke.
@@ -205,6 +230,15 @@ class Stroke {
   /// The width at each point, as a factor of [StrokeStyle.width], or null
   /// for a stroke of even width.
   final List<double>? widths;
+
+  /// Milliseconds from the associated recording's start until pen-up.
+  final int? completedAtMs;
+
+  /// The audio recording whose timeline owns [completedAtMs].
+  final String? recordingId;
+
+  /// Milliseconds between accepted input samples, for organic replay.
+  final List<int>? sampleDeltasMs;
 
   /// The filled outline of a stroke of varying width; null for an even
   /// one, which is drawn by stroking [path]. Built when first painted.
@@ -366,6 +400,7 @@ class ActiveStroke {
   final StrokeDynamics dynamics;
   final OneEuroSmoother _smoother;
   final List<RawInkSample> _rawSamples = <RawInkSample>[];
+
   final List<InkVector> _points = <InkVector>[];
   final Path _path = Path();
   late final _Extent _extent;
@@ -427,10 +462,21 @@ class ActiveStroke {
     return _appendPoint(output);
   }
 
-  Stroke finish() {
+  Stroke finish({int? completedAtMs, String? recordingId}) {
     _smoother.finish().forEach(_appendPoint);
     final List<double>? widths = dynamics.isNone ? null : _finalWidths();
+    final List<int>? sampleDeltas =
+        completedAtMs == null || recordingId == null || _rawSamples.isEmpty
+        ? null
+        : <int>[
+            0,
+            for (int i = 1; i < _rawSamples.length; i++)
+              (_rawSamples[i].timestamp - _rawSamples[i - 1].timestamp)
+                  .inMilliseconds
+                  .clamp(0, 60000),
+          ];
     return Stroke._(
+      id: _newStrokeId(),
       style: style,
       source: StrokeSource.input,
       rawSamples: List<RawInkSample>.unmodifiable(_rawSamples),
@@ -439,6 +485,11 @@ class ActiveStroke {
       isDot: isDot,
       bounds: _extent.bounds(style.width * Stroke._widest(widths)),
       widths: widths == null ? null : List<double>.unmodifiable(widths),
+      completedAtMs: completedAtMs,
+      recordingId: recordingId,
+      sampleDeltasMs: sampleDeltas == null
+          ? null
+          : List<int>.unmodifiable(sampleDeltas),
     );
   }
 

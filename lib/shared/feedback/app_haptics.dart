@@ -36,6 +36,9 @@ abstract final class AppHaptics {
   }
 
   static void toolSwitch() => play(AppHaptic.toolSwitch);
+
+  /// A detent clicked into place, such as the ruler reaching 45 degrees.
+  static void selectionClick() => play(AppHaptic.toolSwitch);
   static void tap() => play(AppHaptic.tap);
   static void lift() => play(AppHaptic.lift);
   static void success() => play(AppHaptic.success);

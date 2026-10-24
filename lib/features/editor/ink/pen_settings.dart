@@ -17,6 +17,7 @@ class PenConfig {
     this.highlighterMaxWidth = 40,
     this.highlighterDefaultWidth = 12,
     this.highlighterOpacity = StrokeStyle.defaultHighlighterOpacity,
+    this.strokeWidthScale = defaultStrokeWidthScale,
   }) : assert(minWidth > 0),
        assert(maxWidth >= minWidth),
        assert(defaultWidth >= minWidth && defaultWidth <= maxWidth),
@@ -26,7 +27,12 @@ class PenConfig {
          highlighterDefaultWidth >= highlighterMinWidth &&
              highlighterDefaultWidth <= highlighterMaxWidth,
        ),
-       assert(highlighterOpacity > 0 && highlighterOpacity <= 1);
+       assert(highlighterOpacity > 0 && highlighterOpacity <= 1),
+       assert(strokeWidthScale > 0);
+
+  /// The factor by which configured stroke width levels are scaled to
+  /// logical canvas pixels (1 level = 0.5 px).
+  static const double defaultStrokeWidthScale = 0.5;
 
   final double minWidth;
   final double maxWidth;
@@ -39,6 +45,9 @@ class PenConfig {
   /// How opaque one highlighter mark is; overlapping marks darken.
   final double highlighterOpacity;
 
+  /// How stroke width levels are scaled to canvas pixels.
+  final double strokeWidthScale;
+
   double minWidthFor(WritingStyle style) =>
       style == WritingStyle.highlighter ? highlighterMinWidth : minWidth;
 
@@ -49,12 +58,11 @@ class PenConfig {
 /// What the next stroke will look like, and how the pen behaves while it
 /// is drawn.
 ///
-/// The ink and width are the basic settings. The rest are advanced: how
+/// The style, ink, and width are the basic settings. The rest are advanced: how
 /// sharp the ends of a stroke are, how much stylus pressure changes the
 /// width, and how much the line is stabilized, each off at 0; whether
 /// holding the pen still at the end of a stroke turns it into a shape, on
-/// by default; whether scribbling over ink erases it, on by default; and
-/// whether the pen follows ink it is drawn close alongside, off by default.
+/// by default; and whether scribbling over ink erases it, on by default.
 @immutable
 class PenSettings {
   const PenSettings({
@@ -68,7 +76,6 @@ class PenSettings {
     this.stabilization = defaultStabilization,
     this.holdToShape = true,
     this.scribbleToErase = true,
-    this.followStroke = false,
   }) : assert(tipSharpness >= 0 && tipSharpness <= 1),
        assert(pressureSensitivity >= 0 && pressureSensitivity <= 1),
        assert(stabilization >= 0 && stabilization <= 1);
@@ -111,6 +118,8 @@ class PenSettings {
 
   bool get isHighlighter => style == WritingStyle.highlighter;
 
+  bool get isPencil => style == WritingStyle.pencil;
+
   /// The ink of the current [style].
   InkColor get activeInk => isHighlighter ? highlighterInk : ink;
 
@@ -136,11 +145,15 @@ class PenSettings {
     return isHighlighter
         ? StrokeStyle(
             ink: highlighterInk,
-            width: highlighterWidth,
+            width: highlighterWidth * config.strokeWidthScale,
             writing: WritingStyle.highlighter,
             opacity: config.highlighterOpacity,
           )
-        : StrokeStyle(ink: ink, width: width);
+        : StrokeStyle(
+            ink: ink,
+            width: width * config.strokeWidthScale,
+            writing: style,
+          );
   }
 
   /// Whether holding still at the end of the next stroke may turn it into
@@ -150,10 +163,6 @@ class PenSettings {
   /// Whether scribbling over ink with the next stroke may erase that ink:
   /// only for the pen.
   bool get armsScribbleToErase => scribbleToErase && !isHighlighter;
-
-  /// Whether the next stroke is drawn onto ink it passes close alongside:
-  /// only for the pen.
-  bool get followsStrokes => followStroke && !isHighlighter;
 
   /// How sharply the ends of a stroke narrow, from 0 (round) to 1 (a fine
   /// point).
@@ -173,10 +182,6 @@ class PenSettings {
   /// and is not kept itself.
   final bool scribbleToErase;
 
-  /// Whether the pen is drawn onto a stroke it passes very close
-  /// alongside, and eases away from it as it leaves.
-  final bool followStroke;
-
   /// How the width of the next stroke changes along it. A highlighter is
   /// even from end to end: no taper, no pressure.
   StrokeDynamics get dynamics {
@@ -188,7 +193,9 @@ class PenSettings {
 
   /// [base] tuned for this pen's stabilization: unsmoothed at 0, [base]
   /// itself at 50%, and smoothing harder on up to 100%. The cutoff moves
-  /// geometrically, so each step of the slider feels alike.
+  /// geometrically, so each step of the slider feels alike. The extra
+  /// steadiness [base] asks for when drawing slowly fades out with the
+  /// slider: full from 50% up, none at 0.
   SmoothingConfig smoothing(SmoothingConfig base) {
     if (stabilization == _configuredStabilization) {
       return base;
@@ -215,6 +222,12 @@ class PenSettings {
       maxFinalizationPoints: base.maxFinalizationPoints,
       finalizationSpacing: base.finalizationSpacing,
       endpointTolerance: base.endpointTolerance,
+      slowSpeed: base.slowSpeed,
+      fastSpeed: base.fastSpeed,
+      slowCutoffScale:
+          1 -
+          (1 - base.slowCutoffScale) *
+              math.min(1, stabilization / _configuredStabilization),
     );
   }
 
@@ -229,7 +242,6 @@ class PenSettings {
     double? stabilization,
     bool? holdToShape,
     bool? scribbleToErase,
-    bool? followStroke,
   }) {
     return PenSettings(
       ink: ink ?? this.ink,
@@ -242,7 +254,6 @@ class PenSettings {
       stabilization: stabilization ?? this.stabilization,
       holdToShape: holdToShape ?? this.holdToShape,
       scribbleToErase: scribbleToErase ?? this.scribbleToErase,
-      followStroke: followStroke ?? this.followStroke,
     );
   }
 
@@ -258,8 +269,7 @@ class PenSettings {
         other.pressureSensitivity == pressureSensitivity &&
         other.stabilization == stabilization &&
         other.holdToShape == holdToShape &&
-        other.scribbleToErase == scribbleToErase &&
-        other.followStroke == followStroke;
+        other.scribbleToErase == scribbleToErase;
   }
 
   @override
@@ -274,6 +284,5 @@ class PenSettings {
     stabilization,
     holdToShape,
     scribbleToErase,
-    followStroke,
   );
 }

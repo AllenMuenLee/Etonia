@@ -76,9 +76,9 @@ enum SubscriptionPlan {
     title: 'Pro',
     priceLabel: '\$12.99 / month',
     yearlyPriceLabel: '\$129.99 / year',
-    includedCreditsMicroUsd: 5000000,
-    yearlyIncludedCreditsMicroUsd: 60000000,
-    tokenPoolScale: 0.62,
+    includedCreditsMicroUsd: 4000000,
+    yearlyIncludedCreditsMicroUsd: 48000000,
+    tokenPoolScale: 0.55,
     meteredModels: _allMetered,
     creditDescription:
         'AI tokens for Sonnet, Sol, Opus, Argon & Astra combined',
@@ -87,8 +87,8 @@ enum SubscriptionPlan {
     title: 'Max',
     priceLabel: '\$29.99 / month',
     yearlyPriceLabel: '\$299.99 / year',
-    includedCreditsMicroUsd: 15000000,
-    yearlyIncludedCreditsMicroUsd: 180000000,
+    includedCreditsMicroUsd: 10000000,
+    yearlyIncludedCreditsMicroUsd: 120000000,
     tokenPoolScale: 1.0,
     meteredModels: _allMetered,
     creditDescription:
@@ -135,8 +135,8 @@ enum SubscriptionPlan {
   String get tokenComparisonText {
     return switch (this) {
       SubscriptionPlan.starter499 => 'Essential AI access',
-      SubscriptionPlan.pro1299 => '4.2× more tokens than Starter',
-      SubscriptionPlan.max2999 => '3× more tokens than Pro (12.5× Starter)',
+      SubscriptionPlan.pro1299 => '3.3× more tokens than Starter',
+      SubscriptionPlan.max2999 => '2.5× more tokens than Pro (8.3× Starter)',
     };
   }
 
@@ -370,6 +370,7 @@ class SubscriptionState {
     this.expiresAt,
     this.status,
     this.freeCreditMicroUsd = 0,
+    this.freeCreditExpiresAt,
   });
 
   factory SubscriptionState.fromJson(Map<String, Object?> json) {
@@ -394,6 +395,9 @@ class SubscriptionState {
       expiresAt: DateTime.tryParse(json['expiresAt'] as String? ?? ''),
       status: json['status'] as String?,
       freeCreditMicroUsd: freeCredit is int && freeCredit > 0 ? freeCredit : 0,
+      freeCreditExpiresAt: DateTime.tryParse(
+        json['freeCreditExpiresAt'] as String? ?? '',
+      ),
     );
   }
 
@@ -407,10 +411,13 @@ class SubscriptionState {
   final DateTime? expiresAt;
   final String? status;
 
-  /// The one-time credit the server granted this free account, or 0. Only
-  /// meaningful without an [activePlan]; [remainingCreditsMicroUsd] is
-  /// what is left of it.
+  /// The free credit the server granted this account (the one-time credit and
+  /// any gift codes), or 0. Only meaningful without an [activePlan];
+  /// [remainingCreditsMicroUsd] is what is left of it.
   final int freeCreditMicroUsd;
+
+  /// When the free credit ends, one month after it was last granted.
+  final DateTime? freeCreditExpiresAt;
 
   SubscriptionState copyWith({
     SubscriptionPlan? activePlan,
@@ -427,6 +434,7 @@ class SubscriptionState {
       expiresAt: expiresAt,
       status: status,
       freeCreditMicroUsd: freeCreditMicroUsd,
+      freeCreditExpiresAt: freeCreditExpiresAt,
     );
   }
 

@@ -2,6 +2,7 @@ import 'dart:isolate';
 import 'dart:math' as math;
 import 'dart:typed_data';
 import 'dart:ui';
+import 'dart:convert';
 
 import 'package:image/image.dart' as image;
 
@@ -16,6 +17,7 @@ import '../page/page_setup.dart';
 import 'document_io_config.dart';
 import 'document_models.dart';
 import 'document_platform.dart';
+import 'svg_document.dart';
 import 'goodnotes_archive_extractor.dart';
 import 'goodnotes_pdf_recovery.dart';
 
@@ -171,7 +173,7 @@ class DocumentImporter {
                 pageSize: plan.pageSizes[i],
               ),
             ),
-        ]),
+        ], isImportedPdf: true),
       );
       cancellation?.throwIfCancelled();
       return note;
@@ -229,24 +231,29 @@ class DocumentImporter {
       cancellation?.throwIfCancelled();
       await repository.saveNote(
         note.id,
-        NoteContent(<StoredPage>[
-          for (int i = 0; i < extraction.pageCount; i++)
-            StoredPage(
-              setup: PageSetup(
-                size: PageSize.custom,
-                customSize: extraction.pageSizes[i],
-                background: PageBackground.blank,
+        NoteContent(
+          <StoredPage>[
+            for (int i = 0; i < extraction.pageCount; i++)
+              StoredPage(
+                setup: PageSetup(
+                  size: PageSize.custom,
+                  customSize: extraction.pageSizes[i],
+                  background: PageBackground.blank,
+                ),
+                strokes: extraction.pageStrokes[i],
+                pdfSource: extraction.pdfAttachmentIndices[i] == null
+                    ? null
+                    : PdfPageSource(
+                        assetId: assetIds[extraction.pdfAttachmentIndices[i]!],
+                        pageIndex: extraction.pdfPageIndices[i]!,
+                        pageSize: extraction.pageSizes[i],
+                      ),
               ),
-              strokes: extraction.pageStrokes[i],
-              pdfSource: extraction.pdfAttachmentIndices[i] == null
-                  ? null
-                  : PdfPageSource(
-                      assetId: assetIds[extraction.pdfAttachmentIndices[i]!],
-                      pageIndex: extraction.pdfPageIndices[i]!,
-                      pageSize: extraction.pageSizes[i],
-                    ),
-            ),
-        ]),
+          ],
+          isImportedPdf: extraction.pdfAttachmentIndices.any(
+            (int? idx) => idx != null,
+          ),
+        ),
       );
       cancellation?.throwIfCancelled();
       return note;
@@ -349,6 +356,46 @@ class DocumentImporter {
     if (!controller.insertImage(element)) {
       await repository.removeAsset(noteId, assetId);
       throw const DocumentImportException('This image could not be inserted');
+    }
+    return element;
+  }
+
+  /// Inserts a self-contained SVG without rasterizing it. Its source remains
+  /// inline in the note so a later SVG export is still editable.
+  Future<NoteImageElement> insertSvg({
+    required InkController controller,
+    required PickedDocument picked,
+    required Rect visiblePage,
+  }) async {
+    final EditableSvg vector;
+    try {
+      vector = EditableSvg.parse(
+        utf8.decode(picked.bytes, allowMalformed: false),
+      ).croppedToContent();
+    } on Object {
+      throw const DocumentImportException(
+        'This SVG could not be opened safely',
+      );
+    }
+    final Size intrinsic = vector.viewBox.size;
+    final double scale = math.min(
+      1,
+      math.min(
+        visiblePage.width * config.insertedImageMaxFraction / intrinsic.width,
+        visiblePage.height * config.insertedImageMaxFraction / intrinsic.height,
+      ),
+    );
+    final NoteImageElement element = NoteImageElement(
+      id: 'svg-${DateTime.now().microsecondsSinceEpoch.toRadixString(36)}',
+      assetId: '',
+      pixelSize: intrinsic,
+      center: InkVector(visiblePage.center.dx, visiblePage.center.dy),
+      size: intrinsic * scale,
+      fileName: picked.name,
+      vector: vector,
+    );
+    if (!controller.insertImage(element)) {
+      throw const DocumentImportException('This SVG could not be inserted');
     }
     return element;
   }

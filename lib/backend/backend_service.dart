@@ -194,6 +194,9 @@ class BackendService extends BillingBackend with WidgetsBindingObserver {
         'verification_failed',
         'not_configured',
         'request_in_progress',
+        'invalid_code',
+        'code_redeemed',
+        'code_exhausted',
         'rejected',
         'server',
       };
@@ -223,6 +226,17 @@ class BackendService extends BillingBackend with WidgetsBindingObserver {
         'productId': purchase.productId,
         'purchaseId': purchase.purchaseId,
         'verificationData': purchase.verificationData,
+      }),
+    );
+  }
+
+  @override
+  Future<SubscriptionState> redeemGiftCode(String code) async {
+    return SubscriptionState.fromJson(
+      await invoke('billing', {
+        'action': 'redeem',
+        'deviceId': deviceId,
+        'code': code,
       }),
     );
   }

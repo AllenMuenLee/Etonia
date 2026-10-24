@@ -654,7 +654,8 @@ void main() {
       final Rect canvas = _surface(tester);
 
       for (final Offset corner in <Offset>[
-        const Offset(3, 3),
+        // Not the top left corner: the card of controls hangs there.
+        const Offset(3, 150),
         Offset(page.width - 3, 3),
         Offset(3, page.height - 3),
         Offset(page.width - 3, page.height - 3),
@@ -760,7 +761,7 @@ void main() {
     );
     // Clear of the action bar, which now floats above the moved frame.
     expect(
-      pixels.at(_at(tester, const Offset(130, 200))),
+      pixels.at(_at(tester, const Offset(130, 260))),
       isSameColorAs(AppColors.light.writingSurface),
     );
   });
@@ -1033,7 +1034,7 @@ void main() {
         return found;
       }
 
-      for (int i = 0; i < 12 && !focused('Copy'); i++) {
+      for (int i = 0; i < 20 && !focused('Copy'); i++) {
         await tester.sendKeyEvent(LogicalKeyboardKey.tab);
         await tester.pump();
       }
@@ -1373,7 +1374,7 @@ void main() {
     // A new stroke, at the pen's width, not the scaled one.
     expect(controller.strokes.length, 4);
     expect(controller.strokes.last.source, StrokeSource.input);
-    expect(controller.strokes.last.style.width, 3);
+    expect(controller.strokes.last.style.width, 1.5);
     expect(controller.strokes[0].style.width, closeTo(8, 1e-9));
 
     // Scaled ink erases like any other: the area eraser cuts it.

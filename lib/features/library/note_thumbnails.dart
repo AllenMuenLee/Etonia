@@ -73,12 +73,14 @@ class ThumbnailCache {
     required this.rasterizer,
     this.pixelWidth = 420,
     this.capacity = 120,
-    this.concurrency = 2,
+    this.concurrency = 4,
     this.maxBytes = 24 * 1024 * 1024,
+    this.prefetchLimit = 18,
   }) : assert(pixelWidth > 0),
        assert(capacity > 0),
        assert(concurrency > 0),
-       assert(maxBytes > 0);
+       assert(maxBytes > 0),
+       assert(prefetchLimit >= 0);
 
   final NoteRepository repository;
   final PdfRasterizer rasterizer;
@@ -94,6 +96,10 @@ class ThumbnailCache {
   final int concurrency;
   final int maxBytes;
 
+  /// How many of a folder's notes [prefetch] draws ahead: about a screen
+  /// and a half of cards, which fits in [maxBytes].
+  final int prefetchLimit;
+
   int get retainedBytes => _entries.values.fold(0, (int total, _Entry entry) {
     final ui.Image? image = entry.image.value?.image;
     return total + (image == null ? 0 : image.width * image.height * 4);
@@ -103,8 +109,7 @@ class ThumbnailCache {
   /// this synchronously in initState; no load/render is started here.
   NoteThumbnailImage? peek(NoteEntry note, Brightness brightness) {
     final entry = _entries[note.id];
-    if (entry?.key != '${note.modified.microsecondsSinceEpoch}' ||
-        entry?.style?.brightness != brightness) {
+    if (entry?.key != _keyOf(note) || entry?.style?.brightness != brightness) {
       return null;
     }
     return entry?.image.value;
@@ -112,9 +117,87 @@ class ThumbnailCache {
 
   final LinkedHashMap<String, _Entry> _entries =
       LinkedHashMap<String, _Entry>();
+
+  /// Pictures asked for by a card being built, drawn before those only
+  /// fetched in advance.
   final Queue<_Entry> _waiting = Queue<_Entry>();
+  final Queue<_Entry> _background = Queue<_Entry>();
   int _running = 0;
   bool _disposed = false;
+
+  /// Pictures being drawn, and whether drawing waits for the library to
+  /// be shown again.
+  final Set<_Entry> _drawing = <_Entry>{};
+  bool _paused = false;
+
+  /// Moves on whenever what is drawing is let go: a draw started before
+  /// stops at its next step.
+  int _epoch = 0;
+
+  /// The user has moved on to something these pictures are not part of,
+  /// such as a note: drawing stops, so it never competes with what the
+  /// user now sees. Pictures waiting their turn are let go, those being
+  /// drawn stop at their next step, and each is drawn when it is next
+  /// asked for once [resume]d. Pictures already drawn stay.
+  void pause() {
+    if (_paused) return;
+    _paused = true;
+    cancelPending();
+  }
+
+  /// Draws again, as the library comes back into view: first what is
+  /// asked for, then the notes just saved.
+  void resume() {
+    if (!_paused) return;
+    _paused = false;
+    _pump();
+    _drawCaptured();
+  }
+
+  /// First pages just saved from the editor, by note, with the entry each
+  /// was saved as. A note's picture is drawn from its page here, already in
+  /// memory, rather than read back from disk.
+  final Map<String, ({NoteEntry note, StoredPage page})> _captured =
+      <String, ({NoteEntry note, StoredPage page})>{};
+
+  /// The style pictures were last asked for in, which those of the notes
+  /// just saved are drawn in.
+  ThumbnailStyle? _style;
+
+  /// [note] has just been saved with [page] as its first page. Its picture
+  /// is drawn from [page] as soon as the library is in view, and stored, so
+  /// a folder showing the note later only reads that picture. Nothing is
+  /// drawn while [pause]d: the editor in front saves often.
+  void capture(NoteEntry note, StoredPage page) {
+    if (_disposed) return;
+    _captured[note.id] = (note: note, page: page);
+    if (!_paused) _drawCaptured();
+  }
+
+  void _drawCaptured() {
+    final ThumbnailStyle? style = _style;
+    if (style == null || _disposed) return;
+    for (final ({NoteEntry note, StoredPage page}) captured
+        in _captured.values.toList()) {
+      _request(captured.note, style, background: true);
+    }
+  }
+
+  /// Lets go of the pictures waiting to be drawn and of those being drawn,
+  /// as when another folder is shown. Each is drawn when next asked for.
+  void cancelPending() {
+    _epoch++;
+    for (final _Entry entry in <_Entry>[..._waiting, ..._background]) {
+      entry
+        ..queued = false
+        ..dropped = true;
+    }
+    _waiting.clear();
+    _background.clear();
+    for (final _Entry entry in _drawing) {
+      entry.dropped = true;
+    }
+  }
 
   /// The picture of [note] in [style], drawn if it is missing or stale.
   /// Its value is null until the first picture is ready; the listenable
@@ -122,27 +205,73 @@ class ThumbnailCache {
   ValueListenable<NoteThumbnailImage?> watch(
     NoteEntry note,
     ThumbnailStyle style,
-  ) {
-    final String key = '${note.modified.microsecondsSinceEpoch}';
+  ) => _request(note, style, background: false).image;
+
+  /// Starts drawing the first [prefetchLimit] of [notes] as soon as they
+  /// are known, so their cards find the pictures ready when built. Cards
+  /// on screen still draw ahead of these.
+  void prefetch(Iterable<NoteEntry> notes, ThumbnailStyle style) {
+    int left = prefetchLimit;
+    for (final NoteEntry note in notes) {
+      if (left-- <= 0) break;
+      _request(note, style, background: true);
+    }
+  }
+
+  /// What [note]'s picture is named for: the pages it shows, as saved.
+  /// Its title and dates do not change it, and it reads back exactly.
+  static String _keyOf(NoteEntry note) => 'r${note.revision}';
+
+  _Entry _request(
+    NoteEntry note,
+    ThumbnailStyle style, {
+    required bool background,
+  }) {
+    _style = style;
+    final String key = _keyOf(note);
     _Entry? entry = _entries.remove(note.id);
     entry ??= _Entry(note.id);
     _entries[note.id] = entry;
-    if (entry.key != key || entry.style != style) {
+    final bool stale =
+        entry.key != key || entry.style != style || entry.dropped;
+    if (stale) {
       entry
         ..key = key
-        ..style = style;
-      if (!entry.queued) {
-        entry.queued = true;
+        ..style = style
+        ..dropped = false;
+    }
+    final NoteEntry? captured = _captured[note.id]?.note;
+    if (captured != null &&
+        (note.revision > captured.revision ||
+            (!stale &&
+                !entry.queued &&
+                !_drawing.contains(entry) &&
+                key == _keyOf(captured)))) {
+      // Changed again since, or already pictured as it was saved.
+      _captured.remove(note.id);
+    }
+    if (entry.queued) {
+      if (!background && entry.background) {
+        // A card wants it now: it goes ahead of the ones only fetched early.
+        _background.remove(entry);
+        entry.background = false;
         _waiting.add(entry);
         _pump();
       }
+    } else if (stale) {
+      entry
+        ..queued = true
+        ..background = background;
+      (background ? _background : _waiting).add(entry);
+      _pump();
     }
     _evict();
-    return entry.image;
+    return entry;
   }
 
   /// Forgets the notes not in [ids], such as deleted ones.
   void retainOnly(Set<String> ids) {
+    _captured.removeWhere((String id, _) => !ids.contains(id));
     _entries.removeWhere((String id, _Entry entry) {
       final bool gone = !ids.contains(id);
       if (gone) entry.dispose();
@@ -157,6 +286,20 @@ class ThumbnailCache {
     }
   }
 
+  /// How many pictures are kept under memory pressure: about as many as
+  /// a library screen shows at once, the most recently shown.
+  static const int _pressuredCapacity = 32;
+
+  /// Under memory pressure: keeps only the most recently shown pictures.
+  /// Those still on screen keep clones of their own.
+  void releaseMemory() {
+    // Their pictures are drawn from disk instead, when next shown.
+    _captured.clear();
+    while (_entries.length > _pressuredCapacity) {
+      _entries.remove(_entries.keys.first)!.dispose();
+    }
+  }
+
   void _evict() {
     while (_entries.length > capacity || retainedBytes > maxBytes) {
       final String oldest = _entries.keys.first;
@@ -165,17 +308,25 @@ class ThumbnailCache {
   }
 
   void _pump() {
-    while (!_disposed && _running < concurrency && _waiting.isNotEmpty) {
-      final _Entry entry = _waiting.removeFirst();
+    while (!_disposed &&
+        !_paused &&
+        _running < concurrency &&
+        (_waiting.isNotEmpty || _background.isNotEmpty)) {
+      final _Entry entry = (_waiting.isNotEmpty ? _waiting : _background)
+          .removeFirst();
       entry.queued = false;
       if (entry.disposed) continue;
       _running++;
+      _drawing.add(entry);
       final String key = entry.key!;
       final ThumbnailStyle style = entry.style!;
+      final int epoch = _epoch;
       unawaited(
-        _draw(entry.noteId, key, style)
+        _draw(entry.noteId, key, style, () => epoch != _epoch || _disposed)
             .then((ui.Image? image) {
               if (image == null) return;
+              // Finished after all: nothing is left to draw again.
+              entry.dropped = false;
               // A newer request, or a dropped entry, wants another picture.
               if (_disposed ||
                   entry.disposed ||
@@ -187,9 +338,14 @@ class ThumbnailCache {
               entry.show(NoteThumbnailImage(image));
               _evict();
             })
-            .catchError((Object _) {})
+            .catchError((Object error, StackTrace stack) {
+              // Drawn again when next asked for, rather than left blank.
+              entry.dropped = true;
+              debugPrint('Thumbnail of ${entry.noteId} failed: $error\n$stack');
+            })
             .whenComplete(() {
               _running--;
+              _drawing.remove(entry);
               _pump();
             }),
       );
@@ -206,15 +362,22 @@ class ThumbnailCache {
 
   Future<ui.Image?> _draw(
     String noteId,
-    String modifiedKey,
+    String key,
     ThumbnailStyle style,
+    bool Function() cancelled,
   ) async {
-    final String diskKey = '${modifiedKey}_${style.brightness.name}';
+    final String diskKey = '${key}_${style.brightness.name}';
     final NoteRepository repository = this.repository;
     final ThumbnailDiskStore? store = repository is ThumbnailDiskStore
         ? repository as ThumbnailDiskStore
         : null;
-    if (store != null) {
+    // Just saved from the editor: drawn from the page in memory. Nothing for
+    // it is on disk yet.
+    final ({NoteEntry note, StoredPage page})? captured = _captured[noteId];
+    final StoredPage? fresh = captured != null && _keyOf(captured.note) == key
+        ? captured.page
+        : null;
+    if (store != null && fresh == null) {
       final Uint8List? cached = await store.readThumbnail(noteId, diskKey);
       if (cached != null) {
         try {
@@ -224,9 +387,9 @@ class ThumbnailCache {
         }
       }
     }
-    final NoteContent content = await repository.loadNote(noteId);
-    if (content.pages.isEmpty) return null;
-    final StoredPage page = content.pages.first;
+    if (cancelled()) return null;
+    final StoredPage? page = fresh ?? await repository.loadFirstPage(noteId);
+    if (page == null || cancelled()) return null;
     final Size paper = NoteThumbnailPainter.pageSizeOf(page);
     final double aspect = (paper.width / paper.height).clamp(0.6, 1.5);
     final int width = pixelWidth;
@@ -270,9 +433,19 @@ class ThumbnailCache {
         }
       }
     }
+    // Let go of part way: what was decoded for it goes too.
+    bool stopped() {
+      if (!cancelled()) return false;
+      for (final ui.Image part in parts) {
+        part.dispose();
+      }
+      return true;
+    }
+
     final List<(NoteImageElement, ui.Image)> pictures =
         <(NoteImageElement, ui.Image)>[];
     for (final NoteImageElement element in page.images) {
+      if (stopped()) return null;
       if ((element.center.y - element.size.height) * scale > height) continue;
       final Uint8List? bytes = await _asset(noteId, element.assetId);
       if (bytes == null) continue;
@@ -288,6 +461,7 @@ class ThumbnailCache {
       }
     }
 
+    if (stopped()) return null;
     final ui.PictureRecorder recorder = ui.PictureRecorder();
     final Canvas canvas = Canvas(recorder);
     final Size size = Size(width.toDouble(), height.toDouble());
@@ -340,24 +514,20 @@ class ThumbnailCache {
     final ui.Picture picture = recorder.endRecording();
     try {
       final ui.Image result = await picture.toImage(width, height);
+      if (fresh != null && identical(_captured[noteId], captured)) {
+        _captured.remove(noteId);
+      }
+      // Saved after the picture is shown, not before: the encode and write
+      // are not what the user waits for.
       if (store != null) {
-        try {
-          final ByteData? encoded = await result.toByteData(
-            format: ui.ImageByteFormat.png,
-          );
-          if (encoded != null) {
-            await store.writeThumbnail(
-              noteId,
-              diskKey,
-              encoded.buffer.asUint8List(
-                encoded.offsetInBytes,
-                encoded.lengthInBytes,
-              ),
-            );
-          }
-        } on Object {
-          // Disk caching is opportunistic; the in-memory image is valid.
-        }
+        final Future<void> write = _persist(
+          store,
+          noteId,
+          diskKey,
+          result.clone(),
+        );
+        _writes.add(write);
+        unawaited(write.whenComplete(() => _writes.remove(write)));
       }
       return result;
     } finally {
@@ -365,6 +535,40 @@ class ThumbnailCache {
       for (final ui.Image part in parts) {
         part.dispose();
       }
+    }
+  }
+
+  final Set<Future<void>> _writes = <Future<void>>{};
+
+  /// Completes once the pictures drawn so far are saved to disk.
+  @visibleForTesting
+  Future<void> settleWrites() => Future.wait(_writes.toList());
+
+  /// Writes [image] to [store] and disposes it.
+  static Future<void> _persist(
+    ThumbnailDiskStore store,
+    String noteId,
+    String diskKey,
+    ui.Image image,
+  ) async {
+    try {
+      final ByteData? encoded = await image.toByteData(
+        format: ui.ImageByteFormat.png,
+      );
+      if (encoded != null) {
+        await store.writeThumbnail(
+          noteId,
+          diskKey,
+          encoded.buffer.asUint8List(
+            encoded.offsetInBytes,
+            encoded.lengthInBytes,
+          ),
+        );
+      }
+    } on Object {
+      // Disk caching is opportunistic; the in-memory image is valid.
+    } finally {
+      image.dispose();
     }
   }
 
@@ -386,7 +590,9 @@ class ThumbnailCache {
       entry.dispose();
     }
     _entries.clear();
+    _captured.clear();
     _waiting.clear();
+    _background.clear();
   }
 }
 
@@ -397,7 +603,13 @@ class _Entry {
   String? key;
   ThumbnailStyle? style;
   bool queued = false;
+
+  /// Queued by [ThumbnailCache.prefetch], with no card asking yet.
+  bool background = false;
   bool disposed = false;
+
+  /// Let go of before its picture was drawn: drawn when next asked for.
+  bool dropped = false;
   final ValueNotifier<NoteThumbnailImage?> image =
       ValueNotifier<NoteThumbnailImage?>(null);
 
@@ -550,13 +762,6 @@ class NoteThumbnailPainter extends CustomPainter {
       ).paint(canvas, visible);
     }
     if (paintInk) {
-      // Sticky notes, with their own ink, under the page's ink.
-      for (final StickyNoteElement note in page.stickyNotes) {
-        if (note.bounds.top > visible.height) {
-          continue;
-        }
-        paintStickyNote(canvas, note);
-      }
       for (final Stroke stroke in page.strokes) {
         if (stroke.bounds.top > visible.height) {
           continue;
@@ -569,7 +774,15 @@ class NoteThumbnailPainter extends CustomPainter {
           origin: stroke.points.first,
           isDot: stroke.isDot,
           outline: stroke.outline,
+          writing: stroke.style.writing,
         );
+      }
+      // Sticky notes, with their own ink, above the page's ink.
+      for (final StickyNoteElement note in page.stickyNotes) {
+        if (note.bounds.top > visible.height) {
+          continue;
+        }
+        paintStickyNote(canvas, note);
       }
     }
     canvas.restore();

@@ -76,6 +76,51 @@ void main() {
     });
   });
 
+  group('slow-speed stabilization', () {
+    const SmoothingConfig steady = SmoothingConfig(slowCutoffScale: 0.25);
+
+    test('scales the cutoff fully when slow, not at all when fast', () {
+      expect(steady.cutoffScaleAt(0), 0.25);
+      expect(steady.cutoffScaleAt(steady.slowSpeed), 0.25);
+      expect(steady.cutoffScaleAt(steady.fastSpeed), 1);
+      expect(steady.cutoffScaleAt(5000), 1);
+      final double middle = steady.cutoffScaleAt(
+        (steady.slowSpeed + steady.fastSpeed) / 2,
+      );
+      expect(middle, inExclusiveRange(0.25, 1));
+    });
+
+    test('a scale of 1 leaves the filter as it was', () {
+      const SmoothingConfig plain = SmoothingConfig();
+      expect(plain.cutoffScaleAt(0), 1);
+      expect(plain.cutoffScaleAt(200), 1);
+    });
+
+    test('a slow stroke is steadier than with the scale off', () {
+      // 60 px/s along x with 1 px of alternating sideways shake.
+      final List<RawInkSample> samples = <RawInkSample>[
+        for (int i = 0; i < 60; i++)
+          _at(i * 1.0, i.isEven ? 1 : -1, i * 16),
+      ];
+      double wobble(SmoothingConfig config) {
+        final List<InkVector> out = _run(samples, config: config);
+        return out.skip(20).map((InkVector p) => p.y.abs()).reduce(math.max);
+      }
+
+      expect(wobble(steady), lessThan(wobble(const SmoothingConfig())));
+    });
+
+    test('a fast stroke is smoothed the same either way', () {
+      final List<RawInkSample> samples = <RawInkSample>[
+        for (int i = 0; i < 40; i++) _at(i * 16.0, 0, i * 16),
+      ];
+      final List<InkVector> a = _run(samples, config: steady);
+      final List<InkVector> b = _run(samples);
+      // Early samples still count as slow; once up to speed they agree.
+      expect(a.last.x, closeTo(b.last.x, 25));
+    });
+  });
+
   group('pen behavior', () {
     test('suppresses stationary high-frequency jitter', () {
       final math.Random random = math.Random(7);

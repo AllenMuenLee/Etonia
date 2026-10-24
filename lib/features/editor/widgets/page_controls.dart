@@ -8,16 +8,86 @@ import '../document_io/document_models.dart';
 import '../page/note_document.dart';
 import '../page/page_background.dart';
 import '../page/page_setup.dart';
+import '../../../shared/navigation/app_dialogs.dart';
+import '../../../shared/widgets/app_controls.dart';
+
+/// The action chosen from the Add menu; remembered so subsequent clicks
+/// on the Add button trigger the action directly without asking again.
+enum AddPageAction { addPage, insertPdf }
+
+/// The floating card hanging from the top bar over the page at the right:
+/// holds change page, search, and the add button.
+class FloatingPageControls extends StatelessWidget {
+  const FloatingPageControls({
+    super.key,
+    required this.height,
+    required this.width,
+    required this.child,
+  });
+
+  final double height;
+  final double width;
+  final Widget child;
+
+  static double widthFor(
+    double height, {
+    required bool find,
+    required bool navigation,
+  }) {
+    const double indicator = 72;
+    const double touch = AppSizes.minTouchTarget;
+    final double padding = (height - touch) / 2;
+    return (navigation ? 2 * touch : 0) +
+        indicator +
+        (find ? touch : 0) +
+        touch +
+        2 * padding;
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final AppColors colors = AppColors.of(context);
+    return Semantics(
+      container: true,
+      explicitChildNodes: true,
+      label: 'Page controls and actions',
+      child: SizedBox(
+        key: const ValueKey<String>('page-controls-card'),
+        height: height,
+        width: width,
+        child: GlassSurface(
+          // Joined to the top bar and the screen's right edge: rounded only where
+          // it hangs free.
+          borderRadius: const BorderRadius.only(
+            bottomLeft: Radius.circular(AppRadii.large),
+          ),
+          boxShadow: AppShadows.floating(colors),
+          child: Material(
+            type: MaterialType.transparency,
+            child: Center(
+              child: FocusTraversalGroup(
+                child: FittedBox(fit: BoxFit.scaleDown, child: child),
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
 
 /// The page indicator, `current / count`, which opens the page panel, on
-/// wider layouts previous and next beside it, and the round Add button,
-/// whose menu adds a page or inserts a PDF.
+/// wider layouts previous and next beside it, search, and the round Add button.
 class PageControls extends StatelessWidget {
   const PageControls({
     super.key,
     required this.document,
     required this.showNavigation,
     required this.onOpenPanel,
+    this.canFind = false,
+    this.onFind,
+    this.lastAddAction,
+    this.onAddActionChanged,
     this.onChooseImageFromGallery,
     this.onTakePhoto,
     this.onInsertPdf,
@@ -30,6 +100,14 @@ class PageControls extends StatelessWidget {
   final bool showNavigation;
 
   final VoidCallback onOpenPanel;
+
+  final bool canFind;
+
+  /// Called with the search button's global bounds, so the find bubble can
+  /// hang below it.
+  final ValueChanged<Rect>? onFind;
+  final AddPageAction? lastAddAction;
+  final ValueChanged<AddPageAction>? onAddActionChanged;
 
   final VoidCallback? onChooseImageFromGallery;
   final VoidCallback? onTakePhoto;
@@ -45,59 +123,240 @@ class PageControls extends StatelessWidget {
     return ListenableBuilder(
       listenable: document,
       builder: (BuildContext context, Widget? child) {
-        final int index = document.currentIndex;
-        final int count = document.pageCount;
         return Row(
           mainAxisSize: MainAxisSize.min,
           children: <Widget>[
             if (showNavigation)
-              IconButton(
+              ToolbarIconButton(
                 tooltip: 'Previous page',
                 onPressed: document.canGoBack ? document.previousPage : null,
-                icon: const Icon(AppIcons.previous),
+                icon: AppIcons.previous,
+              ),
+            _PageNumberSection(
+              document: document,
+              onOpenPanel: onOpenPanel,
+              colors: colors,
+            ),
+            if (showNavigation)
+              ToolbarIconButton(
+                tooltip: 'Next page',
+                onPressed: document.canGoForward ? document.nextPage : null,
+                icon: AppIcons.disclosure,
+              ),
+            if (canFind && onFind != null)
+              Builder(
+                builder: (BuildContext context) => ToolbarIconButton(
+                  tooltip: 'Find handwriting',
+                  onPressed: () {
+                    final RenderBox box =
+                        context.findRenderObject()! as RenderBox;
+                    onFind!(box.localToGlobal(Offset.zero) & box.size);
+                  },
+                  icon: AppIcons.search,
+                ),
+              ),
+            AddMenuButton(
+              onAddPage: document.addPage,
+              onInsertPdf: onInsertPdf,
+              lastAction: lastAddAction,
+              onActionChanged: onAddActionChanged,
+            ),
+          ],
+        );
+      },
+    );
+  }
+}
+
+class _PageNumberSection extends StatefulWidget {
+  const _PageNumberSection({
+    required this.document,
+    required this.onOpenPanel,
+    required this.colors,
+  });
+
+  final NoteDocument document;
+  final VoidCallback onOpenPanel;
+  final AppColors colors;
+
+  @override
+  State<_PageNumberSection> createState() => _PageNumberSectionState();
+}
+
+class _PageNumberSectionState extends State<_PageNumberSection> {
+  bool _isEditing = false;
+
+  /// Counts rejected entries; each one shakes the field.
+  int _rejected = 0;
+  late final TextEditingController _controller;
+  late final FocusNode _focusNode;
+
+  @override
+  void initState() {
+    super.initState();
+    _controller = TextEditingController(
+      text: '${widget.document.currentIndex + 1}',
+    );
+    _focusNode = FocusNode();
+    _focusNode.addListener(_onFocusChange);
+  }
+
+  @override
+  void didUpdateWidget(_PageNumberSection oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (!_isEditing) {
+      _controller.text = '${widget.document.currentIndex + 1}';
+    }
+  }
+
+  void _onFocusChange() {
+    if (!_focusNode.hasFocus && _isEditing) {
+      _submit(_controller.text, retryIfInvalid: false);
+    }
+  }
+
+  void _startEditing() {
+    setState(() {
+      _isEditing = true;
+      _controller.text = '${widget.document.currentIndex + 1}';
+      _controller.selection = TextSelection(
+        baseOffset: 0,
+        extentOffset: _controller.text.length,
+      );
+    });
+    _focusNode.requestFocus();
+  }
+
+  void _submit(String text, {bool retryIfInvalid = true}) {
+    final int? page = int.tryParse(text.trim());
+    final bool valid =
+        page != null && page >= 1 && page <= widget.document.pageCount;
+    if (valid) {
+      widget.document.goTo(page - 1);
+    } else if (retryIfInvalid && _isEditing) {
+      // Stay in the field: it shakes, and the entry is selected to retype.
+      setState(() {
+        _rejected++;
+        _controller.selection = TextSelection(
+          baseOffset: 0,
+          extentOffset: _controller.text.length,
+        );
+      });
+      _focusNode.requestFocus();
+      return;
+    }
+    if (mounted) {
+      setState(() {
+        _isEditing = false;
+        _controller.text = '${widget.document.currentIndex + 1}';
+      });
+    }
+  }
+
+  @override
+  void dispose() {
+    _focusNode.removeListener(_onFocusChange);
+    _focusNode.dispose();
+    _controller.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final int index = widget.document.currentIndex;
+    final int count = widget.document.pageCount;
+    final TextStyle labelStyle = Theme.of(context).textTheme.labelLarge!
+        .copyWith(
+          fontFeatures: const <FontFeature>[FontFeature.tabularFigures()],
+          color: widget.colors.textPrimary,
+        );
+
+    return Stack(
+      alignment: Alignment.center,
+      children: <Widget>[
+        Opacity(
+          opacity: 0,
+          child: Text(
+            '${index + 1} / $count',
+            semanticsLabel: PageControls.describe(index, count),
+            style: labelStyle,
+          ),
+        ),
+        Row(
+          mainAxisSize: MainAxisSize.min,
+          children: <Widget>[
+            if (_isEditing)
+              Shake(
+                errorToken: _rejected == 0 ? null : _rejected,
+                child: Container(
+                  width: 36,
+                  height: 28,
+                  alignment: Alignment.center,
+                  decoration: BoxDecoration(
+                    color: widget.colors.selected.withValues(alpha: 0.5),
+                    borderRadius: BorderRadius.circular(AppRadii.small),
+                    border: Border.all(
+                      color: widget.colors.accent,
+                      width: AppSizes.hairline,
+                    ),
+                  ),
+                  child: TextField(
+                    key: const ValueKey<String>('page-number-input'),
+                    controller: _controller,
+                    focusNode: _focusNode,
+                    autofocus: true,
+                    keyboardType: TextInputType.number,
+                    textInputAction: TextInputAction.go,
+                    textAlign: TextAlign.center,
+                    style: labelStyle,
+                    cursorColor: widget.colors.accent,
+                    decoration: const InputDecoration(
+                      isDense: true,
+                      contentPadding: EdgeInsets.zero,
+                      border: InputBorder.none,
+                    ),
+                    onSubmitted: _submit,
+                  ),
+                ),
+              )
+            else
+              Tooltip(
+                message: 'Go to page',
+                child: InkWell(
+                  key: const ValueKey<String>('page-number-button'),
+                  canRequestFocus: false,
+                  onTap: _startEditing,
+                  borderRadius: BorderRadius.circular(AppRadii.small),
+                  child: Padding(
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: AppSpacing.xxs,
+                      vertical: AppSpacing.xxs,
+                    ),
+                    child: RollingNumber(index + 1, style: labelStyle),
+                  ),
+                ),
               ),
             Tooltip(
               message: 'Page setup',
               excludeFromSemantics: true,
               child: TextButton(
-                onPressed: onOpenPanel,
+                onPressed: widget.onOpenPanel,
                 style: TextButton.styleFrom(
-                  foregroundColor: colors.textPrimary,
-                  minimumSize: const Size(
-                    AppSizes.minTouchTarget,
-                    AppSizes.minTouchTarget,
-                  ),
+                  foregroundColor: widget.colors.textPrimary,
+                  minimumSize: const Size(0, AppSizes.minTouchTarget),
                   padding: const EdgeInsets.symmetric(
-                    horizontal: AppSpacing.xs,
+                    horizontal: AppSpacing.xxs,
                   ),
-                  shape: RoundedRectangleBorder(
-                    borderRadius: BorderRadius.circular(AppRadii.medium),
-                  ),
-                ),
-                child: Text(
-                  '${index + 1} / $count',
-                  semanticsLabel: describe(index, count),
-                  style: Theme.of(context).textTheme.labelLarge!.copyWith(
-                    fontFeatures: const <FontFeature>[
-                      FontFeature.tabularFigures(),
-                    ],
+                  shape: const RoundedRectangleBorder(
+                    borderRadius: AppBorderRadius.medium,
                   ),
                 ),
+                child: Text(' / $count', style: labelStyle),
               ),
-            ),
-            if (showNavigation)
-              IconButton(
-                tooltip: 'Next page',
-                onPressed: document.canGoForward ? document.nextPage : null,
-                icon: const Icon(AppIcons.disclosure),
-              ),
-            AddMenuButton(
-              onAddPage: document.addPage,
-              onInsertPdf: onInsertPdf,
             ),
           ],
-        );
-      },
+        ),
+      ],
     );
   }
 }
@@ -118,6 +377,7 @@ class ImageMenuButton extends StatelessWidget {
   Widget build(BuildContext context) {
     final bool enabled = onChooseFromGallery != null || onTakePhoto != null;
     return MenuAnchor(
+      animated: !MediaQuery.disableAnimationsOf(context),
       alignmentOffset: const Offset(0, AppSpacing.xxs),
       menuChildren: <Widget>[
         MenuItemButton(
@@ -146,35 +406,93 @@ class ImageMenuButton extends StatelessWidget {
 }
 
 /// A round, accent-tinted button whose menu adds a new page or inserts a
-/// PDF's pages. Tinted rather than filled, so the bar stays
-/// quiet around the page.
-class AddMenuButton extends StatelessWidget {
-  const AddMenuButton({super.key, required this.onAddPage, this.onInsertPdf});
+/// PDF's pages. Once an action has been chosen, clicking it executes that
+/// action directly without asking again; long press opens the menu to switch.
+class AddMenuButton extends StatefulWidget {
+  const AddMenuButton({
+    super.key,
+    required this.onAddPage,
+    this.onInsertPdf,
+    this.lastAction,
+    this.onActionChanged,
+  });
 
   static const double _diameter = 36;
 
   final VoidCallback onAddPage;
   final VoidCallback? onInsertPdf;
+  final AddPageAction? lastAction;
+  final ValueChanged<AddPageAction>? onActionChanged;
+
+  @override
+  State<AddMenuButton> createState() => _AddMenuButtonState();
+}
+
+class _AddMenuButtonState extends State<AddMenuButton> {
+  final MenuController _menu = MenuController();
+  AddPageAction? _localAction;
+
+  AddPageAction? get _effectiveAction => widget.lastAction ?? _localAction;
+
+  void _chooseAction(AddPageAction action) {
+    setState(() {
+      _localAction = action;
+    });
+    widget.onActionChanged?.call(action);
+    switch (action) {
+      case AddPageAction.addPage:
+        widget.onAddPage();
+      case AddPageAction.insertPdf:
+        widget.onInsertPdf?.call();
+    }
+  }
+
+  void _handleClick() {
+    final AddPageAction? action = _effectiveAction;
+    if (action != null) {
+      switch (action) {
+        case AddPageAction.addPage:
+          widget.onAddPage();
+          return;
+        case AddPageAction.insertPdf:
+          if (widget.onInsertPdf != null) {
+            widget.onInsertPdf!();
+            return;
+          }
+      }
+    }
+    if (_menu.isOpen) {
+      _menu.close();
+    } else {
+      _menu.open();
+    }
+  }
+
+  void _handleLongPress() {
+    if (_menu.isOpen) {
+      _menu.close();
+    } else {
+      _menu.open();
+    }
+  }
 
   @override
   Widget build(BuildContext context) {
     final AppColors colors = AppColors.of(context);
     return MenuAnchor(
+      animated: !MediaQuery.disableAnimationsOf(context),
+      controller: _menu,
       alignmentOffset: const Offset(0, AppSpacing.xxs),
       menuChildren: <Widget>[
         MenuItemButton(
           leadingIcon: const Icon(AppIcons.pdf),
-          onPressed: onInsertPdf,
+          onPressed: () => _chooseAction(AddPageAction.insertPdf),
           child: const Text('Insert PDF'),
         ),
         MenuItemButton(
           leadingIcon: const Icon(AppIcons.newNote),
-          onPressed: () => _showAddPageDialog(
-            context,
-            onAddPage: onAddPage,
-            onInsertPdf: onInsertPdf,
-          ),
-          child: const Text('Add new page'),
+          onPressed: () => _chooseAction(AddPageAction.addPage),
+          child: const Text('Add blank page'),
         ),
       ],
       builder: (BuildContext context, MenuController menu, Widget? child) {
@@ -183,12 +501,13 @@ class AddMenuButton extends StatelessWidget {
           key: const ValueKey<String>('add-menu-button'),
           tooltip: 'Add',
           padding: const EdgeInsets.all(
-            (AppSizes.minTouchTarget - _diameter) / 2,
+            (AppSizes.minTouchTarget - AddMenuButton._diameter) / 2,
           ),
-          onPressed: () => menu.isOpen ? menu.close() : menu.open(),
+          onPressed: _handleClick,
+          onLongPress: _handleLongPress,
           icon: Container(
-            width: _diameter,
-            height: _diameter,
+            width: AddMenuButton._diameter,
+            height: AddMenuButton._diameter,
             decoration: BoxDecoration(
               color: colors.selected,
               shape: BoxShape.circle,
@@ -205,60 +524,6 @@ class AddMenuButton extends StatelessWidget {
   }
 }
 
-/// Lets a new page start as a blank sheet or come directly from the device's
-/// file browser. The dialog keeps the immediate blank-page route close to
-/// imports without making the main Add menu overly busy.
-Future<void> _showAddPageDialog(
-  BuildContext context, {
-  required VoidCallback onAddPage,
-  VoidCallback? onInsertPdf,
-}) {
-  void closeThen(BuildContext dialogContext, VoidCallback action) {
-    Navigator.of(dialogContext).pop();
-    action();
-  }
-
-  return showDialog<void>(
-    context: context,
-    builder: (BuildContext dialogContext) => AlertDialog(
-      title: const Text('Add page'),
-      content: ConstrainedBox(
-        constraints: const BoxConstraints(maxWidth: 360),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: <Widget>[
-            Text(
-              'Start with a blank page or add a PDF from your device.',
-              style: Theme.of(dialogContext).textTheme.bodyMedium,
-            ),
-            const SizedBox(height: AppSpacing.md),
-            FilledButton.icon(
-              onPressed: () => closeThen(dialogContext, onAddPage),
-              icon: const Icon(AppIcons.add),
-              label: const Text('Add blank page'),
-            ),
-            const SizedBox(height: AppSpacing.xs),
-            OutlinedButton.icon(
-              onPressed: onInsertPdf == null
-                  ? null
-                  : () => closeThen(dialogContext, onInsertPdf),
-              icon: const Icon(AppIcons.pdf),
-              label: const Text('Browse files for a PDF'),
-            ),
-          ],
-        ),
-      ),
-      actions: <Widget>[
-        TextButton(
-          onPressed: () => Navigator.of(dialogContext).pop(),
-          child: const Text('Cancel'),
-        ),
-      ],
-    ),
-  );
-}
-
 /// Opens the page panel as a card under the top bar's trailing corner,
 /// beside the control that opened it. A tap outside closes it.
 Future<void> showPagePanel(
@@ -272,7 +537,7 @@ Future<void> showPagePanel(
     barrierDismissible: true,
     barrierLabel: 'Close page setup',
     barrierColor: Colors.transparent,
-    transitionDuration: AppMotion.resolve(context, AppMotion.fast),
+    transitionDuration: AppMotion.resolve(context, AppMotion.snappy.duration),
     pageBuilder:
         (
           BuildContext context,
@@ -311,12 +576,13 @@ Future<void> showPagePanel(
         ) {
           final Animation<double> curved = CurvedAnimation(
             parent: animation,
-            curve: AppMotion.standard,
+            curve: AppMotion.fadeInCurve,
+            reverseCurve: AppMotion.fadeOutCurve,
           );
           return FadeTransition(
             opacity: curved,
             child: ScaleTransition(
-              scale: Tween<double>(begin: 0.96, end: 1).animate(curved),
+              scale: Tween<double>(begin: 0.94, end: 1).animate(curved),
               alignment: AlignmentDirectional.topEnd.resolve(
                 Directionality.of(context),
               ),
@@ -365,7 +631,7 @@ class PagePanel extends StatelessWidget {
     if (page.ink.strokes.isNotEmpty ||
         page.ink.images.isNotEmpty ||
         page.pdfSource != null) {
-      final bool? confirmed = await showDialog<bool>(
+      final bool? confirmed = await showAppDialog<bool>(
         context: context,
         builder: (BuildContext context) {
           return AlertDialog(
@@ -399,7 +665,7 @@ class PagePanel extends StatelessWidget {
   Widget build(BuildContext context) {
     final TextTheme text = Theme.of(context).textTheme;
     final AppColors colors = AppColors.of(context);
-    final BorderRadius radius = BorderRadius.circular(AppRadii.large);
+    const BorderRadius radius = AppBorderRadius.large;
     return GlassSurface(
       borderRadius: radius,
       boxShadow: AppShadows.floating(colors),
@@ -488,7 +754,7 @@ class PagePanel extends StatelessWidget {
                 DecoratedBox(
                   decoration: BoxDecoration(
                     color: colors.background,
-                    borderRadius: BorderRadius.circular(AppRadii.medium),
+                    borderRadius: AppBorderRadius.medium,
                   ),
                   child: Padding(
                     padding: const EdgeInsets.all(AppSpacing.md),
@@ -498,7 +764,9 @@ class PagePanel extends StatelessWidget {
                         paper: _paperFor(setup.size, setup),
                         background: setup.background,
                         config: config,
-                        infinite: !pdf && setup.size == PageSize.infinite,
+                        infinite:
+                            !document.isImportedPdf &&
+                            setup.size == PageSize.infinite,
                         maxSize: const Size(
                           PagePanel.width - 4 * AppSpacing.md,
                           136,
@@ -513,17 +781,25 @@ class PagePanel extends StatelessWidget {
                   label: 'Size',
                   helper: pdf
                       ? 'The size of an imported PDF page is fixed.'
-                      : null,
+                      : (document.isImportedPdf
+                            ? 'Infinite canvas is not available in PDF documents.'
+                            : null),
                   value: setup.size,
                   onChanged: pdf
                       ? null
                       : (PageSize size) {
+                          if (document.isImportedPdf &&
+                              size == PageSize.infinite) {
+                            return;
+                          }
                           document.setSetup(setup.copyWith(size: size));
                         },
                   options: <PageSize>[
                     for (final PageSize size in PageSize.values)
-                      if (size != PageSize.custom ||
-                          setup.size == PageSize.custom)
+                      if ((size != PageSize.custom ||
+                              setup.size == PageSize.custom) &&
+                          (!document.isImportedPdf ||
+                              size != PageSize.infinite))
                         size,
                   ],
                   labelOf: (PageSize size) => size.label,
@@ -622,7 +898,7 @@ class _PanelDropdown<T> extends StatelessWidget {
           itemHeight: null,
           style: text.bodyMedium,
           icon: Icon(AppIcons.expand, size: 20, color: colors.textSecondary),
-          borderRadius: BorderRadius.circular(AppRadii.large),
+          borderRadius: AppBorderRadius.large,
           dropdownColor: colors.surface,
           onChanged: onChanged == null
               ? null

@@ -1,4 +1,4 @@
-import 'package:flutter/material.dart';
+﻿import 'package:flutter/material.dart';
 
 import '../../../app/theme/app_icons.dart';
 import '../../../app/theme/app_tokens.dart';
@@ -9,10 +9,12 @@ class ImageOptions extends StatelessWidget {
     super.key,
     this.onChooseFromGallery,
     this.onTakePhoto,
+    this.onChooseSvg,
   });
 
   final VoidCallback? onChooseFromGallery;
   final VoidCallback? onTakePhoto;
+  final VoidCallback? onChooseSvg;
 
   @override
   Widget build(BuildContext context) {
@@ -30,6 +32,12 @@ class ImageOptions extends StatelessWidget {
           icon: AppIcons.camera,
           label: 'Take photo',
           onPressed: onTakePhoto,
+        ),
+        const SizedBox(height: AppSpacing.xxs),
+        _ImageOptionRow(
+          icon: AppIcons.note,
+          label: 'Import editable SVG',
+          onPressed: onChooseSvg,
         ),
       ],
     );
@@ -51,7 +59,7 @@ class _ImageOptionRow extends StatelessWidget {
   Widget build(BuildContext context) {
     final AppColors colors = AppColors.of(context);
     final bool enabled = onPressed != null;
-    final BorderRadius radius = BorderRadius.circular(AppRadii.medium);
+    const BorderRadius radius = AppBorderRadius.medium;
 
     return Semantics(
       container: true,

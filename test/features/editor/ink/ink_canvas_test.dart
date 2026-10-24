@@ -6,6 +6,7 @@ import 'package:greatnote/features/editor/ink/ink_canvas.dart';
 import 'package:greatnote/features/editor/ink/ink_controller.dart';
 import 'package:greatnote/features/editor/ink/ink_palette.dart';
 import 'package:greatnote/features/editor/ink/ink_sample.dart';
+import 'package:greatnote/features/editor/ink/pen_settings.dart';
 import 'package:greatnote/features/editor/ink/stroke.dart';
 
 import '../../../helpers/editor_harness.dart';
@@ -124,7 +125,10 @@ void main() {
   });
 
   testWidgets('a tap leaves a round dot', (WidgetTester tester) async {
-    final InkController controller = await pumpEditor(tester);
+    final InkController controller = await pumpEditor(
+      tester,
+      penConfig: const PenConfig(strokeWidthScale: 1),
+    );
     final Offset position = pageToGlobal(tester, const Offset(150, 150));
 
     await tester.tapAt(position, kind: PointerDeviceKind.stylus);
@@ -230,7 +234,10 @@ void main() {
   testWidgets('color and width changes apply only to later strokes', (
     WidgetTester tester,
   ) async {
-    final InkController controller = await pumpEditor(tester);
+    final InkController controller = await pumpEditor(
+      tester,
+      penConfig: const PenConfig(strokeWidthScale: 1),
+    );
     final Offset origin = canvasRect(tester).topLeft + const Offset(100, 100);
     final InkColor blue = InkPalette.colors.firstWhere(
       (InkColor ink) => ink.id == 'blue',
@@ -362,7 +369,11 @@ void main() {
   testWidgets('ink stays legible when the theme switches to dark', (
     WidgetTester tester,
   ) async {
-    await pumpEditor(tester, themeMode: ThemeMode.dark);
+    await pumpEditor(
+      tester,
+      themeMode: ThemeMode.dark,
+      penConfig: const PenConfig(strokeWidthScale: 1),
+    );
     final Offset origin = canvasRect(tester).topLeft + const Offset(100, 100);
 
     await _drawLine(tester, origin, origin + const Offset(200, 0));

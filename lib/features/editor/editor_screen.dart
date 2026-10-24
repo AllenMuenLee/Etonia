@@ -1,17 +1,21 @@
 import 'dart:math' as math;
 import 'dart:async';
 import 'dart:isolate';
+import 'dart:io';
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
-import 'package:flutter/scheduler.dart';
 
 import '../../app/theme/app_tokens.dart';
 import '../../app/theme/app_icons.dart';
 import '../../shared/feedback/app_haptics.dart';
 import '../../shared/layout/breakpoints.dart';
+import '../../shared/memory/memory_pressure.dart';
 import '../library/note_content.dart';
 import '../library/note_repository.dart';
+import '../library/note_recording_track.dart';
+import 'audio/note_audio.dart';
+import 'audio/stroke_replay_controller.dart';
 import 'ai/ai_assistant_controller.dart';
 import 'ai/ai_canvas_input.dart';
 import 'ai/ai_client.dart';
@@ -19,18 +23,21 @@ import 'ai/ai_config.dart';
 import 'ai/ai_notation.dart';
 import 'ai/canvas_text_recognizer.dart';
 import 'ai/handwriting_prediction.dart';
-import 'ai/flying_words.dart';
 import 'ai/backend_ai_client.dart';
 import 'ai/ink_attachment.dart';
 import 'ai/note_image_renderer.dart';
 import 'ai/notation_layout.dart';
+import 'ai/notation_font.dart';
 import 'ai/notation_space.dart';
 import 'ai/selection_image_renderer.dart';
 import 'handwriting/handwriting_calibration.dart';
 import 'handwriting/handwriting_calibration_screen.dart';
 import 'handwriting/handwriting_indexer.dart';
+import 'handwriting/ink_search.dart';
 import 'handwriting/recognized_handwriting.dart';
 import 'ink/eraser_settings.dart';
+import 'ink/pointer_claims.dart';
+import 'ink/ruler.dart';
 import 'ink/ink_canvas.dart';
 import 'ink/ink_controller.dart';
 import 'ink/input_defaults.dart';
@@ -56,15 +63,20 @@ import 'document_io/pdf_page_layer.dart';
 import 'document_io/page_image_cache.dart';
 import 'document_io/pdf_selection_image.dart';
 import 'document_io/pdf_exporter.dart';
+import 'document_io/svg_document.dart';
+import 'document_io/svg_exporter.dart';
 import 'widgets/ai_assistant_panel.dart';
+import 'widgets/ai_context_glow.dart';
 import 'widgets/clipboard_shortcuts.dart';
 import 'widgets/editor_app_bar.dart';
+import 'widgets/editor_chrome.dart';
 import 'widgets/editor_settings_sheet.dart';
 import 'widgets/export_options_sheet.dart';
 import 'widgets/history_controls.dart';
 import 'widgets/document_io_progress_dialog.dart';
 import 'widgets/page_controls.dart';
 import 'widgets/selection_action_bar.dart';
+import 'widgets/recording_options.dart';
 import 'widgets/tool_palette.dart';
 import 'widgets/writing_surface_frame.dart';
 import '../payment/payment_page.dart';
@@ -118,6 +130,8 @@ class EditorScreen extends StatefulWidget {
     this.initialAiActive = false,
     this.subscription,
     this.handwritingProfileStore,
+    this.audioRecorder,
+    this.audioPlayer,
   });
 
   /// The user's plan and AI credits: which models the assistant may use,
@@ -129,6 +143,8 @@ class EditorScreen extends StatefulWidget {
   /// dismissed. Without a store (as in lightweight editor embeds), the
   /// reminder is not shown.
   final HandwritingProfileStore? handwritingProfileStore;
+  final NoteAudioRecorder? audioRecorder;
+  final NoteAudioPlayer? audioPlayer;
 
   /// How writing on the page in AI mode is told apart and read.
   final AiCanvasConfig aiCanvasConfig;
@@ -231,15 +247,16 @@ class EditorScreen extends StatefulWidget {
   State<EditorScreen> createState() => EditorScreenState();
 }
 
-class EditorScreenState extends State<EditorScreen> {
+class EditorScreenState extends State<EditorScreen>
+    with WidgetsBindingObserver {
   /// These session details do not round-trip through note storage. Keep the
   /// editor alive rather than silently dropping history, selection, or work.
   bool get requiresRetention =>
+      _audioRecorder.state != NoteAudioRecorderState.idle ||
       _documentIoPending != 0 ||
       _ai.placement.value.isOpen ||
       _ai.hasPendingWork ||
       _ai.draft.isNotEmpty ||
-      !_aiInput.isEmpty ||
       _document.pages.any(
         (page) =>
             page.ink.isBusy ||
@@ -255,8 +272,9 @@ class EditorScreenState extends State<EditorScreen> {
   );
   ValueNotifier<PenSettings>? _ownedPenSettings;
 
-  /// Whether AI mode is on: the palette's AI button. While it is on, the
-  /// assistant's notes are shown; the chat may be open or closed.
+  /// Whether AI mode is on: the palette's AI button. It is on exactly while
+  /// the chat is open, and the assistant's notes show then if the settings
+  /// say so.
   late final ValueNotifier<bool> _aiActive = ValueNotifier<bool>(
     widget.initialAiActive,
   );
@@ -264,34 +282,7 @@ class EditorScreenState extends State<EditorScreen> {
   /// The tool AI mode hands the page back to when it is turned off.
   EditorTool _writingTool = EditorTool.pen;
 
-  /// The tool seen last, to tell when the AI tool was left.
-  EditorTool _shownTool = EditorTool.pen;
-
-  /// What is written on the page with the AI tool, which is never ink.
-  late final AiCanvasInputController _aiInput = AiCanvasInputController(
-    config: widget.aiCanvasConfig,
-    onCircle: _onAiCircle,
-    onHandwriting: _onAiHandwriting,
-  );
-
-  /// Goes up each time AI mode is turned off, so handwriting still being
-  /// read then never reaches the chat.
-  int _aiGeneration = 0;
-
-  /// Each batch sees the preceding words after they land in the draft.
-  Future<void> _handwritingQueue = Future<void>.value();
-
-  /// Handwriting batches written for the assistant and not yet read.
-  int _handwritingReads = 0;
-
-  /// Whether input for the assistant is under way: handwriting waiting or
-  /// being read, or the open chat's composer holding unsent text.
-  /// While it is, the AI tool is the only one on; once it is sent or
-  /// cleared, another tool can be chosen with AI mode still on.
-  final ValueNotifier<bool> _aiInputPending = ValueNotifier<bool>(false);
-
-  /// Ordinary pen ink waiting for on-device recognition. This is separate
-  /// from AI-mode handwriting, which remains transient chat input.
+  /// Ordinary pen ink waiting for on-device recognition.
   final List<(Stroke, String?)> _indexingPending = <(Stroke, String?)>[];
   final Set<Stroke> _knownPageStrokes = Set<Stroke>.identity();
   Timer? _indexingTimer;
@@ -324,27 +315,100 @@ class EditorScreenState extends State<EditorScreen> {
 
   /// The region the palette was last laid out in, which a drag snaps to.
   Rect _paletteRegion = Rect.zero;
-  _EditorLayout? _lastLayout;
+  EditorLayout? _lastLayout;
+
+  /// Hands the shared top bar this editor's settings, when the bar is not
+  /// this editor's own.
+  EditorChromeScope? _chromeScope;
+  EditorChromeEntry? _chromeEntry;
+
+  void _publishChrome() {
+    final EditorChromeScope? scope = _chromeScope;
+    if (scope == null || _chromeEntry != null) return;
+    final EditorChromeEntry entry = EditorChromeEntry(
+      onSettings: _openSettings,
+      audioPlayer: _audioPlayer,
+      replayController: _strokeReplay,
+      onCloseReplay: () => unawaited(_closeReplay()),
+    );
+    _chromeEntry = entry;
+    // After this frame: publishing lays the shared bar out again.
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted || !identical(_chromeEntry, entry)) return;
+      scope.host.publish(scope.noteId, entry);
+    });
+  }
+
+  void _refreshChrome() {
+    final EditorChromeScope? scope = _chromeScope;
+    final EditorChromeEntry? entry = _chromeEntry;
+    if (scope != null && entry != null) scope.host.publish(scope.noteId, entry);
+  }
+
+  void _rebuildChrome() {
+    _retractChrome();
+    _publishChrome();
+  }
+
+  /// Whether there is ink to find, including diagrams with no transcription.
+  bool get _canFind => _document.pages.any(
+    (NotePage page) =>
+        page.ink.strokes.isNotEmpty ||
+        page.ink.stickyNotes.any(
+          (StickyNoteElement note) => note.strokes.isNotEmpty,
+        ),
+  );
+
+  /// The remembered add action (addPage or insertPdf).
+  AddPageAction? _lastAddAction;
 
   List<Rect> _nativeExclusionRects() {
-    final _EditorLayout? layout = _lastLayout;
+    final EditorLayout? layout = _lastLayout;
     if (layout == null) return const <Rect>[];
-    final Size paletteSize = ToolPalette.sizeFor(layout.paletteAxis);
+    // An open menu hangs over the page wherever it likes, and its size is
+    // not known here: while one is open, the pen is left to Flutter, which
+    // lets the menu take the press.
+    if (_paletteController.hasOpenPopover) {
+      return const <Rect>[Rect.fromLTRB(-1e6, -1e6, 1e6, 1e6)];
+    }
+    final Size paletteSize = ToolPalette.sizeFor(
+      layout.paletteAxis,
+      expanded: _paletteExpanded,
+    );
     final Rect paletteRect = layout.paletteOrigin & paletteSize;
-    final Rect historyRect = layout.history;
     final double topMargin = layout.surface.top;
+    // The layout is in the body's coordinates; the native side hears the
+    // pen in the window's.
+    final RenderObject? body = _bodyKey.currentContext?.findRenderObject();
+    final Offset origin = body is RenderBox && body.attached
+        ? body.localToGlobal(Offset.zero)
+        : Offset.zero;
     return <Rect>[
-      paletteRect,
-      historyRect,
-      if (topMargin > 0) Rect.fromLTWH(0, 0, layout.surface.right, topMargin),
+      paletteRect.shift(origin),
+      layout.history.shift(origin),
+      layout.pageControls.shift(origin),
+      if (topMargin > 0)
+        Rect.fromLTWH(0, 0, layout.surface.right, topMargin).shift(origin),
     ];
   }
+
+  final GlobalKey _bodyKey = GlobalKey();
 
   late final ValueNotifier<EraserSettings> _eraserSettings =
       ValueNotifier<EraserSettings>(
         EraserSettings.defaults(widget.eraserConfig),
       );
   final ToolPaletteController _paletteController = ToolPaletteController();
+
+  /// The ruler laid on the pages, shown from the palette's extension.
+  final RulerController _ruler = RulerController();
+
+  /// Touches a canvas has taken for the ruler, which the page
+  /// view must not also scroll with.
+  final PointerClaims _pointerClaims = PointerClaims();
+
+  /// Whether the palette is unfolded: the screen lays out around its size.
+  bool get _paletteExpanded => _paletteController.expanded.value;
 
   /// The look of the next sticky note: yellow and lined until the user
   /// chooses otherwise, then remembered for the session.
@@ -412,6 +476,32 @@ class EditorScreenState extends State<EditorScreen> {
   NoteDocument? _ownedDocument;
   late NoteDocument _document = _createDocument();
 
+  late final bool _ownsAudioRecorder = widget.audioRecorder == null;
+  late final NoteAudioRecorder _audioRecorder =
+      widget.audioRecorder ?? PlatformNoteAudioRecorder();
+  late final bool _ownsAudioPlayer = widget.audioPlayer == null;
+  late final NoteAudioPlayer _audioPlayer =
+      widget.audioPlayer ?? PlatformNoteAudioPlayer();
+  final StrokeReplayController _strokeReplay = StrokeReplayController();
+  Future<void>? _stoppingRecording;
+
+  InkRecordingContext? _activeRecordingContext() {
+    if (!_audioRecorder.isRecording) return null;
+    final String? id = _audioRecorder.activeRecordingId;
+    return id == null
+        ? null
+        : InkRecordingContext(
+            recordingId: id,
+            elapsedMs: _audioRecorder.currentElapsedMs,
+          );
+  }
+
+  void _syncRecordingContexts() {
+    for (final NotePage page in _document.pages) {
+      page.ink.recordingContext = _activeRecordingContext;
+    }
+  }
+
   /// The page whose ink the screen is listening to.
   InkController? _listenedInk;
 
@@ -452,9 +542,6 @@ class EditorScreenState extends State<EditorScreen> {
   HandwritingCalibrationState? _handwritingCalibrationState;
   int _handwritingCalibrationLoad = 0;
 
-  /// Handwritten words still flying into the composer.
-  final Map<OverlayEntry, Completer<void>> _flights =
-      <OverlayEntry, Completer<void>>{};
   PdfPageRenderCache? _pdfCache;
   PageImageCache? _imageCache;
   bool _reportedPageShown = false;
@@ -521,10 +608,144 @@ class EditorScreenState extends State<EditorScreen> {
   }
 
   InkController _newInk() {
-    return InkController(selectionConfig: widget.selectionConfig);
+    return InkController(selectionConfig: widget.selectionConfig)
+      ..recordingContext = _activeRecordingContext;
+  }
+
+  Future<void> _startRecording() async {
+    if (_strokeReplay.isActive) await _closeReplay();
+    _selectionCarry.clearSelection();
+    final bool started = await _audioRecorder.start();
+    if (!mounted) return;
+    if (!started) {
+      ScaffoldMessenger.maybeOf(context)?.showSnackBar(
+        const SnackBar(content: Text('Microphone permission is required.')),
+      );
+      return;
+    }
+    setState(() {});
+  }
+
+  Future<void> _pauseRecording() => _audioRecorder.pause();
+  Future<void> _resumeRecording() => _audioRecorder.resume();
+
+  Future<void> finalizeRecording() {
+    return _stoppingRecording ??= _stopRecording().whenComplete(() {
+      _stoppingRecording = null;
+    });
+  }
+
+  Future<void> _stopRecording() async {
+    final RecordedNoteAudio? recorded = await _audioRecorder.stop();
+    if (recorded == null) return;
+    try {
+      final List<int> bytes = await File(recorded.path).readAsBytes();
+      final NoteRepository? repository = widget.repository;
+      final String? noteId = widget.noteId;
+      final String assetPath = repository != null && noteId != null
+          ? await repository.storeAsset(
+              noteId,
+              Uint8List.fromList(bytes),
+              kind: NoteAssetKind.audio,
+              extension: 'm4a',
+              fileName: '${recorded.id}.m4a',
+            )
+          : recorded.path;
+      final NoteRecordingTrack track = NoteRecordingTrack(
+        id: recorded.id,
+        title: 'Recording ${_document.recordings.length + 1}',
+        assetPath: assetPath,
+        durationMs: recorded.duration.inMilliseconds,
+        createdAt: recorded.createdAt,
+      );
+      _document.addRecording(track);
+      await _audioPlayer.loadBytes(recorded.id, Uint8List.fromList(bytes));
+      _strokeReplay.open(track);
+      _rebuildChrome();
+      if (mounted) setState(() {});
+    } on Object {
+      if (mounted) {
+        ScaffoldMessenger.maybeOf(context)?.showSnackBar(
+          const SnackBar(content: Text("Couldn't save the recording.")),
+        );
+      }
+    } finally {
+      final File temporary = File(recorded.path);
+      if (await temporary.exists()) await temporary.delete();
+    }
+  }
+
+  Future<void> _openReplay(NoteRecordingTrack track) async {
+    try {
+      final Uint8List bytes;
+      final NoteRepository? repository = widget.repository;
+      final String? noteId = widget.noteId;
+      if (repository != null && noteId != null) {
+        bytes = (await repository.readAsset(noteId, track.assetPath)).bytes;
+      } else {
+        bytes = await File(track.assetPath).readAsBytes();
+      }
+      await _audioPlayer.loadBytes(track.id, bytes);
+      _selectionCarry.clearSelection();
+      _strokeReplay.open(track);
+      _refreshChrome();
+      if (mounted) setState(() {});
+    } on Object {
+      if (mounted) {
+        ScaffoldMessenger.maybeOf(context)?.showSnackBar(
+          const SnackBar(content: Text("Couldn't open the recording.")),
+        );
+      }
+    }
+  }
+
+  Future<void> _closeReplay() async {
+    await _audioPlayer.pause();
+    _strokeReplay.close();
+    _refreshChrome();
+    if (mounted) setState(() {});
+  }
+
+  /// Removes a recording manifest entry and its private audio asset.
+  Future<void> deleteRecording(String recordingId) async {
+    final NoteRecordingTrack? removed = _document.removeRecording(recordingId);
+    if (removed == null) return;
+    if (_strokeReplay.track?.id == recordingId) await _closeReplay();
+    final NoteRepository? repository = widget.repository;
+    final String? noteId = widget.noteId;
+    if (repository != null && noteId != null) {
+      await repository.removeAsset(noteId, removed.assetPath);
+    }
+    _rebuildChrome();
+    if (mounted) setState(() {});
+  }
+
+  void _onAudioPlayerChanged() {
+    if (_strokeReplay.isActive) {
+      _strokeReplay.updatePosition(_audioPlayer.position);
+    }
+  }
+
+  void _seekToStroke(Stroke stroke) {
+    final int? completed = stroke.completedAtMs;
+    if (completed == null) return;
+    _strokeReplay.flash(stroke);
+    unawaited(
+      _audioPlayer
+          .seek(Duration(milliseconds: math.max(0, completed - 500)))
+          .then((_) => _audioPlayer.play()),
+    );
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state != AppLifecycleState.resumed && _audioRecorder.isRecording) {
+      unawaited(_audioRecorder.pause());
+    }
   }
 
   void _attachInk(InkController ink) {
+    ink.recordingContext = _activeRecordingContext;
     ink.selectionListenable.addListener(_onSelectionChanged);
     ink.activeStrokeListenable.addListener(_onActiveInkChanged);
     ink.completedStrokesListenable.addListener(_growToInk);
@@ -545,7 +766,9 @@ class EditorScreenState extends State<EditorScreen> {
         page.recognizedWords.isEmpty) {
       _indexingPending.addAll(<(Stroke, String?)>[
         for (final (Stroke stroke, String? stickyId) in locations)
-          if (!stroke.style.isHighlighter) (stroke, stickyId),
+          if (stroke.source == StrokeSource.input &&
+              !stroke.style.isHighlighter)
+            (stroke, stickyId),
       ]);
       if (_indexingPending.isNotEmpty) {
         _indexingTimer?.cancel();
@@ -666,6 +889,7 @@ class EditorScreenState extends State<EditorScreen> {
   /// page ends its gesture and drops its selection; the clipboard comes
   /// along.
   void _onDocumentChanged() {
+    _syncRecordingContexts();
     final InkController next = _inkController;
     final InkController? previous = _listenedInk;
     if (!identical(next, previous)) {
@@ -750,7 +974,6 @@ class EditorScreenState extends State<EditorScreen> {
   void _onScrollStart(Set<int> pointers) {
     _scrolling = true;
     for (final int pointer in pointers) {
-      _aiInput.cancel(pointer);
       _selectionCarry.cancelPointer(pointer);
     }
     for (final NotePage page in _document.pages) {
@@ -909,6 +1132,9 @@ class EditorScreenState extends State<EditorScreen> {
         requestContext.logicalSize != _surfaceSize) {
       return const AiNotationApplication(AiNotationStatus.notAppliedStale);
     }
+    if (notation.vector case final vector?) {
+      return _applySvgNotation(vector, requestContext);
+    }
     final AiStickySize? sticky = notation.sticky;
     if (sticky != null) {
       return _applyStickyNotation(notation, sticky, requestContext);
@@ -966,13 +1192,13 @@ class EditorScreenState extends State<EditorScreen> {
           ? null
           : Duration(milliseconds: timeline.durationMs),
     );
-    // A notation is appended whole, one stroke per trace. With AI mode
-    // off, it arrives hidden, as the rest of the assistant's notes are.
+    // A notation is appended whole, one stroke per trace. While the notes
+    // are hidden, it arrives hidden, as the rest of them are.
     List<Stroke> added() {
       final List<Stroke> strokes = controller.strokes.sublist(
         controller.strokes.length - traces.length,
       );
-      if (!_aiActive.value) {
+      if (!_showAiNotes) {
         controller.setStrokesHidden(strokes, true);
       }
       return strokes;
@@ -1001,6 +1227,47 @@ class EditorScreenState extends State<EditorScreen> {
         AiNotationStatus.notAppliedInvalid,
       ),
     };
+  }
+
+  AiNotationApplication _applySvgNotation(
+    EditableSvg vector,
+    NoteImage requestContext,
+  ) {
+    final InkController controller = _inkController;
+    if (controller.documentRevision != requestContext.revision) {
+      return const AiNotationApplication(AiNotationStatus.notAppliedStale);
+    }
+    if (controller.isBusy) {
+      return const AiNotationApplication(AiNotationStatus.notAppliedBusy);
+    }
+    final Rect page = Offset.zero & requestContext.logicalSize;
+    final Rect viewBox = vector.viewBox;
+    final Rect bounds = vector.contentBounds;
+    const double tolerance = 0.01;
+    if ((viewBox.left).abs() > tolerance ||
+        (viewBox.top).abs() > tolerance ||
+        (viewBox.width - page.width).abs() > tolerance ||
+        (viewBox.height - page.height).abs() > tolerance ||
+        !page.inflate(tolerance).contains(bounds.topLeft) ||
+        !page.inflate(tolerance).contains(bounds.bottomRight) ||
+        bounds.isEmpty) {
+      return const AiNotationApplication(AiNotationStatus.notAppliedInvalid);
+    }
+    final EditableSvg cropped = vector.croppedToContent();
+    final NoteImageElement element = NoteImageElement(
+      id: 'svg-ai-${DateTime.now().microsecondsSinceEpoch.toRadixString(36)}',
+      assetId: '',
+      pixelSize: cropped.viewBox.size,
+      center: InkVector(bounds.center.dx, bounds.center.dy),
+      size: bounds.size,
+      fileName: '${vector.label}.svg',
+      vector: cropped,
+      aiGenerated: true,
+    );
+    if (!controller.insertImage(element)) {
+      return const AiNotationApplication(AiNotationStatus.notAppliedInvalid);
+    }
+    return const AiNotationApplication(AiNotationStatus.applied);
   }
 
   /// The paper of the assistant's sticky notes, told apart from the user's
@@ -1124,25 +1391,75 @@ class EditorScreenState extends State<EditorScreen> {
 
   void _undo() {
     _pastePrompt.value = null;
-    _inkController.undo();
+    _document.undo();
   }
 
-  Future<void> _openHandwritingFind() {
+  OverlayEntry? _findEntry;
+
+  /// Where the user has dragged the find panel from its resting spot.
+  final ValueNotifier<Offset> _findDrag = ValueNotifier<Offset>(Offset.zero);
+
+  void _closeHandwritingFind() {
+    _findEntry?.remove();
+    _findEntry = null;
     _handwritingFindTarget.value = null;
-    return showDialog<void>(
-      context: context,
-      builder: (BuildContext context) => _HandwritingFindDialog(
-        document: _document,
-        onTargetChanged: (_HandwritingFindTarget? target) {
-          if (mounted) _handwritingFindTarget.value = target;
-        },
-      ),
+  }
+
+  /// Floats the find panel over the note without a barrier, so the page
+  /// stays scrollable while searching; the find button toggles it.
+  void _openHandwritingFind(Rect anchor) {
+    if (_findEntry != null) {
+      _closeHandwritingFind();
+      return;
+    }
+    _handwritingFindTarget.value = null;
+    _findDrag.value = Offset.zero;
+    _findEntry = OverlayEntry(
+      builder: (BuildContext context) {
+        final Size screen = MediaQuery.sizeOf(context);
+        final double width = math.min(340, screen.width - 16);
+        final double left = (anchor.right - width).clamp(
+          8,
+          math.max(8, screen.width - width - 8),
+        );
+        return ValueListenableBuilder<Offset>(
+          valueListenable: _findDrag,
+          builder: (BuildContext context, Offset drag, Widget? child) {
+            return Stack(
+              children: <Widget>[
+                Positioned(
+                  left: (left + drag.dx).clamp(
+                    8,
+                    math.max(8, screen.width - width - 8),
+                  ),
+                  top: (anchor.bottom + 6 + drag.dy).clamp(
+                    8,
+                    math.max(8, screen.height - 120),
+                  ),
+                  width: width,
+                  child: child!,
+                ),
+              ],
+            );
+          },
+          child: _HandwritingFindDialog(
+            document: _document,
+            recognizer: widget.textRecognizer,
+            renderer: widget.handwritingRenderer,
+            onDrag: (Offset delta) => _findDrag.value += delta,
+            onTargetChanged: (_HandwritingFindTarget? target) {
+              if (mounted) _handwritingFindTarget.value = target;
+            },
+          ),
+        );
+      },
     );
+    Overlay.of(context).insert(_findEntry!);
   }
 
   void _redo() {
     _pastePrompt.value = null;
-    _inkController.redo();
+    _document.redo();
   }
 
   /// Pastes with the copies centered where the pointer was held.
@@ -1291,8 +1608,9 @@ class EditorScreenState extends State<EditorScreen> {
     );
   }
 
-  /// Opens the assistant on the current selection, from the selection's AI
-  /// button, and turns AI mode on with it. Nothing is sent.
+  /// Opens the assistant on the current selection, if there is one, from the
+  /// selection's AI button or the palette's, and turns AI mode on with it.
+  /// Nothing is sent.
   void _openAi() {
     final bool hadSelection = _stableSelection() != null;
     _setAiActive(true, openChat: !hadSelection);
@@ -1307,24 +1625,13 @@ class EditorScreenState extends State<EditorScreen> {
     }
   }
 
-  /// The palette's AI button: turns AI mode on, opening the chat on the
-  /// current selection if there is one; or off.
-  void _toggleAiMode() {
-    if (_aiActive.value) {
-      _setAiActive(false);
-    } else {
-      _openAi();
-    }
-  }
-
-  /// Turns AI mode on or off. On, the assistant's notes show, the page is
-  /// written on for the assistant, and the chat opens when [openChat]
-  /// says; off, the notes hide, the chat closes, and whatever was written
-  /// for the assistant is dropped, unread.
+  /// Turns AI mode on or off. On, the assistant's notes show and the chat
+  /// opens when [openChat] says; off, the chat closes and the notes hide
+  /// unless Show notes in chat is on.
   void _setAiActive(bool active, {bool openChat = true}) {
     if (active) {
       _aiActive.value = true;
-      _setAiNotesHidden(false);
+      _setAiNotesHidden(!_showAiNotes);
       if (_tool.value != EditorTool.ai) {
         _tool.value = EditorTool.ai;
       }
@@ -1336,32 +1643,37 @@ class EditorScreenState extends State<EditorScreen> {
     if (!_aiActive.value) {
       return;
     }
-    _aiGeneration++;
-    // New writing must not wait on a recognition from a previous AI session.
-    _handwritingQueue = Future<void>.value();
-    _aiInput.clear();
     _aiActive.value = false;
-    _setAiNotesHidden(true);
+    _setAiNotesHidden(!_showAiNotes);
     if (_ai.isOpen) {
-      _closeAi();
+      _ai.close();
+      // The panel takes its text field with it.
+      _editorFocus.requestFocus();
     }
     if (_tool.value == EditorTool.ai) {
       _tool.value = _writingTool;
     }
   }
 
-  /// Keeps track of the tool AI mode gives back, and reads what was
-  /// written for the assistant as soon as another tool is chosen.
+  /// Keeps track of the tool AI mode gives back.
   void _onToolChanged() {
     final EditorTool tool = _tool.value;
-    if (_shownTool == EditorTool.ai && tool != EditorTool.ai) {
-      _aiInput.flush();
-    }
     if (tool != EditorTool.ai) {
       _writingTool = tool;
     }
-    _shownTool = tool;
   }
+
+  /// A press anywhere in the chat, on its text or its composer, takes up the
+  /// AI tool, so no other tool stays on beside it.
+  void _selectAiTool() {
+    if (_aiActive.value && _tool.value != EditorTool.ai) {
+      _tool.value = EditorTool.ai;
+    }
+  }
+
+  /// Whether the assistant's notes show now: always if Show notes in chat is
+  /// on; otherwise only while AI mode is active.
+  bool get _showAiNotes => _ai.showNotesInChat || _aiActive.value;
 
   /// Shows or hides every AI-generated stroke, on every page.
   void _setAiNotesHidden(bool hidden) {
@@ -1375,239 +1687,28 @@ class EditorScreenState extends State<EditorScreen> {
     }
   }
 
-  /// A loop drawn in AI mode around something on the page: what it
-  /// encloses is selected and becomes what the assistant is asked about.
-  bool _onAiCircle(List<InkVector> outline, InkController page) {
-    if (!mounted || !identical(page, _inkController)) {
-      return false;
-    }
-    final PdfPageSource? pdf = _document.current.pdfSource;
-    final bool selected = page.selectEnclosed(
-      outline,
-      selectablePdfBounds: pdf == null ? null : Offset.zero & pdf.pageSize,
-    );
-    if (!selected) {
-      return false;
-    }
-    unawaited(_captureForAi(open: true));
-    return true;
-  }
-
-  /// Handwriting written in AI mode: read on the device, and its words
-  /// added to the chat's composer, opening the chat when [openPanel] says.
-  void _onAiHandwriting(
-    List<AiCanvasStroke> strokes,
-    InkController page, {
-    required bool openPanel,
-  }) {
-    final int generation = _aiGeneration;
-    final AiSelectionContext? selectionContext = _ai.context;
-    _handwritingReads++;
-    _updateAiInputPending();
-    _handwritingQueue = _handwritingQueue.then((_) async {
-      try {
-        if (!mounted ||
-            generation != _aiGeneration ||
-            !identical(selectionContext, _ai.context)) {
-          return;
-        }
-        await _readHandwriting(
-          strokes,
-          openPanel: openPanel,
-          generation: generation,
-          selectionContext: selectionContext,
-        );
-      } finally {
-        _handwritingReads--;
-        if (mounted) _updateAiInputPending();
-      }
-    });
-  }
-
-  /// Works out [_aiInputPending]. As input begins, the AI tool is taken up
-  /// again if another tool was on beside AI mode.
-  void _updateAiInputPending() {
-    if (SchedulerBinding.instance.schedulerPhase ==
-        SchedulerPhase.persistentCallbacks) {
-      // Never change the palette while the tree is being built.
-      SchedulerBinding.instance.addPostFrameCallback((Duration _) {
-        if (mounted) _updateAiInputPending();
-      });
-      return;
-    }
-    final bool pending =
-        _aiActive.value &&
-        (!_aiInput.isEmpty ||
-            _handwritingReads > 0 ||
-            (_ai.isOpen && _ai.hasDraft.value));
-    if (pending == _aiInputPending.value) {
-      return;
-    }
-    _aiInputPending.value = pending;
-    if (pending && _tool.value != EditorTool.ai) {
-      _tool.value = EditorTool.ai;
-    }
-  }
-
-  Future<void> _readHandwriting(
-    List<AiCanvasStroke> strokes, {
-    required bool openPanel,
-    required int generation,
-    required AiSelectionContext? selectionContext,
-  }) async {
-    final String words;
-    try {
-      final HandwritingBatch batch =
-          widget.textRecognizer is PlatformCanvasTextRecognizer
-          ? widget.handwritingRenderer.vectors(strokes)
-          : await widget.handwritingRenderer.render(strokes);
-      if (!mounted || generation != _aiGeneration) return;
-      if (!identical(selectionContext, _ai.context)) return;
-      final String recognized = await widget.textRecognizer
-          .recognize(
-            batch.withContext(
-              HandwritingContext(
-                draft: _ai.draft,
-                recentMessages: _ai.messages.map((message) => message.text),
-              ),
-            ),
-          )
-          .timeout(const Duration(seconds: 8), onTimeout: () => '');
-      words = recognized;
-    } on Object {
-      // Nothing read is nothing added.
-      return;
-    }
-    if (!mounted ||
-        generation != _aiGeneration ||
-        words.trim().isEmpty ||
-        !identical(selectionContext, _ai.context)) {
-      return;
-    }
-    if (openPanel) {
-      _ai.show();
-    }
-    await _flyIntoComposer(words.trim(), strokes, generation, selectionContext);
-  }
-
-  /// Flies [words] from where [strokes] were written into the composer,
-  /// adding them to the draft as they land. Without motion, or with nowhere
-  /// to fly from or to, they are added at once.
-  Future<void> _flyIntoComposer(
-    String words,
-    List<AiCanvasStroke> strokes,
-    int generation,
-    AiSelectionContext? selectionContext,
-  ) async {
-    Rect? from;
-    for (final AiCanvasStroke stroke in strokes) {
-      final Rect? bounds = stroke.screenBounds;
-      if (bounds == null) continue;
-      from = from?.expandToInclude(bounds) ?? bounds;
-    }
-    final OverlayState? overlay = Overlay.maybeOf(context);
-    final RenderObject? overlayBox = overlay?.context.findRenderObject();
-    final Duration duration = AppMotion.resolve(context, AppMotion.flight);
-    if (from == null ||
-        overlay == null ||
-        overlayBox is! RenderBox ||
-        !_ai.isOpen ||
-        duration == Duration.zero) {
-      _ai.appendToDraft(words);
-      return;
-    }
-    final TextStyle style =
-        Theme.of(context).textTheme.bodyMedium ?? const TextStyle();
-    final TextDirection direction = Directionality.of(context);
-    Rect toOverlay(Rect global) => Rect.fromPoints(
-      overlayBox.globalToLocal(global.topLeft),
-      overlayBox.globalToLocal(global.bottomRight),
-    );
-
-    // Where the composer's text ends now, in the overlay.
-    Offset? target() {
-      final RenderObject? field = _aiComposerKey.currentContext
-          ?.findRenderObject();
-      if (!mounted ||
-          !overlayBox.attached ||
-          field is! RenderBox ||
-          !field.attached ||
-          !field.hasSize) {
-        return null;
-      }
-      final Rect box = toOverlay(
-        MatrixUtils.transformRect(
-          field.getTransformTo(null),
-          Offset.zero & field.size,
-        ),
-      );
-      final String draft = _ai.draft.trimRight();
-      final TextPainter painter = TextPainter(
-        text: TextSpan(text: draft.isEmpty ? '' : '$draft ', style: style),
-        textDirection: direction,
-        maxLines: 1,
-      )..layout();
-      const double inset = AppSpacing.md;
-      final double width = math.min(
-        painter.width,
-        math.max(0.0, box.width - 2 * inset),
-      );
-      painter.dispose();
-      return Offset(box.left + inset + width, box.center.dy);
-    }
-
-    late final OverlayEntry entry;
-    entry = OverlayEntry(
-      builder: (BuildContext context) => FlyingWords(
-        text: words,
-        from: toOverlay(from!),
-        target: target,
-        style: style,
-        color: AppColors.of(context).accent,
-        duration: duration,
-        curve: AppMotion.flightCurve,
-        onArrived: () {
-          _landFlight(entry);
-          if (mounted &&
-              generation == _aiGeneration &&
-              identical(selectionContext, _ai.context)) {
-            _ai.appendToDraft(words);
-          }
-        },
-      ),
-    );
-    final Completer<void> landed = Completer<void>();
-    _flights[entry] = landed;
-    overlay.insert(entry);
-    await landed.future;
-  }
-
-  void _landFlight(OverlayEntry entry) {
-    final Completer<void>? landed = _flights.remove(entry);
-    if (landed != null) {
-      entry
-        ..remove()
-        ..dispose();
-      landed.complete();
-    }
-  }
-
   /// Switches to the current selection, resuming a matching conversation.
   void _useCurrentSelection() => unawaited(_captureForAi(open: false));
 
   /// Adds the current selection to the open conversation's ink.
-  void _addSelectionToAi() {
+  Future<void> _addSelectionToAi() async {
     final InkSelection? selection = _stableSelection();
-    if (selection != null) {
-      _ai.addToContext(selection);
-    }
+    if (selection == null) return;
+    final InkController page = _inkController;
+    final List<SnapshotBitmap> bitmaps = await _selectionBitmaps(selection);
+    if (!mounted || !identical(selection, _stableSelection())) return;
+    _ai.addToContext(selection, bitmaps: bitmaps, page: page);
   }
 
   /// Hands [capture] the selection and the page's look, unless a gesture is
   /// still reshaping the selection or nothing is selected.
-  Future<void> _captureForAi({required bool open}) async {
+  ///
+  /// With [ask], a chat already open is kept, and offers the selection as
+  /// more context or as a chat of its own.
+  Future<void> _captureForAi({required bool open, bool ask = false}) async {
     final InkSelection? selection = _stableSelection();
     if (selection == null) return;
+    final InkController page = _inkController;
     final Brightness brightness = Theme.of(context).brightness;
     final Color background = AppColors.of(context).writingSurface;
     final List<SnapshotBitmap> bitmaps = await _selectionBitmaps(selection);
@@ -1624,6 +1725,8 @@ class EditorScreenState extends State<EditorScreen> {
         brightness: brightness,
         background: background,
         snapshot: snapshot,
+        page: page,
+        ask: ask,
       );
     } else {
       _ai.useSelection(
@@ -1631,6 +1734,7 @@ class EditorScreenState extends State<EditorScreen> {
         brightness: brightness,
         background: background,
         snapshot: snapshot,
+        page: page,
       );
     }
   }
@@ -1683,14 +1787,8 @@ class EditorScreenState extends State<EditorScreen> {
     return bitmaps;
   }
 
-  /// Closes the chat only: AI mode stays on, and its notes stay shown.
-  /// Handwriting still waiting is read into the composer for later.
-  void _closeAi() {
-    _aiInput.flush(openPanel: false);
-    _ai.close();
-    // The panel takes its text field with it.
-    _editorFocus.requestFocus();
-  }
+  /// Closing the chat turns AI mode off with it.
+  void _closeAi() => _setAiActive(false);
 
   Future<void> _openSettings() {
     return showEditorSettings(
@@ -1699,10 +1797,24 @@ class EditorScreenState extends State<EditorScreen> {
         return EditorSettingsSheet(
           controller: _ai,
           stylusOnly: _stylusOnly,
+          textSize: HandwritingCalibration.textSize,
+          onTextSizeChanged: _setAiTextSize,
+          onChooseHandwriting: widget.handwritingProfileStore == null
+              ? null
+              : () {
+                  Navigator.of(context).pop();
+                  _calibrateHandwritingFromChat();
+                },
           onExportPdf: _canUseDocumentIo
               ? () {
                   Navigator.of(context).pop();
                   _exportPdf();
+                }
+              : null,
+          onExportSvg: _canUseDocumentIo
+              ? () {
+                  Navigator.of(context).pop();
+                  _exportSvg();
                 }
               : null,
         );
@@ -1776,6 +1888,27 @@ class EditorScreenState extends State<EditorScreen> {
     }
   }
 
+  Future<void> _insertSvg() async {
+    if (widget.documentPicker is! SvgDocumentPicker) return;
+    final SvgDocumentPicker picker = widget.documentPicker as SvgDocumentPicker;
+    _documentIoPending++;
+    try {
+      final PickedDocument? picked = await picker.pickSvg();
+      if (picked == null || !mounted) return;
+      await _importer.insertSvg(
+        controller: _inkController,
+        picked: picked,
+        visiblePage: Offset.zero & _surfaceSize,
+      );
+      _tool.value = EditorTool.select;
+      AppHaptics.success();
+    } on Object catch (error) {
+      if (mounted) _showIoError(error);
+    } finally {
+      _documentIoPending--;
+    }
+  }
+
   Future<void> _exportPdf() async {
     final PdfExportOptions? options = await showExportOptions(
       context,
@@ -1808,6 +1941,25 @@ class EditorScreenState extends State<EditorScreen> {
           ),
     );
     _onIoFinished(result);
+  }
+
+  Future<void> _exportSvg() async {
+    _documentIoPending++;
+    try {
+      _inkController.finalizeActiveGesture();
+      _inkController.finishNotationPlayback();
+      await SvgExporter(sink: widget.exportSink).exportAndShare(
+        title: widget.title,
+        pageSize: _surfaceSize,
+        controller: _inkController,
+        brightness: Theme.of(context).brightness,
+      );
+      if (mounted) AppHaptics.success();
+    } on Object catch (error) {
+      if (mounted) _showIoError(error);
+    } finally {
+      _documentIoPending--;
+    }
   }
 
   void _onIoFinished(DocumentIoProgressResult result) {
@@ -1887,10 +2039,16 @@ class EditorScreenState extends State<EditorScreen> {
     return cache.render(pdf, pdf.pageSize, 1);
   }
 
-  /// Turning Animation off stops every notation still looping on the note.
+  /// Turning Animation off stops every notation still looping on the note,
+  /// and the notes follow Show notes in chat as soon as it changes.
   void _onAiChanged() {
+    _inkController.setSvgAnimationsEnabled(_ai.animationEnabled);
     if (!_ai.animationEnabled) {
       _inkController.finishNotationPlayback();
+    }
+    if (_ai.showNotesInChat != _aiNotesInChatSeen) {
+      _aiNotesInChatSeen = _ai.showNotesInChat;
+      _setAiNotesHidden(!_showAiNotes);
     }
     final AiRequestState state = _ai.requestState;
     if (_aiRequestState == AiRequestState.sending &&
@@ -1907,9 +2065,27 @@ class EditorScreenState extends State<EditorScreen> {
   /// The request state last seen, to feel when an answer lands or fails.
   AiRequestState _aiRequestState = AiRequestState.idle;
 
+  /// Show notes in chat as last seen, to act only when it changes.
+  late bool _aiNotesInChatSeen = _ai.showNotesInChat;
+
+  /// The system is low on memory: rendered PDF pages and decoded pictures
+  /// not on screen go, to be made again when shown.
+  void _releaseMemory() {
+    _pdfCache?.releaseMemory();
+    _imageCache?.releaseMemory();
+  }
+
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
+    _audioPlayer.addListener(_onAudioPlayerChanged);
+    _syncRecordingContexts();
+    MemoryPressure.instance.addListener(_releaseMemory);
+    // Reading and parsing the PDF is most of the wait for its first page, so
+    // it starts now rather than when the first page asks to be drawn.
+    final PdfPageSource? firstPdf = _document.current.pdfSource;
+    if (firstPdf != null) _pageRenderCache?.warm(firstPdf);
     WidgetsBinding.instance.addPostFrameCallback((_) {
       // PDF paper reports itself once rendered.
       if (mounted &&
@@ -1922,19 +2098,37 @@ class EditorScreenState extends State<EditorScreen> {
     _document.addListener(_onDocumentChanged);
     _ai.addListener(_onAiChanged);
     _palettePlacement.addListener(_onPalettePlacementChanged);
+    _paletteController.expanded.addListener(_onPalettePlacementChanged);
     _tool.addListener(AppHaptics.toolSwitch);
     _tool.addListener(_onToolChanged);
-    _aiInput.addListener(_updateAiInputPending);
-    _aiActive.addListener(_updateAiInputPending);
-    _ai.hasDraft.addListener(_updateAiInputPending);
-    _ai.placement.addListener(_updateAiInputPending);
     _adoptAiSession();
     _loadHandwritingCalibrationNotice();
     if (_aiActive.value) {
       _tool.value = EditorTool.ai;
-    } else {
-      _setAiNotesHidden(true);
+      _ai.show();
     }
+    _setAiNotesHidden(!_showAiNotes);
+  }
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    final EditorChromeScope? scope = EditorChromeScope.maybeOf(context);
+    if (scope != _chromeScope) {
+      _retractChrome();
+      _chromeScope = scope;
+    }
+  }
+
+  void _retractChrome() {
+    final EditorChromeScope? scope = _chromeScope;
+    final EditorChromeEntry? entry = _chromeEntry;
+    _chromeEntry = null;
+    if (scope == null || entry == null) return;
+    // The bar is laid out again by this; not while the tree is torn down.
+    WidgetsBinding.instance.addPostFrameCallback(
+      (_) => scope.host.retract(scope.noteId, entry),
+    );
   }
 
   void _onPalettePlacementChanged() => setState(() {});
@@ -1958,13 +2152,14 @@ class EditorScreenState extends State<EditorScreen> {
     if (center == null) {
       return;
     }
-    final double margin = _EditorLayout.marginFor(
+    final double margin = EditorLayout.marginFor(
       WindowSizeClass.fromWidth(MediaQuery.sizeOf(context).width),
     );
     _palettePlacement.value = PalettePlacement.nearest(
       _paletteRegion,
       center,
       margin,
+      expanded: _paletteExpanded,
     );
     // Commit the dock while the drag position still owns the visual origin.
     // Releasing it afterwards lets AnimatedPositioned ease from the exact
@@ -1999,11 +2194,9 @@ class EditorScreenState extends State<EditorScreen> {
     }
     if (oldWidget.document != widget.document ||
         oldWidget.inkController != widget.inkController) {
-      _aiGeneration++;
       _indexingGeneration++;
       _indexingTimer?.cancel();
       _indexingPending.clear();
-      _handwritingQueue = Future<void>.value();
       _handwritingFindTarget.value = null;
       _releaseAiSession();
       _document.removeListener(_onDocumentChanged);
@@ -2012,8 +2205,7 @@ class EditorScreenState extends State<EditorScreen> {
       _document = _createDocument();
       _document.addListener(_onDocumentChanged);
       _adoptAiSession();
-      _aiInput.clear();
-      _setAiNotesHidden(!_aiActive.value);
+      _setAiNotesHidden(!_showAiNotes);
       _onDocumentChanged();
       owned?.dispose();
     }
@@ -2021,6 +2213,21 @@ class EditorScreenState extends State<EditorScreen> {
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    _audioPlayer.removeListener(_onAudioPlayerChanged);
+    _strokeReplay.dispose();
+    if (_ownsAudioRecorder) {
+      if (_audioRecorder.state == NoteAudioRecorderState.idle) {
+        _audioRecorder.dispose();
+      } else {
+        unawaited(_audioRecorder.stop().whenComplete(_audioRecorder.dispose));
+      }
+    }
+    if (_ownsAudioPlayer) _audioPlayer.dispose();
+    _findEntry?.remove();
+    _findEntry = null;
+    _findDrag.dispose();
+    _retractChrome();
     _indexingGeneration++;
     _indexingTimer?.cancel();
     final InkController? listened = _listenedInk;
@@ -2031,16 +2238,13 @@ class EditorScreenState extends State<EditorScreen> {
       ..removeListener(_onSelectionChanged)
       ..dispose();
     _releaseAiSession();
-    for (final OverlayEntry entry in List<OverlayEntry>.of(_flights.keys)) {
-      _landFlight(entry);
-    }
     _document.removeListener(_onDocumentChanged);
     _ai.removeListener(_onAiChanged);
-    _ai.hasDraft.removeListener(_updateAiInputPending);
-    _ai.placement.removeListener(_updateAiInputPending);
-    _aiInput.removeListener(_updateAiInputPending);
-    _aiActive.removeListener(_updateAiInputPending);
     _palettePlacement.removeListener(_onPalettePlacementChanged);
+    _paletteController.expanded
+      ..removeListener(_onPalettePlacementChanged)
+      ..dispose();
+    _ruler.dispose();
     _ai.dispose();
     _ownedAiClient?.close();
     _editorFocus.dispose();
@@ -2049,9 +2253,7 @@ class EditorScreenState extends State<EditorScreen> {
       ..removeListener(AppHaptics.toolSwitch)
       ..removeListener(_onToolChanged)
       ..dispose();
-    _aiInput.dispose();
     _aiActive.dispose();
-    _aiInputPending.dispose();
     _ownedPenSettings?.dispose();
     _ownedPalettePlacement?.dispose();
     _paletteDragCenter.dispose();
@@ -2060,6 +2262,7 @@ class EditorScreenState extends State<EditorScreen> {
     _pastePrompt.dispose();
     _handwritingFindTarget.dispose();
     _ownedStylusOnly?.dispose();
+    MemoryPressure.instance.removeListener(_releaseMemory);
     _pdfCache?.clear();
     _imageCache?.clear();
     super.dispose();
@@ -2115,6 +2318,21 @@ class EditorScreenState extends State<EditorScreen> {
   }
 
   Widget _buildPanel() {
+    return FocusScope(
+      onFocusChange: (bool focused) {
+        // Not mid-stroke: a press on the page drops the composer's focus
+        // into this scope, which must not take the pen away.
+        if (focused && !_inkController.isBusy) _selectAiTool();
+      },
+      child: Listener(
+        behavior: HitTestBehavior.translucent,
+        onPointerDown: (PointerDownEvent _) => _selectAiTool(),
+        child: _buildAssistantPanel(),
+      ),
+    );
+  }
+
+  Widget _buildAssistantPanel() {
     return AiAssistantPanel(
       key: _aiPanelKey,
       controller: _ai,
@@ -2153,17 +2371,32 @@ class EditorScreenState extends State<EditorScreen> {
     if (mounted) await _loadHandwritingCalibrationNotice();
   }
 
+  /// Writes the assistant's text [size] from now on, and keeps it.
+  Future<void> _setAiTextSize(AiTextSize size) async {
+    HandwritingCalibration.textSize.value = size;
+    final HandwritingProfileStore? store = widget.handwritingProfileStore;
+    if (store == null) return;
+    try {
+      final HandwritingCalibrationState saved =
+          await store.read() ?? const HandwritingCalibrationState();
+      await store.write(saved.copyWith(textSize: size));
+    } on Object {
+      if (!mounted) return;
+      ScaffoldMessenger.maybeOf(context)?.showSnackBar(
+        const SnackBar(content: Text("Couldn't save that preference.")),
+      );
+    }
+  }
+
   Future<void> _dismissHandwritingCalibrationNotice() async {
     final HandwritingProfileStore? store = widget.handwritingProfileStore;
     if (store == null) return;
     ++_handwritingCalibrationLoad;
     final HandwritingCalibrationState? previous = _handwritingCalibrationState;
-    final HandwritingCalibrationState dismissed = HandwritingCalibrationState(
-      style: previous?.style,
-      font: previous?.font,
-      skipped: previous?.skipped ?? false,
-      chatReminderDismissed: true,
-    );
+    final HandwritingCalibrationState dismissed =
+        (previous ?? const HandwritingCalibrationState()).copyWith(
+          chatReminderDismissed: true,
+        );
     _handwritingCalibrationState = dismissed;
     setState(() => _showHandwritingCalibrationNotice = false);
     try {
@@ -2207,8 +2440,14 @@ class EditorScreenState extends State<EditorScreen> {
     final AppColors colors = AppColors.of(context);
     final Size screen = MediaQuery.sizeOf(context);
     final double width = widget.aiLayoutConfig.sheetWidth(screen.width);
-    final Duration duration = AppMotion.resolve(context, AppMotion.medium);
-    final Duration entrance = AppMotion.resolve(context, AppMotion.gentle);
+    final Duration duration = AppMotion.resolve(
+      context,
+      AppMotion.snappy.duration,
+    );
+    final Duration entrance = AppMotion.resolve(
+      context,
+      AppMotion.smooth.duration,
+    );
     return <Widget>[
       Positioned.fill(
         child: Semantics(
@@ -2224,7 +2463,7 @@ class EditorScreenState extends State<EditorScreen> {
             child: TweenAnimationBuilder<double>(
               tween: Tween<double>(begin: 0, end: 0.32),
               duration: entrance,
-              curve: Curves.easeOut,
+              curve: AppMotion.fadeInCurve,
               builder: (BuildContext context, double alpha, Widget? _) {
                 return ColoredBox(
                   color: colors.shadow.withValues(alpha: alpha),
@@ -2237,7 +2476,7 @@ class EditorScreenState extends State<EditorScreen> {
       AnimatedPositioned(
         key: const ValueKey<String>('ai-panel-sheet'),
         duration: duration,
-        curve: AppMotion.standard,
+        curve: AppMotion.fadeInCurve,
         top: 0,
         bottom: 0,
         left: side == AiPanelSide.left ? 0 : screen.width - width,
@@ -2246,7 +2485,7 @@ class EditorScreenState extends State<EditorScreen> {
         child: TweenAnimationBuilder<double>(
           tween: Tween<double>(begin: 1, end: 0),
           duration: entrance,
-          curve: AppMotion.gentleCurve,
+          curve: AppMotion.fadeInCurve,
           builder: (BuildContext context, double hidden, Widget? child) {
             return FractionalTranslation(
               translation: Offset(
@@ -2284,29 +2523,28 @@ class EditorScreenState extends State<EditorScreen> {
     // What the body's SafeArea already keeps clear at the bottom; constant
     // while the keyboard moves, unlike the padding.
     final double bottomSafeArea = MediaQuery.viewPaddingOf(context).bottom;
+    final bool showNavigation = sizeClass != WindowSizeClass.compact;
+    _publishChrome();
     return Scaffold(
       // The keyboard only ever serves the assistant's composer, which lifts
       // itself clear of it. Resizing the body would lay the page out again
       // on every frame of the keyboard's slide and make it stutter.
       resizeToAvoidBottomInset: false,
-      appBar: EditorAppBar(
-        title: widget.title,
-        centerTitle: sizeClass == WindowSizeClass.expanded,
-        onMenuPressed: widget.onBack ?? () {},
-        leadingIsBack: widget.onBack != null,
-        onTitlePressed: widget.onTitlePressed ?? () {},
-        onSettingsPressed: _openSettings,
-        onFindPressed: _document.recognizedWords.isEmpty
-            ? null
-            : _openHandwritingFind,
-        tabs: widget.tabs,
-        pageControls: PageControls(
-          document: _document,
-          showNavigation: sizeClass != WindowSizeClass.compact,
-          onOpenPanel: _openPagePanel,
-          onInsertPdf: _canUseDocumentIo ? _insertPdf : null,
-        ),
-      ),
+      // Under tabs, the bar is theirs, and shared by every pane.
+      appBar: _chromeScope != null
+          ? null
+          : EditorAppBar(
+              title: widget.title,
+              centerTitle: sizeClass == WindowSizeClass.expanded,
+              onMenuPressed: widget.onBack ?? () {},
+              leadingIsBack: widget.onBack != null,
+              onTitlePressed: widget.onTitlePressed ?? () {},
+              onSettingsPressed: _openSettings,
+              tabs: widget.tabs,
+              audioPlayer: _audioPlayer,
+              replayController: _strokeReplay,
+              onCloseReplay: () => unawaited(_closeReplay()),
+            ),
       body: SafeArea(
         top: false,
         // The keyboard eats into the bottom padding as it rises; keeping
@@ -2329,13 +2567,28 @@ class EditorScreenState extends State<EditorScreen> {
               size.height,
             );
             _paletteRegion = region;
-            final _EditorLayout layout = _EditorLayout.compute(
+            final double historyWidth = FloatingHistoryControls.widthFor(
+              ToolPalette.sizeFor(Axis.horizontal).height,
+            );
+            final double pageControlsWidth = FloatingPageControls.widthFor(
+              ToolPalette.sizeFor(Axis.horizontal).height,
+              find: _canFind,
+              navigation: showNavigation,
+            );
+            final bool isAiOpen = panelSide != null;
+            final EditorLayout layout = EditorLayout.compute(
               sizeClass,
               region,
               _palettePlacement.value,
+              historyWidth: historyWidth,
+              pageControlsWidth: pageControlsWidth,
+              isAiOpen: isAiOpen,
+              paletteExpanded: _paletteExpanded,
             );
             _lastLayout = layout;
             final List<NotePage> pages = _document.pages;
+            final bool infiniteCanvas =
+                pages[_document.currentIndex].setup.size == PageSize.infinite;
             final List<PageGeometry> geometries = <PageGeometry>[
               for (final NotePage page in pages)
                 PageGeometry.of(
@@ -2354,14 +2607,24 @@ class EditorScreenState extends State<EditorScreen> {
             });
             // The palette floats over the page; the page's own floating
             // bars keep clear of it. In the page area's coordinates.
+            // What floats over the page, for its own floating bars to clear:
+            // the card and the palette.
+            final Rect historyOnPage = layout.history.shift(
+              -layout.surface.topLeft,
+            );
             final Rect paletteOnPage =
-                (layout.paletteOrigin - layout.surface.topLeft) &
-                ToolPalette.sizeFor(layout.paletteAxis);
+                ((layout.paletteOrigin - layout.surface.topLeft) &
+                        ToolPalette.sizeFor(
+                          layout.paletteAxis,
+                          expanded: _paletteExpanded,
+                        ))
+                    .expandToInclude(historyOnPage);
             final BorderSide edge = BorderSide(
               color: colors.divider,
               width: AppSizes.hairline,
             );
             return Stack(
+              key: _bodyKey,
               children: <Widget>[
                 Positioned.fromRect(
                   rect: layout.surface,
@@ -2374,14 +2637,21 @@ class EditorScreenState extends State<EditorScreen> {
                           for (final NotePage page in pages) ObjectKey(page),
                         ],
                         currentPage: _document.currentIndex,
-                        initialZoom: EditorScreen.openingZoom,
+                        // Infinite canvas is the writing surface itself. It
+                        // must never shrink enough to reveal a desk edge.
+                        minZoom: infiniteCanvas ? 1 : 0.5,
+                        initialZoom: infiniteCanvas
+                            ? 1
+                            : EditorScreen.openingZoom,
                         onPageTouched: _showPage,
                         onDeskTap: _selectionCarry.clearSelection,
                         onVisiblePageChanged: _showPage,
                         onScrollStart: _onScrollStart,
                         onScrollEnd: _onScrollEnd,
                         fingersNavigate: _stylusOnly,
+                        pointerClaims: _pointerClaims,
                         onPullToAddPage: _addPageAtEnd,
+                        pullToAddDistance: 180,
                         pageBuilder:
                             (
                               BuildContext context,
@@ -2408,13 +2678,19 @@ class EditorScreenState extends State<EditorScreen> {
                                           ? _pageShown
                                           : null,
                                     ),
-                                  if (widget.assetReader != null)
+                                  if (widget.assetReader != null ||
+                                      page.ink.images.any(
+                                        (NoteImageElement image) =>
+                                            image.isVector,
+                                      ))
                                     PageImageLayer(
-                                      cache: _imageCache ??= PageImageCache(
-                                        readAsset: widget.assetReader!,
-                                      ),
+                                      cache: widget.assetReader == null
+                                          ? null
+                                          : _imageCache ??= PageImageCache(
+                                              readAsset: widget.assetReader!,
+                                            ),
                                       controller: page.ink,
-                                      readAsset: widget.assetReader!,
+                                      readAsset: widget.assetReader,
                                       maxDecodeDimension: widget
                                           .documentIoConfig
                                           .maxStoredImageDimension,
@@ -2433,6 +2709,8 @@ class EditorScreenState extends State<EditorScreen> {
                                     isInputBlocked: _isPageInputBlocked,
                                     pastePrompt: _pastePrompt,
                                     stylusOnly: _stylusOnly,
+                                    ruler: _ruler,
+                                    pointerClaims: _pointerClaims,
                                     selectablePdfBounds: page.pdfSource == null
                                         ? null
                                         : Offset.zero &
@@ -2441,9 +2719,12 @@ class EditorScreenState extends State<EditorScreen> {
                                     onStickyPlaced: _onStickyPlaced,
                                     pageGrows:
                                         page.setup.size == PageSize.infinite,
-                                    aiInput: _aiInput,
                                     carry: _selectionCarry,
                                     exclusionRects: _nativeExclusionRects,
+                                    exclusionsChanged:
+                                        _paletteController.popoverChanged,
+                                    replay: _strokeReplay,
+                                    onReplayStrokeTapped: _seekToStroke,
                                     // The page the selection is on is the
                                     // current one; the view stays put.
                                     onSelectionCarried: () => context
@@ -2452,6 +2733,7 @@ class EditorScreenState extends State<EditorScreen> {
                                         >()
                                         ?.touchPage(index),
                                   ),
+                                  AiContextGlow(assistant: _ai, page: page.ink),
                                   ValueListenableBuilder<
                                     _HandwritingFindTarget?
                                   >(
@@ -2524,28 +2806,67 @@ class EditorScreenState extends State<EditorScreen> {
                 ),
                 AnimatedPositioned(
                   key: const ValueKey<String>('history-position'),
-                  duration: AppMotion.resolve(context, AppMotion.medium),
-                  curve: AppMotion.standard,
+                  duration: AppMotion.resolve(
+                    context,
+                    AppMotion.snappy.duration,
+                  ),
+                  curve: AppMotion.fadeInCurve,
                   left: layout.history.left,
                   top: layout.history.top,
                   child: FloatingHistoryControls(
-                    controller: _inkController,
-                    onUndo: _undo,
-                    onRedo: _redo,
                     height: layout.history.height,
+                    width: layout.history.width,
+                    children: <Widget>[
+                      HistoryControls(
+                        controller: _inkController,
+                        onUndo: _undo,
+                        onRedo: _redo,
+                      ),
+                    ],
+                  ),
+                ),
+                AnimatedPositioned(
+                  key: const ValueKey<String>('page-controls-position'),
+                  duration: AppMotion.resolve(
+                    context,
+                    AppMotion.snappy.duration,
+                  ),
+                  curve: AppMotion.fadeInCurve,
+                  left: layout.pageControls.left,
+                  top: layout.pageControls.top,
+                  child: FloatingPageControls(
+                    height: layout.pageControls.height,
+                    width: layout.pageControls.width,
+                    child: PageControls(
+                      document: _document,
+                      showNavigation: showNavigation,
+                      onOpenPanel: _openPagePanel,
+                      canFind: _canFind,
+                      onFind: _openHandwritingFind,
+                      lastAddAction: _lastAddAction,
+                      onAddActionChanged: (AddPageAction action) {
+                        setState(() => _lastAddAction = action);
+                      },
+                      onInsertPdf: _canUseDocumentIo ? _insertPdf : null,
+                    ),
                   ),
                 ),
                 _PalettePositioner(
+                  historyWidth: historyWidth,
+                  pageControlsWidth: pageControlsWidth,
                   center: _paletteDragCenter,
                   sizeClass: sizeClass,
                   region: region,
                   placement: _palettePlacement.value,
+                  isAiOpen: isAiOpen,
+                  expanded: _paletteExpanded,
                   builder: (PaletteEdge edge) => ToolPalette(
                     edge: edge,
                     onDragStart: () => _onPaletteDragStart(
                       layout.paletteOrigin +
                           ToolPalette.sizeFor(
                             layout.paletteAxis,
+                            expanded: _paletteExpanded,
                           ).center(Offset.zero),
                     ),
                     onDragUpdate: _onPaletteDragUpdate,
@@ -2559,11 +2880,23 @@ class EditorScreenState extends State<EditorScreen> {
                     canPaste: () => _inkController.canPaste,
                     onPaste: _paste,
                     aiActive: _aiActive,
-                    onToggleAi: _toggleAiMode,
-                    toolsLocked: _aiInputPending,
+                    onTurnOnAi: _openAi,
+                    assistant: _ai,
                     penConfig: widget.penConfig,
                     eraserConfig: widget.eraserConfig,
                     controller: _paletteController,
+                    ruler: _ruler,
+                    recording: RecordingToolData(
+                      recorder: _audioRecorder,
+                      document: _document,
+                      replay: _strokeReplay,
+                      onStart: () => unawaited(_startRecording()),
+                      onPause: () => unawaited(_pauseRecording()),
+                      onResume: () => unawaited(_resumeRecording()),
+                      onStop: () => unawaited(finalizeRecording()),
+                      onOpen: (NoteRecordingTrack track) =>
+                          unawaited(_openReplay(track)),
+                    ),
                     stickySettings: _stickySettings,
                     onStickySettingsChanged: _onStickySettingsChanged,
                     stickyTargetLabel: () =>
@@ -2574,6 +2907,11 @@ class EditorScreenState extends State<EditorScreen> {
                     onTakePhoto: _canUseDocumentIo
                         ? () => _insertImage(DocumentImageSource.camera)
                         : null,
+                    onChooseSvg:
+                        _canUseDocumentIo &&
+                            widget.documentPicker is SvgDocumentPicker
+                        ? _insertSvg
+                        : null,
                   ),
                 ),
                 if (panelSide != null)
@@ -2581,8 +2919,8 @@ class EditorScreenState extends State<EditorScreen> {
                     key: const ValueKey<String>('ai-panel-beside'),
                     duration: _resizingAiPanel
                         ? Duration.zero
-                        : AppMotion.resolve(context, AppMotion.medium),
-                    curve: AppMotion.standard,
+                        : AppMotion.resolve(context, AppMotion.snappy.duration),
+                    curve: AppMotion.fadeInCurve,
                     top: 0,
                     bottom: 0,
                     left: panelSide == AiPanelSide.left
@@ -2606,8 +2944,11 @@ class EditorScreenState extends State<EditorScreen> {
                       // appearing all at once.
                       child: TweenAnimationBuilder<double>(
                         tween: Tween<double>(begin: 1, end: 0),
-                        duration: AppMotion.resolve(context, AppMotion.gentle),
-                        curve: AppMotion.gentleCurve,
+                        duration: AppMotion.resolve(
+                          context,
+                          AppMotion.smooth.duration,
+                        ),
+                        curve: AppMotion.fadeInCurve,
                         builder:
                             (
                               BuildContext context,
@@ -2712,7 +3053,7 @@ class _PanelResizeHandleState extends State<_PanelResizeHandle> {
           width: _PanelResizeHandle.width,
           child: Center(
             child: AnimatedContainer(
-              duration: AppMotion.resolve(context, AppMotion.fast),
+              duration: AppMotion.resolve(context, AppMotion.fadeIn),
               // Always faintly there, since touch screens can't hover.
               width: _hovered || widget.active ? 4 : 3,
               height: 40,
@@ -2731,10 +3072,15 @@ class _PanelResizeHandleState extends State<_PanelResizeHandle> {
 }
 
 class _HandwritingFindTarget {
-  const _HandwritingFindTarget({required this.page, required this.word});
+  const _HandwritingFindTarget({
+    required this.page,
+    required this.bounds,
+    this.stickyId,
+  });
 
   final NotePage page;
-  final RecognizedInkWord word;
+  final Rect bounds;
+  final String? stickyId;
 }
 
 class _HandwritingFindHighlightPainter extends CustomPainter {
@@ -2768,14 +3114,12 @@ class _HandwritingFindHighlightPainter extends CustomPainter {
 
   @override
   void paint(Canvas canvas, Size size) {
-    final RecognizedInkWord word = target.word;
-    if (!word.isSearchable || !page.recognizedWords.contains(word)) return;
-    if (word.stickyId == null) {
-      _paintHighlight(canvas, word.bounds);
+    if (target.stickyId == null) {
+      _paintHighlight(canvas, target.bounds);
       return;
     }
     final StickyNoteElement? sticky = page.ink.stickyNotes
-        .where((StickyNoteElement note) => note.id == word.stickyId)
+        .where((StickyNoteElement note) => note.id == target.stickyId)
         .firstOrNull;
     if (sticky == null || !sticky.isValid) return;
     final Size local = sticky.localSize;
@@ -2785,7 +3129,7 @@ class _HandwritingFindHighlightPainter extends CustomPainter {
       ..rotate(sticky.rotation)
       ..scale(sticky.scale)
       ..translate(-local.width / 2, -local.height / 2);
-    _paintHighlight(canvas, word.bounds, scale: sticky.scale);
+    _paintHighlight(canvas, target.bounds, scale: sticky.scale);
     canvas.restore();
   }
 
@@ -2799,10 +3143,16 @@ class _HandwritingFindHighlightPainter extends CustomPainter {
 class _HandwritingFindDialog extends StatefulWidget {
   const _HandwritingFindDialog({
     required this.document,
+    required this.recognizer,
+    required this.renderer,
     required this.onTargetChanged,
+    required this.onDrag,
   });
 
   final NoteDocument document;
+  final CanvasTextRecognizer recognizer;
+  final HandwritingImageRenderer renderer;
+  final ValueChanged<Offset> onDrag;
   final ValueChanged<_HandwritingFindTarget?> onTargetChanged;
 
   @override
@@ -2811,110 +3161,365 @@ class _HandwritingFindDialog extends StatefulWidget {
 
 class _HandwritingFindDialogState extends State<_HandwritingFindDialog> {
   final TextEditingController _query = TextEditingController();
+  final List<List<InkVector>> _drawnQuery = <List<InkVector>>[];
+  String _drawnReading = '';
+  int _recognitionGeneration = 0;
   int _selected = 0;
+  Timer? _pause;
+  List<_InkFindMatch> _found = const <_InkFindMatch>[];
 
-  List<(int, RecognizedInkWord)> get _matches {
-    final String needle = _query.text.trim().toLowerCase();
-    if (needle.isEmpty) return const <(int, RecognizedInkWord)>[];
-    return <(int, RecognizedInkWord)>[
-      for (int page = 0; page < widget.document.pages.length; page++)
-        for (final RecognizedInkWord word
-            in widget.document.pages[page].recognizedWords)
-          if (word.isSearchable && word.text.toLowerCase().contains(needle))
-            (page, word),
-    ];
+  /// How long the pen must rest before the drawn query is searched.
+  static const Duration _drawPause = Duration(milliseconds: 800);
+
+  List<_InkFindMatch> _search() {
+    final String typed = _query.text.trim();
+    final String text = <String>[
+      typed,
+      if (_drawnReading.isNotEmpty) _drawnReading,
+    ].join(' ').trim();
+    List<List<InkVector>> queryInk = _drawnQuery;
+    if (queryInk.isEmpty && typed.isNotEmpty) {
+      final String symbol = InkSearch.normalizeSearchText(typed);
+      if (symbol.runes.length <= 3 && NotationFont.canWrite(symbol)) {
+        queryInk = NotationFont.write(symbol, origin: InkVector.zero, size: 40);
+      }
+    }
+    if (text.isEmpty && queryInk.isEmpty) return const <_InkFindMatch>[];
+    final List<_InkFindMatch> found = <_InkFindMatch>[];
+    for (
+      int pageIndex = 0;
+      pageIndex < widget.document.pages.length;
+      pageIndex++
+    ) {
+      final NotePage page = widget.document.pages[pageIndex];
+      final List<InkSearchRegion> words = <InkSearchRegion>[
+        for (final RecognizedInkWord word in page.recognizedWords)
+          InkSearchRegion(
+            strokes: <List<InkVector>>[
+              for (final Stroke stroke in word.sourceStrokes) stroke.points,
+            ],
+            texts: <String>[word.text, ...word.alternatives],
+            confidence: word.confidence,
+            stickyId: word.stickyId,
+          ),
+      ];
+      final List<InkSearchRegion> regions = <InkSearchRegion>[
+        ...words,
+        ...InkSearch.lineSequences(words),
+        ...InkSearch.connectedRegions(page.ink.strokes),
+        for (final StickyNoteElement sticky in page.ink.stickyNotes)
+          ...InkSearch.connectedRegions(sticky.strokes, stickyId: sticky.id),
+      ];
+      for (final InkSearchMatch match in InkSearch.find(
+        regions: regions,
+        text: text,
+        strokes: queryInk,
+      )) {
+        found.add(_InkFindMatch(pageIndex, match));
+      }
+    }
+    found.sort((_InkFindMatch a, _InkFindMatch b) {
+      final int score = b.match.score.compareTo(a.match.score);
+      return score == 0 ? a.page.compareTo(b.page) : score;
+    });
+    return found.take(100).toList();
   }
 
-  void _showMatch(List<(int, RecognizedInkWord)> found, int index) {
+  void _showMatch(List<_InkFindMatch> found, int index) {
     if (found.isEmpty) {
       widget.onTargetChanged(null);
       return;
     }
-    final (int pageIndex, RecognizedInkWord word) = found[index];
-    widget.document.goTo(pageIndex);
+    final _InkFindMatch hit = found[index];
+    widget.document.goTo(hit.page);
     widget.onTargetChanged(
       _HandwritingFindTarget(
-        page: widget.document.pages[pageIndex],
-        word: word,
+        page: widget.document.pages[hit.page],
+        bounds: hit.match.region.bounds,
+        stickyId: hit.match.region.stickyId,
       ),
     );
   }
 
-  void _onQueryChanged(String _) {
-    setState(() => _selected = 0);
-    _showMatch(_matches, 0);
+  void _refresh() {
+    setState(() {
+      _selected = 0;
+      _found = _search();
+    });
+    _showMatch(_found, 0);
+  }
+
+  void _onQueryChanged(String _) => _refresh();
+
+  /// A new stroke began: whatever was waiting on the pause is stale.
+  void _onStrokeStart() {
+    _pause?.cancel();
+    _recognitionGeneration++;
+  }
+
+  void _onInkChanged(List<List<InkVector>> strokes) {
+    _pause?.cancel();
+    final int generation = ++_recognitionGeneration;
+    if (strokes.isEmpty) {
+      _drawnQuery.clear();
+      _drawnReading = '';
+      _refresh();
+      return;
+    }
+    _pause = Timer(_drawPause, () async {
+      if (!mounted || generation != _recognitionGeneration) return;
+      _drawnQuery
+        ..clear()
+        ..addAll(strokes.map(List<InkVector>.of));
+      _drawnReading = '';
+      _refresh();
+      int micros = 0;
+      final List<AiCanvasStroke> canvasStrokes = <AiCanvasStroke>[
+        for (final List<InkVector> stroke in strokes)
+          AiCanvasStroke(<AiCanvasPoint>[
+            for (final InkVector point in stroke)
+              AiCanvasPoint(point, Duration(microseconds: micros += 8000)),
+          ]),
+      ];
+      final HandwritingBatch batch =
+          widget.recognizer is PlatformCanvasTextRecognizer
+          ? widget.renderer.vectors(canvasStrokes)
+          : await widget.renderer.render(canvasStrokes);
+      final String reading = await widget.recognizer.recognize(batch);
+      if (!mounted || generation != _recognitionGeneration) return;
+      _drawnReading = reading.trim();
+      _refresh();
+    });
   }
 
   @override
   void dispose() {
+    _pause?.cancel();
+    _recognitionGeneration++;
     _query.dispose();
     super.dispose();
   }
 
   @override
   Widget build(BuildContext context) {
-    final List<(int, RecognizedInkWord)> found = _matches;
+    final List<_InkFindMatch> found = _found;
     final int selected = found.isEmpty ? 0 : _selected % found.length;
-    return AlertDialog(
-      title: const Text('Find handwriting'),
-      content: SizedBox(
-        width: 420,
+    return Material(
+      elevation: 8,
+      borderRadius: AppBorderRadius.medium,
+      clipBehavior: Clip.antiAlias,
+      child: Padding(
+        padding: const EdgeInsets.all(AppSpacing.sm),
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: <Widget>[
+            GestureDetector(
+              behavior: HitTestBehavior.opaque,
+              onPanUpdate: (DragUpdateDetails details) =>
+                  widget.onDrag(details.delta),
+              child: SizedBox(
+                height: 20,
+                width: double.infinity,
+                child: Center(
+                  child: Container(
+                    key: const ValueKey<String>('find-drag-handle'),
+                    width: 36,
+                    height: 4,
+                    decoration: BoxDecoration(
+                      color: Theme.of(context).dividerColor,
+                      borderRadius: BorderRadius.circular(2),
+                    ),
+                  ),
+                ),
+              ),
+            ),
             TextField(
               controller: _query,
               autofocus: true,
               textInputAction: TextInputAction.search,
               decoration: const InputDecoration(
-                hintText: 'Type a word or phrase',
+                hintText: 'Type a word, phrase, or symbol',
                 prefixIcon: Icon(AppIcons.search),
               ),
               onChanged: _onQueryChanged,
               onSubmitted: (_) => _showMatch(found, selected),
             ),
             const SizedBox(height: AppSpacing.sm),
-            Align(
-              alignment: Alignment.centerLeft,
-              child: Text(
-                _query.text.trim().isEmpty
-                    ? 'Search words recognized with at least ${(searchableHandwritingConfidence * 100).round()}% confidence.'
-                    : found.isEmpty
-                    ? 'No high-confidence handwritten text found.'
-                    : '${selected + 1} of ${found.length} — Page ${found[selected].$1 + 1}: ${found[selected].$2.text}',
-              ),
+            _InkSearchPad(
+              onStrokeStart: _onStrokeStart,
+              onChanged: _onInkChanged,
+            ),
+            Row(
+              children: <Widget>[
+                Expanded(
+                  child: Text(
+                    _query.text.trim().isEmpty
+                        ? _drawnQuery.isEmpty
+                              ? 'Type above or write/draw below.'
+                              : _drawnReading.isEmpty
+                              ? 'Searching by ink shape.'
+                              : 'Searching shape and “$_drawnReading”'
+                        : found.isEmpty
+                        ? 'No similar ink found.'
+                        : '${selected + 1} of ${found.length} · Page ${found[selected].page + 1} · ${(found[selected].match.score * 100).round()}%',
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                ),
+                if (found.length > 1)
+                  IconButton(
+                    tooltip: 'Previous match',
+                    onPressed: () {
+                      final int previous =
+                          (selected - 1 + found.length) % found.length;
+                      setState(() => _selected = previous);
+                      _showMatch(found, previous);
+                    },
+                    icon: const Icon(Icons.chevron_left),
+                  ),
+                if (found.isNotEmpty)
+                  IconButton(
+                    tooltip: 'Next match',
+                    onPressed: () {
+                      final int next = (selected + 1) % found.length;
+                      setState(() => _selected = next);
+                      _showMatch(found, next);
+                    },
+                    icon: const Icon(Icons.chevron_right),
+                  ),
+              ],
             ),
           ],
         ),
       ),
-      actions: <Widget>[
-        if (found.length > 1)
-          IconButton(
-            tooltip: 'Previous match',
-            onPressed: () {
-              final int previous = (selected - 1 + found.length) % found.length;
-              setState(() => _selected = previous);
-              _showMatch(found, previous);
-            },
-            icon: const Icon(Icons.chevron_left),
-          ),
-        if (found.isNotEmpty)
-          IconButton(
-            tooltip: 'Next match',
-            onPressed: () {
-              final int next = (selected + 1) % found.length;
-              setState(() => _selected = next);
-              _showMatch(found, next);
-            },
-            icon: const Icon(Icons.chevron_right),
-          ),
-        TextButton(
-          onPressed: () => Navigator.of(context).pop(),
-          child: const Text('Done'),
-        ),
-      ],
     );
   }
+}
+
+class _InkFindMatch {
+  const _InkFindMatch(this.page, this.match);
+
+  final int page;
+  final InkSearchMatch match;
+}
+
+class _InkSearchPad extends StatefulWidget {
+  const _InkSearchPad({required this.onChanged, this.onStrokeStart});
+
+  final ValueChanged<List<List<InkVector>>> onChanged;
+  final VoidCallback? onStrokeStart;
+
+  @override
+  State<_InkSearchPad> createState() => _InkSearchPadState();
+}
+
+class _InkSearchPadState extends State<_InkSearchPad> {
+  final List<List<InkVector>> _strokes = <List<InkVector>>[];
+  final Map<int, List<InkVector>> _active = <int, List<InkVector>>{};
+
+  void _down(PointerDownEvent event) {
+    final List<InkVector> stroke = <InkVector>[
+      InkVector(event.localPosition.dx, event.localPosition.dy),
+    ];
+    _active[event.pointer] = stroke;
+    widget.onStrokeStart?.call();
+    setState(() => _strokes.add(stroke));
+  }
+
+  void _move(PointerMoveEvent event) {
+    final List<InkVector>? stroke = _active[event.pointer];
+    if (stroke == null) return;
+    final InkVector point = InkVector(
+      event.localPosition.dx,
+      event.localPosition.dy,
+    );
+    if ((point - stroke.last).length < 1) return;
+    setState(() => stroke.add(point));
+  }
+
+  void _up(PointerEvent event) {
+    _active.remove(event.pointer);
+    widget.onChanged(<List<InkVector>>[
+      for (final List<InkVector> stroke in _strokes) List<InkVector>.of(stroke),
+    ]);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return SizedBox(
+      height: 96,
+      child: Stack(
+        children: <Widget>[
+          Positioned.fill(
+            child: DecoratedBox(
+              decoration: BoxDecoration(
+                border: Border.all(color: Theme.of(context).dividerColor),
+                borderRadius: BorderRadius.circular(10),
+              ),
+              child: Listener(
+                behavior: HitTestBehavior.opaque,
+                onPointerDown: _down,
+                onPointerMove: _move,
+                onPointerUp: _up,
+                onPointerCancel: _up,
+                child: CustomPaint(
+                  key: const ValueKey<String>('ink-search-pad'),
+                  painter: _InkSearchPadPainter(_strokes),
+                  child: _strokes.isEmpty
+                      ? const Center(child: Text('Write or draw to search'))
+                      : null,
+                ),
+              ),
+            ),
+          ),
+          if (_strokes.isNotEmpty)
+            Positioned(
+              right: 4,
+              top: 4,
+              child: IconButton(
+                tooltip: 'Clear drawing',
+                onPressed: () {
+                  setState(() {
+                    _active.clear();
+                    _strokes.clear();
+                  });
+                  widget.onChanged(const <List<InkVector>>[]);
+                },
+                icon: const Icon(Icons.close),
+              ),
+            ),
+        ],
+      ),
+    );
+  }
+}
+
+class _InkSearchPadPainter extends CustomPainter {
+  const _InkSearchPadPainter(this.strokes);
+
+  final List<List<InkVector>> strokes;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final Paint paint = Paint()
+      ..color = Colors.black87
+      ..strokeWidth = 2.5
+      ..strokeCap = StrokeCap.round
+      ..strokeJoin = StrokeJoin.round
+      ..style = PaintingStyle.stroke;
+    for (final List<InkVector> stroke in strokes) {
+      if (stroke.isEmpty) continue;
+      final Path path = Path()..moveTo(stroke.first.x, stroke.first.y);
+      for (final InkVector point in stroke.skip(1)) {
+        path.lineTo(point.x, point.y);
+      }
+      if (stroke.length == 1) path.lineTo(stroke.first.x, stroke.first.y);
+      canvas.drawPath(path, paint);
+    }
+  }
+
+  @override
+  bool shouldRepaint(_InkSearchPadPainter oldDelegate) => true;
 }
 
 /// An AI notation's playback, as the assistant sees it: done once it has
@@ -2963,13 +3568,21 @@ class _PalettePositioner extends StatefulWidget {
     required this.sizeClass,
     required this.region,
     required this.placement,
+    required this.historyWidth,
+    required this.pageControlsWidth,
     required this.builder,
+    this.isAiOpen = false,
+    this.expanded = false,
   });
+  final bool expanded;
+  final double historyWidth;
+  final double pageControlsWidth;
   final ValueListenable<Offset?> center;
   final WindowSizeClass sizeClass;
   final Rect region;
   final PalettePlacement placement;
   final Widget Function(PaletteEdge) builder;
+  final bool isAiOpen;
 
   @override
   State<_PalettePositioner> createState() => _PalettePositionerState();
@@ -2989,11 +3602,15 @@ class _PalettePositionerState extends State<_PalettePositioner> {
   Widget build(BuildContext context) => ValueListenableBuilder<Offset?>(
     valueListenable: widget.center,
     builder: (context, center, _) {
-      final layout = _EditorLayout.compute(
+      final layout = EditorLayout.compute(
         widget.sizeClass,
         widget.region,
         widget.placement,
+        historyWidth: widget.historyWidth,
+        pageControlsWidth: widget.pageControlsWidth,
         dragCenter: center,
+        isAiOpen: widget.isAiOpen,
+        paletteExpanded: widget.expanded,
       );
       // Reuse the entire control subtree until the edge or editor inputs
       // change. Each move updates only Stack parent data and compositing.
@@ -3004,9 +3621,9 @@ class _PalettePositionerState extends State<_PalettePositioner> {
       return AnimatedPositioned(
         key: const ValueKey<String>('tool-palette-position'),
         duration: center == null
-            ? AppMotion.resolve(context, AppMotion.dock)
+            ? AppMotion.resolve(context, AppMotion.bouncy.duration)
             : Duration.zero,
-        curve: AppMotion.standard,
+        curve: AppMotion.fadeInCurve,
         left: layout.paletteOrigin.dx,
         top: layout.paletteOrigin.dy,
         child: _palette!,
@@ -3015,67 +3632,108 @@ class _PalettePositionerState extends State<_PalettePositioner> {
   );
 }
 
-class _EditorLayout {
-  const _EditorLayout({
+class EditorLayout {
+  const EditorLayout({
     required this.surface,
     required this.paletteOrigin,
     required this.paletteEdge,
     required this.history,
+    required this.pageControls,
   });
 
   final Rect surface;
   final Offset paletteOrigin;
   final PaletteEdge paletteEdge;
 
-  /// Where Undo and Redo float: in the top right corner, as tall as the
-  /// palette lying across the top, and beside the palette rather than
-  /// under it when it is docked there.
+  /// Where the card of Undo and Redo hangs: in the top left corner.
   final Rect history;
 
-  static Rect _historyRect(
+  /// Where the card of change page, search, and add button hangs: in the top right corner.
+  final Rect pageControls;
+
+  static Rect _historyRect(Rect region, double width) {
+    final double height = ToolPalette.sizeFor(Axis.horizontal).height;
+    return region.topLeft & Size(math.min(width, region.width), height);
+  }
+
+  static Rect _pageControlsRect(Rect region, double width) {
+    final double height = ToolPalette.sizeFor(Axis.horizontal).height;
+    final double clampedWidth = math.min(width, region.width);
+    return Rect.fromLTWH(
+      region.right - clampedWidth,
+      region.top,
+      clampedWidth,
+      height,
+    );
+  }
+
+  /// Whether the palette and both cards can lie across the top.
+  static bool _fitsBeside(
     Rect region,
     double margin,
     PalettePlacement placement,
-  ) {
-    final double height = ToolPalette.sizeFor(Axis.horizontal).height;
-    final Size size = Size(FloatingHistoryControls.widthFor(height), height);
-    Rect rect =
-        Offset(region.right - margin - size.width, region.top + margin) & size;
-    // Measured against where the palette docks, so it does not jump about
-    // while the palette is dragged.
-    final Rect palette =
-        _dockedOrigin(region, margin, placement) &
-        ToolPalette.sizeFor(placement.edge.axis);
-    if (rect.overlaps(palette)) {
-      rect = rect.shift(Offset(palette.left - margin - rect.right, 0));
-    }
-    return rect;
+    double historyWidth,
+    double pageControlsWidth, {
+    bool expanded = false,
+  }) {
+    final Size palette = ToolPalette.sizeFor(
+      placement.edge.axis,
+      expanded: expanded,
+    );
+    return palette.width + historyWidth + pageControlsWidth + 4 * margin <=
+        region.width;
   }
 
-  /// Where the docked palette sits: as its placement says, unless it would
-  /// lie under Undo and Redo in the top right corner, on a narrow screen;
-  /// then it moves left just far enough to clear them, if it can.
+  /// Where the docked palette sits: centered or as its placement says, clear of
+  /// the cards at the corners. With no room beside both cards, as on a phone,
+  /// it goes on the row below.
   static Offset _dockedOrigin(
     Rect region,
     double margin,
     PalettePlacement placement,
-  ) {
-    final Offset origin = placement.originIn(region, margin);
+    double historyWidth,
+    double pageControlsWidth, {
+    bool isAiOpen = false,
+    bool expanded = false,
+  }) {
+    final Offset origin = placement.originIn(
+      region,
+      margin,
+      expanded: expanded,
+    );
     if (placement.edge != PaletteEdge.top) {
       return origin;
     }
-    final Size size = ToolPalette.sizeFor(Axis.horizontal);
-    final double historyLeft =
-        region.right -
-        margin -
-        FloatingHistoryControls.widthFor(size.height) -
-        margin;
-    final double overlap = origin.dx + size.width - historyLeft;
-    if (overlap <= 0) {
-      return origin;
+    final Rect leftCard = _historyRect(region, historyWidth);
+    final Rect rightCard = _pageControlsRect(region, pageControlsWidth);
+    if (!_fitsBeside(
+      region,
+      margin,
+      placement,
+      historyWidth,
+      pageControlsWidth,
+      expanded: expanded,
+    )) {
+      return Offset(origin.dx, math.max(origin.dy, leftCard.bottom + margin));
     }
-    final double left = math.max(region.left + margin, origin.dx - overlap);
-    return Offset(left, origin.dy);
+    if (isAiOpen) {
+      final Size paletteSize = ToolPalette.sizeFor(
+        placement.edge.axis,
+        expanded: expanded,
+      );
+      final double middleX = (leftCard.right + rightCard.left) / 2;
+      final double centeredX = middleX - paletteSize.width / 2;
+      final double clampedX = centeredX.clamp(
+        leftCard.right + margin,
+        math.max(
+          leftCard.right + margin,
+          rightCard.left - paletteSize.width - margin,
+        ),
+      );
+      return Offset(clampedX, origin.dy);
+    }
+    final double minClear = leftCard.right + margin;
+    return origin.dx >= minClear ? origin : Offset(minClear, origin.dy);
   }
 
   Axis get paletteAxis => paletteEdge.axis;
@@ -3089,21 +3747,30 @@ class _EditorLayout {
     };
   }
 
-  static _EditorLayout compute(
+  static EditorLayout compute(
     WindowSizeClass sizeClass,
     Rect region,
     PalettePlacement placement, {
+    required double historyWidth,
+    required double pageControlsWidth,
     Offset? dragCenter,
+    bool isAiOpen = false,
+    bool paletteExpanded = false,
   }) {
     final double margin = marginFor(sizeClass);
-    final Rect history = _historyRect(region, margin, placement);
+    final Rect history = _historyRect(region, historyWidth);
+    final Rect pageControls = _pageControlsRect(region, pageControlsWidth);
     if (dragCenter != null) {
       final PaletteEdge edge = PalettePlacement.nearestEdge(region, dragCenter);
-      final Size size = ToolPalette.sizeFor(edge.axis);
+      final Size size = ToolPalette.sizeFor(
+        edge.axis,
+        expanded: paletteExpanded,
+      );
       final Offset origin = dragCenter - size.center(Offset.zero);
-      return _EditorLayout(
+      return EditorLayout(
         surface: region,
         history: history,
+        pageControls: pageControls,
         paletteEdge: edge,
         paletteOrigin: Offset(
           origin.dx.clamp(
@@ -3117,11 +3784,20 @@ class _EditorLayout {
         ),
       );
     }
-    return _EditorLayout(
+    return EditorLayout(
       surface: region,
       history: history,
+      pageControls: pageControls,
       paletteEdge: placement.edge,
-      paletteOrigin: _dockedOrigin(region, margin, placement),
+      paletteOrigin: _dockedOrigin(
+        region,
+        margin,
+        placement,
+        historyWidth,
+        pageControlsWidth,
+        isAiOpen: isAiOpen,
+        expanded: paletteExpanded,
+      ),
     );
   }
 }

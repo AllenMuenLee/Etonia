@@ -16,7 +16,7 @@ enum HandwritingFont {
       descenderHook: 2.4,
       descenderLoop: 1,
       loopAspect: 0.9,
-      wordSpacing: 4,
+      wordSpacing: 6,
       baselineJitter: 0.08,
       sizeJitter: 0.02,
       joined: true,
@@ -32,7 +32,7 @@ enum HandwritingFont {
       descenderHook: 0.8,
       loopAspect: 1.05,
       lineProfile: StrokeProfile(<double>[0.004]),
-      wordSpacing: 3.6,
+      wordSpacing: 5.6,
       baselineJitter: 0.04,
       sizeJitter: 0.01,
     ),
@@ -47,7 +47,7 @@ enum HandwritingFont {
       descenderScale: 0.85,
       descenderHook: 1.8,
       loopAspect: 1.4,
-      wordSpacing: 4.2,
+      wordSpacing: 6.2,
       baselineJitter: 0.1,
       sizeJitter: 0.02,
     ),
@@ -64,14 +64,14 @@ enum HandwritingFont {
       loopAspect: 0.8,
       lineProfile: StrokeProfile(<double>[0.03, -0.012]),
       crossTilt: -0.12,
-      wordSpacing: 2.6,
+      wordSpacing: 4.4,
       baselineJitter: 0.35,
       sizeJitter: 0.07,
     ),
   ),
 
   /// The writer's own letters; its style is whatever they wrote.
-  custom('Your handwriting', 'Write 15 letters to make your own', null);
+  custom('Your handwriting', 'Write 18 letters to make your own', null);
 
   const HandwritingFont(this.label, this.description, this.style);
 

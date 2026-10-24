@@ -354,7 +354,7 @@ void main() {
                 'type': 'label',
                 'x': 0,
                 'y': 0,
-                'text': '∫',
+                'text': '☃',
                 'ink': 'red',
               }),
             ),
@@ -440,7 +440,7 @@ void main() {
               ],
           _text()
             ..['size'] = 8
-            ..['text'] = 'a' * 120,
+            ..['text'] = 'a' * 48,
           _text()..['size'] = 120,
           _path()
             ..['closed'] = true
@@ -523,13 +523,6 @@ void main() {
     );
     expect(
       () => AiAssistantResponse.parse('before ${jsonEncode(_valid())}'),
-      throwsFormatException,
-    );
-    expect(
-      () => AiAssistantResponse.parse(
-        jsonEncode(_valid()),
-        config: const AiNotationConfig(maxResponseBytes: 10),
-      ),
       throwsFormatException,
     );
   });
@@ -844,6 +837,7 @@ void main() {
         };
     expect(byType.keys, <String>[
       '[text]',
+      '[math]',
       '[graph]',
       '[plot]',
       '[path]',

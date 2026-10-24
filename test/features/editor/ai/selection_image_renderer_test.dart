@@ -488,13 +488,7 @@ void main() {
               const InkVector(-double.maxFinite, 0),
               const InkVector(double.maxFinite, 10),
             ),
-          ]): SelectionImageFailure.tooLarge,
-          SelectionInkSnapshot.fromStrokes(<SnapshotStroke>[
-            _line(const InkVector(0, 0), const InkVector(1e9, 1e9)),
-          ]): SelectionImageFailure.tooLarge,
-          SelectionInkSnapshot.fromStrokes(<SnapshotStroke>[
-            _line(const InkVector(0, 0), const InkVector(100000, 4)),
-          ]): SelectionImageFailure.tooLarge,
+          ]): SelectionImageFailure.invalidGeometry,
         };
 
     for (final MapEntry<SelectionInkSnapshot, SelectionImageFailure> entry
@@ -502,6 +496,13 @@ void main() {
       expect(() => counting.layout(entry.key), _fails(entry.value));
       expect(counting.render(entry.key), _fails(entry.value));
     }
+    final SelectionImageLayout huge = counting.layout(
+      SelectionInkSnapshot.fromStrokes(<SnapshotStroke>[
+        _line(const InkVector(0, 0), const InkVector(1e9, 1e9)),
+      ]),
+    );
+    expect(huge.width, 2048);
+    expect(huge.height, 2048);
     expect(images, 0);
   });
 

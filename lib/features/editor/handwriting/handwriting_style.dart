@@ -3,6 +3,7 @@ import 'dart:math' as math;
 import 'package:flutter/foundation.dart';
 
 import '../ink/ink_sample.dart';
+import 'glyph_builder.dart';
 import 'hand_features.dart';
 import 'hand_glyphs.dart';
 import 'stroke_profile.dart';
@@ -30,7 +31,7 @@ class HandwritingStyle {
     this.lineProfile = standardLineProfile,
     this.curveProfile = CurveProfile.zero,
     this.crossTilt = 0,
-    this.wordSpacing = 3,
+    this.wordSpacing = 5,
     this.baselineJitter = 0.11,
     this.sizeJitter = 0.025,
     this.joined = false,
@@ -86,7 +87,8 @@ class HandwritingStyle {
   /// negative rises to the right.
   final double crossTilt;
 
-  /// How wide a space between words is, in grid units.
+  /// How wide a space between words is, in grid units, besides the gaps
+  /// either side of it: at 5, words stand about an n apart, as on paper.
   final double wordSpacing;
 
   /// How far letters wander above and below the baseline, in grid units.
@@ -223,7 +225,7 @@ class HandwritingStyle {
     double width, {
     double seed = 0,
   }) {
-    final HandGlyph? own = glyphs?[char];
+    final HandGlyph? own = glyphs?.lined(char);
     if (own != null) return (strokes: own.strokes, width: own.width);
     if (strokes.isEmpty) return (strokes: strokes, width: width * widthScale);
     final bool lowercase = _isLowercase(char);
@@ -267,6 +269,72 @@ class HandwritingStyle {
       ];
     }
     return _placed(shaped, seed, lines: true);
+  }
+
+  /// [strokes], marks in the font's grid that are no letter, such as a
+  /// fraction bar, a radical, or a bracket drawn as tall as a formula,
+  /// drawn as this hand draws: its lines and curves bending as its do, its
+  /// cross-strokes tilted, and leaning as its letters do about the
+  /// baseline at y = 10. [seed] makes each mark a little different.
+  List<List<InkVector>> mark(List<List<InkVector>> strokes, {double seed = 0}) {
+    if (strokes.isEmpty) return strokes;
+    // A bar across a formula drifts as a cross-stroke does, but a long one
+    // turned by a letter's angle would run far off level: the longer it
+    // is, the less it turns.
+    List<List<InkVector>> shaped = <List<InkVector>>[
+      for (final List<InkVector> stroke in strokes)
+        () {
+          final ({double left, double right, double top, double bottom}) box =
+              _box(<List<InkVector>>[stroke]);
+          final double length = box.right - box.left;
+          if (crossTilt == 0 ||
+              stroke.length < 2 ||
+              length < 2 ||
+              box.bottom - box.top > length * 0.3) {
+            return stroke;
+          }
+          final double angle = crossTilt * math.min(1, 6 / length);
+          final InkVector middle = InkVector(
+            (box.left + box.right) / 2,
+            (box.top + box.bottom) / 2,
+          );
+          final double c = math.cos(angle);
+          final double sn = math.sin(angle);
+          return <InkVector>[
+            for (final InkVector p in stroke)
+              middle +
+                  InkVector(
+                    (p.x - middle.x) * c - (p.y - middle.y) * sn,
+                    (p.x - middle.x) * sn + (p.y - middle.y) * c,
+                  ),
+          ];
+        }(),
+    ];
+    final HandFeatures? hand = features;
+    if (hand != null && !hand.isEmpty) {
+      // A mark is no i or j, so its dots stay where they are.
+      shaped = hand.apply('-', shaped, bowls: false, tailed: false, seed: seed);
+      if (hand.straight == null) shaped = _lines(shaped, seed);
+    } else {
+      if (!curveProfile.isZero) {
+        shaped = <List<InkVector>>[
+          for (final List<InkVector> stroke in shaped)
+            stroke.length < 3
+                ? stroke
+                : withCurves(
+                    stroke,
+                    curveProfile,
+                    size: _capHeight,
+                    spacing: 0.4,
+                  ),
+        ];
+      }
+      shaped = _lines(shaped, seed);
+    }
+    return _mapped(
+      shaped,
+      (InkVector p) => InkVector(p.x + (10 - p.y) * slant, p.y),
+    );
   }
 
   /// How far [char]'s tail curls. A g whose tail drops straight reads as a
@@ -634,12 +702,14 @@ class HandwritingStyle {
       curveProfile:
           CurveProfile.fromJson(json['curveProfile']) ?? d.curveProfile,
       crossTilt: read('crossTilt', d.crossTilt),
-      wordSpacing: read('wordSpacing', d.wordSpacing),
+      // Calibration has no words to measure a space from, so a saved one
+      // is the built-in hand's as it was then: it follows the built-in one.
+      wordSpacing: d.wordSpacing,
       baselineJitter: read('baselineJitter', d.baselineJitter),
       sizeJitter: read('sizeJitter', d.sizeJitter),
       joined: json['joined'] == true,
       features: HandFeatures.fromJson(json['features']),
-      glyphs: HandGlyphs.fromJson(json['glyphs']),
+      glyphs: rebuiltGlyphs(HandGlyphs.fromJson(json['glyphs'])),
     ).clamped();
   }
 

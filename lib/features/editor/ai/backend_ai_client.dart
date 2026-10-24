@@ -39,61 +39,49 @@ class BackendAiClient implements AiModelRouter {
     return '${hex.substring(0, 8)}-${hex.substring(8, 12)}-${hex.substring(12, 16)}-${hex.substring(16, 20)}-${hex.substring(20)}';
   }
 
-  /// Keeps the most recent complete turns, compacted, the current user
-  /// message being sent separately as [prompt]. Every turn kept is paid for
-  /// again on each request, so only the last few go, and only the latest
-  /// answer nearly whole: enough to follow up on it. Older turns are short
-  /// excerpts, and a quick action is its label, not its long prompt.
+  /// Keeps twelve complete turns: enough for sustained follow-ups without
+  /// paying again for an unbounded transcript. Old turns are compact, the
+  /// latest two stay detailed, and applied notation is never resent.
   static List<Map<String, String>> _history(
     List<AiMessage> messages,
     int currentIndex,
   ) {
-    const int maxMessages = 6;
-    const int maxBytes = 8000;
+    const int maxMessages = 24;
+    const int maxBytes = 24000;
     if (currentIndex <= 0) return const <Map<String, String>>[];
     final List<AiMessage> earlier = messages.take(currentIndex).toList();
     final List<Map<String, String>> history = <Map<String, String>>[
       for (int i = 0; i < earlier.length; i++)
         <String, String>{
           'role': earlier[i].role == AiRole.user ? 'user' : 'assistant',
-          'content': _compactTurn(earlier[i], latest: i >= earlier.length - 2),
+          'content': _compactTurn(earlier[i], recent: i >= earlier.length - 4),
         },
     ];
     while (history.length > maxMessages ||
         utf8.encode(jsonEncode(history)).length > maxBytes) {
+      // Remove whole turns, never leave an orphan assistant answer.
       history.removeAt(0);
-    }
-    // A truncated conversation must not begin with an orphaned answer.
-    if (history.isNotEmpty && history.first['role'] == 'assistant') {
-      history.removeAt(0);
+      if (history.isNotEmpty && history.first['role'] == 'assistant') {
+        history.removeAt(0);
+      }
     }
     return history;
   }
 
-  /// [message] as history: the latest exchange's answer up to 2000
-  /// characters, its question up to 600; anything older a one-line excerpt.
-  static String _compactTurn(AiMessage message, {required bool latest}) {
+  static String _compactTurn(AiMessage message, {required bool recent}) {
     final String? label = message.label?.trim();
     if (message.role == AiRole.user && label != null && label.isNotEmpty) {
       return label;
     }
-    if (latest) {
-      return _excerpt(
-        message.text.trim(),
-        message.role == AiRole.user ? 600 : 2000,
-      );
-    }
-    return _excerpt(
-      message.text.replaceAll(RegExp(r'\s+'), ' ').trim(),
-      message.role == AiRole.user ? 200 : 300,
-    );
-  }
-
-  /// [text] cut to about [max] characters, at a word break, marked as cut.
-  static String _excerpt(String text, int max) {
-    if (text.length <= max) return text;
-    int cut = text.lastIndexOf(' ', max);
-    if (cut < max * 0.6) cut = max;
+    final String text = recent
+        ? message.historyText.trim()
+        : message.historyText.replaceAll(RegExp(r'\s+'), ' ').trim();
+    final int limit = recent
+        ? (message.role == AiRole.user ? 1200 : 4000)
+        : (message.role == AiRole.user ? 400 : 700);
+    if (text.length <= limit) return text;
+    int cut = text.lastIndexOf(' ', limit);
+    if (cut < limit * 0.6) cut = limit;
     return '${text.substring(0, cut).trimRight()} …';
   }
 
@@ -118,8 +106,19 @@ class BackendAiClient implements AiModelRouter {
     try {
       final note = request.noteImage;
       final focus = note?.normalizedFocusBounds;
+      final double? clampedLeft = focus?.left.clamp(0.0, 1.0);
+      final double? clampedTop = focus?.top.clamp(0.0, 1.0);
+      final double? clampedRight = focus?.right.clamp(0.0, 1.0);
+      final double? clampedBottom = focus?.bottom.clamp(0.0, 1.0);
+      final bool validFocus =
+          clampedLeft != null &&
+          clampedTop != null &&
+          clampedRight != null &&
+          clampedBottom != null &&
+          clampedLeft < clampedRight &&
+          clampedTop < clampedBottom;
       final bool notation =
-          request.notationEnabled && note != null && focus != null;
+          request.notationEnabled && note != null && validFocus;
       final history = _history(request.messages, latestIndex);
       final response = await (invoke ?? _backend.invoke)('ai', {
         'requestId': _requestId(),
@@ -129,24 +128,29 @@ class BackendAiClient implements AiModelRouter {
         // The fixed instruction, the same for every request, so providers
         // read it from their cache at a fraction of the price.
         'systemInstruction': request.systemInstruction,
+        // The large notation grammar goes only to the model that draws the
+        // answer, never to the one that writes it.
+        if (notation && request.notationInstruction != null)
+          'notationInstruction': request.notationInstruction,
+        if (notation) 'animationAllowed': request.animationEnabled,
         // The note travels as coordinates, never as a picture: where the
         // selection is, its ink, boxes round what is near it, and where the
         // paper is blank. Apart, so it does not break the cached prefix.
         if (notation) 'noteMetadata': aiNoteMetadata(note),
         'selectedImage': base64Encode(request.imagePng),
+        if (notation && request.notationImagePng != null)
+          'notationImage': base64Encode(request.notationImagePng!),
         // Formatted output: the provider must answer in exactly this
-        // shape, the words in message and the drawing in notation.
-        if (notation) 'responseSchema': aiResponseJsonSchema(),
         if (notation)
           'notationContext': {
             'width': note.logicalSize.width,
             'height': note.logicalSize.height,
             // The crop's padding can run past the paper; the service takes
             // only the paper.
-            'left': focus.left.clamp(0.0, 1.0),
-            'top': focus.top.clamp(0.0, 1.0),
-            'right': focus.right.clamp(0.0, 1.0),
-            'bottom': focus.bottom.clamp(0.0, 1.0),
+            'left': clampedLeft,
+            'top': clampedTop,
+            'right': clampedRight,
+            'bottom': clampedBottom,
           },
       });
       if (_closed) return const AiError(AiFailure(AiFailureKind.interrupted));

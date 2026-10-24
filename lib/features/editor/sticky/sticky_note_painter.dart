@@ -130,6 +130,7 @@ void paintStickyNote(
       origin: stroke.points.first,
       isDot: stroke.isDot,
       outline: stroke.outline,
+      writing: stroke.style.writing,
     );
   }
   paintAboveInk?.call(canvas);

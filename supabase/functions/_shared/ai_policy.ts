@@ -22,13 +22,20 @@ export interface AiInput {
   prompt: string;
   history?: AiHistoryMessage[];
   systemInstruction: string;
+  /** Expensive drawing grammar, sent to the provider only after the first
+   * pass decides that a visual adds value. */
+  notationInstruction?: string;
+  animationAllowed?: boolean;
   /** The note as coordinates for this request. Sent apart from the fixed
    * [systemInstruction] so that the fixed part stays a cacheable prefix. */
   noteMetadata?: string;
   selectedImage: string;
+  /** Clean crop is used for reading; this gridded variant is used only if a
+   * second drawing pass is needed. */
+  notationImage?: string;
   notationContext?: Record<string, number>;
-  /** The answer's JSON schema, sent with Notation on: the provider is held
-   * to it, so the drawing arrives in the shape the app reads. */
+  /** Accepted from older app versions for request compatibility. New clients
+   * omit it, and it is never forwarded to providers. */
   responseSchema?: Record<string, unknown>;
 }
 export interface AiHistoryMessage {
@@ -36,14 +43,20 @@ export interface AiHistoryMessage {
   content: string;
 }
 
-/** The most a response schema may be, as JSON. */
-const maxSchemaBytes = 64000;
-const maxHistoryBytes = 128000;
-const maxHistoryMessages = 100;
+const maxHistoryBytes = 24000;
+const maxHistoryMessages = 24;
+const maxSchemaBytes = 256000;
+const hardMaxOutputTokens = 16384;
+/** With Notation on, the user's model writes the words only, within this many
+ * output tokens; the drawing is left to [drawingModel]. */
+export const answerOutputCap = 8192;
+/** The model that turns an answer into the editable notation SVG. */
+export const drawingModel = "luna";
 
 export function validatePng(image: unknown): asserts image is string {
   if (
-    typeof image !== "string" || image.length > 6000000 || !/^[A-Za-z0-9+/]+={0,2}$/.test(image)
+    typeof image !== "string" || image.length > 10000000 ||
+    !/^[A-Za-z0-9+/]+={0,2}$/.test(image)
   ) {
     throw new Failure("rejected");
   }
@@ -59,7 +72,7 @@ export function validatePng(image: unknown): asserts image is string {
     throw new Failure("rejected");
   }
   const view = new DataView(Uint8Array.from(bytes.slice(16, 24), (c) => c.charCodeAt(0)).buffer);
-  if ([view.getUint32(0), view.getUint32(4)].some((n) => n < 1 || n > 2048)) {
+  if ([view.getUint32(0), view.getUint32(4)].some((n) => n < 1 || n > 4096)) {
     throw new Failure("rejected");
   }
 }
@@ -74,8 +87,11 @@ export function validateInput(body: Record<string, unknown>) {
         "prompt",
         "history",
         "systemInstruction",
+        "notationInstruction",
+        "animationAllowed",
         "noteMetadata",
         "selectedImage",
+        "notationImage",
         "notationContext",
         "responseSchema",
       ].includes(k)
@@ -90,11 +106,17 @@ export function validateInput(body: Record<string, unknown>) {
     (body.history !== undefined && !validHistory(body.history)) ||
     typeof body.systemInstruction !== "string" ||
     new TextEncoder().encode(body.systemInstruction).length > 64000 ||
+    (body.notationInstruction !== undefined &&
+      (typeof body.notationInstruction !== "string" ||
+        new TextEncoder().encode(body.notationInstruction).length > 64000)) ||
+    (body.animationAllowed !== undefined &&
+      typeof body.animationAllowed !== "boolean") ||
     (body.noteMetadata !== undefined &&
       (typeof body.noteMetadata !== "string" ||
-        new TextEncoder().encode(body.noteMetadata).length > 64000))
+        new TextEncoder().encode(body.noteMetadata).length > 128000))
   ) throw new Failure("rejected");
   validatePng(body.selectedImage);
+  if (body.notationImage !== undefined) validatePng(body.notationImage);
   if (body.notationContext !== undefined) {
     const context = body.notationContext as Record<string, number>;
     const keys = ["width", "height", "left", "top", "right", "bottom"];
@@ -106,6 +128,11 @@ export function validateInput(body: Record<string, unknown>) {
       context.left < 0 || context.top < 0 || context.right > 1 || context.bottom > 1 ||
       context.left >= context.right || context.top >= context.bottom
     ) throw new Failure("rejected");
+  } else if (
+    body.notationInstruction !== undefined || body.animationAllowed !== undefined ||
+    body.notationImage !== undefined
+  ) {
+    throw new Failure("rejected");
   }
   if (body.responseSchema !== undefined) {
     const schema = body.responseSchema;
@@ -143,7 +170,6 @@ export function modelConfig(catalog: Record<string, ModelConfig>, alias: string)
     !Number.isSafeInteger(model.outputMicroPerKilo) || model.outputMicroPerKilo <= 0 ||
     model.outputMicroPerKilo > 1e9 ||
     !Number.isSafeInteger(model.maxOutputTokens) || model.maxOutputTokens < 256 ||
-    model.maxOutputTokens > 16384 ||
     (model.cachedInputMicroPerKilo !== undefined &&
       (!Number.isSafeInteger(model.cachedInputMicroPerKilo) ||
         model.cachedInputMicroPerKilo < 0 ||
@@ -153,27 +179,51 @@ export function modelConfig(catalog: Record<string, ModelConfig>, alias: string)
   ) throw new Failure("not_configured", 503);
   return model;
 }
+/** Which request an input bound is for: a plain one, or the answer or drawing
+ * step of a notation request, each of which sends only part of the input. */
+type Part = "all" | "text" | "draw";
+
 /** The most one provider call's input can cost. */
-function inputCostBound(model: ModelConfig, input: AiInput): number {
+function inputCostBound(model: ModelConfig, input: AiInput, part: Part = "all"): number {
+  const sent = part === "text"
+    ? input.prompt + input.systemInstruction + JSON.stringify(input.history ?? [])
+    : part === "draw"
+    ? input.prompt + (input.notationInstruction ?? input.systemInstruction) +
+      (input.noteMetadata ?? "") + JSON.stringify(input.responseSchema ?? "")
+    : input.prompt + input.systemInstruction + (input.notationInstruction ?? "") +
+      (input.noteMetadata ?? "") + JSON.stringify(input.history ?? []) +
+      JSON.stringify(input.responseSchema ?? "");
   // UTF-8 bytes conservatively bound text tokens; leave room for the fixed
   // system instruction, framing and a conservative allowance for a 2048px crop.
-  const inputBound = new TextEncoder().encode(
-    input.prompt + input.systemInstruction + (input.noteMetadata ?? "") +
-      JSON.stringify(input.history ?? []) +
-      JSON.stringify(input.responseSchema ?? ""),
-  ).length +
-    32768;
+  const inputBound = new TextEncoder().encode(sent).length + 32768;
   return Math.ceil(inputBound * model.inputMicroPerKilo / 1000);
 }
 
+/** The most the drawing step can cost: [drawer] reads the note and the
+ * answer, which is at most [answerOutputCap] tokens, and writes the notation. */
+function drawingCap(drawer: ModelConfig, input: AiInput): number {
+  const maxOutput = Math.min(drawer.maxOutputTokens, hardMaxOutputTokens);
+  return inputCostBound(drawer, input, "draw") +
+    Math.ceil(answerOutputCap * drawer.inputMicroPerKilo / 1000) +
+    Math.ceil(maxOutput * drawer.outputMicroPerKilo / 1000);
+}
+
 /** The most this request can cost at full output, so only that much of the
- * balance is held and other requests can run alongside it. A two-step request
- * sends the input twice, the second time with step 1's answer added. */
-export function reservationCap(model: ModelConfig, input: AiInput, twoSteps: boolean): number {
-  const step = inputCostBound(model, input) +
-    Math.ceil(model.maxOutputTokens * model.outputMicroPerKilo / 1000);
-  if (!twoSteps) return step;
-  return 2 * step + Math.ceil(model.maxOutputTokens * model.inputMicroPerKilo / 1000);
+ * balance is held and other requests can run alongside it. A notation request
+ * has [drawer] draw the answer after [model] has written it. */
+export function reservationCap(model: ModelConfig, input: AiInput, drawer?: ModelConfig): number {
+  const maxOutput = Math.min(model.maxOutputTokens, hardMaxOutputTokens);
+  if (!drawer) {
+    return inputCostBound(model, input) + Math.ceil(maxOutput * model.outputMicroPerKilo / 1000);
+  }
+  return inputCostBound(model, input, "text") +
+    Math.ceil(Math.min(maxOutput, answerOutputCap) * model.outputMicroPerKilo / 1000) +
+    drawingCap(drawer, input);
+}
+
+/** What of [reserved] is left for the answer once [drawer]'s step is paid for. */
+export function answerReserve(reserved: number, drawer: ModelConfig, input: AiInput): number {
+  return reserved - drawingCap(drawer, input);
 }
 
 export function outputBudget(
@@ -181,13 +231,19 @@ export function outputBudget(
   input: AiInput,
   reserved: number,
   unlimited: boolean,
+  drawn = false,
 ): number {
   // Reasoning counts against this, often thousands of tokens before the
   // answer starts; the model config caps it, as for metered requests.
-  if (unlimited) return model.maxOutputTokens;
-  const inputCost = inputCostBound(model, input);
-  const output = Math.min(
+  const cap = Math.min(
     model.maxOutputTokens,
+    hardMaxOutputTokens,
+    drawn ? answerOutputCap : Infinity,
+  );
+  if (unlimited) return cap;
+  const inputCost = inputCostBound(model, input, drawn ? "text" : "all");
+  const output = Math.min(
+    cap,
     Math.floor((reserved - inputCost) * 1000 / model.outputMicroPerKilo),
   );
   if (output < 256) throw new Failure("insufficient_credits", 409);
@@ -220,8 +276,10 @@ export function costOf(
 }
 
 /** The fixed instructions, the same for every request: a cacheable prefix. */
-function fixedInstruction(input: AiInput): string {
-  return input.systemInstruction +
+function fixedInstruction(input: AiInput, notation = false): string {
+  return (notation
+    ? input.notationInstruction ?? input.systemInstruction
+    : input.systemInstruction) +
     "\nPrivacy: You receive this AI conversation's text, the current question, and selected image " +
     "crop. You cannot see the rest of the note or PDFs. Do not pretend you can.";
 }
@@ -232,73 +290,67 @@ function requestInstruction(input: AiInput): string {
     ? "Crop on the note (page logical width and height; crop bounds note_normalized). Beyond " +
       "it you know only the metadata; never assume other paper is blank. " +
       JSON.stringify(input.notationContext)
-    : "Return notation:null.") +
+    : "Return no visible SVG elements.") +
     (input.noteMetadata ? "\n\n" + input.noteMetadata : "");
 }
 
-function instruction(input: AiInput): string {
-  return fixedInstruction(input) + " " + requestInstruction(input);
+function instruction(input: AiInput, notation = false): string {
+  return fixedInstruction(input, notation) + (notation ? " " + requestInstruction(input) : "");
 }
 
-/** One of the two requests Claude answers in with Notation on: first the
- * explanation alone, then the notation that writes and draws it. */
-export type ClaudeStep = { step: "text" } | { step: "notation"; message: string };
+/** One phase of a notation-enabled request: the user's model writes the words
+ * from the clean crop, then [drawingModel] draws them from the gridded one. */
+export type AiStep =
+  | { step: "text" }
+  | { step: "notation"; message: string; visual?: "static" };
 
-/** Whether [model] answers [input] in two steps. Claude cannot be held to
- * the whole answer's shape (its grammar is too large), and one answer that
- * both explains and draws often runs out before the drawing; split, the
- * words come first and always, and the drawing request has one job. */
-export function twoStep(model: ModelConfig, input: AiInput): boolean {
-  return model.provider === "claude" && input.notationContext !== undefined;
+/** Whether [input] is eligible for the answer-then-drawing pair of passes. */
+export function twoStep(_model: ModelConfig, input: AiInput): boolean {
+  return input.notationContext !== undefined;
 }
 
-const textStep = "\nThis is step 1 of 2. Return only the explanation, in message, as the " +
-  "instructions above describe; write no notation now. In step 2 you will be asked to " +
-  "write and draw on the note following this explanation, so you may say briefly what you " +
-  "are writing and drawing there, but never mention steps, requests, or doing it later: " +
-  "the user sees one answer.";
+const textStep =
+  "\nAnswer fully but concisely, in words only: return the required SVG with only title and message desc. " +
+  "A separate step draws on the note afterwards, so do not draw or mention a drawing.";
 
-const notationStep = "\nThis is step 2 of 2. Your previous message, the explanation, has " +
-  "already been shown to the user. Following it, write and draw it on the note: return only a JSON " +
-  'object {"notation": ...} holding the notation, exactly as the instructions above describe, ' +
-  'animated only if they enable animation, or {"notation": null} when the explanation is a ' +
-  "simple text answer. Write nothing else.";
+const notationStep =
+  "\nThe explanation is already complete. Return the required self-contained SVG, placing the " +
+  "explanation in its message desc and adding only the useful visible vector annotation. " +
+  "Use no visible elements when a drawing would not help. Write nothing outside the SVG.";
 
-/** Step 1's answer: the explanation alone. */
-const textSchema = {
-  type: "object",
-  additionalProperties: false,
-  properties: { message: { type: "string" } },
-  required: ["message"],
-};
-
-/** The explanation in step 1's answer. */
+/** The explanation in step 1's answer; an unreadable answer fails. */
 export function stepMessage(answer: string): string {
-  let message: unknown;
-  try {
-    message = JSON.parse(withoutFence(answer)).message;
-  } catch {
+  const svg = withoutFence(answer);
+  const match = /<desc\b[^>]*data-etonia-role=["']message["'][^>]*>([\s\S]*?)<\/desc>/i.exec(svg);
+  if (!match?.[1]?.trim()) {
     throw new Failure("server", 503);
   }
-  if (typeof message !== "string" || !message.trim()) throw new Failure("server", 503);
-  return message;
+  return decodeXml(match[1]).trim();
 }
 
 /** The answer the app reads, from step 1's explanation and step 2's answer,
  * or none: a drawing that cannot be read is left out, the words kept. */
 export function combineSteps(message: string, notationAnswer: string | undefined): string {
-  let notation: unknown = null;
-  try {
-    const parsed = JSON.parse(withoutFence(notationAnswer ?? ""));
-    if (parsed && typeof parsed === "object") {
-      // {"notation": {...}}, or, from a model that left out the wrapper, the
-      // notation itself.
-      notation = "notation" in parsed ? parsed.notation : "items" in parsed ? parsed : null;
-    }
-  } catch {
-    // Words without a drawing.
-  }
-  return JSON.stringify({ version: 2, message, notation });
+  const fallback =
+    `<svg xmlns="http://www.w3.org/2000/svg" data-etonia-version="1" viewBox="0 0 1 1"><title>Answer</title><desc data-etonia-role="message">${
+      escapeXml(message)
+    }</desc></svg>`;
+  const svg = withoutFence(notationAnswer ?? "");
+  if (!/^<svg\b/i.test(svg) || !/<\/svg>\s*$/i.test(svg)) return fallback;
+  const desc = /<desc\b[^>]*data-etonia-role=["']message["'][^>]*>[\s\S]*?<\/desc>/i;
+  const replacement = `<desc data-etonia-role="message">${escapeXml(message)}</desc>`;
+  return desc.test(svg)
+    ? svg.replace(desc, replacement)
+    : svg.replace(/<svg\b[^>]*>/i, (root) => root + replacement);
+}
+
+function escapeXml(text: string): string {
+  return text.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;");
+}
+
+function decodeXml(text: string): string {
+  return text.replaceAll("&lt;", "<").replaceAll("&gt;", ">")
+    .replaceAll("&quot;", '"').replaceAll("&apos;", "'").replaceAll("&amp;", "&");
 }
 
 /** [text] without a Markdown code fence round it. */
@@ -313,14 +365,22 @@ export function providerRequest(
   input: AiInput,
   maxOutput: number,
   key: string,
-  claudeStep?: ClaudeStep,
+  aiStep?: AiStep,
 ): {
   url: string;
   headers: Record<string, string>;
   body: Record<string, unknown>;
 } {
-  const system = instruction(input);
+  const system = instruction(input, aiStep?.step === "notation") +
+    (aiStep?.step === "text" ? textStep : aiStep?.step === "notation"
+      ? notationStep +
+        (aiStep.visual === "static" ? " This visual is static; omit step on every item." : "")
+      : "");
   const history = input.history ?? [];
+  const requestHistory = aiStep?.step === "notation" ? [] : history;
+  const selectedImage = aiStep?.step === "notation"
+    ? input.notationImage ?? input.selectedImage
+    : input.selectedImage;
   if (model.provider === "openai") {
     return {
       url: "https://api.openai.com/v1/chat/completions",
@@ -331,17 +391,9 @@ export function providerRequest(
         stream: false,
         max_completion_tokens: maxOutput,
         ...(model.reasoningEffort ? { reasoning_effort: model.reasoningEffort } : {}),
-        // Not strict: strict mode needs every property required, and the
-        // answer has optional fields. The schema still steers the shape.
-        response_format: input.responseSchema
-          ? {
-            type: "json_schema",
-            json_schema: { name: "etonia_answer", schema: input.responseSchema, strict: false },
-          }
-          : { type: "json_object" },
         messages: [
           { role: "system", content: system },
-          ...history,
+          ...requestHistory,
           {
             role: "user",
             content: [
@@ -350,13 +402,19 @@ export function providerRequest(
                 // Always the full-resolution read: misread handwriting
                 // costs more than the image's tokens.
                 image_url: {
-                  url: `data:image/png;base64,${input.selectedImage}`,
+                  url: `data:image/png;base64,${selectedImage}`,
                   detail: "high",
                 },
               },
               { type: "text", text: input.prompt },
             ],
           },
+          ...(aiStep?.step === "notation"
+            ? [
+              { role: "assistant", content: aiStep.message },
+              { role: "user", content: "Add only the useful visual." },
+            ]
+            : []),
         ],
       },
     };
@@ -374,37 +432,39 @@ export function providerRequest(
         system: [
           {
             type: "text",
-            text: fixedInstruction(input),
+            text: fixedInstruction(input, aiStep?.step === "notation"),
             cache_control: { type: "ephemeral" },
           },
           {
             type: "text",
-            text: requestInstruction(input) +
-              (claudeStep?.step === "text" ? textStep : claudeStep ? notationStep : ""),
+            text: (aiStep?.step === "notation" ? requestInstruction(input) : "") +
+              (aiStep?.step === "text" ? textStep : aiStep?.step === "notation"
+                ? notationStep +
+                  (aiStep.visual === "static"
+                    ? " This visual is static; omit step on every item."
+                    : "")
+                : ""),
           },
         ],
-        // The explanation is held to its one-field shape. The notation's
+        // The explanation/decision is held to its small shape. The notation's
         // shape cannot be: Claude refuses its schema as too large a grammar
         // (a plot alone just fits), so the prompt's example and the app's
         // tolerant parser carry it.
-        ...(claudeStep?.step === "text"
-          ? { output_config: { format: { type: "json_schema", schema: textSchema } } }
-          : {}),
         messages: [
-          ...history,
+          ...requestHistory,
           {
             role: "user",
             content: [
               {
                 type: "image",
-                source: { type: "base64", media_type: "image/png", data: input.selectedImage },
+                source: { type: "base64", media_type: "image/png", data: selectedImage },
               },
               { type: "text", text: input.prompt },
             ],
           },
-          ...(claudeStep?.step === "notation"
+          ...(aiStep?.step === "notation"
             ? [
-              { role: "assistant", content: claudeStep.message },
+              { role: "assistant", content: aiStep.message },
               {
                 role: "user",
                 content: "Following your explanation, write and draw it on the note.",
@@ -421,25 +481,30 @@ export function providerRequest(
     body: {
       systemInstruction: { parts: [{ text: system }] },
       contents: [
-        ...history.map((message) => ({
+        ...requestHistory.map((message) => ({
           role: message.role === "assistant" ? "model" : "user",
           parts: [{ text: message.content }],
         })),
         {
           role: "user",
           parts: [
-            { inlineData: { mimeType: "image/png", data: input.selectedImage } },
+            { inlineData: { mimeType: "image/png", data: selectedImage } },
             { text: input.prompt },
           ],
         },
+        ...(aiStep?.step === "notation"
+          ? [
+            { role: "model", parts: [{ text: aiStep.message }] },
+            { role: "user", parts: [{ text: "Add only the useful visual." }] },
+          ]
+          : []),
       ],
       generationConfig: {
         maxOutputTokens: maxOutput,
         ...(model.reasoningEffort
           ? { thinkingConfig: { thinkingLevel: model.reasoningEffort } }
           : {}),
-        responseMimeType: "application/json",
-        ...(input.responseSchema ? { responseJsonSchema: input.responseSchema } : {}),
+        responseMimeType: "text/plain",
       },
     },
   };

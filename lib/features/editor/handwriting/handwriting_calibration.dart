@@ -4,11 +4,13 @@ import 'dart:math' as math;
 
 import 'package:flutter/foundation.dart';
 
+import '../ai/ai_config.dart';
 import '../ai/notation_font.dart';
 import '../ink/ink_sample.dart';
 import 'glyph_builder.dart';
 import 'hand_features.dart';
 import 'hand_glyphs.dart';
+import 'pen_smoothing.dart';
 import 'handwriting_fonts.dart';
 import 'handwriting_style.dart';
 import 'stroke_runs.dart';
@@ -19,9 +21,9 @@ import 'stroke_runs.dart';
 /// strokes. Any of the others may be written too, to be used as written;
 /// digits left out are written in the built-in font.
 const List<List<String>> customFontPages = <List<String>>[
-  <String>['abefgik', 'nostw', 'AER'],
-  <String>['cdhjlmp', 'qruvxyz'],
-  <String>['BCDFGHIJ', 'KLMNOPQS', 'TUVWXYZ'],
+  <String>['abdefghi', 'mostvw', 'AERD'],
+  <String>['cjklnp', 'qruxyz'],
+  <String>['BCFGHIJ', 'KLMNOPQS', 'TUVWXYZ'],
   <String>['01234', '56789'],
 ];
 
@@ -252,15 +254,23 @@ CalibrationReading readCustomFont(List<List<List<InkVector>>> pages) {
       s.strokes,
       spacing: unit * 0.4,
     );
-    final _Bounds bounds = _Bounds.of(smooth);
-    glyphs[s.letter] = HandGlyph(bounds.width / unit, <List<InkVector>>[
+    // In the font's grid, then through the pen's own smoothing, as the
+    // letters built from these are.
+    final List<List<InkVector>> grid = <List<InkVector>>[
       for (final List<InkVector> stroke in smooth)
-        <InkVector>[
+        penSmoothed(<InkVector>[
           for (final InkVector p in stroke)
             InkVector(
-              (p.x - bounds.left) / unit,
+              p.x / unit,
               NotationFont.capHeight + (p.y - s.baseline) / unit,
             ),
+        ], spacing: 0.4),
+    ];
+    final _Bounds bounds = _Bounds.of(grid);
+    glyphs[s.letter] = HandGlyph(bounds.width, <List<InkVector>>[
+      for (final List<InkVector> stroke in grid)
+        <InkVector>[
+          for (final InkVector p in stroke) InkVector(p.x - bounds.left, p.y),
         ],
     ]);
   }
@@ -270,13 +280,11 @@ CalibrationReading readCustomFont(List<List<List<InkVector>>> pages) {
     for (final _Sample s in samples)
       if (handLetters.contains(s.letter)) s.scaled(_padScale),
   ], _padScale);
-  glyphs.addAll(buildMissingGlyphs(glyphs, slant: measured.slant));
-
   return CalibrationReading(
     style: HandwritingStyle.standard
         .mix(measured, calibrationMix)
         .clamped()
-        .withGlyphs(HandGlyphs.rounded(glyphs)),
+        .withGlyphs(builtGlyphs(glyphs, slant: measured.slant)),
   );
 }
 
@@ -550,6 +558,7 @@ class HandwritingCalibrationState {
     this.font,
     this.skipped = false,
     this.chatReminderDismissed = false,
+    this.textSize = AiTextSize.medium,
   });
 
   final HandwritingStyle? style;
@@ -564,10 +573,39 @@ class HandwritingCalibrationState {
   /// The writer permanently dismissed the small reminder in the chat.
   final bool chatReminderDismissed;
 
+  /// How large the assistant writes.
+  final AiTextSize textSize;
+
+  /// This state with [style] in [font], or neither when [style] is null,
+  /// which counts as skipping; every other choice is kept.
+  HandwritingCalibrationState withStyle(
+    HandwritingStyle? style,
+    HandwritingFont? font,
+  ) => HandwritingCalibrationState(
+    style: style,
+    font: style == null ? null : font,
+    skipped: style == null,
+    chatReminderDismissed: chatReminderDismissed,
+    textSize: textSize,
+  );
+
+  /// This state with [chatReminderDismissed] and [textSize] changed.
+  HandwritingCalibrationState copyWith({
+    bool? chatReminderDismissed,
+    AiTextSize? textSize,
+  }) => HandwritingCalibrationState(
+    style: style,
+    font: font,
+    skipped: skipped,
+    chatReminderDismissed: chatReminderDismissed ?? this.chatReminderDismissed,
+    textSize: textSize ?? this.textSize,
+  );
+
   Map<String, Object?> toJson() => <String, Object?>{
     'skipped': skipped,
     if (font != null) 'font': font!.name,
     if (chatReminderDismissed) 'chatReminderDismissed': true,
+    if (textSize != AiTextSize.medium) 'textSize': textSize.name,
     if (style != null) 'style': style!.toJson(),
   };
 
@@ -579,6 +617,7 @@ class HandwritingCalibrationState {
       font: font,
       skipped: json['skipped'] == true,
       chatReminderDismissed: json['chatReminderDismissed'] == true,
+      textSize: AiTextSize.byName(json['textSize']),
     );
   }
 }
@@ -707,4 +746,9 @@ class InMemoryHandwritingProfileStore implements HandwritingProfileStore {
 abstract final class HandwritingCalibration {
   static final ValueNotifier<HandwritingStyle?> current =
       ValueNotifier<HandwritingStyle?>(null);
+
+  /// How large the assistant writes, as the writer chose.
+  static final ValueNotifier<AiTextSize> textSize = ValueNotifier<AiTextSize>(
+    AiTextSize.medium,
+  );
 }

@@ -19,12 +19,21 @@ class InkColor {
   Color resolve(Brightness brightness) {
     return brightness == Brightness.dark ? onDarkPaper : onLightPaper;
   }
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is InkColor && runtimeType == other.runtimeType && id == other.id;
+
+  @override
+  int get hashCode => id.hashCode;
 }
 
 /// The curated inks. Every color keeps at least 3:1 contrast against the
 /// writing surface in both themes (enforced by a test).
 abstract final class InkPalette {
   static const String _importedPrefix = 'imported-';
+  static const String _customPrefix = 'custom-';
 
   static const InkColor ink = InkColor(
     id: 'ink',
@@ -148,7 +157,36 @@ abstract final class InkPalette {
         );
       }
     }
+    if (id.startsWith(_customPrefix)) {
+      final String value = id.substring(_customPrefix.length);
+      if (RegExp(r'^[0-9a-fA-F]{8}$').hasMatch(value)) {
+        final Color color = Color(int.parse(value, radix: 16));
+        return InkColor(
+          id: '$_customPrefix${value.toLowerCase()}',
+          label: 'Custom (#${value.substring(2).toUpperCase()})',
+          onLightPaper: color,
+          onDarkPaper: color,
+        );
+      }
+    }
     return null;
+  }
+
+  /// A user-selected custom color picked from the color palette (色盤).
+  /// Its stable ID lets it survive the ordinary note JSON format.
+  static InkColor custom(Color color) {
+    final Color customColor = Color(color.toARGB32());
+    final String hex = customColor
+        .toARGB32()
+        .toRadixString(16)
+        .padLeft(8, '0')
+        .toLowerCase();
+    return InkColor(
+      id: '$_customPrefix$hex',
+      label: 'Custom (#${hex.substring(2).toUpperCase()})',
+      onLightPaper: customColor,
+      onDarkPaper: customColor,
+    );
   }
 
   /// A PDF-recovered color that is not constrained to the pen palette.

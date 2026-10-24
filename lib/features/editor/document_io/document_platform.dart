@@ -25,12 +25,22 @@ abstract interface class DocumentPicker {
   Future<PickedDocument?> pickImage(DocumentImageSource source);
 }
 
-class SystemDocumentPicker implements DocumentPicker {
+/// Optional capability kept separate so existing embedders and test pickers
+/// do not have to implement SVG support until they opt in.
+abstract interface class SvgDocumentPicker {
+  Future<PickedDocument?> pickSvg();
+}
+
+class SystemDocumentPicker implements DocumentPicker, SvgDocumentPicker {
   const SystemDocumentPicker();
 
   @override
   Future<PickedDocument?> pickPdf() =>
       _pick(FileType.custom, const <String>['pdf']);
+
+  @override
+  Future<PickedDocument?> pickSvg() =>
+      _pick(FileType.custom, const <String>['svg']);
 
   /// Any file: `.goodnotes` is not a type every platform's picker can
   /// filter by, so what is picked is told apart by its contents.
@@ -144,13 +154,25 @@ class PdfrxRasterizer
   @override
   Future<OpenPdf> open(Uint8List bytes) async {
     return _PdfrxOpenPdf(
-      await pdfrx.PdfDocument.openData(
+      await _openForRendering(
         bytes,
-        sourceName: 'greatnote-view-${bytes.length}-${identityHashCode(bytes)}',
-        passwordProvider: () => null,
+        'greatnote-view-${bytes.length}-${identityHashCode(bytes)}',
       ),
     );
   }
+
+  /// Opens [bytes] to render from. Only the first page is read up front:
+  /// reading every page first keeps a long PDF's first page, and its
+  /// thumbnail, waiting on the last. Any page still renders by its number.
+  static Future<pdfrx.PdfDocument> _openForRendering(
+    Uint8List bytes,
+    String sourceName,
+  ) => pdfrx.PdfDocument.openData(
+    bytes,
+    sourceName: sourceName,
+    passwordProvider: () => null,
+    useProgressiveLoading: true,
+  );
 
   @override
   Future<PdfInspection> inspect(Uint8List bytes) async {
@@ -182,10 +204,9 @@ class PdfrxRasterizer
     required int pixelWidth,
     required int pixelHeight,
   }) async {
-    final pdfrx.PdfDocument document = await pdfrx.PdfDocument.openData(
+    final pdfrx.PdfDocument document = await _openForRendering(
       bytes,
-      sourceName: 'greatnote-render-${bytes.length}-$pageIndex',
-      passwordProvider: () => null,
+      'greatnote-render-${bytes.length}-$pageIndex',
     );
     pdfrx.PdfImage? rendered;
     try {
@@ -231,10 +252,9 @@ class PdfrxRasterizer
     required int pixelWidth,
     required int pixelHeight,
   }) async {
-    final pdfrx.PdfDocument document = await pdfrx.PdfDocument.openData(
+    final pdfrx.PdfDocument document = await _openForRendering(
       bytes,
-      sourceName: 'greatnote-display-${bytes.length}-$pageIndex',
-      passwordProvider: () => null,
+      'greatnote-display-${bytes.length}-$pageIndex',
     );
     try {
       return await _renderPdfrxImage(
@@ -300,9 +320,12 @@ class SystemExportSink implements ExportSink {
 
   @override
   Future<void> share(File file, {ui.Rect? sharePositionOrigin}) async {
+    final bool svg = file.path.toLowerCase().endsWith('.svg');
     await SharePlus.instance.share(
       ShareParams(
-        files: <XFile>[XFile(file.path, mimeType: 'application/pdf')],
+        files: <XFile>[
+          XFile(file.path, mimeType: svg ? 'image/svg+xml' : 'application/pdf'),
+        ],
         sharePositionOrigin: sharePositionOrigin,
       ),
     );

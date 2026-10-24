@@ -216,6 +216,13 @@ void main() {
           )
           as Map<String, Object?>;
 
+  /// The manifest's log of note statuses, by id.
+  Map<String, Map<String, Object?>> log() => <String, Map<String, Object?>>{
+    for (final MapEntry<String, Object?> entry
+        in (manifest()['log']! as Map<String, Object?>).entries)
+      entry.key: entry.value! as Map<String, Object?>,
+  };
+
   /// The titles of the notes in the manifest's [list].
   List<String> titlesIn(String list) => <String>[
     for (final Object? record in manifest()[list]! as List<Object?>)
@@ -360,80 +367,146 @@ void main() {
       expect(titlesIn('trash'), <String>['Groceries']);
     });
 
-    test('a note in the backup but not here moves to Recently Deleted, '
-        'here and in the backup', () async {
-      final InMemoryNoteRepository original = _repository();
-      await _seed(original);
-      await service(original).backUp();
-      final GoogleDriveItem files = drive.itemAt('Etonia/notes')!;
-      final Set<String> assetFiles = <String>{
-        for (final GoogleDriveItem item in drive.childrenOf(files.id))
-          if (!item.name.endsWith('.json')) item.id,
-      };
-      drive.uploads.clear();
-
-      // Another device, which never had them.
-      final InMemoryNoteRepository other = _repository();
-      final BackupSummary summary = await service(
-        other,
-        state: InMemoryCloudStateStore(),
-      ).backUp();
-
-      expect(summary.movedToDeleted, 2);
-      expect(summary.noteCount, 0);
-      expect(summary.deletedCount, 2);
-      expect((await other.list(null)).notes, isEmpty);
-      final List<NoteEntry> trash = await other.trash();
-      expect(
-        trash.map((NoteEntry n) => n.title),
-        unorderedEquals(<String>['Groceries', 'Lecture 1']),
-      );
-      for (final NoteEntry note in trash) {
-        expect(note.deleted, DateTime(2026, 10, 16, 9, 30));
-      }
-      // Ink and assets came with them.
-      await other.restoreNote(trash.first.id);
-      await other.restoreNote(trash.last.id);
-      final Map<String, Object?> restored = await _describe(other);
-      final Map<String, Object?> expected = await _describe(original);
-      expect(
-        (restored['notes']! as Map<String, Object?>).values,
-        unorderedEquals((expected['notes']! as Map<String, Object?>).values),
-      );
-      expect(titlesIn('notes'), isEmpty);
-      expect(titlesIn('trash'), <String>['Groceries', 'Lecture 1']);
-      // The assets were already in Drive, so they were not sent again.
-      expect(
-        drive.uploads.where((String name) => !name.endsWith('.json')),
-        isEmpty,
-      );
-      expect(
-        drive.childrenOf(files.id).map((GoogleDriveItem item) => item.id),
-        containsAll(assetFiles),
-      );
-    });
-
-    test('a note deleted for good leaves the backup', () async {
+    test('logs the latest status of every note', () async {
       final InMemoryNoteRepository repository = _repository();
       await _seed(repository);
       final GoogleDriveBackupService backup = service(repository);
       await backup.backUp();
+      final NoteEntry lecture = (await repository.search(
+        'Lecture',
+      )).notes.single;
       final NoteEntry groceries = (await repository.search(
         'Groceries',
       )).notes.single;
-      await repository.deleteNote(groceries.id);
+      expect(log()[lecture.id]!['status'], 'live');
+      expect(log()[groceries.id]!['status'], 'live');
+
+      await repository.deleteNote(groceries.id, at: DateTime(2026, 10, 2));
       await backup.backUp();
-      expect(titlesIn('trash'), <String>['Groceries']);
+      expect(log()[groceries.id], <String, Object?>{
+        'status': 'deleted',
+        'at': DateTime(2026, 10, 2).toUtc().toIso8601String(),
+        'title': 'Groceries',
+      });
 
       await repository.deleteForever(groceries.id);
-      final BackupSummary summary = await backup.backUp();
-
-      expect(summary.movedToDeleted, 0);
-      expect(await repository.trash(), isEmpty);
+      await backup.backUp();
+      expect(log()[groceries.id]!['status'], 'purged');
+      expect(log()[groceries.id]!['title'], 'Groceries');
+      expect(log()[lecture.id]!['status'], 'live');
       expect(titlesIn('notes'), <String>['Lecture 1']);
       expect(titlesIn('trash'), isEmpty);
       // Its content went to the Drive trash; Lecture 1's three files stay.
       expect(drive.childrenOf(drive.itemAt('Etonia/notes')!.id), hasLength(3));
+    });
+
+    group('with another device', () {
+      late InMemoryNoteRepository first;
+      late InMemoryNoteRepository second;
+      late GoogleDriveBackupService firstSync;
+      late GoogleDriveBackupService secondSync;
+      late String groceries;
+
+      setUp(() async {
+        first = _repository();
+        second = _repository();
+        firstSync = service(first, state: InMemoryCloudStateStore());
+        secondSync = service(second, state: InMemoryCloudStateStore());
+        await _seed(first);
+        groceries = (await first.search('Groceries')).notes.single.id;
+        await firstSync.backUp();
+      });
+
+      test('a note only in the backup comes here as it is there', () async {
+        drive.uploads.clear();
+
+        final BackupSummary summary = await secondSync.backUp();
+
+        expect(summary.addedHere, 2);
+        final Map<String, Object?> here = await _describe(second);
+        final Map<String, Object?> there = await _describe(first);
+        // In the same folders; the empty one is not brought.
+        expect(here['notes'], there['notes']);
+        expect(here['folders'], <String>[
+          'School (red)',
+          'School/Math (green)',
+        ]);
+        // Under the same ids, so the log names the same notes.
+        expect(
+          (await second.list(null)).notes.map((NoteEntry n) => n.id),
+          contains(groceries),
+        );
+        // The assets were already in Drive, so they were not sent again.
+        expect(
+          drive.uploads.where((String name) => !name.endsWith('.json')),
+          isEmpty,
+        );
+      });
+
+      test('a note deleted there moves to Recently Deleted here, and is '
+          'deleted for good only once it is there', () async {
+        await secondSync.backUp();
+        await first.deleteNote(groceries, at: DateTime(2026, 10, 3));
+        await firstSync.backUp();
+
+        final BackupSummary moved = await secondSync.backUp();
+
+        expect(moved.movedToDeleted, 1);
+        expect(moved.deletedForGood, 0);
+        final NoteEntry trashed = (await second.trash()).single;
+        expect(trashed.id, groceries);
+        expect(trashed.deleted, DateTime(2026, 10, 3));
+        expect(log()[groceries]!['status'], 'deleted');
+
+        // Synced again, still only deleted.
+        expect((await secondSync.backUp()).deletedForGood, 0);
+        expect(await second.trash(), hasLength(1));
+
+        await first.deleteForever(groceries);
+        await firstSync.backUp();
+        final BackupSummary purged = await secondSync.backUp();
+
+        expect(purged.deletedForGood, 1);
+        expect(await second.trash(), isEmpty);
+        expect(log()[groceries]!['status'], 'purged');
+      });
+
+      test('a later change here wins over the log', () async {
+        await secondSync.backUp();
+        await first.deleteNote(groceries);
+        await firstSync.backUp();
+        await secondSync.backUp();
+        expect(await second.trash(), hasLength(1));
+
+        // Taken back out of Recently Deleted here...
+        await second.restoreNote(groceries);
+        final BackupSummary kept = await secondSync.backUp();
+        expect(kept.movedToDeleted, 0);
+        expect(log()[groceries]!['status'], 'live');
+
+        // ...and so there too.
+        final BackupSummary back = await firstSync.backUp();
+        expect(back.addedHere, 1);
+        expect(await first.trash(), isEmpty);
+        expect(
+          (await first.list(null)).notes.map((NoteEntry n) => n.id),
+          contains(groceries),
+        );
+      });
+
+      test('deleting for good here is logged for there', () async {
+        await secondSync.backUp();
+        await second.deleteNote(groceries);
+        await second.deleteForever(groceries);
+        await secondSync.backUp();
+        expect(log()[groceries]!['status'], 'purged');
+
+        final BackupSummary summary = await firstSync.backUp();
+
+        expect(summary.deletedForGood, 1);
+        expect((await first.search('Groceries')).notes, isEmpty);
+        expect(await first.trash(), isEmpty);
+      });
     });
 
     test('cancelling leaves no manifest pointing at half a backup', () async {
@@ -601,7 +674,9 @@ void main() {
 
       // What was restored is what is here: the next backup moves nothing.
       final BackupSummary backup = await service(fresh, state: state).backUp();
+      expect(backup.addedHere, 0);
       expect(backup.movedToDeleted, 0);
+      expect(backup.deletedForGood, 0);
       expect(titlesIn('notes'), <String>['Lecture 1']);
       expect(titlesIn('trash'), <String>['Groceries']);
     });

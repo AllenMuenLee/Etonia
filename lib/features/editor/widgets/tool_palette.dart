@@ -10,20 +10,29 @@ import '../../../app/theme/app_tokens.dart';
 import '../../../app/theme/app_icons.dart';
 import '../../../shared/feedback/app_haptics.dart';
 import '../../../shared/widgets/app_controls.dart';
+import '../ai/ai_assistant_controller.dart';
+import '../audio/note_audio.dart';
 import '../ink/eraser_settings.dart';
 import '../ink/ink_palette.dart';
 import '../ink/pen_settings.dart';
+import '../ink/ruler.dart';
 import '../ink/stroke.dart';
+import 'ai_options.dart';
 import 'eraser_options.dart';
 import 'image_options.dart';
 import 'ink_color_picker.dart';
 import 'palette_button.dart';
 import 'palette_popover.dart';
 import 'pen_advanced_panel.dart';
+import 'recording_options.dart';
 import 'select_options.dart';
 import 'sticky_options.dart';
 import 'stroke_width_picker.dart';
 import '../sticky/sticky_note.dart';
+
+class PopoverChanged extends ChangeNotifier {
+  void notify() => notifyListeners();
+}
 
 /// Handles to the palette's popovers, for code outside the palette that
 /// needs to know whether one is open.
@@ -33,13 +42,25 @@ class ToolPaletteController {
   final MenuController selectMenu = MenuController();
   final MenuController stickyMenu = MenuController();
   final MenuController imageMenu = MenuController();
+  final MenuController aiMenu = MenuController();
+  final MenuController recordingMenu = MenuController();
+
+  /// Whether the palette is unfolded to show its secondary tools, the
+  /// ruler. The screen lays out around the palette's size,
+  /// so it listens to this too.
+  final ValueNotifier<bool> expanded = ValueNotifier<bool>(false);
+
+  /// Notifies when a popover opens or closes.
+  final PopoverChanged popoverChanged = PopoverChanged();
 
   bool get hasOpenPopover {
     return penMenu.isOpen ||
         eraserMenu.isOpen ||
         selectMenu.isOpen ||
         stickyMenu.isOpen ||
-        imageMenu.isOpen;
+        imageMenu.isOpen ||
+        aiMenu.isOpen ||
+        recordingMenu.isOpen;
   }
 
   void closeAll() {
@@ -48,6 +69,8 @@ class ToolPaletteController {
     selectMenu.close();
     stickyMenu.close();
     imageMenu.close();
+    aiMenu.close();
+    recordingMenu.close();
   }
 }
 
@@ -80,8 +103,8 @@ class PalettePlacement {
 
   /// The palette's top-left corner when docked in [region], [margin] from
   /// its edge.
-  Offset originIn(Rect region, double margin) {
-    final Size size = ToolPalette.sizeFor(edge.axis);
+  Offset originIn(Rect region, double margin, {bool expanded = false}) {
+    final Size size = ToolPalette.sizeFor(edge.axis, expanded: expanded);
     final double freeX = math.max(0, region.width - 2 * margin - size.width);
     final double freeY = math.max(0, region.height - 2 * margin - size.height);
     final double alongX = region.left + margin + freeX * along;
@@ -123,9 +146,14 @@ class PalettePlacement {
   /// The placement nearest a palette let go centered on [center] in
   /// [region]: against the nearest edge, where it was along it, or at the
   /// edge's middle when let go within [centerSnap] of it.
-  factory PalettePlacement.nearest(Rect region, Offset center, double margin) {
+  factory PalettePlacement.nearest(
+    Rect region,
+    Offset center,
+    double margin, {
+    bool expanded = false,
+  }) {
     final PaletteEdge edge = nearestEdge(region, center);
-    final Size size = ToolPalette.sizeFor(edge.axis);
+    final Size size = ToolPalette.sizeFor(edge.axis, expanded: expanded);
     final bool across = edge.axis == Axis.horizontal;
     final double offMiddle = across
         ? center.dx - region.center.dx
@@ -156,11 +184,12 @@ class PalettePlacement {
   int get hashCode => Object.hash(edge, along);
 }
 
-/// The floating tool palette: the pen, eraser, Select, Sticky note, and
-/// AI mode. Each tool,
+/// The floating tool palette: the pen, eraser, Select, Sticky note, image
+/// insertion, and AI mode, and, folded away behind an arrow at its end, the
+/// ruler. Each tool,
 /// pressed while selected, opens its options: the pen's ink color and
 /// width (and, folded away, its advanced settings), the eraser's mode and
-/// size, and Select's Paste.
+/// size, Select's Paste, and the assistant's notation settings.
 ///
 /// Holding it anywhere, on its tools too, moves it: held a moment, the
 /// palette lights up in the accent color; held for [liftDelay], it lifts
@@ -184,8 +213,8 @@ class ToolPalette extends StatelessWidget {
     required this.canPaste,
     required this.onPaste,
     required this.aiActive,
-    required this.onToggleAi,
-    this.toolsLocked,
+    required this.onTurnOnAi,
+    this.assistant,
     this.penConfig = const PenConfig(),
     this.eraserConfig = const EraserConfig(),
     this.dense = false,
@@ -199,15 +228,33 @@ class ToolPalette extends StatelessWidget {
     this.stickyTargetLabel,
     this.onChooseImageFromGallery,
     this.onTakePhoto,
+    this.onChooseSvg,
+    this.ruler,
+    this.recording,
   });
 
   static const double _padding = AppSpacing.xxs;
-  static const int _buttonCount = 6;
+
+  /// The tools always shown; an arrow folds the rest in and out.
+  static const int _primaryCount = 6;
+  static const int _secondaryCount = 2;
   static const double _buttonStep = 44;
+
+  /// How long the secondary tools take to fold in or out.
+  static Duration get unfoldDuration => AppMotion.snappy.duration;
+
+  /// The ruler the Ruler button shows and hides. Without it there is no
+  /// Ruler button.
+  final RulerController? ruler;
+
+  /// The microphone and the note's recordings. Without it there is no Record
+  /// button.
+  final RecordingToolData? recording;
 
   /// Callbacks for inserting images from gallery or camera.
   final VoidCallback? onChooseImageFromGallery;
   final VoidCallback? onTakePhoto;
+  final VoidCallback? onChooseSvg;
 
   /// The look of the next sticky note. Without it there is no Sticky note
   /// tool.
@@ -220,7 +267,7 @@ class ToolPalette extends StatelessWidget {
   final ValueGetter<String?>? stickyTargetLabel;
 
   /// How long the surface is held before the palette lifts to be dragged.
-  static const Duration liftDelay = Duration(milliseconds: 300);
+  static const Duration liftDelay = Duration(milliseconds: 450);
 
   final PaletteEdge edge;
 
@@ -243,18 +290,16 @@ class ToolPalette extends StatelessWidget {
   /// the page with the AI tool is for the assistant.
   final ValueListenable<bool> aiActive;
 
-  /// Turns AI mode on, or off when it is on.
-  final VoidCallback onToggleAi;
+  /// Turns AI mode on. While it is on, the AI button opens the assistant's
+  /// options instead; the chat's close button turns it off.
+  final VoidCallback onTurnOnAi;
 
-  /// Whether input for the assistant is under way. While it is, the AI tool
-  /// is the only one that can be on: the other tools cannot be chosen.
-  final ValueListenable<bool>? toolsLocked;
+  /// The assistant whose settings the AI button's options change; without
+  /// it the button has no options.
+  final AiAssistantController? assistant;
 
-  bool get _locked => toolsLocked?.value ?? false;
-
-  /// What choosing a tool that is not already on does: nothing while the
-  /// tools are locked.
-  VoidCallback? _choose(VoidCallback choose) => _locked ? null : choose;
+  /// Choosing a tool is always allowed.
+  VoidCallback? _choose(VoidCallback choose) => choose;
 
   final PenConfig penConfig;
   final EraserConfig eraserConfig;
@@ -271,16 +316,18 @@ class ToolPalette extends StatelessWidget {
   /// place of dragging.
   final ValueChanged<PaletteEdge>? onMoveTo;
 
-  /// The palette's outer size; fixed so the screen can lay out around it.
-  static Size sizeFor(Axis axis) {
+  /// The palette's outer size, folded or [expanded]; fixed so the screen can
+  /// lay out around it.
+  static Size sizeFor(Axis axis, {bool expanded = false}) {
     const double thickness = AppSizes.minTouchTarget + 2 * _padding;
-    const double length =
-        (_buttonCount - 1) * _buttonStep +
-        AppSizes.minTouchTarget +
-        2 * _padding;
+    // The primary tools and the toggle, and the secondary tools beside them
+    // once unfolded.
+    final int count = _primaryCount + 1 + (expanded ? _secondaryCount : 0);
+    final double length =
+        (count - 1) * _buttonStep + AppSizes.minTouchTarget + 2 * _padding;
     return axis == Axis.vertical
-        ? const Size(thickness, length)
-        : const Size(length, thickness);
+        ? Size(thickness, length)
+        : Size(length, thickness);
   }
 
   @override
@@ -312,14 +359,29 @@ class ToolPalette extends StatelessWidget {
                 penSettings,
                 eraserSettings,
                 aiActive,
-                ?toolsLocked,
                 ?stickySettings,
+                ?ruler,
+                ?recording?.recorder,
+                ?controller?.expanded,
               ]),
               builder: (BuildContext context, Widget? _) {
+                final bool unfolded = controller?.expanded.value ?? false;
                 return _PaletteButtonsLayout(
                   axis: axis,
                   step: _buttonStep,
-                  children: <Widget>[
+                  unfolded: unfolded,
+                  duration: AppMotion.resolve(context, unfoldDuration),
+                  toolSlot: switch (tool.value) {
+                    EditorTool.pen => 0,
+                    EditorTool.eraser => 1,
+                    EditorTool.select => 2,
+                    EditorTool.sticky => stickySettings != null ? 3 : null,
+                    EditorTool.ai => null,
+                  },
+                  capsuleSize: dense
+                      ? AppSizes.paletteButtonVisualDense
+                      : AppSizes.paletteButtonVisual,
+                  primary: <Widget>[
                     _penControl(),
                     _eraserControl(),
                     _selectControl(),
@@ -327,6 +389,13 @@ class ToolPalette extends StatelessWidget {
                     _imageControl(),
                     _aiControl(),
                   ],
+                  secondary: <Widget>[
+                    if (ruler != null) _rulerControl(),
+                    if (recording != null) _recordingControl(),
+                  ],
+                  toggle: controller == null
+                      ? null
+                      : _extensionToggle(unfolded),
                 );
               },
             ),
@@ -341,11 +410,13 @@ class ToolPalette extends StatelessWidget {
     return PalettePopover(
       paletteEdge: edge,
       controller: controller?.penMenu,
+      onChanged: controller?.popoverChanged.notify,
       anchorBuilder: (BuildContext context, VoidCallback toggle) {
         final bool selected = tool.value == EditorTool.pen;
         final PenSettings pen = penSettings.value;
         return PaletteButton(
           tooltip: pen.style.label,
+          hostsSelection: true,
           semanticLabel: PenOptions.describe(pen),
           selected: selected,
           dense: dense,
@@ -389,10 +460,12 @@ class ToolPalette extends StatelessWidget {
     return PalettePopover(
       paletteEdge: edge,
       controller: controller?.eraserMenu,
+      onChanged: controller?.popoverChanged.notify,
       anchorBuilder: (BuildContext context, VoidCallback toggle) {
         final bool selected = tool.value == EditorTool.eraser;
         return PaletteButton(
           tooltip: 'Eraser',
+          hostsSelection: true,
           semanticLabel:
               'Eraser, ${EraserOptions.describe(eraserSettings.value)}',
           selected: selected,
@@ -423,10 +496,12 @@ class ToolPalette extends StatelessWidget {
     return PalettePopover(
       paletteEdge: edge,
       controller: controller?.selectMenu,
+      onChanged: controller?.popoverChanged.notify,
       anchorBuilder: (BuildContext context, VoidCallback toggle) {
         final bool selected = tool.value == EditorTool.select;
         return PaletteButton(
           tooltip: 'Select',
+          hostsSelection: true,
           selected: selected,
           dense: dense,
           onPressed: selected
@@ -461,11 +536,13 @@ class ToolPalette extends StatelessWidget {
     return PalettePopover(
       paletteEdge: edge,
       controller: controller?.stickyMenu,
+      onChanged: controller?.popoverChanged.notify,
       anchorBuilder: (BuildContext context, VoidCallback toggle) {
         final bool selected = tool.value == EditorTool.sticky;
         return PaletteButton(
           key: const ValueKey<String>('sticky-note-tool'),
           tooltip: 'Sticky note',
+          hostsSelection: true,
           semanticLabel:
               'Sticky note, ${StickyOptions.describe(settings.value)}',
           selected: selected,
@@ -498,10 +575,13 @@ class ToolPalette extends StatelessWidget {
   /// Opens image insertion options: gallery or camera.
   Widget _imageControl() {
     final bool enabled =
-        onChooseImageFromGallery != null || onTakePhoto != null;
+        onChooseImageFromGallery != null ||
+        onTakePhoto != null ||
+        onChooseSvg != null;
     return PalettePopover(
       paletteEdge: edge,
       controller: controller?.imageMenu,
+      onChanged: controller?.popoverChanged.notify,
       anchorBuilder: (BuildContext context, VoidCallback toggle) {
         return PaletteButton(
           key: const ValueKey<String>('insert-image-button'),
@@ -514,6 +594,12 @@ class ToolPalette extends StatelessWidget {
       },
       panelBuilder: (BuildContext context, VoidCallback close) {
         return ImageOptions(
+          onChooseSvg: onChooseSvg == null
+              ? null
+              : () {
+                  close();
+                  onChooseSvg!();
+                },
           onChooseFromGallery: onChooseImageFromGallery == null
               ? null
               : () {
@@ -531,20 +617,119 @@ class ToolPalette extends StatelessWidget {
     );
   }
 
-  /// Turns AI mode on and off. On, it shows the assistant's notes, opens
-  /// the chat, and makes writing on the page glow for the assistant rather
-  /// than leave ink; off, it hides the notes and closes the chat.
+  /// Folds the secondary tools in and out. The arrow points the way the
+  /// palette will grow, and back the other way once it has.
+  Widget _extensionToggle(bool unfolded) {
+    final bool across = axis == Axis.horizontal;
+    final IconData icon = unfolded
+        ? (across ? AppIcons.toolsCollapseAcross : AppIcons.toolsCollapseDown)
+        : (across ? AppIcons.toolsExpandAcross : AppIcons.toolsExpandDown);
+    return Builder(
+      builder: (BuildContext context) {
+        return PaletteButton(
+          key: const ValueKey<String>('palette-extension-toggle'),
+          tooltip: unfolded ? 'Collapse toolbar' : 'Expand toolbar',
+          semanticLabel: unfolded ? 'Collapse toolbar' : 'Expand toolbar',
+          dense: dense,
+          onPressed: () {
+            final bool next = !unfolded;
+            controller!.expanded.value = next;
+            if (!next) {
+              controller!.recordingMenu.close();
+            }
+            SemanticsService.sendAnnouncement(
+              View.of(context),
+              next
+                  ? 'Tools expanded, $_secondaryCount additional tools available'
+                  : 'Tools collapsed',
+              Directionality.of(context),
+            );
+          },
+          child: Icon(icon),
+        );
+      },
+    );
+  }
+
+  /// Opens the recording panel: record, and choose any recording to replay.
+  Widget _recordingControl() {
+    final RecordingToolData data = recording!;
+    return PalettePopover(
+      paletteEdge: edge,
+      controller: controller?.recordingMenu,
+      onChanged: controller?.popoverChanged.notify,
+      anchorBuilder: (BuildContext context, VoidCallback toggle) {
+        return PaletteButton(
+          key: const ValueKey<String>('recording-tool'),
+          tooltip: 'Recordings',
+          semanticLabel: 'Recordings',
+          selected: data.recorder.state != NoteAudioRecorderState.idle,
+          dense: dense,
+          onPressed: toggle,
+          child: RecordingGlyph(recorder: data.recorder),
+        );
+      },
+      panelBuilder: (BuildContext context, VoidCallback close) {
+        return RecordingOptions(data: data, onChosen: close);
+      },
+    );
+  }
+
+  /// Shows and hides the ruler. It is no tool: the one in use stays chosen.
+  Widget _rulerControl() {
+    final RulerController guide = ruler!;
+    return Builder(
+      builder: (BuildContext context) {
+        final bool on = guide.isVisible;
+        return PaletteButton(
+          key: const ValueKey<String>('ruler-toggle'),
+          tooltip: on ? 'Hide ruler' : 'Show ruler',
+          semanticLabel: 'Ruler',
+          selected: on,
+          toggled: on,
+          dense: dense,
+          onPressed: () {
+            guide.toggle();
+            SemanticsService.sendAnnouncement(
+              View.of(context),
+              guide.isVisible ? 'Ruler shown' : 'Ruler hidden',
+              Directionality.of(context),
+            );
+          },
+          child: const RulerIcon(),
+        );
+      },
+    );
+  }
+
+  /// Turns AI mode on: it shows the assistant's notes and opens the chat.
+  /// Pressed again, it opens the assistant's options. Closing the chat
+  /// turns it off; other tools can stay on beside it.
   Widget _aiControl() {
-    final bool on = aiActive.value;
-    return PaletteButton(
-      key: const ValueKey<String>('ai-mode-toggle'),
-      tooltip: on ? 'Turn off AI' : 'Turn on AI',
-      semanticLabel: 'AI mode',
-      selected: on,
-      toggled: on,
-      dense: dense,
-      onPressed: onToggleAi,
-      child: const _AiGlyph(),
+    return PalettePopover(
+      paletteEdge: edge,
+      controller: controller?.aiMenu,
+      onChanged: controller?.popoverChanged.notify,
+      anchorBuilder: (BuildContext context, VoidCallback toggle) {
+        final bool on = aiActive.value;
+        return PaletteButton(
+          key: const ValueKey<String>('ai-mode-toggle'),
+          tooltip: on ? 'AI settings' : 'Turn on AI',
+          semanticLabel: 'AI mode',
+          selected: on,
+          toggled: on,
+          dense: dense,
+          onPressed: !on
+              ? onTurnOnAi
+              : assistant == null
+              ? null
+              : toggle,
+          child: const _AiGlyph(),
+        );
+      },
+      panelBuilder: (BuildContext context, VoidCallback close) {
+        return AiOptions(assistant: assistant!);
+      },
     );
   }
 }
@@ -568,7 +753,7 @@ class _AiGlyph extends StatelessWidget {
             color: icon.color,
             fontSize: (icon.size ?? AppSizes.icon) * 0.66,
             height: 1,
-            fontWeight: FontWeight.w800,
+            fontWeight: FontWeight.w600,
             letterSpacing: 0.4,
           ),
         ),
@@ -578,43 +763,107 @@ class _AiGlyph extends StatelessWidget {
 }
 
 /// Lays out the palette buttons along [axis] spaced by [step] while
-/// preserving each button's 48 px touch target.
+/// preserving each button's 48 px touch target. The [secondary] buttons
+/// slide out beside the [primary] ones as [unfolded] turns true, the
+/// [toggle] riding at the end of them.
 class _PaletteButtonsLayout extends StatelessWidget {
   const _PaletteButtonsLayout({
     required this.axis,
     required this.step,
-    required this.children,
+    required this.primary,
+    required this.secondary,
+    required this.unfolded,
+    required this.duration,
+    required this.toolSlot,
+    required this.capsuleSize,
+    this.toggle,
   });
+
+  /// The slot of the chosen tool, which the selection capsule glides to; null
+  /// when no button in the row is the chosen tool.
+  final int? toolSlot;
+  final double capsuleSize;
 
   final Axis axis;
   final double step;
-  final List<Widget> children;
+  final List<Widget> primary;
+  final List<Widget> secondary;
+  final Widget? toggle;
+  final bool unfolded;
+  final Duration duration;
 
   @override
   Widget build(BuildContext context) {
-    final double width = axis == Axis.horizontal
-        ? (children.length - 1) * step + AppSizes.minTouchTarget
-        : AppSizes.minTouchTarget;
-    final double height = axis == Axis.vertical
-        ? (children.length - 1) * step + AppSizes.minTouchTarget
-        : AppSizes.minTouchTarget;
+    return TweenAnimationBuilder<double>(
+      tween: Tween<double>(end: unfolded ? 1 : 0),
+      duration: duration,
+      curve: AppMotion.fadeInCurve,
+      builder: (BuildContext context, double reveal, Widget? _) {
+        // Slots along the palette: the primary tools, the secondary ones as
+        // far as they are revealed, then the toggle.
+        final double slots =
+            primary.length +
+            secondary.length * reveal +
+            (toggle == null ? 0 : 1);
+        final double along = (slots - 1) * step + AppSizes.minTouchTarget;
+        final bool across = axis == Axis.horizontal;
 
-    return SizedBox(
-      width: width,
-      height: height,
-      child: Stack(
-        clipBehavior: Clip.none,
-        children: <Widget>[
-          for (int i = 0; i < children.length; i++)
-            Positioned(
-              left: axis == Axis.horizontal ? i * step : 0,
-              top: axis == Axis.vertical ? i * step : 0,
-              width: AppSizes.minTouchTarget,
-              height: AppSizes.minTouchTarget,
-              child: children[i],
-            ),
-        ],
-      ),
+        Widget place(double slot, Widget child) {
+          return Positioned(
+            left: across ? slot * step : 0,
+            top: across ? 0 : slot * step,
+            width: AppSizes.minTouchTarget,
+            height: AppSizes.minTouchTarget,
+            child: child,
+          );
+        }
+
+        return SizedBox(
+          width: across ? along : AppSizes.minTouchTarget,
+          height: across ? AppSizes.minTouchTarget : along,
+          child: Stack(
+            clipBehavior: Clip.none,
+            children: <Widget>[
+              // One capsule behind the buttons, gliding to the chosen tool.
+              Positioned.fill(
+                child: IgnorePointer(
+                  child: AnimatedOpacity(
+                    opacity: toolSlot == null ? 0 : 1,
+                    duration: AppMotion.resolve(context, AppMotion.fadeIn),
+                    curve: AppMotion.fadeInCurve,
+                    child: SelectionCapsule(
+                      index: toolSlot ?? 0,
+                      count: primary.length,
+                      axis: axis,
+                      slotExtent: step,
+                      size: capsuleSize,
+                      origin: (AppSizes.minTouchTarget - capsuleSize) / 2,
+                    ),
+                  ),
+                ),
+              ),
+              for (int i = 0; i < primary.length; i++)
+                place(i.toDouble(), primary[i]),
+              // Folded away, the secondary tools are neither seen nor
+              // reachable, by touch or by screen reader.
+              if (reveal > 0)
+                for (int i = 0; i < secondary.length; i++)
+                  place(
+                    primary.length + i * reveal,
+                    ExcludeSemantics(
+                      excluding: !unfolded,
+                      child: IgnorePointer(
+                        ignoring: !unfolded,
+                        child: Opacity(opacity: reveal, child: secondary[i]),
+                      ),
+                    ),
+                  ),
+              if (toggle != null)
+                place(primary.length + secondary.length * reveal, toggle!),
+            ],
+          ),
+        );
+      },
     );
   }
 }
@@ -705,8 +954,11 @@ class _LiftableSurfaceState extends State<_LiftableSurface> {
   Widget build(BuildContext context) {
     final AppColors colors = AppColors.of(context);
     final bool lit = _pressed || _lifted;
-    final BorderRadius radius = BorderRadius.circular(AppRadii.large);
-    final Duration duration = AppMotion.resolve(context, AppMotion.medium);
+    const BorderRadius radius = AppBorderRadius.large;
+    final Duration duration = AppMotion.resolve(
+      context,
+      AppMotion.snappy.duration,
+    );
     // Around the whole card, so a hold on a tool lifts it too; a tap on a
     // tool still reaches the tool.
     return RawGestureDetector(
@@ -733,38 +985,32 @@ class _LiftableSurfaceState extends State<_LiftableSurface> {
       child: AnimatedScale(
         scale: _lifted ? 1.06 : 1,
         duration: duration,
-        curve: AppMotion.standard,
+        curve: AppMotion.fadeInCurve,
         child: TweenAnimationBuilder<double>(
           tween: Tween<double>(end: _lifted ? 1 : 0),
           duration: duration,
-          curve: AppMotion.standard,
+          curve: AppMotion.fadeInCurve,
           builder: (BuildContext context, double lift, Widget? child) {
             final Color glass = AppGlass.surface(colors);
-            final Widget frosted = ClipRRect(
+            final Widget surface = ClipRRect(
               borderRadius: radius,
-              child: BackdropFilter(
-                // While moving, sample no backdrop: the palette can composite
-                // independently of the ink/PDF underneath it.
-                enabled: !_lifted,
-                filter: AppGlass.filter,
-                child: DecoratedBox(
-                  decoration: BoxDecoration(
-                    color: lit
-                        ? Color.alphaBlend(
-                            colors.accent.withValues(alpha: 0.14),
-                            glass,
-                          )
-                        : glass,
-                    borderRadius: radius,
-                    border: lit
-                        ? Border.all(
-                            color: colors.accent,
-                            width: AppSizes.hairline,
-                          )
-                        : Border.fromBorderSide(AppGlass.border(colors)),
-                  ),
-                  child: child,
+              child: DecoratedBox(
+                decoration: BoxDecoration(
+                  color: lit
+                      ? Color.alphaBlend(
+                          colors.accent.withValues(alpha: 0.14),
+                          glass,
+                        )
+                      : glass,
+                  borderRadius: radius,
+                  border: lit
+                      ? Border.all(
+                          color: colors.accent,
+                          width: AppSizes.hairline,
+                        )
+                      : Border.fromBorderSide(AppGlass.border(colors)),
                 ),
+                child: child,
               ),
             );
             return DecoratedBox(
@@ -782,7 +1028,7 @@ class _LiftableSurfaceState extends State<_LiftableSurface> {
                     ),
                 ],
               ),
-              child: frosted,
+              child: surface,
             );
           },
           child: Material(
@@ -829,7 +1075,7 @@ class _StickyIcon extends StatelessWidget {
         decoration: BoxDecoration(
           color: color.paper,
           borderRadius: BorderRadius.circular(3),
-          border: Border.all(color: outline, width: 1.4),
+          border: Border.all(color: outline, width: 1.2),
         ),
         child: CustomPaint(painter: _StickyLinesPainter(outline)),
       ),
@@ -888,61 +1134,114 @@ class _PenIconPainter extends CustomPainter {
     final Paint paint = Paint()
       ..color = color
       ..style = PaintingStyle.stroke
-      ..strokeWidth = 1.8 * unit
+      ..strokeWidth = 1.2 * unit
       ..strokeJoin = StrokeJoin.round
       ..strokeCap = StrokeCap.round
       ..isAntiAlias = true;
 
-    // The surface line being drawn on.
+    // The surface being written on, as under the eraser.
     canvas.drawLine(
-      Offset(4 * unit, 20.5 * unit),
-      Offset(16 * unit, 20.5 * unit),
+      Offset(5 * unit, 20.5 * unit),
+      Offset(20 * unit, 20.5 * unit),
       paint,
     );
 
-    // An angled pen pointing down-left toward the baseline, matching the
-    // eraser's angle and stroke weight.
+    // A pen tilted like the eraser, its nib down at the line: one outline
+    // from the rounded end of the barrel to the point, and a collar where
+    // the nib begins.
+    const double half = 3;
     canvas
       ..save()
-      ..translate(12.5 * unit, 10.5 * unit)
-      ..rotate(-3 * math.pi / 4);
-
-    // Barrel: rounded top cap, straight body.
-    final RRect barrel = RRect.fromRectAndCorners(
-      Rect.fromLTRB(-9.5 * unit, -2.4 * unit, 2.5 * unit, 2.4 * unit),
-      topLeft: Radius.circular(1.8 * unit),
-      bottomLeft: Radius.circular(1.8 * unit),
-    );
-    canvas.drawRRect(barrel, paint);
-
-    // Collar band separating barrel and nib.
-    canvas.drawLine(
-      Offset(2.5 * unit, -2.4 * unit),
-      Offset(2.5 * unit, 2.4 * unit),
-      paint,
-    );
-
-    // Tapered nib.
-    final Path nib = Path()
-      ..moveTo(2.5 * unit, -2.4 * unit)
-      ..lineTo(7.5 * unit, -0.6 * unit)
-      ..lineTo(9.5 * unit, 0)
-      ..lineTo(7.5 * unit, 0.6 * unit)
-      ..lineTo(2.5 * unit, 2.4 * unit);
-    canvas.drawPath(nib, paint);
-
-    // Nib slit.
-    canvas.drawLine(
-      Offset(4.0 * unit, 0),
-      Offset(8.0 * unit, 0),
-      paint,
-    );
-
-    canvas.restore();
+      ..translate(11.5 * unit, 12 * unit)
+      ..rotate(3 * math.pi / 4)
+      ..drawPath(
+        Path()
+          ..moveTo(2.5 * unit, -half * unit)
+          ..lineTo(-7 * unit, -half * unit)
+          ..arcToPoint(
+            Offset(-7 * unit, half * unit),
+            radius: Radius.circular(half * unit),
+            clockwise: false,
+          )
+          ..lineTo(2.5 * unit, half * unit)
+          ..lineTo(8.5 * unit, 0)
+          ..close(),
+        paint,
+      )
+      ..drawLine(
+        Offset(2.5 * unit, -half * unit),
+        Offset(2.5 * unit, half * unit),
+        paint,
+      )
+      ..restore();
   }
 
   @override
   bool shouldRepaint(_PenIconPainter oldDelegate) => oldDelegate.color != color;
+}
+
+/// A ruler glyph, styled to match the floating tool palette: a slanted bar
+/// with ticks along one edge. The Cupertino icon set has none.
+class RulerIcon extends StatelessWidget {
+  const RulerIcon({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    final IconThemeData theme = IconTheme.of(context);
+    return SizedBox.square(
+      dimension: theme.size,
+      child: CustomPaint(
+        painter: _RulerIconPainter(theme.color ?? const Color(0xFF000000)),
+      ),
+    );
+  }
+}
+
+class _RulerIconPainter extends CustomPainter {
+  const _RulerIconPainter(this.color);
+
+  final Color color;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final double unit = size.shortestSide / 24;
+    final Paint paint = Paint()
+      ..color = color
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 1.2 * unit
+      ..strokeJoin = StrokeJoin.round
+      ..strokeCap = StrokeCap.round
+      ..isAntiAlias = true;
+    canvas
+      ..save()
+      ..translate(12 * unit, 12 * unit)
+      ..rotate(-math.pi / 4)
+      ..drawRRect(
+        RRect.fromRectAndRadius(
+          Rect.fromCenter(
+            center: Offset.zero,
+            width: 21 * unit,
+            height: 8 * unit,
+          ),
+          Radius.circular(2 * unit),
+        ),
+        paint,
+      );
+    // Ticks down from the top edge, every other one longer.
+    for (int i = 0; i < 5; i++) {
+      final double x = (-7.5 + i * 3.75) * unit;
+      canvas.drawLine(
+        Offset(x, -4 * unit),
+        Offset(x, (i.isEven ? -0.5 : -2) * unit),
+        paint,
+      );
+    }
+    canvas.restore();
+  }
+
+  @override
+  bool shouldRepaint(_RulerIconPainter oldDelegate) =>
+      oldDelegate.color != color;
 }
 
 /// A picture glyph, styled to match the floating tool palette.
@@ -972,35 +1271,40 @@ class _PictureIconPainter extends CustomPainter {
     final Paint paint = Paint()
       ..color = color
       ..style = PaintingStyle.stroke
-      ..strokeWidth = 1.8 * unit
+      ..strokeWidth = 1.2 * unit
       ..strokeJoin = StrokeJoin.round
       ..strokeCap = StrokeCap.round
       ..isAntiAlias = true;
 
-    final Rect frame = Rect.fromCenter(
-      center: Offset(12 * unit, 12 * unit),
-      width: 17 * unit,
-      height: 14 * unit,
+    final RRect frame = RRect.fromLTRBR(
+      3 * unit,
+      4.5 * unit,
+      21 * unit,
+      19.5 * unit,
+      Radius.circular(3.5 * unit),
     );
-    final RRect rrect = RRect.fromRectAndRadius(frame, Radius.circular(2.5 * unit));
-    canvas.drawRRect(rrect, paint);
+    canvas.drawRRect(frame, paint);
 
-    canvas.save();
-    canvas.clipRRect(rrect);
-    final Path mountains = Path()
-      ..moveTo(3.5 * unit, 16.5 * unit)
-      ..lineTo(8 * unit, 11.5 * unit)
-      ..lineTo(12.5 * unit, 15.5 * unit)
-      ..lineTo(16 * unit, 12.5 * unit)
-      ..lineTo(20.5 * unit, 16.5 * unit);
-    canvas.drawPath(mountains, paint);
-
-    canvas.drawCircle(Offset(15.5 * unit, 8 * unit), 1.5 * unit, paint);
-    canvas.restore();
+    // A sun over a ridge of two hills that runs out under the frame.
+    canvas
+      ..save()
+      ..clipRRect(frame)
+      ..drawPath(
+        Path()
+          ..moveTo(2 * unit, 19 * unit)
+          ..lineTo(8.5 * unit, 12.5 * unit)
+          ..lineTo(12 * unit, 16 * unit)
+          ..lineTo(14.5 * unit, 13.5 * unit)
+          ..lineTo(22 * unit, 21 * unit),
+        paint,
+      )
+      ..drawCircle(Offset(15.5 * unit, 8.75 * unit), 1.75 * unit, paint)
+      ..restore();
   }
 
   @override
-  bool shouldRepaint(_PictureIconPainter oldDelegate) => oldDelegate.color != color;
+  bool shouldRepaint(_PictureIconPainter oldDelegate) =>
+      oldDelegate.color != color;
 }
 
 /// The writing tool's glyph with a sample of the current ink at its
@@ -1043,7 +1347,7 @@ class _PenIcon extends StatelessWidget {
                 color: highlighter ? color.withValues(alpha: opacity) : color,
                 shape: highlighter ? BoxShape.rectangle : BoxShape.circle,
                 borderRadius: highlighter ? BorderRadius.circular(2) : null,
-                border: Border.all(color: colors.surface, width: 1.5),
+                border: Border.all(color: colors.surface, width: 1.2),
               ),
             ),
           ),
@@ -1088,6 +1392,9 @@ class PenOptions extends StatelessWidget {
           options: WritingStyle.values,
           selected: settings.style,
           labelOf: (WritingStyle style) => style.label,
+          iconOnly: true,
+          visualOf: (WritingStyle style, Color color) =>
+              _WritingTipGlyph(style: style, color: color),
           keyOf: (WritingStyle style) =>
               ValueKey<String>('writing-style-${style.name}'),
           onSelected: (WritingStyle style) =>
@@ -1120,6 +1427,121 @@ class PenOptions extends StatelessWidget {
   }
 }
 
+/// A close-up of the part that touches the page, so the writing styles can
+/// be distinguished by their nib rather than by a label or generic tool icon.
+class _WritingTipGlyph extends StatelessWidget {
+  const _WritingTipGlyph({required this.style, required this.color});
+
+  final WritingStyle style;
+  final Color color;
+
+  @override
+  Widget build(BuildContext context) {
+    return SizedBox.square(
+      dimension: 24,
+      child: CustomPaint(
+        key: ValueKey<String>('writing-style-tip-${style.name}'),
+        painter: _WritingTipPainter(style: style, color: color),
+      ),
+    );
+  }
+}
+
+class _WritingTipPainter extends CustomPainter {
+  const _WritingTipPainter({required this.style, required this.color});
+
+  final WritingStyle style;
+  final Color color;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final double unit = size.shortestSide / 24;
+    canvas.scale(unit, unit);
+    final Paint outline = Paint()
+      ..color = color
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 1.35
+      ..strokeCap = StrokeCap.round
+      ..strokeJoin = StrokeJoin.round
+      ..isAntiAlias = true;
+
+    switch (style) {
+      case WritingStyle.pen:
+        // Split fountain nib: narrow point with a breather hole and slit.
+        canvas
+          ..drawPath(
+            Path()
+              ..moveTo(7, 5)
+              ..lineTo(17, 5)
+              ..lineTo(15.5, 13)
+              ..lineTo(12, 21)
+              ..lineTo(8.5, 13)
+              ..close(),
+            outline,
+          )
+          ..drawLine(const Offset(7, 5), const Offset(17, 5), outline)
+          ..drawCircle(const Offset(12, 11), 1.15, outline)
+          ..drawLine(const Offset(12, 12.2), const Offset(12, 18.5), outline);
+      case WritingStyle.pencil:
+        // Sharpened wooden cone with a solid graphite core at its point.
+        canvas
+          ..drawRect(const Rect.fromLTRB(7.5, 3, 16.5, 11), outline)
+          ..drawPath(
+            Path()
+              ..moveTo(7.5, 11)
+              ..lineTo(16.5, 11)
+              ..lineTo(12, 21)
+              ..close(),
+            outline,
+          )
+          ..drawPath(
+            Path()
+              ..moveTo(10.25, 17)
+              ..lineTo(13.75, 17)
+              ..lineTo(12, 21)
+              ..close(),
+            Paint()
+              ..color = color
+              ..style = PaintingStyle.fill
+              ..isAntiAlias = true,
+          );
+      case WritingStyle.highlighter:
+        // Wide felt nib ending in the highlighter's characteristic chisel.
+        canvas
+          ..drawRRect(
+            RRect.fromRectAndRadius(
+              const Rect.fromLTRB(6.5, 3, 17.5, 12),
+              const Radius.circular(1.5),
+            ),
+            outline,
+          )
+          ..drawPath(
+            Path()
+              ..moveTo(7.5, 12)
+              ..lineTo(16.5, 12)
+              ..lineTo(15.25, 17.5)
+              ..lineTo(7, 20)
+              ..close(),
+            outline,
+          )
+          ..drawLine(
+            const Offset(7, 20),
+            const Offset(15.25, 17.5),
+            Paint()
+              ..color = color
+              ..strokeWidth = 2.6
+              ..strokeCap = StrokeCap.square
+              ..isAntiAlias = true,
+          );
+    }
+  }
+
+  @override
+  bool shouldRepaint(_WritingTipPainter oldDelegate) {
+    return oldDelegate.style != style || oldDelegate.color != color;
+  }
+}
+
 /// Opens the advanced pen settings panel.
 class _AdvancedButton extends StatelessWidget {
   const _AdvancedButton({required this.onPressed});
@@ -1137,7 +1559,7 @@ class _AdvancedButton extends StatelessWidget {
       child: InkWell(
         key: const ValueKey<String>('pen-advanced-toggle'),
         onTap: onPressed,
-        borderRadius: BorderRadius.circular(AppRadii.medium),
+        borderRadius: AppBorderRadius.medium,
         child: SizedBox(
           height: AppSizes.minTouchTarget,
           child: Row(

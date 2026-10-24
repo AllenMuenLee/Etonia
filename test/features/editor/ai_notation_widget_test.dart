@@ -2,6 +2,7 @@ import 'dart:ui';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:greatnote/features/editor/ai/ai_assistant_controller.dart';
 import 'package:greatnote/features/editor/ai/ai_notation.dart';
 import 'package:greatnote/features/editor/editor_screen.dart';
 import 'package:greatnote/features/editor/ink/ink_canvas.dart';
@@ -11,6 +12,7 @@ import 'package:greatnote/features/editor/ink/ink_sample.dart';
 import 'package:greatnote/features/editor/ink/notation_playback.dart';
 import 'package:greatnote/features/editor/ink/stroke.dart';
 import 'package:greatnote/features/editor/widgets/ai_assistant_panel.dart';
+import 'package:greatnote/features/editor/widgets/ai_options.dart';
 import 'package:greatnote/features/editor/widgets/editor_settings_sheet.dart';
 
 import '../../helpers/ai_fakes.dart';
@@ -121,12 +123,13 @@ void main() {
     expect(find.text('Panel side'), findsNothing);
     expect(find.text('Add to note'), findsNothing);
 
-    await tester.tap(find.byTooltip('Settings'));
+    // The assistant's settings are the AI tool's options.
+    await tester.tap(find.byTooltip('AI settings'));
     await tester.pumpAndSettle();
-    expect(find.byType(EditorSettingsSheet), findsOneWidget);
+    expect(find.byType(AiOptions), findsOneWidget);
     expect(find.text('Enable notation'), findsOneWidget);
     expect(find.text('Enable animation'), findsOneWidget);
-    expect(find.text('Panel side'), findsOneWidget);
+    expect(find.text('Show notes in chat'), findsOneWidget);
     expect(
       tester
           .widget<AiAssistantPanel>(find.byType(AiAssistantPanel))
@@ -134,6 +137,16 @@ void main() {
           .notationEnabled,
       isTrue,
     );
+    await tester.tap(find.byTooltip('AI settings'));
+    await tester.pumpAndSettle();
+    expect(find.byType(AiOptions), findsNothing);
+
+    // The Settings sheet keeps the panel's side, not these.
+    await tester.tap(find.byTooltip('Settings'));
+    await tester.pumpAndSettle();
+    expect(find.byType(EditorSettingsSheet), findsOneWidget);
+    expect(find.text('Panel side'), findsOneWidget);
+    expect(find.text('Enable notation'), findsNothing);
     Navigator.of(tester.element(find.byType(EditorSettingsSheet))).pop();
     await tester.pumpAndSettle();
     await tester.enterText(find.byType(TextField), 'Label this');
@@ -217,12 +230,12 @@ void main() {
     );
   });
 
-  testWidgets('the AI button shows AI notes while on and hides them when off', (
+  testWidgets('Show notes in chat on keeps AI notes visible when AI is off', (
     WidgetTester tester,
   ) async {
     final (InkController controller, FakeAiClient client) = await _open(tester);
     // Pressing AI on the selection turned the palette's AI button on.
-    expect(find.byTooltip('Turn off AI'), findsOneWidget);
+    expect(find.byTooltip('AI settings'), findsOneWidget);
 
     await tester.enterText(find.byType(TextField), 'Label this');
     await tester.pump();
@@ -234,16 +247,16 @@ void main() {
     expect(trace, hasLength(2));
     expect(trace.any(controller.isStrokeHidden), isFalse);
 
-    // Closing the chat keeps AI mode, and its notes, on.
+    // Another tool leaves AI mode, and its chat, on.
+    await tester.tap(find.byTooltip('Pen'));
+    await tester.pumpAndSettle();
+    expect(find.byType(AiAssistantPanel), findsOneWidget);
+    expect(trace.any(controller.isStrokeHidden), isFalse);
     tester.widget<AiAssistantPanel>(find.byType(AiAssistantPanel)).onClose();
     await tester.pumpAndSettle();
     expect(find.byType(AiAssistantPanel), findsNothing);
-    expect(find.byTooltip('Turn off AI'), findsOneWidget);
+    // Notes stay visible even when AI is turned off because Show notes in chat is on.
     expect(trace.any(controller.isStrokeHidden), isFalse);
-
-    await tester.tap(find.byTooltip('Turn off AI'));
-    await tester.pumpAndSettle();
-    expect(trace.every(controller.isStrokeHidden), isTrue);
     expect(controller.isStrokeHidden(controller.strokes.first), isFalse);
     expect(controller.strokes, hasLength(3));
     expect(find.byTooltip('Turn on AI'), findsOneWidget);
@@ -253,7 +266,60 @@ void main() {
     await settleAi(tester);
     expect(trace.any(controller.isStrokeHidden), isFalse);
     expect(find.byType(AiAssistantPanel), findsOneWidget);
-    expect(find.byTooltip('Turn off AI'), findsOneWidget);
+    expect(find.byTooltip('AI settings'), findsOneWidget);
+
+    // Closing the chat turns AI mode off, but notes stay visible.
+    tester.widget<AiAssistantPanel>(find.byType(AiAssistantPanel)).onClose();
+    await tester.pumpAndSettle();
+    expect(find.byType(AiAssistantPanel), findsNothing);
+    expect(find.byTooltip('Turn on AI'), findsOneWidget);
+    expect(trace.any(controller.isStrokeHidden), isFalse);
+  });
+
+  testWidgets('Show notes in chat off hides AI notes when AI is off and shows '
+      'them when AI is on', (WidgetTester tester) async {
+    final (InkController controller, FakeAiClient client) = await _open(tester);
+    final AiAssistantController assistant = tester
+        .widget<AiAssistantPanel>(find.byType(AiAssistantPanel))
+        .controller;
+    assistant.setShowNotesInChat(false);
+    await tester.pump();
+
+    await tester.enterText(find.byType(TextField), 'Label this');
+    await tester.pump();
+    await tester.tap(find.byTooltip('Send'));
+    await settleAi(tester);
+    client.answerResponse(_notation());
+    await tester.pumpAndSettle();
+    final List<Stroke> trace = controller.strokes.sublist(1);
+    expect(trace.any(controller.isStrokeHidden), isFalse);
+
+    // Closing the chat turns AI off; with Show notes in chat off, notes hide.
+    tester.widget<AiAssistantPanel>(find.byType(AiAssistantPanel)).onClose();
+    await tester.pumpAndSettle();
+    expect(trace.every(controller.isStrokeHidden), isTrue);
+    expect(controller.isStrokeHidden(controller.strokes.first), isFalse);
+
+    // Turning AI back on shows them again.
+    await tester.tap(find.byTooltip('Turn on AI'));
+    await tester.pumpAndSettle();
+    await settleAi(tester);
+    expect(trace.any(controller.isStrokeHidden), isFalse);
+
+    // Closing the chat turns AI off and hides the notes.
+    tester.widget<AiAssistantPanel>(find.byType(AiAssistantPanel)).onClose();
+    await tester.pumpAndSettle();
+    expect(trace.every(controller.isStrokeHidden), isTrue);
+
+    // Turning Show notes in chat back on while AI is off shows the notes.
+    assistant.setShowNotesInChat(true);
+    await tester.pump();
+    expect(trace.any(controller.isStrokeHidden), isFalse);
+
+    // Turning Show notes in chat off while AI is off hides them again.
+    assistant.setShowNotesInChat(false);
+    await tester.pump();
+    expect(trace.every(controller.isStrokeHidden), isTrue);
   });
 
   testWidgets('a changed note makes in-flight notation non-destructive', (

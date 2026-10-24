@@ -7,15 +7,16 @@ preview, and send full-rate actual samples to the existing `InkController`.
 ## Data flow
 
 1. Each visible `InkCanvas` registers its size, screen transform, current pen
-   color/width, and pressure setting through `NativeInkBridge`.
+   color/width, pressure setting, writing style, and stabilization value
+   through `NativeInkBridge`.
 2. Native code hit-tests a pen-down against those registered surfaces. Finger
    input is not consumed and continues to drive Flutter scrolling and zoom.
 3. Android sends all `MotionEvent` historical samples. iOS sends UIKit
    coalesced Pencil touches. A flat `x, y, timestamp, pressure` array keeps the
    platform-channel payload small.
-4. A native overlay immediately previews opaque pen ink. Both platforms append
-   predicted samples to this preview (UIKit predicted touches on iOS, AndroidX
-   `MotionEventPredictor` on Android); predictions are never sent to Dart.
+4. A native overlay immediately previews opaque pen ink. Jetpack Ink owns the
+   wet-ink renderer on Android; PencilKit owns it on iOS. Their predicted
+   samples are never sent to Dart.
 5. Dart feeds actual batches into the same stroke, erase, smoothing,
    hold-to-shape, and persistence code used by the Flutter fallback.
 6. On up/cancel (or hold-to-shape conversion), Dart acknowledges the packet and
@@ -39,20 +40,25 @@ pressure, palm contact, lift outside the page, zoomed pages, hold-to-shape, and
 eraser-end input on Android. Use profile/release mode because debug mode adds
 JIT and diagnostics overhead.
 
-The native overlay currently previews opaque pen strokes. Highlighter strokes
-still receive full-rate native samples, but use Flutter rendering so their
-transparency is not compounded by two layers. Android calls
-`requestUnbufferedDispatch`.
+The native overlay currently previews opaque pen and pencil strokes.
+Highlighter strokes still receive full-rate native samples, but use Flutter
+rendering so their transparency is not compounded by two layers. Android also
+calls `requestUnbufferedDispatch`.
 
 ## Preview rendering
 
-- **Android (API 29+)** draws each new actual segment straight into the front
-  buffer with AndroidX `CanvasFrontBufferedRenderer`, so a sample costs one
-  segment, not a redraw of the stroke. Only the short predicted tail goes
-  through the overlay `View`, invalidated by dirty rect. Below API 29 the
-  overlay `View` draws everything, also by dirty rect, skipping segments
-  outside the clip. Finishing a stroke clears the front buffer.
-- **iOS** invalidates only the rectangle covering the newly appended segments,
-  the predicted tail being replaced, and the new one, inflated by the widest
-  line, and `draw(_:)` skips segments outside that rect. The overlay asks for
-  120 Hz with `CAFrameRateRange` on ProMotion displays.
+- **Android** uses Jetpack Ink's `InProgressStrokesView` and
+  `MotionEventPredictor`. The view is eagerly initialized so loading native Ink
+  code does not hitch the first stroke. The stabilization meter selects a
+  native `SlidingWindowModel` from 0 to 32 ms; zero selects Jetpack Ink's
+  pass-through model. The model upsamples at 240 Hz before native rendering.
+- **iOS** uses a pencil-only `PKCanvasView`. PencilKit supplies Apple's native
+  prediction, smoothing, and low-latency renderer, and the overlay requests
+  120 Hz on ProMotion displays. PencilKit does not expose a stabilization
+  strength, so the meter continues to tune the lightweight smoothing used for
+  the persisted Flutter stroke while the transient wet ink stays entirely in
+  PencilKit.
+
+The native preview is only the latency-critical wet layer. Actual coalesced
+samples still feed the shared Dart document model so files, undo, selection,
+shape recognition, and cross-platform rendering keep one representation.

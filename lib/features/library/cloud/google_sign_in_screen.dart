@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 
 import '../../../app/theme/app_icons.dart';
 import '../../../app/theme/app_tokens.dart';
+import '../../../shared/widgets/processing.dart';
 import 'google_drive_client.dart';
 
 /// Shows the Google sign-in screen and returns the account signed in, or
@@ -95,7 +96,13 @@ class _GoogleSignInScreenState extends State<GoogleSignInScreen> {
                   FilledButton(
                     key: const ValueKey<String>('google-sign-in'),
                     onPressed: _busy ? null : _signIn,
-                    child: Text(_busy ? 'Signing in…' : 'Sign in with Google'),
+                    child: GentleSwitcher(
+                      value: _busy,
+                      alignment: Alignment.center,
+                      child: Text(
+                        _busy ? 'Signing in…' : 'Sign in with Google',
+                      ),
+                    ),
                   ),
                   if (_problem != null) ...<Widget>[
                     const SizedBox(height: AppSpacing.sm),
@@ -107,9 +114,7 @@ class _GoogleSignInScreenState extends State<GoogleSignInScreen> {
                   ],
                   const SizedBox(height: AppSpacing.xs),
                   TextButton(
-                    onPressed: _busy
-                        ? null
-                        : () => Navigator.of(context).pop(),
+                    onPressed: _busy ? null : () => Navigator.of(context).pop(),
                     child: const Text('Not now'),
                   ),
                 ],

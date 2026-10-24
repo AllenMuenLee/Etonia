@@ -19,6 +19,46 @@ Map<String, Object?> _decodeNoteJson(String encoded) {
 
 String _encodeNoteJson(Map<String, Object?> json) => jsonEncode(json);
 
+Map<String, Object?> _decodeNoteFile(String path) =>
+    _decodeNoteJson(File(path).readAsStringSync());
+
+/// The first page's values of the note stored at [path], or null when it
+/// has no pages.
+Map<String, Object?>? _decodeFirstPage(String path) =>
+    _firstPageOf(_decodeNoteFile(path));
+
+Map<String, Object?>? _firstPageOf(Map<String, Object?> json) {
+  checkSchema(json);
+  final Object? pages = json['pages'];
+  if (pages is! List || pages.isEmpty) return null;
+  return pages.first! as Map<String, Object?>;
+}
+
+typedef _LibraryIndex = ({
+  List<Folder> folders,
+  List<NoteEntry> notes,
+  List<NoteEntry> trash,
+});
+
+_LibraryIndex _decodeLibraryIndex(String encoded) {
+  final Map<String, Object?> json = jsonDecode(encoded) as Map<String, Object?>;
+  checkSchema(json);
+  return (
+    folders: <Folder>[
+      for (final Object? folder in (json['folders'] as List?) ?? <Object?>[])
+        Folder.fromJson(folder! as Map<String, Object?>),
+    ],
+    notes: <NoteEntry>[
+      for (final Object? note in (json['notes'] as List?) ?? <Object?>[])
+        NoteEntry.fromJson(note! as Map<String, Object?>),
+    ],
+    trash: <NoteEntry>[
+      for (final Object? note in (json['trash'] as List?) ?? <Object?>[])
+        NoteEntry.fromJson(note! as Map<String, Object?>),
+    ],
+  );
+}
+
 bool _largeJsonValue(Object? root, {int threshold = 512 * 1024}) {
   int estimate = 0;
   final List<Object?> pending = <Object?>[root];
@@ -71,28 +111,26 @@ class FileNoteRepository extends IndexedNoteRepository
     DateTime Function()? clock,
     String Function()? newId,
   }) async {
-    await Directory('${directory.path}/notes').create(recursive: true);
-    await Directory('${directory.path}/thumbnails').create(recursive: true);
+    await Future.wait<Directory>(<Future<Directory>>[
+      Directory('${directory.path}/notes').create(recursive: true),
+      Directory('${directory.path}/thumbnails').create(recursive: true),
+    ]);
     final File index = File('${directory.path}/$_indexName');
     List<Folder> folders = const <Folder>[];
     List<NoteEntry> notes = const <NoteEntry>[];
     List<NoteEntry> trash = const <NoteEntry>[];
     if (await index.exists()) {
-      final Map<String, Object?> json =
-          jsonDecode(await index.readAsString()) as Map<String, Object?>;
-      checkSchema(json);
-      folders = <Folder>[
-        for (final Object? folder in (json['folders'] as List?) ?? <Object?>[])
-          Folder.fromJson(folder! as Map<String, Object?>),
-      ];
-      notes = <NoteEntry>[
-        for (final Object? note in (json['notes'] as List?) ?? <Object?>[])
-          NoteEntry.fromJson(note! as Map<String, Object?>),
-      ];
-      trash = <NoteEntry>[
-        for (final Object? note in (json['trash'] as List?) ?? <Object?>[])
-          NoteEntry.fromJson(note! as Map<String, Object?>),
-      ];
+      final String encoded = await index.readAsString();
+      final _LibraryIndex decoded = encoded.length >= 512 * 1024
+          ? await compute(
+              _decodeLibraryIndex,
+              encoded,
+              debugLabel: 'library.jsonDecode',
+            )
+          : _decodeLibraryIndex(encoded);
+      folders = decoded.folders;
+      notes = decoded.notes;
+      trash = decoded.trash;
     }
     return FileNoteRepository._(
       directory,
@@ -126,11 +164,12 @@ class FileNoteRepository extends IndexedNoteRepository
       File('${_thumbnailDirectory(id).path}/$key.png');
 
   @override
-  Future<void> writeIndex() {
-    return _writeAtomically(
-      File('${directory.path}/$_indexName'),
-      jsonEncode(indexToJson()),
-    );
+  Future<void> writeIndex() async {
+    final Map<String, Object?> json = indexToJson();
+    final String encoded = _largeJsonValue(json)
+        ? await compute(_encodeNoteJson, json, debugLabel: 'library.jsonEncode')
+        : jsonEncode(json);
+    await _writeAtomically(File('${directory.path}/$_indexName'), encoded);
   }
 
   @override
@@ -140,32 +179,75 @@ class FileNoteRepository extends IndexedNoteRepository
       return NoteContent.blank();
     }
     try {
-      final String encoded = await file.readAsString();
-      // Small notes avoid isolate startup cost. Large notes transfer only
-      // JSON values, never ui.Path / NoteDocument / controllers.
-      if (encoded.length >= 512 * 1024) {
+      if (await file.length() >= _offMainBytes) {
+        // Read and decoded on another isolate, so not even the text passes
+        // through this one; only JSON values come back, never ui.Path /
+        // NoteDocument / controllers. Ink is then made from them in short
+        // steps, which stop as soon as no one waits for the note.
         final task = TimelineTask()..start('note.hydrateLarge');
         try {
           final json = await compute(
-            _decodeNoteJson,
-            encoded,
+            _decodeNoteFile,
+            file.path,
             debugLabel: 'note.jsonDecode',
           );
-          return await NoteContent.fromJsonIncrementally(json);
+          if (isLoadAbandoned(id)) throw const LoadAbandoned();
+          return await NoteContent.fromJsonIncrementally(
+            json,
+            cancelled: () => isLoadAbandoned(id),
+          );
         } finally {
           task.finish();
         }
       }
+      // Small notes avoid isolate startup cost.
+      final String encoded = await file.readAsString();
       final json = Timeline.timeSync(
         'note.jsonDecode',
         () => _decodeNoteJson(encoded),
       );
-      return Timeline.timeSync(
+      return await Timeline.timeSync(
         'note.materialize',
         () => NoteContent.fromJson(json),
       );
     } on StorageFormatException {
       rethrow;
+    } on LoadAbandoned {
+      rethrow;
+    } on Object catch (error) {
+      throw StorageFormatException('Could not read the note: $error');
+    }
+  }
+
+  /// Notes at least this large are read and decoded off the UI isolate:
+  /// decoding them here, and making all their ink at once, would hold up
+  /// the transition that opens them. The note slides in for longer than the
+  /// isolate takes to start, so only notes with next to nothing in them,
+  /// which decode in well under a frame, are read here.
+  static const int _offMainBytes = 8 * 1024;
+
+  @override
+  Future<StoredPage?> readFirstPage(String id) async {
+    final File file = _noteFile(id);
+    if (!await file.exists()) {
+      return NoteContent.blank().pages.first;
+    }
+    try {
+      // Only the first page's values come back from a large note, and only
+      // its ink is made, a little at a time: the library may be moving.
+      final bool large = await file.length() >= _offMainBytes;
+      final Map<String, Object?>? page = large
+          ? await compute(
+              _decodeFirstPage,
+              file.path,
+              debugLabel: 'note.firstPage',
+            )
+          : _firstPageOf(_decodeNoteJson(await file.readAsString()));
+      // A note with no pages opens as one blank page, and is pictured so.
+      if (page == null) return NoteContent.blank().pages.first;
+      return large
+          ? await StoredPage.fromJsonIncrementally(page)
+          : StoredPage.fromJson(page);
     } on Object catch (error) {
       throw StorageFormatException('Could not read the note: $error');
     }
@@ -227,8 +309,10 @@ class FileNoteRepository extends IndexedNoteRepository
     final File temporary = File('${file.path}.tmp');
     await temporary.writeAsBytes(png, flush: true);
     await temporary.rename(file.path);
+    // By name: listed paths need not be spelled as [file]'s, as on Windows.
+    final String name = '$key.png';
     for (final FileSystemEntity entity in directory.listSync()) {
-      if (entity is File && entity.path != file.path) {
+      if (entity is File && entity.uri.pathSegments.last != name) {
         await entity.delete();
       }
     }

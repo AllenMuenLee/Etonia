@@ -6,6 +6,7 @@ import 'package:flutter/foundation.dart';
 
 import '../editor/ai/ai_client.dart';
 import '../editor/ai/ai_usage_gate.dart';
+import '../../backend/backend_service.dart' show BackendFailure;
 import 'in_app_purchase_gateway.dart';
 import 'payment_models.dart';
 import 'billing_backend.dart';
@@ -102,11 +103,9 @@ class SubscriptionController extends ChangeNotifier with AiUsageGate {
   Future<void> _saving = Future<void>.value();
 
   bool? _storeAvailable;
-  final Map<String, StoreProduct> _products =
-      <String, StoreProduct>{};
+  final Map<String, StoreProduct> _products = <String, StoreProduct>{};
   StoreActivity _activity = StoreActivity.idle;
   SubscriptionPlan? _pendingPlan;
-  BillingCycle _pendingCycle = BillingCycle.monthly;
   String? _errorMessage;
   String? _notice;
 
@@ -122,7 +121,19 @@ class SubscriptionController extends ChangeNotifier with AiUsageGate {
     return _state.activePlan;
   }
 
-  int get remainingCreditsMicroUsd => _state.remainingCreditsMicroUsd;
+  /// Free credit lasts a month; the server counts it as none after that, and
+  /// so does this, before the next refresh arrives.
+  bool get _freeCreditExpired {
+    final DateTime? ends = _state.freeCreditExpiresAt;
+    return activePlan == null && ends != null && !ends.isAfter(DateTime.now());
+  }
+
+  int get remainingCreditsMicroUsd =>
+      _freeCreditExpired ? 0 : _state.remainingCreditsMicroUsd;
+
+  /// When the free credit ends, while it is the credit in use.
+  DateTime? get freeCreditExpiresAt =>
+      hasFreeCredit ? _state.freeCreditExpiresAt : null;
 
   /// Whether this is a free account the server granted the one-time
   /// credit, spent or not, with no paid plan active.
@@ -153,8 +164,10 @@ class SubscriptionController extends ChangeNotifier with AiUsageGate {
     SubscriptionPlan plan, {
     BillingCycle cycle = BillingCycle.monthly,
   }) {
-    final String? productId =
-        config.productIdsFor(platform, cycle: cycle)[plan];
+    final String? productId = config.productIdsFor(
+      platform,
+      cycle: cycle,
+    )[plan];
     return productId == null ? null : _products[productId];
   }
 
@@ -176,8 +189,10 @@ class SubscriptionController extends ChangeNotifier with AiUsageGate {
 
   SubscriptionPlan? planForProduct(String productId) {
     for (final BillingCycle cycle in BillingCycle.values) {
-      final Map<SubscriptionPlan, String> ids =
-          config.productIdsFor(platform, cycle: cycle);
+      final Map<SubscriptionPlan, String> ids = config.productIdsFor(
+        platform,
+        cycle: cycle,
+      );
       for (final MapEntry<SubscriptionPlan, String> entry in ids.entries) {
         if (entry.value == productId) {
           return entry.key;
@@ -262,7 +277,7 @@ class SubscriptionController extends ChangeNotifier with AiUsageGate {
 
   void _scheduleExpiryRefresh() {
     _expiryRefresh?.cancel();
-    final expiry = _state.expiresAt;
+    final expiry = _state.expiresAt ?? _state.freeCreditExpiresAt;
     if (expiry == null || !expiry.isAfter(DateTime.now())) return;
     _expiryRefresh = Timer(
       expiry.difference(DateTime.now()) + const Duration(seconds: 2),
@@ -337,7 +352,6 @@ class SubscriptionController extends ChangeNotifier with AiUsageGate {
     }
     _activity = StoreActivity.purchasing;
     _pendingPlan = plan;
-    _pendingCycle = cycle;
     _notify();
     try {
       await gateway.buySubscription(product);
@@ -347,6 +361,38 @@ class SubscriptionController extends ChangeNotifier with AiUsageGate {
       _errorMessage = 'The purchase could not be started. Try again.';
       _notify();
     }
+  }
+
+  /// Adds the free credit of a gift code to the signed-in account.
+  Future<void> redeemGiftCode(String code) async {
+    final remote = backend;
+    _errorMessage = null;
+    _notice = null;
+    if (remote == null || remote.userId == null) {
+      _errorMessage = 'Sign in with Google to redeem a gift code.';
+      _notify();
+      return;
+    }
+    final owner = remote.userId;
+    try {
+      final state = await remote.redeemGiftCode(code.trim());
+      if (_disposed || owner != remote.userId) return;
+      _refreshVersion++;
+      _state = state.copyWith(preferredModel: _state.preferredModel);
+      _scheduleExpiryRefresh();
+      _notice = 'Gift code redeemed. Free credit lasts one month.';
+    } on Object catch (error) {
+      if (_disposed) return;
+      _errorMessage = switch (error is BackendFailure ? error.code : null) {
+        'invalid_code' => 'That gift code is not valid.',
+        'code_redeemed' => 'You have already redeemed that gift code.',
+        'code_exhausted' => 'That gift code has been fully claimed.',
+        'unauthorized' => 'Sign in with Google to redeem a gift code.',
+        'rate_limited' => 'Too many attempts. Try again in a minute.',
+        _ => 'Could not redeem the gift code. Try again.',
+      };
+    }
+    _notify();
   }
 
   /// Asks the store for past purchases; any found arrive as restored.
@@ -502,7 +548,7 @@ class SubscriptionController extends ChangeNotifier with AiUsageGate {
       if (!hasFreeCredit || !freeCreditModels.contains(model)) {
         return AiModelAccess.noPlan;
       }
-      return _state.remainingCreditsMicroUsd > 0
+      return remainingCreditsMicroUsd > 0
           ? AiModelAccess.metered
           : AiModelAccess.outOfCredits;
     }
@@ -545,16 +591,16 @@ class SubscriptionController extends ChangeNotifier with AiUsageGate {
     if (included <= 0) {
       return 0;
     }
-    return (_state.remainingCreditsMicroUsd / included).clamp(0.0, 1.0);
+    return (remainingCreditsMicroUsd / included).clamp(0.0, 1.0);
   }
 
   @override
   String get creditsLabel {
     if ((activePlan == null && !hasFreeCredit) ||
-        _state.remainingCreditsMicroUsd <= 0) {
+        remainingCreditsMicroUsd <= 0) {
       return 'Upgrade';
     }
-    return '${formatTokenPercent(_state.remainingCreditsMicroUsd, includedCreditsMicroUsd)} tokens';
+    return '${formatTokenPercent(remainingCreditsMicroUsd, includedCreditsMicroUsd)} tokens';
   }
 
   @override

@@ -8,6 +8,7 @@ import '../ink/ink_controller.dart';
 import '../ink/stroke.dart';
 import '../sticky/sticky_note.dart';
 import '../document_io/document_models.dart';
+import '../../library/note_recording_track.dart';
 import 'page_setup.dart';
 
 /// One page of a note: its ink and its setup.
@@ -56,30 +57,74 @@ class NoteDocument extends ChangeNotifier {
     List<NotePage>? pages,
     int currentIndex = 0,
     InkController Function()? createInk,
+    bool? isImportedPdf,
+    Iterable<NoteRecordingTrack> recordings = const <NoteRecordingTrack>[],
   }) : _createInk = createInk ?? InkController.new,
        _pages = pages == null || pages.isEmpty
            ? <NotePage>[NotePage(ink: (createInk ?? InkController.new)())]
            : List<NotePage>.of(pages),
-       _current = 0 {
+       _current = 0,
+       _recordings = List<NoteRecordingTrack>.of(recordings),
+       _isImportedPdf =
+           isImportedPdf ??
+           (pages != null && pages.any((NotePage p) => p.pdfSource != null)) {
     _current = currentIndex.clamp(0, _pages.length - 1);
+    // One history for every page: undo and redo follow the order changes
+    // were made in, not the page they were made on.
+    history = _pages.first.ink.history;
+    for (final NotePage page in _pages) {
+      page.ink.history = history;
+    }
   }
 
   /// A one-page document around [ink], which the caller keeps owning.
   factory NoteDocument.single(
     InkController ink, {
     InkController Function()? createInk,
+    bool? isImportedPdf,
   }) {
     return NoteDocument(
       pages: <NotePage>[NotePage(ink: ink, ownsInk: false)],
       createInk: createInk,
+      isImportedPdf: isImportedPdf,
     );
   }
+
+  /// The changes made to every page, for undo and redo.
+  late final InkHistory history;
 
   final InkController Function() _createInk;
   final List<NotePage> _pages;
   int _current;
   int _structureRevision = 0;
   bool _disposed = false;
+  bool _isImportedPdf;
+  final List<NoteRecordingTrack> _recordings;
+
+  List<NoteRecordingTrack> get recordings =>
+      UnmodifiableListView<NoteRecordingTrack>(_recordings);
+
+  void addRecording(NoteRecordingTrack recording) {
+    if (_recordings.any((NoteRecordingTrack item) => item.id == recording.id)) {
+      return;
+    }
+    _recordings.add(recording);
+    _changed();
+  }
+
+  NoteRecordingTrack? removeRecording(String id) {
+    final int index = _recordings.indexWhere(
+      (NoteRecordingTrack item) => item.id == id,
+    );
+    if (index < 0) return null;
+    final NoteRecordingTrack removed = _recordings.removeAt(index);
+    _changed();
+    return removed;
+  }
+
+  /// Whether this document was imported from a PDF or contains PDF-backed pages.
+  bool get isImportedPdf =>
+      _isImportedPdf || _pages.any((NotePage page) => page.pdfSource != null);
 
   /// The AI assistant's remembered conversations, as stored with the note.
   /// Opaque here: written and read by the editor. Null when there are none.
@@ -101,7 +146,7 @@ class NoteDocument extends ChangeNotifier {
   /// Adds one on-device handwriting reading. This is document metadata, so
   /// it is autosaved without creating an ink undo step.
   void addRecognizedWord(NotePage page, RecognizedInkWord word) {
-    if (!_pages.contains(page) || word.text.isEmpty) return;
+    if (!_pages.contains(page) || word.sourceStrokes.isEmpty) return;
     page.recognizedWords.add(word);
     _changed();
   }
@@ -114,21 +159,31 @@ class NoteDocument extends ChangeNotifier {
   }) {
     if (!_pages.contains(page) || page.recognizedWords.isEmpty) return;
     final List<RecognizedInkWord> next = <RecognizedInkWord>[];
+    // Built once per call, not per word: this runs after every stroke, and a
+    // page with many words and strokes would otherwise be quadratic.
+    final Set<Stroke> pageStrokes = Set<Stroke>.identity()
+      ..addAll(page.ink.strokes);
+    final Map<String, Set<Stroke>> stickyStrokes = <String, Set<Stroke>>{};
     for (final RecognizedInkWord word in page.recognizedWords) {
       final RecognizedInkWord followed = replacements.isEmpty
           ? word
           : word.follow(replacements);
-      final StickyNoteElement? sticky = followed.stickyId == null
-          ? null
-          : page.ink.stickyNotes
-                .where((StickyNoteElement note) => note.id == followed.stickyId)
-                .firstOrNull;
-      final Set<Stroke> present = Set<Stroke>.identity()
-        ..addAll(
-          followed.stickyId == null
-              ? page.ink.strokes
-              : sticky?.strokes ?? const <Stroke>[],
-        );
+      final String? stickyId = followed.stickyId;
+      final Set<Stroke> present = stickyId == null
+          ? pageStrokes
+          : stickyStrokes.putIfAbsent(
+              stickyId,
+              () => Set<Stroke>.identity()
+                ..addAll(
+                  page.ink.stickyNotes
+                          .where(
+                            (StickyNoteElement note) => note.id == stickyId,
+                          )
+                          .firstOrNull
+                          ?.strokes ??
+                      const <Stroke>[],
+                ),
+            );
       if (followed.sourceStrokes.every(present.contains)) next.add(followed);
     }
     if (listEquals(next, page.recognizedWords)) return;
@@ -192,13 +247,16 @@ class NoteDocument extends ChangeNotifier {
   /// An empty page the size of [model]; after an imported PDF page, a
   /// blank page as big as its paper.
   NotePage _pageLike(NotePage model) {
-    final PageSetup setup = model.pdfSource == null
+    PageSetup setup = model.pdfSource == null
         ? model.setup
         : PageSetup(
             size: PageSize.custom,
             customSize: model.pdfSource!.pageSize,
           );
-    return NotePage(ink: _createInk(), setup: setup);
+    if (isImportedPdf && setup.size == PageSize.infinite) {
+      setup = setup.copyWith(size: PageSize.a4Portrait);
+    }
+    return NotePage(ink: _createInk()..history = history, setup: setup);
   }
 
   /// Inserts already validated pages after the current page as one document
@@ -206,6 +264,15 @@ class NoteDocument extends ChangeNotifier {
   void insertPagesAfterCurrent(List<NotePage> pages) {
     if (pages.isEmpty) {
       return;
+    }
+    if (pages.any((NotePage p) => p.pdfSource != null)) {
+      _isImportedPdf = true;
+    }
+    for (final NotePage page in pages) {
+      if (isImportedPdf && page.setup.size == PageSize.infinite) {
+        page.setup = page.setup.copyWith(size: PageSize.a4Portrait);
+      }
+      page.ink.history = history;
     }
     _pages.insertAll(_current + 1, pages);
     _current++;
@@ -223,14 +290,32 @@ class NoteDocument extends ChangeNotifier {
       _current--;
     }
     _changed();
+    history.forget(removed.ink);
     if (removed.ownsInk) {
       removed.ink.dispose();
     }
     return true;
   }
 
+  /// Takes back the latest change on any page, showing the page it was on.
+  /// Returns false when there is nothing to undo, or its page is busy.
+  bool undo() => _travelled(current.ink.isBusy ? null : history.undo());
+
+  /// Makes again the change [undo] took back, showing its page.
+  bool redo() => _travelled(current.ink.isBusy ? null : history.redo());
+
+  bool _travelled(InkController? page) {
+    if (page == null) return false;
+    final int index = _pages.indexWhere((NotePage it) => it.ink == page);
+    if (index >= 0) goTo(index);
+    return true;
+  }
+
   /// Gives the current page [setup]. Its ink keeps its page coordinates.
   void setSetup(PageSetup setup) {
+    if (isImportedPdf && setup.size == PageSize.infinite) {
+      return;
+    }
     final NotePage page = current;
     if (page.setup == setup) {
       return;

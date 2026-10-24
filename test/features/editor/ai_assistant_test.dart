@@ -1,4 +1,4 @@
-import 'package:flutter/material.dart';
+﻿import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:greatnote/app/theme/app_icons.dart';
@@ -16,11 +16,13 @@ import 'package:greatnote/features/editor/ink/ink_sample.dart';
 import 'package:greatnote/features/editor/ink/ink_selection.dart';
 import 'package:greatnote/features/editor/ink/eraser_settings.dart';
 import 'package:greatnote/features/editor/ink/stroke.dart';
+import 'package:greatnote/features/editor/widgets/ai_context_glow.dart';
 import 'package:greatnote/features/editor/widgets/ai_assistant_panel.dart';
+import 'package:greatnote/features/editor/widgets/ai_options.dart';
 import 'package:greatnote/features/editor/widgets/editor_settings_sheet.dart';
 import 'package:greatnote/features/editor/widgets/tool_palette.dart';
 import 'package:greatnote/features/editor/widgets/writing_surface_frame.dart';
-import 'package:greatnote/shared/widgets/processing.dart';
+import 'package:greatnote/shared/widgets/etonia_mark.dart';
 import 'package:gpt_markdown/gpt_markdown.dart';
 
 import '../../helpers/ai_fakes.dart';
@@ -302,11 +304,16 @@ void main() {
       _assistant(tester).setSide(AiPanelSide.left);
       await tester.pumpAndSettle();
       expect(_panelRect(tester).left, 0);
-      // The palette stays centered across the top of what the panel
-      // leaves.
+      // The palette lies across the top of what the panel leaves, clear of
+      // the card in the corner.
+      final Rect card = tester.getRect(
+        find.byKey(const ValueKey<String>('history-card')),
+      );
+      expect(card.left, _surfaceRect(tester).left);
+      expect(_paletteRect(tester).left, greaterThanOrEqualTo(card.right));
       expect(
-        _paletteRect(tester).center.dx,
-        closeTo(_surfaceRect(tester).center.dx, 0.5),
+        _paletteRect(tester).right,
+        lessThanOrEqualTo(_surfaceRect(tester).right),
       );
       expect(_surfaceRect(tester).left, _panelRect(tester).right);
       expect(
@@ -364,13 +371,11 @@ void main() {
       expect(controller.activePointer, isNull);
       expect(inkChanges, 0);
       expect(selectionChanges, 0);
-      // The preview is the very image that would be sent.
+      // What the chat is about is framed on the page, not pictured in it.
       final AiSelectionContext context = _assistant(tester).context!;
       expect(context.snapshot.isOf(selection), isTrue);
-      expect(
-        (tester.widget<Image>(find.byType(Image)).image as MemoryImage).bytes,
-        same(context.image!.png),
-      );
+      expect(find.byType(AiContextGlow), findsWidgets);
+      expect(find.byType(Image), findsNothing);
       expect(tester.takeException(), isNull);
     });
   });
@@ -460,20 +465,14 @@ void main() {
       expect(find.text("Choose the AI's handwriting"), findsOneWidget);
     });
 
-    testWidgets('editor settings hold notation, animation, and panel side', (
-      WidgetTester tester,
-    ) async {
+    testWidgets('the AI tool holds notation and animation; editor settings '
+        'hold the panel side', (WidgetTester tester) async {
       await _pumpOpen(tester);
       final AiAssistantController assistant = _assistant(tester);
 
-      await tester.tap(find.byTooltip('Settings'));
+      await tester.tap(find.byTooltip('AI settings'));
       await tester.pumpAndSettle();
-
-      expect(find.byType(EditorSettingsSheet), findsOneWidget);
-      expect(find.text('Settings'), findsOneWidget);
-      expect(find.text('Enable notation'), findsOneWidget);
-      expect(find.text('Enable animation'), findsOneWidget);
-      expect(find.text('Panel side'), findsOneWidget);
+      expect(find.byType(AiOptions), findsOneWidget);
       // The harness opens the editor with Notation off.
       expect(assistant.notationEnabled, isFalse);
       // On at every launch.
@@ -484,6 +483,17 @@ void main() {
       await tester.pump();
       expect(assistant.notationEnabled, isTrue);
       expect(assistant.animationEnabled, isFalse);
+      await tester.tap(find.byTooltip('AI settings'));
+      await tester.pumpAndSettle();
+      expect(find.byType(AiOptions), findsNothing);
+
+      await tester.tap(find.byTooltip('Settings'));
+      await tester.pumpAndSettle();
+      expect(find.byType(EditorSettingsSheet), findsOneWidget);
+      expect(find.text('Settings'), findsOneWidget);
+      expect(find.text('Panel side'), findsOneWidget);
+      expect(find.text('Enable notation'), findsNothing);
+      expect(find.text('Enable animation'), findsNothing);
 
       await tester.tap(find.text('Left'));
       await tester.pumpAndSettle();
@@ -492,8 +502,6 @@ void main() {
       Navigator.of(tester.element(find.byType(EditorSettingsSheet))).pop();
       await tester.pumpAndSettle();
       expect(find.byType(EditorSettingsSheet), findsNothing);
-      expect(find.text('Enable notation'), findsNothing);
-      expect(find.text('Enable animation'), findsNothing);
       expect(find.text('Panel side'), findsNothing);
     });
 
@@ -566,8 +574,8 @@ void main() {
       }
 
       await _pumpOpen(tester);
-      expect(panel().duration, AppMotion.medium);
-      expect(panel().curve, AppMotion.standard);
+      expect(panel().duration, AppMotion.snappy.duration);
+      expect(panel().curve, AppMotion.fadeInCurve);
       _assistant(tester).setSide(AiPanelSide.left);
       await tester.pump();
       expect(tester.hasRunningAnimations, isTrue);
@@ -581,7 +589,7 @@ void main() {
       );
       await _pumpOpen(tester);
 
-      expect(panel().duration, Duration.zero);
+      expect(panel().duration, AppMotion.reduced);
       _assistant(tester).setSide(AiPanelSide.left);
       await tester.pump();
       expect(_panelRect(tester).left, 0);
@@ -631,8 +639,8 @@ void main() {
         expect(find.byType(AiAssistantPanel), findsNothing);
         expect(_hasFocus(tester, find.byType(EditorScreen)), isTrue);
         expect(_editorExcluded(tester), isFalse);
-        // Closing the chat leaves AI mode on.
-        expect(_tool(tester), EditorTool.ai);
+        // Closing the chat turns AI mode off, giving back the tool before.
+        expect(_tool(tester), EditorTool.select);
         expect(controller.selection, isNotNull);
         expect(controller.strokes, hasLength(3));
 
@@ -705,21 +713,24 @@ void main() {
         final AiAssistantController assistant = _assistant(tester);
         expect(find.text('Explain this'), findsOneWidget);
         expect(find.text('Grade this'), findsOneWidget);
-        expect(find.byType(ShimmerTrack), findsNothing);
+        expect(find.byType(EtoniaBarsLoader), findsNothing);
 
         await tester.tap(_quickAction('Explain this'));
         await tester.pump();
 
         final AiRequest first = client.requests.single;
         expect(first.messages.single.text, AiPrompts.explain);
-        expect(first.systemInstruction, AiPrompts.system);
+        expect(
+          first.systemInstruction,
+          AiPrompts.systemFor(notationEnabled: false),
+        );
         expect(first.imagePng, same(assistant.context!.image!.png));
         expect(first.imagePng.sublist(0, 4), <int>[0x89, 0x50, 0x4E, 0x47]);
-        // In the transcript as the user's message, with a progress bar, and
-        // nothing more can be sent meanwhile.
+        // In the transcript as the user's message, with the answer's place
+        // held, and nothing more can be sent meanwhile.
         expect(find.text('Explain this'), findsNWidgets(2));
         expect(find.text('You'), findsOneWidget);
-        expect(find.byType(ShimmerTrack), findsOneWidget);
+        expect(find.byType(EtoniaBarsLoader), findsOneWidget);
         expect(find.text(AiAssistantPanel.emptyState), findsNothing);
         for (final String label in <String>['Explain this', 'Grade this']) {
           expect(
@@ -734,7 +745,7 @@ void main() {
         client.answer('It shows two parallel lines.');
         await tester.pumpAndSettle();
 
-        expect(find.byType(ShimmerTrack), findsNothing);
+        expect(find.byType(EtoniaBarsLoader), findsNothing);
         expect(find.text('Assistant'), findsOneWidget);
         expect(
           find.descendant(
@@ -878,7 +889,7 @@ void main() {
         ),
         findsWidgets,
       );
-      expect(find.byType(ShimmerTrack), findsOneWidget);
+      expect(find.byType(EtoniaBarsLoader), findsOneWidget);
       expect(find.textContaining('Drawing'), findsNothing);
 
       // The words are all in; the drawing is still coming.
@@ -892,7 +903,7 @@ void main() {
 
       expect(live, findsNothing);
       expect(find.textContaining('Drawing'), findsNothing);
-      expect(find.byType(ShimmerTrack), findsNothing);
+      expect(find.byType(EtoniaBarsLoader), findsNothing);
       expect(find.text('Assistant'), findsOneWidget);
       expect(tester.takeException(), isNull);
     });
@@ -961,7 +972,7 @@ void main() {
         find.text('The AI service took too long to respond.'),
         findsOneWidget,
       );
-      expect(find.byType(ShimmerTrack), findsNothing);
+      expect(find.byType(EtoniaBarsLoader), findsNothing);
       // What was already said is still there, and so is the ink.
       expect(find.text('Looks right.'), findsOneWidget);
       expect(find.text('Are you sure?'), findsOneWidget);
@@ -980,7 +991,7 @@ void main() {
         find.text('The AI service took too long to respond.'),
         findsNothing,
       );
-      expect(find.byType(ShimmerTrack), findsOneWidget);
+      expect(find.byType(EtoniaBarsLoader), findsOneWidget);
       expect(find.text('Are you sure?'), findsOneWidget);
       client.answer('Yes.');
       await tester.pumpAndSettle();
@@ -1072,10 +1083,7 @@ void main() {
       expect(controller.selection!.indices, <int>[2]);
       expect(find.text('New selection'), findsOneWidget);
       expect(assistant.context, same(context));
-      expect(
-        (tester.widget<Image>(find.byType(Image)).image as MemoryImage).bytes,
-        same(context.image!.png),
-      );
+      expect(find.byType(Image), findsNothing);
       expect(find.text('Explain this'), findsNWidgets(2));
 
       // The answer still belongs to the open conversation.
@@ -1098,7 +1106,7 @@ void main() {
       expect(assistant.context!.snapshot.isOf(controller.selection!), isTrue);
       expect(assistant.messages, isEmpty);
       expect(find.text(AiAssistantPanel.emptyState), findsOneWidget);
-      expect(find.byType(ShimmerTrack), findsNothing);
+      expect(find.byType(EtoniaBarsLoader), findsNothing);
       client.answer('Late answer', index: 1);
       await tester.pumpAndSettle();
       expect(find.text('Late answer'), findsNothing);
@@ -1124,7 +1132,10 @@ void main() {
       client.answer('Two lines.');
       await tester.pumpAndSettle();
 
-      await _select(tester, controller, _third);
+      // In AI mode ink is picked by circling it, not with the Select tool,
+      // which would turn AI mode off.
+      selectInk(controller, _third);
+      await tester.pumpAndSettle();
       expect(find.text('New selection'), findsOneWidget);
       await tester.tap(find.widgetWithText(TextButton, 'Add to context'));
       await tester.pump();
@@ -1362,8 +1373,10 @@ void main() {
       expect(_assistant(tester).context, same(context));
       expect(_assistant(tester).context!.snapshot.brightness, Brightness.light);
 
-      // A new capture takes the theme of the moment.
-      await _select(tester, controller, _third);
+      // A new capture takes the theme of the moment. Ink is picked in AI mode
+      // by circling it, as the Select tool would turn AI mode off.
+      selectInk(controller, _third);
+      await tester.pumpAndSettle();
       await tester.tap(find.widgetWithText(TextButton, 'New chat'));
       await tester.pump();
       await settleAi(tester);
@@ -1453,7 +1466,7 @@ void main() {
           hasTapAction: true,
         ),
       );
-      expect(find.bySemanticsLabel('Selected ink'), findsOneWidget);
+      expect(find.bySemanticsLabel('Selected ink'), findsNothing);
       expect(
         find.bySemanticsLabel(AiAssistantPanel.emptyState),
         findsOneWidget,

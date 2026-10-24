@@ -4,6 +4,7 @@ import 'package:greatnote/app/theme/app_icons.dart';
 import 'package:greatnote/features/editor/ink/ink_controller.dart';
 import 'package:greatnote/features/editor/ink/ink_palette.dart';
 import 'package:greatnote/features/editor/ink/pen_settings.dart';
+import 'package:greatnote/features/editor/ink/stroke.dart';
 import 'package:greatnote/features/editor/widgets/eraser_options.dart';
 import 'package:greatnote/features/editor/widgets/ink_color_picker.dart';
 import 'package:greatnote/features/editor/widgets/stroke_width_picker.dart';
@@ -39,6 +40,7 @@ void main() {
     expect(config.maxWidth, 20);
     expect(settings.width, 3);
     expect(settings.ink, InkPalette.ink);
+    expect(settings.strokeStyle(config).width, 1.5);
   });
 
   for (final TestViewport viewport in <TestViewport>[
@@ -124,7 +126,7 @@ void main() {
           return paint.painter! as StrokePreviewPainter;
         }
 
-        expect(preview().width, 3);
+        expect(preview().width, 1.5);
 
         // Drag the thumb to the far end of the track.
         final Rect track = tester.getRect(find.byType(Slider));
@@ -135,7 +137,7 @@ void main() {
         await tester.pumpAndSettle();
 
         expect(tester.widget<Slider>(find.byType(Slider)).value, 20);
-        expect(preview().width, 20);
+        expect(preview().width, 10);
         expect(find.text('20 px'), findsOneWidget);
         expect(find.bySemanticsLabel('Pen, Black, 20 px'), findsOneWidget);
         expect(tester.takeException(), isNull);
@@ -158,6 +160,43 @@ void main() {
       (InkColor ink) => ink.id == 'red',
     );
     expect((paint.painter! as StrokePreviewPainter).color, red.onLightPaper);
+  });
+
+  testWidgets('pen styles use icons and pencil texture is available', (
+    WidgetTester tester,
+  ) async {
+    await pumpEditor(tester);
+    await _openPen(tester);
+
+    expect(find.text('Pen'), findsNothing);
+    expect(find.text('Pencil'), findsNothing);
+    expect(find.text('Highlighter'), findsNothing);
+    expect(
+      find.byKey(const ValueKey<String>('writing-style-tip-pen')),
+      findsOneWidget,
+    );
+    expect(
+      find.byKey(const ValueKey<String>('writing-style-tip-pencil')),
+      findsOneWidget,
+    );
+    expect(
+      find.byKey(const ValueKey<String>('writing-style-tip-highlighter')),
+      findsOneWidget,
+    );
+
+    await tester.tap(
+      find.byKey(const ValueKey<String>('writing-style-pencil')),
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.bySemanticsLabel('Pencil, Black, 3 px'), findsOneWidget);
+    final CustomPaint preview = tester.widget<CustomPaint>(
+      find.byKey(const ValueKey<String>('stroke-width-preview')),
+    );
+    expect(
+      (preview.painter! as StrokePreviewPainter).writing,
+      WritingStyle.pencil,
+    );
   });
 
   testWidgets('dismissing a popover does not draw on the page', (

@@ -191,6 +191,78 @@ void main() {
     });
   });
 
+  testWidgets('low memory releases finished PDF renders and open PDFs, '
+      'leaving pages already shown intact', (tester) async {
+    await tester.runAsync(() async {
+      final rasterizer = _DocumentRasterizer();
+      final cache = PdfPageRenderCache(
+        readAsset: (_) async => Uint8List(1),
+        rasterizer: rasterizer,
+      );
+      final shown = await cache.renderImage(
+        _source(0),
+        const ui.Size(10, 10),
+        1,
+      );
+      (await cache.renderImage(_source(1), const ui.Size(10, 10), 1)).dispose();
+      expect(cache.entryCount, 2);
+      expect(cache.retainedBytes, greaterThan(0));
+
+      cache.releaseMemory();
+      await Future<void>.delayed(Duration.zero);
+      expect(cache.entryCount, 0);
+      expect(cache.retainedBytes, 0);
+      expect(cache.sourceBytes, 0);
+      expect(rasterizer.disposals, 1);
+      // What was handed out is the holder's own.
+      expect(shown.debugDisposed, isFalse);
+      expect(shown.width, 10);
+
+      // Shown again, the page is rendered again.
+      (await cache.renderImage(_source(0), const ui.Size(10, 10), 1)).dispose();
+      expect(rasterizer.opens, 2);
+      shown.dispose();
+      cache.clear();
+    });
+  });
+
+  testWidgets('low memory releases decoded page images but not clones', (
+    tester,
+  ) async {
+    await tester.runAsync(() async {
+      final rasterizer = _Rasterizer();
+      final original = await rasterizer.renderImage(
+        Uint8List(0),
+        0,
+        pixelWidth: 10,
+        pixelHeight: 10,
+      );
+      final data = (await original.toByteData(format: ui.ImageByteFormat.png))!;
+      original.dispose();
+      final png = data.buffer.asUint8List();
+      var reads = 0;
+      final cache = PageImageCache(
+        readAsset: (_) async {
+          reads++;
+          return png;
+        },
+      );
+      final image = await cache.image('a', 10, 10);
+      expect(cache.retainedBytes, 400);
+      expect(cache.sourceBytes, png.length);
+
+      cache.releaseMemory();
+      expect(cache.retainedBytes, 0);
+      expect(cache.sourceBytes, 0);
+      expect(image.debugDisposed, isFalse);
+      image.dispose();
+
+      (await cache.image('a', 10, 10)).dispose();
+      expect(reads, 2);
+      cache.clear();
+    });
+  });
+
   test(
     'asset LRU is byte bounded, coalesces, and clears stale results',
     () async {

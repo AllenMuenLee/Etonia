@@ -9,16 +9,19 @@ import 'ink_controller.dart';
 import 'ink_sample.dart';
 import 'ink_selection.dart';
 import 'notation_playback.dart';
+import 'pencil_texture.dart';
 import 'selection_config.dart';
 import 'selection_transform.dart';
 import 'stroke.dart';
 import '../sticky/sticky_note.dart';
 import '../sticky/sticky_note_painter.dart';
+import '../audio/stroke_replay_controller.dart';
 
 /// Paints one stroke the way the editor shows it: a filled disc for a dot,
 /// otherwise [path] stroked [width] wide with round caps and joins, or,
-/// for a stroke of varying width, its [outline] filled. Every ink layer,
-/// and the image made of a selection, draws through this.
+/// for a stroke of varying width, its [outline] filled. Pencil strokes get
+/// a deterministic broken graphite grain. Every ink layer, and the image
+/// made of a selection, draws through this.
 void paintInkStroke(
   Canvas canvas, {
   required Color color,
@@ -27,7 +30,20 @@ void paintInkStroke(
   required InkVector origin,
   required bool isDot,
   Path? outline,
+  WritingStyle writing = WritingStyle.pen,
 }) {
+  if (writing == WritingStyle.pencil) {
+    paintPencilTexture(
+      canvas,
+      color: color,
+      width: width,
+      path: path,
+      origin: origin,
+      isDot: isDot,
+      outline: outline,
+    );
+    return;
+  }
   final Paint paint = Paint()
     ..color = color
     ..isAntiAlias = true;
@@ -64,11 +80,12 @@ void _paintStroke(
     origin: origin,
     isDot: isDot,
     outline: outline,
+    writing: style.writing,
   );
 }
 
-/// Paints the page's sticky notes, in order, under the page's ink, except
-/// selected ones, which belong to [SelectionPainter] while they are
+/// Paints the page's sticky notes, in order, above the page's completed ink,
+/// except selected ones, which belong to [SelectionPainter] while they are
 /// selected. The note open for writing is outlined in [accent]. Repaints
 /// when the document, the selection, or the note open for writing changes;
 /// never for a pointer move.
@@ -162,17 +179,22 @@ class CompletedStrokesPainter extends CustomPainter {
     required this.controller,
     required this.brightness,
     this.visible,
+    this.replay,
+    this.replayHighlight,
   }) : super(
          repaint: Listenable.merge(<Listenable>[
            controller.completedStrokesListenable,
            controller.notationPlaybackListenable,
            ?visible,
+           ?replay,
          ]),
        );
 
   final InkController controller;
   final Brightness brightness;
   final ValueListenable<Rect>? visible;
+  final StrokeReplayController? replay;
+  final Color? replayHighlight;
 
   @override
   void paint(Canvas canvas, Size size) {
@@ -195,23 +217,79 @@ class CompletedStrokesPainter extends CustomPainter {
           controller.isStrokeHidden(stroke)) {
         continue;
       }
-      _paintStroke(
+      _paintReplayStroke(canvas, stroke);
+    }
+    final StrokeReplayController? activeReplay = replay;
+    if (activeReplay != null && activeReplay.isActive) {
+      for (final ErasedStrokeRecord erased in controller.erasedStrokeRecords) {
+        if (activeReplay.erasedStrokeIsVisible(erased)) {
+          _paintReplayStroke(canvas, erased.stroke);
+        }
+      }
+    }
+  }
+
+  void _paintReplayStroke(Canvas canvas, Stroke stroke) {
+    final StrokeReplayController? activeReplay = replay;
+    final double progress = activeReplay?.revealProgress(stroke) ?? 1;
+    if (progress < 1 && activeReplay != null) {
+      // What is yet to be written lies in light gray under what is.
+      const Color unwritten = StrokeReplayController.unwrittenColor;
+      paintInkStroke(
         canvas,
-        style: stroke.style,
+        color: unwritten.withValues(alpha: unwritten.a * stroke.style.opacity),
+        width: stroke.style.width,
         path: stroke.path,
         origin: stroke.points.first,
         isDot: stroke.isDot,
-        brightness: brightness,
         outline: stroke.outline,
       );
+      if (progress <= 0) return;
     }
+    Path path = stroke.path;
+    bool isDot = stroke.isDot;
+    Path? outline = stroke.outline;
+    if (progress < 1 && stroke.points.length > 1) {
+      final int count = (stroke.points.length * progress).ceil().clamp(
+        1,
+        stroke.points.length,
+      );
+      path = Path()..moveTo(stroke.points.first.x, stroke.points.first.y);
+      for (int i = 1; i < count; i++) {
+        path.lineTo(stroke.points[i].x, stroke.points[i].y);
+      }
+      isDot = count == 1;
+      outline = null;
+    }
+    if (identical(activeReplay?.highlightedStroke, stroke) &&
+        replayHighlight != null) {
+      paintInkStroke(
+        canvas,
+        color: replayHighlight!.withValues(alpha: 0.55),
+        width: stroke.style.width + 8,
+        path: path,
+        origin: stroke.points.first,
+        isDot: isDot,
+      );
+    }
+    _paintStroke(
+      canvas,
+      style: stroke.style,
+      path: path,
+      origin: stroke.points.first,
+      isDot: isDot,
+      brightness: brightness,
+      outline: outline,
+    );
   }
 
   @override
   bool shouldRepaint(CompletedStrokesPainter oldDelegate) {
     return oldDelegate.controller != controller ||
         oldDelegate.brightness != brightness ||
-        oldDelegate.visible != visible;
+        oldDelegate.visible != visible ||
+        oldDelegate.replay != replay ||
+        oldDelegate.replayHighlight != replayHighlight;
   }
 }
 
@@ -312,6 +390,8 @@ class EraserIndicatorPainter extends CustomPainter {
     required this.controller,
     required this.color,
     required this.haloColor,
+    this.scale = 1,
+    this.scaleProvider,
   }) : super(repaint: controller.eraserListenable);
 
   static const double _outlineWidth = 1;
@@ -325,6 +405,26 @@ class EraserIndicatorPainter extends CustomPainter {
   /// Drawn under the outline so it stays visible over ink of any color.
   final Color haloColor;
 
+  /// Screen scale to prevent outline edge from becoming thicker when zoomed in.
+  final double scale;
+
+  /// Optional dynamic provider for the latest screen scale.
+  final double Function()? scaleProvider;
+
+  double _effectiveScale(EraseGesture erase) {
+    final double? dynamicScale = scaleProvider?.call();
+    if (dynamicScale != null && dynamicScale > 0 && dynamicScale.isFinite) {
+      return dynamicScale;
+    }
+    if (scale > 0 && scale.isFinite) {
+      return scale;
+    }
+    if (erase.scale > 0 && erase.scale.isFinite) {
+      return erase.scale;
+    }
+    return 1;
+  }
+
   @override
   void paint(Canvas canvas, Size size) {
     final EraseGesture? erase = controller.activeErase;
@@ -332,6 +432,9 @@ class EraserIndicatorPainter extends CustomPainter {
       return;
     }
     final Offset center = Offset(erase.position.x, erase.position.y);
+    final double s = _effectiveScale(erase);
+    final double outlineWidth = _outlineWidth / s;
+    final double haloWidth = _haloWidth / s;
     final Paint paint = Paint()
       ..style = PaintingStyle.stroke
       ..isAntiAlias = true;
@@ -341,14 +444,14 @@ class EraserIndicatorPainter extends CustomPainter {
         erase.radius,
         paint
           ..color = haloColor
-          ..strokeWidth = _haloWidth,
+          ..strokeWidth = haloWidth,
       )
       ..drawCircle(
         center,
         erase.radius,
         paint
           ..color = color
-          ..strokeWidth = _outlineWidth,
+          ..strokeWidth = outlineWidth,
       );
   }
 
@@ -356,7 +459,9 @@ class EraserIndicatorPainter extends CustomPainter {
   bool shouldRepaint(EraserIndicatorPainter oldDelegate) {
     return oldDelegate.controller != controller ||
         oldDelegate.color != color ||
-        oldDelegate.haloColor != haloColor;
+        oldDelegate.haloColor != haloColor ||
+        oldDelegate.scale != scale ||
+        oldDelegate.scaleProvider != scaleProvider;
   }
 }
 
@@ -485,6 +590,8 @@ class SelectionPainter extends CustomPainter {
     required this.handleColor,
     this.crossPageListenable,
     this.crossPageOverlay,
+    this.scale = 1,
+    this.scaleProvider,
   }) : super(
          repaint: crossPageListenable == null
              ? controller.selectionListenable
@@ -509,6 +616,21 @@ class SelectionPainter extends CustomPainter {
   /// Supplies another page's selection or lasso in this page's coordinates.
   final ValueGetter<CrossPageSelectionOverlay?>? crossPageOverlay;
 
+  /// Screen scale, so the frame, handles and lasso keep one size on screen
+  /// however far the page is zoomed.
+  final double scale;
+
+  /// Optional dynamic provider for the latest screen scale.
+  final double Function()? scaleProvider;
+
+  double get _screenScale {
+    final double? dynamicScale = scaleProvider?.call();
+    if (dynamicScale != null && dynamicScale > 0 && dynamicScale.isFinite) {
+      return dynamicScale;
+    }
+    return scale > 0 && scale.isFinite ? scale : 1;
+  }
+
   @override
   void paint(Canvas canvas, Size size) {
     final InkSelection? selection = controller.selection;
@@ -517,10 +639,6 @@ class SelectionPainter extends CustomPainter {
       canvas.save();
       if (gesture != null) {
         canvas.transform(_matrix(gesture.transform));
-      }
-      // Selected sticky notes under the selected ink, as on the page.
-      for (final StickyNoteElement note in selection.stickies) {
-        paintStickyNote(canvas, note, config: controller.stickyConfig);
       }
       for (final Stroke stroke in selection.strokes) {
         if (controller.isStrokeHidden(stroke)) {
@@ -536,6 +654,10 @@ class SelectionPainter extends CustomPainter {
           outline: stroke.outline,
         );
       }
+      // Selected sticky notes above the selected ink, as on the page.
+      for (final StickyNoteElement note in selection.stickies) {
+        paintStickyNote(canvas, note, config: controller.stickyConfig);
+      }
       canvas.restore();
     }
     final CrossPageSelectionOverlay? extra = crossPageOverlay?.call();
@@ -543,9 +665,6 @@ class SelectionPainter extends CustomPainter {
       for (final CrossPageSelectionPart part in extra.parts) {
         canvas.save();
         canvas.transform(_matrix(part.transform));
-        for (final StickyNoteElement note in part.stickies) {
-          paintStickyNote(canvas, note, config: controller.stickyConfig);
-        }
         for (final Stroke stroke in part.strokes) {
           _paintStroke(
             canvas,
@@ -556,6 +675,9 @@ class SelectionPainter extends CustomPainter {
             brightness: brightness,
             outline: stroke.outline,
           );
+        }
+        for (final StickyNoteElement note in part.stickies) {
+          paintStickyNote(canvas, note, config: controller.stickyConfig);
         }
         canvas.restore();
       }
@@ -584,6 +706,7 @@ class SelectionPainter extends CustomPainter {
     required bool handles,
   }) {
     final SelectionConfig config = controller.selectionConfig;
+    final double s = _screenScale;
     final List<Offset> corners = <Offset>[
       for (final InkVector corner in frame.corners) _offset(corner),
     ];
@@ -593,7 +716,7 @@ class SelectionPainter extends CustomPainter {
     final Paint outline = Paint()
       ..color = color
       ..style = PaintingStyle.stroke
-      ..strokeWidth = AppSizes.hairline
+      ..strokeWidth = AppSizes.hairline / s
       ..isAntiAlias = true;
     canvas.drawPath(Path()..addPolygon(corners, true), outline);
     if (!handles) return;
@@ -602,11 +725,12 @@ class SelectionPainter extends CustomPainter {
     final Paint fill = Paint()
       ..color = handleColor
       ..isAntiAlias = true;
-    outline.strokeWidth = AppSizes.focusRingWidth;
+    outline.strokeWidth = AppSizes.focusRingWidth / s;
+    final double radius = config.handleVisualRadius / s;
     for (final Offset center in <Offset>[...corners, handle]) {
       canvas
-        ..drawCircle(center, config.handleVisualRadius, fill)
-        ..drawCircle(center, config.handleVisualRadius, outline);
+        ..drawCircle(center, radius, fill)
+        ..drawCircle(center, radius, outline);
     }
   }
 
@@ -635,13 +759,14 @@ class SelectionPainter extends CustomPainter {
       return;
     }
     final SelectionConfig config = controller.selectionConfig;
+    final double s = _screenScale;
     final Paint paint = Paint()
       ..color = color
       ..style = PaintingStyle.stroke
-      ..strokeWidth = AppSizes.focusRingWidth
+      ..strokeWidth = AppSizes.focusRingWidth / s
       ..isAntiAlias = true;
     canvas.drawPath(
-      _dashed(line, config.lassoDashLength, config.lassoDashGap),
+      _dashed(line, config.lassoDashLength / s, config.lassoDashGap / s),
       paint,
     );
   }
@@ -709,6 +834,8 @@ class SelectionPainter extends CustomPainter {
         oldDelegate.color != color ||
         oldDelegate.handleColor != handleColor ||
         oldDelegate.crossPageListenable != crossPageListenable ||
-        oldDelegate.crossPageOverlay != crossPageOverlay;
+        oldDelegate.crossPageOverlay != crossPageOverlay ||
+        oldDelegate.scale != scale ||
+        oldDelegate.scaleProvider != scaleProvider;
   }
 }

@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:math' as math;
 import 'dart:typed_data';
 import 'dart:ui' as ui;
 
@@ -363,8 +364,7 @@ void main() {
         },
       ],
       'generationConfig': <String, Object?>{
-        'responseMimeType': 'application/json',
-        'responseJsonSchema': aiResponseJsonSchema(),
+        'responseMimeType': 'text/plain',
         'maxOutputTokens': const AiNotationConfig().maxOutputTokens,
         // No thinkingConfig: the model decides how long to think.
       },
@@ -404,13 +404,13 @@ void main() {
     );
     expect(parts[0][2], <String, Object?>{'text': 'First question'});
     expect(parts[1], <Object?>[
-      <String, Object?>{'text': _wire('First answer')},
+      <String, Object?>{'text': 'First answer'},
     ]);
     expect(parts[2], <Object?>[
       <String, Object?>{'text': 'Second question'},
     ]);
     expect(parts[3], <Object?>[
-      <String, Object?>{'text': _wire('Second answer')},
+      <String, Object?>{'text': 'Second answer'},
     ]);
     expect(parts[4], <Object?>[
       <String, Object?>{'text': 'Third question'},
@@ -769,8 +769,7 @@ void main() {
       expect(
         (jsonDecode(bodies.single) as Map<String, Object?>)['generationConfig'],
         <String, Object?>{
-          'responseMimeType': 'application/json',
-          'responseJsonSchema': aiResponseJsonSchema(),
+          'responseMimeType': 'text/plain',
           'maxOutputTokens': const AiNotationConfig().maxOutputTokens,
           'thinkingConfig': <String, Object?>{'thinkingLevel': 'HIGH'},
         },
@@ -938,17 +937,20 @@ void main() {
       expect(calls, 1);
     });
 
-    test('a stream over the size limit is dropped unread', () async {
-      final List<int> piece = utf8.encode(event('x' * 4096));
-      final int pieces =
-          const AiNotationConfig().maxResponseBytes * 2 ~/ piece.length + 2;
+    test('a valid stream larger than the former app cap is accepted', () async {
+      final String message = 'x' * (256 * 1024 + 1);
+      final String answer = AiAssistantResponse(
+        message: message,
+      ).toJsonString();
+      final List<List<int>> chunks = <List<int>>[];
+      for (int start = 0; start < answer.length; start += 4096) {
+        final int end = math.min(start + 4096, answer.length);
+        chunks.add(utf8.encode(event(answer.substring(start, end))));
+      }
 
-      final AiResult result = await streaming(<List<int>>[
-        utf8.encode(event('{"version": 1, "message": "')),
-        for (int i = 0; i < pieces; i++) piece,
-      ]).send(_request());
+      final AiResult result = await streaming(chunks).send(_request());
 
-      expect((result as AiError).failure.kind, AiFailureKind.malformed);
+      expect((result as AiSuccess).text, message);
     });
 
     /// A client whose service sends [events] one by one, [gap] apart.

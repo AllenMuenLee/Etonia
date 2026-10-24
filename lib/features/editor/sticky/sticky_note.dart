@@ -52,10 +52,22 @@ class StickyPaperColor {
   /// The outline drawn just inside the edge, so a pale paper stays distinct
   /// from white page paper.
   Color get edge => Color.lerp(paper, const Color(0xFF1F2937), 0.12)!;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is StickyPaperColor &&
+          runtimeType == other.runtimeType &&
+          id == other.id;
+
+  @override
+  int get hashCode => id.hashCode;
 }
 
 /// The curated sticky-note papers.
 abstract final class StickyPalette {
+  static const String _customPrefix = 'custom-';
+
   static const StickyPaperColor yellow = StickyPaperColor(
     id: 'yellow',
     label: 'Yellow',
@@ -72,12 +84,41 @@ abstract final class StickyPalette {
 
   /// The paper stored as [id], or null when this version does not know it.
   static StickyPaperColor? byId(Object? id) {
+    if (id is! String) {
+      return null;
+    }
     for (final StickyPaperColor color in colors) {
       if (color.id == id) {
         return color;
       }
     }
+    if (id.startsWith(_customPrefix)) {
+      final String value = id.substring(_customPrefix.length);
+      if (RegExp(r'^[0-9a-fA-F]{8}$').hasMatch(value)) {
+        final Color color = Color(int.parse(value, radix: 16));
+        return StickyPaperColor(
+          id: '$_customPrefix${value.toLowerCase()}',
+          label: 'Custom (#${value.substring(2).toUpperCase()})',
+          paper: color,
+        );
+      }
+    }
     return null;
+  }
+
+  /// A user-selected custom sticky paper color picked from the color palette (色盤).
+  static StickyPaperColor custom(Color color) {
+    final Color customColor = Color(color.toARGB32());
+    final String hex = customColor
+        .toARGB32()
+        .toRadixString(16)
+        .padLeft(8, '0')
+        .toLowerCase();
+    return StickyPaperColor(
+      id: '$_customPrefix$hex',
+      label: 'Custom (#${hex.substring(2).toUpperCase()})',
+      paper: customColor,
+    );
   }
 
   /// The paper stored as [id], or [yellow], the documented fallback.

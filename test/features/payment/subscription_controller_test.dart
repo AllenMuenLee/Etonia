@@ -75,8 +75,8 @@ void main() {
 
     for (final (SubscriptionPlan tier, int credits, String label)
         in <(SubscriptionPlan, int, String)>[
-          (SubscriptionPlan.pro1299, 5000000, '100% tokens'),
-          (SubscriptionPlan.max2999, 15000000, '100% tokens'),
+          (SubscriptionPlan.pro1299, 4000000, '100% tokens'),
+          (SubscriptionPlan.max2999, 10000000, '100% tokens'),
         ]) {
       test('${tier.title}: unlimited Haiku and Luna, $label across all five '
           'metered models', () async {
@@ -245,7 +245,7 @@ void main() {
         store: store,
       );
       expect(reloaded.activePlan, SubscriptionPlan.pro1299);
-      expect(reloaded.remainingCreditsMicroUsd, 5000000);
+      expect(reloaded.remainingCreditsMicroUsd, 4000000);
       expect(reloaded.preferredModel, AiModelId.argon);
       expect(reloaded.accessFor(AiModelId.argon), AiModelAccess.metered);
     });
@@ -272,7 +272,7 @@ void main() {
         expect(seen, contains(StoreActivity.purchasing));
         expect(plan.activity, StoreActivity.idle);
         expect(plan.activePlan, SubscriptionPlan.pro1299);
-        expect(plan.remainingCreditsMicroUsd, 5000000);
+        expect(plan.remainingCreditsMicroUsd, 4000000);
         expect(gateway.completed.single.purchaseId, 'order-1');
       },
     );
@@ -305,14 +305,14 @@ void main() {
         await pumpEventQueue();
         // The highest plan delivered is the one in force.
         expect(plan.activePlan, SubscriptionPlan.max2999);
-        expect(plan.remainingCreditsMicroUsd, 15000000);
+        expect(plan.remainingCreditsMicroUsd, 10000000);
         expect(plan.notice, contains('Restored'));
         expect(gateway.completed.single.purchaseId, 'old-2');
 
         plan.recordUsage(AiModelId.opus, _turn);
         await plan.restorePurchases();
         await pumpEventQueue();
-        expect(plan.remainingCreditsMicroUsd, 15000000 - 24000);
+        expect(plan.remainingCreditsMicroUsd, 10000000 - 24000);
       },
     );
 

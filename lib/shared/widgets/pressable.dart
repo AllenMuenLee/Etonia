@@ -1,92 +1,194 @@
+import 'package:flutter/material.dart';
 import 'package:flutter/physics.dart';
-import 'package:flutter/widgets.dart';
 
 import '../../app/theme/app_tokens.dart';
 
-/// Shrinks [child] a little while a pointer is down on it and springs it
-/// back on release, so a control answers the finger before it acts.
+enum PressableType { button, icon, glass, card, chip }
+
+/// Shared touch-down feedback for app controls.
 ///
-/// It only listens to raw pointers, so it never competes with the
-/// [InkWell], [GestureDetector], or button inside it for the gesture.
+/// This listens to raw pointers so it does not compete with the control's own
+/// gesture recognizer. The visual state changes synchronously on pointer-down;
+/// the child remains responsible for firing its action on release.
 class Pressable extends StatefulWidget {
   const Pressable({
     super.key,
     required this.child,
     this.enabled = true,
-    this.pressedScale = AppMotion.pressedScale,
+    this.type = PressableType.button,
+    this.pressedScale,
+    this.borderRadius,
   });
 
   final Widget child;
-
-  /// Off, a press leaves the child still, as for a disabled control.
   final bool enabled;
+  final PressableType type;
+  final double? pressedScale;
+  final BorderRadius? borderRadius;
 
-  final double pressedScale;
+  /// Whether the nearest shared press interaction is currently held down.
+  static bool isPressed(BuildContext context) =>
+      context
+          .dependOnInheritedWidgetOfExactType<_PressableStateScope>()
+          ?.pressed ??
+      false;
 
   @override
   State<Pressable> createState() => _PressableState();
 }
 
-class _PressableState extends State<Pressable>
-    with SingleTickerProviderStateMixin {
+class _PressableState extends State<Pressable> with TickerProviderStateMixin {
   late final AnimationController _scale = AnimationController.unbounded(
     vsync: this,
     value: 1,
   );
+  late final AnimationController _highlight = AnimationController(
+    vsync: this,
+    duration: AppMotion.press,
+    value: 0,
+  );
+  bool _reduceMotion = false;
+  int _motionGeneration = 0;
 
-  bool get _animate =>
-      widget.enabled && !MediaQuery.disableAnimationsOf(context);
+  double get _pressedScale =>
+      widget.pressedScale ??
+      switch (widget.type) {
+        PressableType.icon => AppMotion.iconPressedScale,
+        PressableType.card => AppMotion.cardPressedScale,
+        PressableType.chip => 0.96,
+        PressableType.button ||
+        PressableType.glass => AppMotion.buttonPressedScale,
+      };
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    final bool reduced = MediaQuery.disableAnimationsOf(context);
+    if (reduced && !_reduceMotion) {
+      _scale
+        ..stop()
+        ..value = 1;
+    }
+    _reduceMotion = reduced;
+  }
 
   @override
   void didUpdateWidget(Pressable oldWidget) {
     super.didUpdateWidget(oldWidget);
-    if (!widget.enabled && _scale.value != 1) _release();
+    if (!widget.enabled && oldWidget.enabled) _release();
   }
 
   @override
   void dispose() {
     _scale.dispose();
+    _highlight.dispose();
     super.dispose();
   }
 
   void _press(PointerDownEvent event) {
-    if (!_animate) return;
-    _scale.animateTo(
-      widget.pressedScale,
-      duration: AppMotion.press,
-      curve: AppMotion.standard,
-    );
+    if (!widget.enabled) return;
+    _motionGeneration++;
+    _highlight
+      ..stop()
+      ..value = 1;
+    if (_reduceMotion) return;
+    _scale
+      ..stop()
+      ..value = _pressedScale;
   }
 
   void _release([PointerEvent? event]) {
+    // A drop or navigation can remove the control before its pointer-up.
+    if (!mounted) return;
+    final int generation = ++_motionGeneration;
+    _highlight.animateBack(
+      0,
+      duration: _reduceMotion ? AppMotion.reduced : AppMotion.press,
+      curve: _reduceMotion ? AppMotion.reducedCurve : AppMotion.fadeOutCurve,
+    );
     if (_scale.value == 1 && !_scale.isAnimating) return;
-    if (!mounted || MediaQuery.disableAnimationsOf(context)) {
-      _scale.value = 1;
+    if (!mounted || _reduceMotion || !widget.enabled) {
+      _scale
+        ..stop()
+        ..value = 1;
       return;
     }
+    final double velocity = _scale.velocity;
+    _scale.stop();
     _scale
         .animateWith(
-          SpringSimulation(AppMotion.spring, _scale.value, 1, _scale.velocity),
+          SpringSimulation(
+            AppMotion.spring(context, AppMotion.snappy),
+            _scale.value,
+            1,
+            velocity,
+          ),
         )
-        // The spring stops within a tolerance of rest; land exactly on it.
-        .then((_) {
-          if (mounted) _scale.value = 1;
+        .whenCompleteOrCancel(() {
+          if (mounted && generation == _motionGeneration) _scale.value = 1;
         });
   }
 
   @override
   Widget build(BuildContext context) {
+    final AppColors colors = AppColors.resolve(context);
+    final bool dark = Theme.of(context).brightness == Brightness.dark;
     return Listener(
+      // Transparent areas inside the bounds press too.
+      behavior: HitTestBehavior.translucent,
       onPointerDown: _press,
       onPointerUp: _release,
       onPointerCancel: _release,
-      child: AnimatedBuilder(
-        animation: _scale,
-        // Always a Transform, so the child keeps its state when it moves.
-        builder: (BuildContext context, Widget? child) =>
-            Transform.scale(scale: _scale.value, child: child),
-        child: widget.child,
+      child: AnimatedOpacity(
+        opacity: widget.enabled ? 1 : 0.38,
+        duration: _reduceMotion ? AppMotion.reduced : AppMotion.fadeIn,
+        curve: _reduceMotion ? AppMotion.reducedCurve : AppMotion.fadeInCurve,
+        child: AnimatedBuilder(
+          animation: Listenable.merge(<Listenable>[_scale, _highlight]),
+          child: widget.child,
+          builder: (BuildContext context, Widget? child) {
+            final Widget highlighted = Stack(
+              fit: StackFit.passthrough,
+              children: <Widget>[
+                _PressableStateScope(
+                  pressed: _highlight.value > 0,
+                  child: child!,
+                ),
+                Positioned.fill(
+                  child: IgnorePointer(
+                    child: DecoratedBox(
+                      decoration: BoxDecoration(
+                        color: (dark ? colors.surface : colors.shadow)
+                            .withValues(alpha: 0.10 * _highlight.value),
+                        borderRadius: widget.borderRadius,
+                        shape:
+                            widget.type == PressableType.icon &&
+                                widget.borderRadius == null
+                            ? BoxShape.circle
+                            : BoxShape.rectangle,
+                      ),
+                    ),
+                  ),
+                ),
+              ],
+            );
+            return Transform.scale(
+              scale: _reduceMotion ? 1 : _scale.value,
+              child: highlighted,
+            );
+          },
+        ),
       ),
     );
   }
+}
+
+class _PressableStateScope extends InheritedWidget {
+  const _PressableStateScope({required this.pressed, required super.child});
+
+  final bool pressed;
+
+  @override
+  bool updateShouldNotify(_PressableStateScope oldWidget) =>
+      oldWidget.pressed != pressed;
 }

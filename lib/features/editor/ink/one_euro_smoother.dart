@@ -38,12 +38,14 @@ class SmoothingStep {
 /// `cutoff = minCutoff + beta * |filtered derivative|`
 ///
 /// so slow movement is heavily smoothed while fast movement remains responsive.
+/// A config's [SmoothingConfig.slowCutoffScale] lowers the cutoff further
+/// while the pen moves slowly.
 /// A single derivative magnitude drives both axes, making the 2D result
 /// rotation-invariant. Work and memory are constant for every sample.
 class OneEuroSmoother {
   OneEuroSmoother({this.config = const SmoothingConfig()});
 
-  final SmoothingConfig config;
+  SmoothingConfig config;
 
   InkVector? _start;
   InkVector _lastRaw = InkVector.zero;
@@ -114,9 +116,11 @@ class OneEuroSmoother {
     final double speed = _magnitude(_filteredDerivative);
     // Avoid the IEEE-754 `0 * infinity = NaN` edge case for a deliberately
     // fixed-cutoff filter receiving an extreme but finite coordinate.
-    final double cutoff = config.beta == 0
-        ? config.minCutoff
-        : config.minCutoff + config.beta * speed;
+    final double cutoff =
+        (config.beta == 0
+            ? config.minCutoff
+            : config.minCutoff + config.beta * speed) *
+        config.cutoffScaleAt(speed);
     final double positionAlpha = _alpha(dt, cutoff);
     final InkVector next = _output + delta * positionAlpha;
     if (next.isFinite) {

@@ -3,21 +3,18 @@ import 'package:flutter/material.dart';
 import '../../app/theme/app_icons.dart';
 import '../../app/theme/app_tokens.dart';
 import '../../shared/widgets/app_controls.dart';
+import '../../shared/widgets/processing.dart';
 import '../editor/ai/ai_client.dart';
 import 'payment_models.dart';
+import 'store_page_shell.dart';
 import 'subscription_controller.dart';
-import 'account_panel.dart';
 
-/// Opens [PaymentPage] over the current screen.
+/// Opens [PaymentPage] as a full screen over the current one.
 Future<void> showPaymentPage(
   BuildContext context,
   SubscriptionController controller,
 ) {
-  return Navigator.of(context).push<void>(
-    MaterialPageRoute<void>(
-      builder: (BuildContext context) => PaymentPage(controller: controller),
-    ),
-  );
+  return showStorePage(context, PaymentPage(controller: controller));
 }
 
 /// The plans, what each includes, the user's current plan and credits, and
@@ -37,8 +34,6 @@ class PaymentPage extends StatefulWidget {
 }
 
 class _PaymentPageState extends State<PaymentPage> {
-  BillingCycle _selectedCycle = BillingCycle.monthly;
-
   @override
   void initState() {
     super.initState();
@@ -55,164 +50,166 @@ class _PaymentPageState extends State<PaymentPage> {
 
   @override
   Widget build(BuildContext context) {
+    return StorePageShell(
+      title: PaymentPage.title,
+      closeKey: const ValueKey<String>('payment-page-close'),
+      child: ListenableBuilder(
+        listenable: widget.controller,
+        builder: (BuildContext context, Widget? _) {
+          final SubscriptionController controller = widget.controller;
+          return Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: <Widget>[
+              const _PricingHero(),
+              PlansSection(controller: controller),
+              const SizedBox(height: AppSpacing.xl),
+              Semantics(
+                header: true,
+                child: Text(
+                  'Your credits',
+                  style: Theme.of(
+                    context,
+                  ).textTheme.titleLarge?.copyWith(fontWeight: FontWeight.w800),
+                ),
+              ),
+              const SizedBox(height: AppSpacing.sm),
+              CreditMeter(controller: controller),
+              if (controller.backend?.userId != null)
+                GiftCodeCard(controller: controller),
+            ],
+          );
+        },
+      ),
+    );
+  }
+}
+
+/// The billing cycle toggle, the store's progress and messages, every plan
+/// side by side (stacked when narrow) and what billing means. Shown on the
+/// plans page and in the account's subscription tab.
+class PlansSection extends StatefulWidget {
+  const PlansSection({super.key, required this.controller});
+
+  final SubscriptionController controller;
+
+  @override
+  State<PlansSection> createState() => _PlansSectionState();
+}
+
+class _PlansSectionState extends State<PlansSection> {
+  BillingCycle _selectedCycle = BillingCycle.monthly;
+
+  @override
+  Widget build(BuildContext context) {
     final AppColors colors = AppColors.of(context);
-    return Scaffold(
-      backgroundColor: Colors.transparent,
-      appBar: AppBar(
-        title: const Text(PaymentPage.title),
-        backgroundColor: AppGlass.background(colors).withValues(alpha: 0.76),
-        foregroundColor: colors.textPrimary,
-        surfaceTintColor: Colors.transparent,
-        elevation: 0,
-        scrolledUnderElevation: 0,
-        flexibleSpace: GlassBlur(
-          child: DecoratedBox(
-            decoration: BoxDecoration(
-              border: Border(
-                bottom: BorderSide(
-                  color: colors.glassEdge,
-                  width: AppSizes.hairline,
+    return ListenableBuilder(
+      listenable: widget.controller,
+      builder: (BuildContext context, Widget? _) {
+        final SubscriptionController controller = widget.controller;
+        return Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: <Widget>[
+            Center(
+              child: ConstrainedBox(
+                constraints: const BoxConstraints(maxWidth: 320),
+                child: SegmentedChoice<BillingCycle>(
+                  key: const ValueKey<String>('billing-cycle-toggle'),
+                  options: BillingCycle.values,
+                  selected: _selectedCycle,
+                  keyOf: (BillingCycle cycle) =>
+                      ValueKey<String>('billing-cycle-${cycle.name}'),
+                  labelOf: (BillingCycle cycle) => switch (cycle) {
+                    BillingCycle.monthly => 'Monthly',
+                    BillingCycle.yearly => 'Yearly · Save 17%',
+                  },
+                  onSelected: (BillingCycle cycle) {
+                    setState(() {
+                      _selectedCycle = cycle;
+                    });
+                  },
                 ),
               ),
             ),
-          ),
-        ),
-      ),
-      body: Stack(
-        fit: StackFit.expand,
-        children: <Widget>[
-          const _PricingAtmosphere(),
-          ListenableBuilder(
-            listenable: widget.controller,
-            builder: (BuildContext context, Widget? _) {
-              final SubscriptionController controller = widget.controller;
-              return SafeArea(
-                child: Center(
-                  child: ConstrainedBox(
-                    constraints: const BoxConstraints(
-                      maxWidth: AppSizes.maxContentWidth,
+            const SizedBox(height: AppSpacing.lg),
+            // Rises into place when the store is asked.
+            GentleSwitcher(
+              value: controller.activity == StoreActivity.idle,
+              child: controller.activity == StoreActivity.idle
+                  ? const SizedBox(width: double.infinity)
+                  : Padding(
+                      padding: const EdgeInsets.only(bottom: AppSpacing.sm),
+                      child: StoreProgress(activity: controller.activity),
                     ),
-                    child: ListView(
-                      padding: const EdgeInsets.fromLTRB(
-                        AppSpacing.md,
-                        AppSpacing.lg,
-                        AppSpacing.md,
-                        AppSpacing.xl,
-                      ),
-                      children: <Widget>[
-                        const _PricingHero(),
-                        if (controller.backend case final backend?)
-                          AccountPanel(
-                            backend: backend,
-                            controller: controller,
-                          ),
-                        _CreditMeter(controller: controller),
-                        if (controller.activity !=
-                            StoreActivity.idle) ...<Widget>[
-                          const SizedBox(height: AppSpacing.sm),
-                          _StoreProgress(activity: controller.activity),
-                        ],
-                        if (controller.errorMessage
-                            case final String error) ...[
-                          const SizedBox(height: AppSpacing.sm),
-                          _Banner(
-                            key: const ValueKey<String>('payment-error'),
-                            message: error,
-                            isError: true,
-                          ),
-                        ] else if (controller.notice
-                            case final String notice) ...[
-                          const SizedBox(height: AppSpacing.sm),
-                          _Banner(message: notice),
-                        ],
-                        if (controller.storeAvailable == false) ...<Widget>[
-                          const SizedBox(height: AppSpacing.sm),
-                          const _Banner(
-                            message:
-                                'The store is not available right now. Plans can '
-                                'be bought once it is.',
-                          ),
-                        ],
+            ),
+            if (controller.errorMessage case final String error) ...<Widget>[
+              StoreBanner(
+                key: const ValueKey<String>('payment-error'),
+                message: error,
+                isError: true,
+              ),
+              const SizedBox(height: AppSpacing.sm),
+            ] else if (controller.notice case final String notice) ...<Widget>[
+              StoreBanner(message: notice),
+              const SizedBox(height: AppSpacing.sm),
+            ],
+            if (controller.storeAvailable == false) ...<Widget>[
+              const StoreBanner(
+                message:
+                    'The store is not available right now. Plans can '
+                    'be bought once it is.',
+              ),
+              const SizedBox(height: AppSpacing.sm),
+            ],
+            LayoutBuilder(
+              builder: (BuildContext context, BoxConstraints box) {
+                final bool wide = box.maxWidth >= PaymentPage.columnsFrom;
+                final List<Widget> cards = <Widget>[
+                  for (final SubscriptionPlan plan in SubscriptionPlan.values)
+                    _PlanCard(
+                      plan: plan,
+                      controller: controller,
+                      cycle: _selectedCycle,
+                      fillHeight: wide,
+                    ),
+                ];
+                if (!wide) {
+                  return Column(
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                    children: <Widget>[
+                      for (final Widget card in cards) ...<Widget>[
+                        card,
                         const SizedBox(height: AppSpacing.md),
-                        Center(
-                          child: ConstrainedBox(
-                            constraints: const BoxConstraints(maxWidth: 320),
-                            child: SegmentedChoice<BillingCycle>(
-                              key: const ValueKey<String>('billing-cycle-toggle'),
-                              options: BillingCycle.values,
-                              selected: _selectedCycle,
-                              keyOf: (BillingCycle cycle) =>
-                                  ValueKey<String>('billing-cycle-${cycle.name}'),
-                              labelOf: (BillingCycle cycle) => switch (cycle) {
-                                BillingCycle.monthly => 'Monthly',
-                                BillingCycle.yearly => 'Yearly · Save 17%',
-                              },
-                              onSelected: (BillingCycle cycle) {
-                                setState(() {
-                                  _selectedCycle = cycle;
-                                });
-                              },
-                            ),
-                          ),
-                        ),
-                        const SizedBox(height: AppSpacing.lg),
-                        LayoutBuilder(
-                          builder: (BuildContext context, BoxConstraints box) {
-                            final List<Widget> cards = <Widget>[
-                              for (final SubscriptionPlan plan
-                                  in SubscriptionPlan.values)
-                                _PlanCard(
-                                  plan: plan,
-                                  controller: controller,
-                                  cycle: _selectedCycle,
-                                  fillHeight:
-                                      box.maxWidth >= PaymentPage.columnsFrom,
-                                ),
-                            ];
-                            if (box.maxWidth < PaymentPage.columnsFrom) {
-                              return Column(
-                                crossAxisAlignment: CrossAxisAlignment.stretch,
-                                children: <Widget>[
-                                  for (final Widget card in cards) ...<Widget>[
-                                    card,
-                                    const SizedBox(height: AppSpacing.md),
-                                  ],
-                                ],
-                              );
-                            }
-                            return IntrinsicHeight(
-                              child: Row(
-                                crossAxisAlignment: CrossAxisAlignment.stretch,
-                                children: <Widget>[
-                                  for (int i = 0; i < cards.length; i++) ...[
-                                    if (i > 0)
-                                      const SizedBox(width: AppSpacing.md),
-                                    Expanded(child: cards[i]),
-                                  ],
-                                ],
-                              ),
-                            );
-                          },
-                        ),
-                        const SizedBox(height: AppSpacing.sm),
-                        Text(
-                          'Plans renew ${_selectedCycle == BillingCycle.yearly ? 'yearly' : 'monthly'} and are billed by '
-                          '${_storeName(context)}. Tokens are granted in full '
-                          'with each renewal and are used only by metered '
-                          'models; Haiku and Luna never use them.',
-                          style: Theme.of(context).textTheme.bodySmall
-                              ?.copyWith(color: colors.textSecondary),
-                          textAlign: TextAlign.center,
-                        ),
                       ],
-                    ),
+                    ],
+                  );
+                }
+                return IntrinsicHeight(
+                  child: Row(
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                    children: <Widget>[
+                      for (int i = 0; i < cards.length; i++) ...<Widget>[
+                        if (i > 0) const SizedBox(width: AppSpacing.md),
+                        Expanded(child: cards[i]),
+                      ],
+                    ],
                   ),
-                ),
-              );
-            },
-          ),
-        ],
-      ),
+                );
+              },
+            ),
+            const SizedBox(height: AppSpacing.md),
+            Text(
+              'Plans renew ${_selectedCycle == BillingCycle.yearly ? 'yearly' : 'monthly'} and are billed by '
+              '${_storeName(context)}. Tokens are granted in full '
+              'with each renewal and are used only by metered '
+              'models; Haiku and Luna never use them.',
+              style: Theme.of(
+                context,
+              ).textTheme.bodySmall?.copyWith(color: colors.textSecondary),
+              textAlign: TextAlign.center,
+            ),
+          ],
+        );
+      },
     );
   }
 
@@ -224,75 +221,6 @@ class _PaymentPageState extends State<PaymentPage> {
   }
 }
 
-/// Soft pools of colored light give the translucent cards something to frost.
-class _PricingAtmosphere extends StatelessWidget {
-  const _PricingAtmosphere();
-
-  @override
-  Widget build(BuildContext context) {
-    final AppColors colors = AppColors.of(context);
-    final bool dark = Theme.of(context).brightness == Brightness.dark;
-    return IgnorePointer(
-      child: Stack(
-        fit: StackFit.expand,
-        children: <Widget>[
-          DecoratedBox(
-            decoration: BoxDecoration(
-              gradient: LinearGradient(
-                begin: Alignment.topLeft,
-                end: Alignment.bottomRight,
-                colors: <Color>[
-                  colors.accent.withValues(alpha: dark ? 0.12 : 0.08),
-                  colors.background.withValues(alpha: 0.18),
-                  colors.selected.withValues(alpha: dark ? 0.30 : 0.58),
-                ],
-                stops: const <double>[0, 0.52, 1],
-              ),
-            ),
-          ),
-          Positioned(
-            top: -190,
-            right: -110,
-            width: 520,
-            height: 520,
-            child: _LightBloom(
-              color: colors.accent.withValues(alpha: dark ? 0.22 : 0.15),
-            ),
-          ),
-          Positioned(
-            top: 250,
-            left: -220,
-            width: 500,
-            height: 500,
-            child: _LightBloom(
-              color: colors.selected.withValues(alpha: dark ? 0.42 : 0.70),
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-}
-
-class _LightBloom extends StatelessWidget {
-  const _LightBloom({required this.color});
-
-  final Color color;
-
-  @override
-  Widget build(BuildContext context) {
-    return DecoratedBox(
-      decoration: BoxDecoration(
-        shape: BoxShape.circle,
-        gradient: RadialGradient(
-          colors: <Color>[color, color.withValues(alpha: 0)],
-          stops: const <double>[0, 1],
-        ),
-      ),
-    );
-  }
-}
-
 class _PricingHero extends StatelessWidget {
   const _PricingHero();
 
@@ -301,28 +229,25 @@ class _PricingHero extends StatelessWidget {
     final AppColors colors = AppColors.of(context);
     final TextTheme text = Theme.of(context).textTheme;
     return Padding(
-      padding: const EdgeInsets.only(top: AppSpacing.sm, bottom: AppSpacing.lg),
+      padding: const EdgeInsets.only(top: AppSpacing.lg, bottom: AppSpacing.lg),
       child: Column(
         children: <Widget>[
-          const _Badge(
-            label: 'Flexible plans, unlimited essentials',
-            leading: AppIcons.plans,
-          ),
-          const SizedBox(height: AppSpacing.sm),
           Semantics(
             header: true,
             child: Text(
               'Choose the space you need to think bigger.',
-              style: text.displaySmall?.copyWith(
+              style: text.displayMedium?.copyWith(
                 color: colors.textPrimary,
-                fontWeight: FontWeight.w700,
+                fontWeight: FontWeight.w800,
+                height: 1.08,
+                letterSpacing: -1,
               ),
               textAlign: TextAlign.center,
             ),
           ),
-          const SizedBox(height: AppSpacing.xs),
+          const SizedBox(height: AppSpacing.sm),
           ConstrainedBox(
-            constraints: const BoxConstraints(maxWidth: 640),
+            constraints: const BoxConstraints(maxWidth: 560),
             child: Text(
               'Every plan includes unlimited fast AI. Upgrade for more '
               'frontier models and a larger monthly token pool.',
@@ -337,10 +262,17 @@ class _PricingHero extends StatelessWidget {
 }
 
 /// The active plan, the tokens left of its allowance, and Restore.
-class _CreditMeter extends StatelessWidget {
-  const _CreditMeter({required this.controller});
+class CreditMeter extends StatelessWidget {
+  const CreditMeter({
+    super.key,
+    required this.controller,
+    this.showRestore = true,
+  });
 
   final SubscriptionController controller;
+
+  /// Whether the Restore Purchases button is offered beside the plan.
+  final bool showRestore;
 
   @override
   Widget build(BuildContext context) {
@@ -385,21 +317,22 @@ class _CreditMeter extends StatelessWidget {
                   ),
                 ],
               ),
-              OutlinedButton.icon(
-                onPressed: controller.activity == StoreActivity.idle
-                    ? controller.restorePurchases
-                    : null,
-                icon: const Icon(AppIcons.restore, size: 18),
-                label: const Text('Restore Purchases'),
-                style: OutlinedButton.styleFrom(
-                  foregroundColor: colors.textPrimary,
-                  side: BorderSide(color: colors.divider),
-                  minimumSize: const Size(
-                    AppSizes.minTouchTarget,
-                    AppSizes.minTouchTarget,
+              if (showRestore)
+                OutlinedButton.icon(
+                  onPressed: controller.activity == StoreActivity.idle
+                      ? controller.restorePurchases
+                      : null,
+                  icon: const Icon(AppIcons.restore, size: 18),
+                  label: const Text('Restore Purchases'),
+                  style: OutlinedButton.styleFrom(
+                    foregroundColor: colors.textPrimary,
+                    side: BorderSide(color: colors.divider),
+                    minimumSize: const Size(
+                      AppSizes.minTouchTarget,
+                      AppSizes.minTouchTarget,
+                    ),
                   ),
                 ),
-              ),
             ],
           ),
           const SizedBox(height: AppSpacing.sm),
@@ -435,12 +368,131 @@ class _CreditMeter extends StatelessWidget {
           const SizedBox(height: AppSpacing.xs),
           Text(
             controller.hasFreeCredit
-                ? 'One-time free tokens for Haiku, Luna, Sonnet & Sol. '
+                ? 'Free tokens for Haiku, Luna, Sonnet & Sol${_freeEnds(controller)}. '
                       'Haiku and Luna are unlimited on every paid plan.'
                 : 'Haiku and Luna are unlimited on every paid plan.',
             style: text.bodySmall?.copyWith(color: colors.textSecondary),
           ),
         ],
+      ),
+    );
+  }
+}
+
+/// ", expires Nov 23" for the free credit, or nothing when the end is unknown.
+String _freeEnds(SubscriptionController controller) {
+  final DateTime? ends = controller.freeCreditExpiresAt?.toLocal();
+  if (ends == null) return ' (valid for one month)';
+  const List<String> months = <String>[
+    'Jan',
+    'Feb',
+    'Mar',
+    'Apr',
+    'May',
+    'Jun',
+    'Jul',
+    'Aug',
+    'Sep',
+    'Oct',
+    'Nov',
+    'Dec',
+  ];
+  final String date = '${months[ends.month - 1]} ${ends.day}';
+  return ends.isAfter(DateTime.now()) ? ', expire $date' : ', expired $date';
+}
+
+/// Where a gift code is entered to claim its free credit.
+class GiftCodeCard extends StatefulWidget {
+  const GiftCodeCard({super.key, required this.controller});
+
+  final SubscriptionController controller;
+
+  @override
+  State<GiftCodeCard> createState() => _GiftCodeCardState();
+}
+
+class _GiftCodeCardState extends State<GiftCodeCard> {
+  final TextEditingController _code = TextEditingController();
+  bool _busy = false;
+
+  @override
+  void dispose() {
+    _code.dispose();
+    super.dispose();
+  }
+
+  Future<void> _redeem() async {
+    if (_busy || _code.text.trim().isEmpty) return;
+    setState(() => _busy = true);
+    await widget.controller.redeemGiftCode(_code.text);
+    if (!mounted) return;
+    setState(() => _busy = false);
+    if (widget.controller.errorMessage == null) _code.clear();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final AppColors colors = AppColors.of(context);
+    final TextTheme text = Theme.of(context).textTheme;
+    return Padding(
+      padding: const EdgeInsets.only(top: AppSpacing.sm),
+      child: _Card(
+        key: const ValueKey<String>('gift-code-card'),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: <Widget>[
+            Text(
+              'Gift code',
+              style: text.labelLarge?.copyWith(color: colors.textSecondary),
+            ),
+            const SizedBox(height: AppSpacing.xxs),
+            Text(
+              'Enter a gift code to claim \$3 of free credit. Free credit '
+              'lasts one month.',
+              style: text.bodySmall?.copyWith(color: colors.textSecondary),
+            ),
+            const SizedBox(height: AppSpacing.sm),
+            Row(
+              children: <Widget>[
+                Expanded(
+                  child: TextField(
+                    key: const ValueKey<String>('gift-code-field'),
+                    controller: _code,
+                    enabled: !_busy,
+                    textCapitalization: TextCapitalization.characters,
+                    autocorrect: false,
+                    enableSuggestions: false,
+                    maxLength: 64,
+                    textInputAction: TextInputAction.done,
+                    onSubmitted: (String _) => _redeem(),
+                    decoration: const InputDecoration(
+                      hintText: 'Gift code',
+                      counterText: '',
+                      isDense: true,
+                      border: OutlineInputBorder(),
+                    ),
+                  ),
+                ),
+                const SizedBox(width: AppSpacing.xs),
+                FilledButton(
+                  key: const ValueKey<String>('gift-code-redeem'),
+                  onPressed: _busy ? null : _redeem,
+                  style: FilledButton.styleFrom(
+                    backgroundColor: colors.accent,
+                    foregroundColor: colors.onAccent,
+                    disabledBackgroundColor: colors.surfaceMuted,
+                    disabledForegroundColor: colors.textPrimary,
+                    minimumSize: const Size(
+                      AppSizes.minTouchTarget,
+                      AppSizes.minTouchTarget,
+                    ),
+                  ),
+                  child: Text(_busy ? 'Redeeming…' : 'Redeem'),
+                ),
+              ],
+            ),
+          ],
+        ),
       ),
     );
   }
@@ -482,18 +534,26 @@ class _PlanCard extends StatelessWidget {
         : plan.index > active.index
         ? 'Upgrade'
         : 'Switch Plan';
+    // The recommended plan is drawn in ink: the card is the accent and its
+    // contents the paper colour.
+    final Color fg = recommended ? colors.onAccent : colors.textPrimary;
+    final Color muted = recommended
+        ? colors.onAccent.withValues(alpha: 0.72)
+        : colors.textSecondary;
+    final String price = controller.priceFor(plan, cycle: cycle);
+    final int slash = price.indexOf(' / ');
     return Semantics(
       container: true,
       label: recommended ? '${plan.title} plan, Recommended' : null,
       child: _Card(
         key: ValueKey<String>('plan-${plan.name}'),
         highlighted: current,
-        emphasized: recommended,
+        inverted: recommended,
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: <Widget>[
             Row(
-              crossAxisAlignment: CrossAxisAlignment.start,
+              crossAxisAlignment: CrossAxisAlignment.center,
               children: <Widget>[
                 Expanded(
                   child: Semantics(
@@ -501,8 +561,8 @@ class _PlanCard extends StatelessWidget {
                     child: Text(
                       plan.title,
                       style: text.titleLarge?.copyWith(
-                        color: colors.textPrimary,
-                        fontWeight: FontWeight.w700,
+                        color: fg,
+                        fontWeight: FontWeight.w800,
                       ),
                     ),
                   ),
@@ -511,8 +571,7 @@ class _PlanCard extends StatelessWidget {
                   const _Badge(
                     key: ValueKey<String>('pro-recommended'),
                     label: 'Recommended',
-                    leading: AppIcons.plans,
-                    strong: true,
+                    tone: _BadgeTone.onInk,
                   )
                 else if (current)
                   const _Badge(label: 'Active'),
@@ -520,69 +579,45 @@ class _PlanCard extends StatelessWidget {
             ),
             if (recommended && current) ...<Widget>[
               const SizedBox(height: AppSpacing.xs),
-              const _Badge(label: 'Active'),
+              const _Badge(label: 'Active', tone: _BadgeTone.onInk),
             ],
-            const SizedBox(height: AppSpacing.xxs),
-            Text(
-              controller.priceFor(plan, cycle: cycle),
-              style: text.headlineSmall?.copyWith(
-                color: colors.textPrimary,
-                fontWeight: FontWeight.w700,
-              ),
-            ),
             const SizedBox(height: AppSpacing.sm),
-            const _Badge(
-              label: 'Unlimited Haiku & Luna',
-              leading: AppIcons.check,
-            ),
-            const SizedBox(height: AppSpacing.sm),
-            Text(
-              plan.creditDescription,
-              style: text.bodyMedium?.copyWith(color: colors.textPrimary),
-            ),
-            const SizedBox(height: AppSpacing.xs),
-            Container(
-              padding: const EdgeInsets.symmetric(
-                horizontal: AppSpacing.xs,
-                vertical: AppSpacing.xxs + 2,
-              ),
-              decoration: BoxDecoration(
-                color: colors.surfaceMuted,
-                borderRadius: BorderRadius.circular(AppRadii.small),
-                border: Border.all(
-                  color: colors.glassEdge,
-                  width: AppSizes.hairline,
-                ),
-              ),
-              child: Row(
-                mainAxisSize: MainAxisSize.min,
-                children: <Widget>[
-                  Icon(
-                    AppIcons.plans,
-                    size: 14,
-                    color: plan == SubscriptionPlan.pro1299 ||
-                            plan == SubscriptionPlan.max2999
-                        ? colors.accent
-                        : colors.textSecondary,
-                  ),
-                  const SizedBox(width: AppSpacing.xxs),
-                  Flexible(
-                    child: Text(
-                      plan.tokenComparisonText,
-                      key: ValueKey<String>('plan-token-comparison-${plan.name}'),
-                      style: text.labelMedium?.copyWith(
-                        color: plan == SubscriptionPlan.pro1299 ||
-                                plan == SubscriptionPlan.max2999
-                            ? colors.accent
-                            : colors.textPrimary,
-                        fontWeight: FontWeight.w600,
+            GentleSwitcher(
+              value: price,
+              alignment: Alignment.centerLeft,
+              child: Text.rich(
+                TextSpan(
+                  children: <InlineSpan>[
+                    TextSpan(
+                      text: slash < 0 ? price : price.substring(0, slash),
+                      style: text.displaySmall?.copyWith(
+                        color: fg,
+                        fontWeight: FontWeight.w800,
+                        letterSpacing: -0.8,
                       ),
                     ),
-                  ),
-                ],
+                    if (slash >= 0)
+                      TextSpan(
+                        text: price.substring(slash),
+                        style: text.titleSmall?.copyWith(color: muted),
+                      ),
+                  ],
+                ),
               ),
             ),
-            const SizedBox(height: AppSpacing.sm),
+            const SizedBox(height: AppSpacing.md),
+            _Feature(text: 'Unlimited Haiku & Luna', color: fg),
+            const SizedBox(height: AppSpacing.xs),
+            _Feature(text: plan.creditDescription, color: fg),
+            const SizedBox(height: AppSpacing.xs),
+            _Feature(
+              text: plan.tokenComparisonText,
+              textKey: ValueKey<String>('plan-token-comparison-${plan.name}'),
+              color: fg,
+              dim: muted,
+              secondary: true,
+            ),
+            const SizedBox(height: AppSpacing.md),
             Wrap(
               spacing: AppSpacing.xxs,
               runSpacing: AppSpacing.xxs,
@@ -592,49 +627,87 @@ class _PlanCard extends StatelessWidget {
                     model: model,
                     included: plan.includes(model),
                     unlimited: plan.unlimitedModels.contains(model),
+                    color: fg,
                   ),
               ],
             ),
-            const SizedBox(height: AppSpacing.md),
+            const SizedBox(height: AppSpacing.lg),
             if (fillHeight) const Spacer(),
-            DecoratedBox(
-              decoration: BoxDecoration(
-                borderRadius: BorderRadius.circular(AppRadii.medium),
-                boxShadow: recommended && !current
-                    ? <BoxShadow>[
-                        BoxShadow(
-                          color: colors.accent.withValues(alpha: 0.24),
-                          blurRadius: 18,
-                          spreadRadius: -6,
-                          offset: const Offset(0, 8),
-                        ),
-                      ]
-                    : const <BoxShadow>[],
-              ),
-              child: SizedBox(
-                width: double.infinity,
-                child: FilledButton(
-                  onPressed: current || busy
-                      ? null
-                      : () => controller.purchase(plan, cycle: cycle),
-                  style: FilledButton.styleFrom(
-                    backgroundColor: colors.accent,
-                    foregroundColor: colors.onAccent,
-                    disabledBackgroundColor: colors.surfaceMuted,
-                    disabledForegroundColor: colors.textPrimary,
-                    elevation: 0,
-                    minimumSize: const Size(
-                      AppSizes.minTouchTarget,
-                      AppSizes.minTouchTarget,
-                    ),
+            SizedBox(
+              width: double.infinity,
+              child: FilledButton(
+                onPressed: current || busy
+                    ? null
+                    : () => controller.purchase(plan, cycle: cycle),
+                style: FilledButton.styleFrom(
+                  backgroundColor: recommended
+                      ? colors.onAccent
+                      : colors.accent,
+                  foregroundColor: recommended
+                      ? colors.accent
+                      : colors.onAccent,
+                  disabledBackgroundColor: recommended
+                      ? colors.onAccent.withValues(alpha: 0.18)
+                      : colors.surfaceMuted,
+                  disabledForegroundColor: recommended
+                      ? colors.onAccent
+                      : colors.textPrimary,
+                  elevation: 0,
+                  minimumSize: const Size(
+                    AppSizes.minTouchTarget,
+                    AppSizes.minTouchTarget,
                   ),
-                  child: Text(action, semanticsLabel: '$action, ${plan.title}'),
                 ),
+                child: Text(action, semanticsLabel: '$action, ${plan.title}'),
               ),
             ),
           ],
         ),
       ),
+    );
+  }
+}
+
+/// One line of what a plan gives, led by a check.
+class _Feature extends StatelessWidget {
+  const _Feature({
+    required this.text,
+    required this.color,
+    this.dim,
+    this.textKey,
+    this.secondary = false,
+  });
+
+  final String text;
+  final Color color;
+  final Color? dim;
+  final Key? textKey;
+
+  /// Set in the quieter colour: a detail of the line above.
+  final bool secondary;
+
+  @override
+  Widget build(BuildContext context) {
+    final TextTheme theme = Theme.of(context).textTheme;
+    return Row(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: <Widget>[
+        Padding(
+          padding: const EdgeInsets.only(top: 2),
+          child: Icon(AppIcons.check, size: 16, color: color),
+        ),
+        const SizedBox(width: AppSpacing.xs),
+        Expanded(
+          child: Text(
+            text,
+            key: textKey,
+            style: theme.bodyMedium?.copyWith(
+              color: secondary ? dim : color,
+              fontWeight: secondary ? FontWeight.w400 : FontWeight.w600,
+            ),
+          ),
+        ),
+      ],
     );
   }
 }
@@ -645,15 +718,16 @@ class _ModelChip extends StatelessWidget {
     required this.model,
     required this.included,
     required this.unlimited,
+    required this.color,
   });
 
   final AiModelId model;
   final bool included;
   final bool unlimited;
+  final Color color;
 
   @override
   Widget build(BuildContext context) {
-    final AppColors colors = AppColors.of(context);
     final String detail = unlimited
         ? 'Unlimited'
         : included
@@ -664,9 +738,12 @@ class _ModelChip extends StatelessWidget {
       excludeSemantics: true,
       child: DecoratedBox(
         decoration: BoxDecoration(
-          color: included ? colors.surfaceMuted : Colors.transparent,
-          borderRadius: BorderRadius.circular(AppRadii.medium),
-          border: Border.all(color: colors.divider),
+          color: included ? color.withValues(alpha: 0.1) : Colors.transparent,
+          borderRadius: BorderRadius.circular(999),
+          border: Border.all(
+            color: color.withValues(alpha: included ? 0 : 0.28),
+            width: AppSizes.hairline,
+          ),
         ),
         child: Padding(
           padding: const EdgeInsets.symmetric(
@@ -678,16 +755,16 @@ class _ModelChip extends StatelessWidget {
             children: <Widget>[
               Icon(
                 included ? AppIcons.check : AppIcons.lock,
-                size: 14,
-                color: colors.textPrimary,
+                size: 13,
+                color: included ? color : color.withValues(alpha: 0.6),
               ),
               const SizedBox(width: AppSpacing.xxs),
               Flexible(
                 child: Text(
                   '${model.label} · $detail',
-                  style: Theme.of(
-                    context,
-                  ).textTheme.labelMedium?.copyWith(color: colors.textPrimary),
+                  style: Theme.of(context).textTheme.labelMedium?.copyWith(
+                    color: included ? color : color.withValues(alpha: 0.6),
+                  ),
                 ),
               ),
             ],
@@ -698,50 +775,36 @@ class _ModelChip extends StatelessWidget {
   }
 }
 
+/// How a [_Badge] is filled: quietly, in the accent, or in the paper colour
+/// on an ink card.
+enum _BadgeTone { soft, onInk }
+
 class _Badge extends StatelessWidget {
-  const _Badge({
-    super.key,
-    required this.label,
-    this.leading,
-    this.strong = false,
-  });
+  const _Badge({super.key, required this.label, this.tone = _BadgeTone.soft});
 
   final String label;
-  final IconData? leading;
-  final bool strong;
+  final _BadgeTone tone;
 
   @override
   Widget build(BuildContext context) {
     final AppColors colors = AppColors.of(context);
+    final bool onInk = tone == _BadgeTone.onInk;
     return DecoratedBox(
       decoration: BoxDecoration(
-        color: strong ? colors.accent : colors.selected,
-        borderRadius: BorderRadius.circular(AppRadii.xl),
+        color: onInk ? colors.onAccent : colors.selected,
+        borderRadius: BorderRadius.circular(999),
       ),
       child: Padding(
         padding: const EdgeInsets.symmetric(
           horizontal: AppSpacing.sm,
           vertical: AppSpacing.xxs,
         ),
-        child: Wrap(
-          spacing: AppSpacing.xxs,
-          runSpacing: AppSpacing.xxs,
-          crossAxisAlignment: WrapCrossAlignment.center,
-          children: <Widget>[
-            if (leading != null)
-              Icon(
-                leading,
-                size: 14,
-                color: strong ? colors.onAccent : colors.textPrimary,
-              ),
-            Text(
-              label,
-              style: Theme.of(context).textTheme.labelMedium?.copyWith(
-                color: strong ? colors.onAccent : colors.textPrimary,
-                fontWeight: FontWeight.w600,
-              ),
-            ),
-          ],
+        child: Text(
+          label,
+          style: Theme.of(context).textTheme.labelMedium?.copyWith(
+            color: onInk ? colors.accent : colors.textPrimary,
+            fontWeight: FontWeight.w700,
+          ),
         ),
       ),
     );
@@ -753,77 +816,52 @@ class _Card extends StatelessWidget {
     super.key,
     required this.child,
     this.highlighted = false,
-    this.emphasized = false,
+    this.inverted = false,
   });
 
   final Widget child;
+
+  /// The card of the plan the user is on: ringed in the accent.
   final bool highlighted;
-  final bool emphasized;
+
+  /// Drawn in ink, the accent as its fill: the recommended plan.
+  final bool inverted;
 
   @override
   Widget build(BuildContext context) {
     final AppColors colors = AppColors.of(context);
-    final BorderRadius radius = BorderRadius.circular(AppRadii.xl);
-    final Color glass = AppGlass.surface(colors);
-    final Color litGlass = Color.alphaBlend(
-      colors.accent.withValues(alpha: emphasized ? 0.13 : 0.035),
-      glass,
+    const BorderRadius radius = AppBorderRadius.xl;
+    final Border border = Border.all(
+      color: highlighted
+          ? colors.accent
+          : inverted
+          ? Colors.transparent
+          : colors.glassEdge,
+      width: highlighted ? 2 : AppSizes.hairline,
     );
-    final List<BoxShadow> shadows = <BoxShadow>[
-      ...(emphasized ? AppShadows.raised(colors) : AppShadows.paper(colors)),
-      if (emphasized)
-        BoxShadow(
-          color: colors.accent.withValues(alpha: 0.18),
-          blurRadius: 36,
-          spreadRadius: -12,
-          offset: const Offset(0, 16),
-        ),
-    ];
-    return DecoratedBox(
-      decoration: BoxDecoration(borderRadius: radius, boxShadow: shadows),
-      child: GlassBlur(
+    final Widget padded = Container(
+      padding: const EdgeInsets.all(AppSpacing.lg),
+      decoration: BoxDecoration(
+        color: inverted ? colors.accent : AppGlass.surface(colors),
         borderRadius: radius,
-        child: Container(
-          padding: const EdgeInsets.all(AppSpacing.lg),
-          decoration: BoxDecoration(
-            gradient: LinearGradient(
-              begin: Alignment.topLeft,
-              end: Alignment.bottomRight,
-              colors: <Color>[
-                Color.alphaBlend(
-                  Colors.white.withValues(
-                    alpha: Theme.of(context).brightness == Brightness.dark
-                        ? 0.035
-                        : 0.26,
-                  ),
-                  litGlass,
-                ),
-                litGlass,
-                glass,
-              ],
-              stops: const <double>[0, 0.38, 1],
-            ),
-            borderRadius: radius,
-            border: Border.all(
-              color: highlighted || emphasized
-                  ? colors.accent.withValues(alpha: highlighted ? 0.96 : 0.68)
-                  : colors.glassEdge,
-              width: highlighted
-                  ? 2
-                  : emphasized
-                  ? 1.5
-                  : AppSizes.hairline,
-            ),
-          ),
-          child: child,
-        ),
+        border: border,
       ),
+      child: child,
+    );
+    return DecoratedBox(
+      decoration: BoxDecoration(
+        borderRadius: radius,
+        boxShadow: inverted
+            ? AppShadows.raised(colors)
+            : AppShadows.paper(colors),
+      ),
+      child: inverted ? padded : GlassBlur(borderRadius: radius, child: padded),
     );
   }
 }
 
-class _StoreProgress extends StatelessWidget {
-  const _StoreProgress({required this.activity});
+class StoreProgress extends StatelessWidget {
+  const StoreProgress({super.key, required this.activity});
 
   final StoreActivity activity;
 
@@ -841,16 +879,17 @@ class _StoreProgress extends StatelessWidget {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: <Widget>[
-          Text(
-            label,
-            style: Theme.of(
-              context,
-            ).textTheme.bodyMedium?.copyWith(color: colors.textPrimary),
-          ),
-          const SizedBox(height: AppSpacing.xxs),
-          LinearProgressIndicator(
-            color: colors.accent,
-            backgroundColor: colors.surfaceMuted,
+          // What the store is doing, breathing until it answers.
+          Breathe(
+            child: GentleSwitcher(
+              value: label,
+              child: Text(
+                label,
+                style: Theme.of(
+                  context,
+                ).textTheme.bodyMedium?.copyWith(color: colors.textPrimary),
+              ),
+            ),
           ),
         ],
       ),
@@ -858,8 +897,8 @@ class _StoreProgress extends StatelessWidget {
   }
 }
 
-class _Banner extends StatelessWidget {
-  const _Banner({super.key, required this.message, this.isError = false});
+class StoreBanner extends StatelessWidget {
+  const StoreBanner({super.key, required this.message, this.isError = false});
 
   final String message;
   final bool isError;
@@ -879,7 +918,7 @@ class _Banner extends StatelessWidget {
                   colors.surface,
                 )
               : colors.surfaceMuted,
-          borderRadius: BorderRadius.circular(AppRadii.medium),
+          borderRadius: AppBorderRadius.medium,
           border: Border.all(
             color: isError ? colors.danger : colors.divider,
             width: AppSizes.hairline,

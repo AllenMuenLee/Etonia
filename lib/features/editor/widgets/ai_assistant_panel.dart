@@ -1,5 +1,3 @@
-import 'dart:math' as math;
-
 import 'dart:async' show unawaited;
 
 import 'package:flutter/material.dart';
@@ -10,6 +8,7 @@ import 'package:speech_to_text/speech_recognition_result.dart';
 import 'package:speech_to_text/speech_to_text.dart';
 
 import '../../../shared/widgets/processing.dart';
+import '../../../shared/widgets/etonia_mark.dart';
 import '../../../app/theme/app_tokens.dart';
 import '../../../app/theme/app_icons.dart';
 import '../../../shared/widgets/app_controls.dart';
@@ -18,7 +17,6 @@ import '../ai/ai_client.dart';
 import '../ai/ai_config.dart';
 import '../ai/ai_usage_gate.dart';
 import '../ai/chat_math.dart';
-import '../ai/selection_image_renderer.dart';
 
 /// The AI assistant: the selected ink the conversation is about, the
 /// conversation, quick actions, and a composer. Editor preferences live in
@@ -304,10 +302,12 @@ class _AiAssistantPanelState extends State<AiAssistantPanel> {
                   child: Stack(
                     children: <Widget>[
                       Positioned.fill(
-                        child: ListView(
+                        child: ListView.builder(
                           controller: _scroll,
                           padding: const EdgeInsets.all(AppSpacing.md),
-                          children: _body(context, controller),
+                          itemCount: _bodyItemCount(controller),
+                          itemBuilder: (BuildContext context, int index) =>
+                              _bodyItem(context, controller, index),
                         ),
                       ),
                       // Floats just above the composer, over the transcript.
@@ -434,70 +434,119 @@ class _AiAssistantPanelState extends State<AiAssistantPanel> {
     ];
   }
 
-  List<Widget> _body(BuildContext context, AiAssistantController controller) {
+  int _bodyItemCount(AiAssistantController controller) {
+    final bool hasPartial =
+        controller.requestState == AiRequestState.sending &&
+        (controller.partialAnswer?.trim().isNotEmpty ?? false);
+    return 3 +
+        (controller.isConfigured ? 0 : 2) +
+        (controller.context != null && controller.messages.isEmpty ? 1 : 0) +
+        controller.messages.length +
+        (hasPartial ? 1 : 0) +
+        (controller.requestState == AiRequestState.sending ? 1 : 0) +
+        (controller.failure == null ? 0 : 1) +
+        (controller.selectionChanged ? 1 : 0);
+  }
+
+  Widget _bodyItem(
+    BuildContext context,
+    AiAssistantController controller,
+    int index,
+  ) {
     final AppColors colors = AppColors.of(context);
     final TextTheme text = Theme.of(context).textTheme;
     final AiSelectionContext? selection = controller.context;
     const Widget gap = SizedBox(height: AppSpacing.sm);
 
-    return <Widget>[
-      if (selection != null)
-        _Preview(
-          selection: selection,
-          maxHeight: widget.config.previewMaxHeight,
-        ),
-      if (selection == null)
-        Text(
-          AiAssistantPanel.noContextPrompt,
-          key: const ValueKey<String>('ai-no-context-prompt'),
-          style: text.bodyMedium?.copyWith(color: colors.textSecondary),
-        ),
-      const SizedBox(height: AppSpacing.xs),
-      if (!controller.isConfigured) ...<Widget>[
-        gap,
-        const _Notice(message: AiAssistantPanel.notConfigured),
-      ],
-      gap,
-      if (selection != null && controller.messages.isEmpty)
-        Text(
+    int cursor = 0;
+    if (index == cursor++) {
+      // What the chat is about is framed on the page; only a failure to
+      // prepare it is told here.
+      return selection != null
+          ? (selection.imageError == null
+                ? const SizedBox.shrink()
+                : Text(
+                    selection.imageError!.message,
+                    style: text.bodyMedium?.copyWith(color: colors.danger),
+                  ))
+          : Text(
+              AiAssistantPanel.noContextPrompt,
+              key: const ValueKey<String>('ai-no-context-prompt'),
+              style: text.bodyMedium?.copyWith(color: colors.textSecondary),
+            );
+    }
+    if (index == cursor++) {
+      return const SizedBox(height: AppSpacing.xs);
+    }
+    if (!controller.isConfigured) {
+      if (index == cursor++) return gap;
+      if (index == cursor++) {
+        return const _Notice(message: AiAssistantPanel.notConfigured);
+      }
+    }
+    if (index == cursor++) return gap;
+    if (selection != null && controller.messages.isEmpty) {
+      if (index == cursor++) {
+        return Text(
           AiAssistantPanel.emptyState,
           style: text.bodyMedium?.copyWith(color: colors.textSecondary),
-        ),
-      for (final AiMessage message in controller.messages)
-        Padding(
+        );
+      }
+    }
+
+    final int messageIndex = index - cursor;
+    if (messageIndex >= 0 && messageIndex < controller.messages.length) {
+      return Padding(
+        padding: const EdgeInsets.only(bottom: AppSpacing.sm),
+        child: _MessageBubble(message: controller.messages[messageIndex]),
+      );
+    }
+    cursor += controller.messages.length;
+
+    // The answer as it is written. It becomes a message, and any drawing
+    // is added to the note, once all of it has arrived.
+    final String? partial = controller.requestState == AiRequestState.sending
+        ? controller.partialAnswer
+        : null;
+    if (partial != null && partial.trim().isNotEmpty) {
+      if (index == cursor++) {
+        return Padding(
           padding: const EdgeInsets.only(bottom: AppSpacing.sm),
-          child: _MessageBubble(message: message),
-        ),
-      // The answer as it is written. It becomes a message, and any drawing
-      // is added to the note, once all of it has arrived.
-      if (controller.requestState == AiRequestState.sending)
-        if (controller.partialAnswer case final String partial
-            when partial.trim().isNotEmpty)
-          Padding(
-            padding: const EdgeInsets.only(bottom: AppSpacing.sm),
-            child: _MessageBubble(
-              key: const ValueKey<String>('ai-partial-answer'),
-              message: AiMessage.model(partial),
-            ),
+          child: _MessageBubble(
+            key: const ValueKey<String>('ai-partial-answer'),
+            message: AiMessage.model(partial),
           ),
-      if (controller.requestState == AiRequestState.sending) ...<Widget>[
-        const Padding(
-          padding: EdgeInsets.symmetric(vertical: AppSpacing.xs),
-          child: ShimmerTrack(semanticsLabel: 'Waiting for the AI service'),
-        ),
-      ],
-      if (controller.failure case final AiFailure failure)
-        _Notice(
+        );
+      }
+    }
+    if (controller.requestState == AiRequestState.sending) {
+      if (index == cursor++) {
+        // Where the answer will be written, until its first words arrive.
+        return const Padding(
+          padding: EdgeInsets.only(bottom: AppSpacing.sm),
+          child: EtoniaBarsLoader(
+            size: 40,
+            semanticsLabel: 'Waiting for the AI service',
+          ),
+        );
+      }
+    }
+    if (controller.failure case final AiFailure failure) {
+      if (index == cursor++) {
+        return _Notice(
           message: failure.message,
           actionLabel: 'Retry',
           onAction: controller.retry,
           isError: true,
           extraActions: _accessActions(controller, failure),
-        ),
+        );
+      }
+    }
+    if (controller.selectionChanged && index == cursor) {
       // Room to scroll the last message out from under the selection choice.
-      if (controller.selectionChanged)
-        const SizedBox(height: AppSizes.minTouchTarget * 2),
-    ];
+      return const SizedBox(height: AppSizes.minTouchTarget * 2);
+    }
+    throw RangeError.index(index, controller.messages, 'index');
   }
 }
 
@@ -754,6 +803,7 @@ class AiModelSelector extends StatelessWidget {
     final AiModelId? selected = controller.selectedModel;
     final String label = selected?.label ?? controller.modelLabel;
     return PopupMenuButton<AiModelId>(
+      popUpAnimationStyle: AppMotion.popupStyle,
       key: const ValueKey<String>('ai-model-selector'),
       tooltip: 'Choose model',
       initialValue: selected,
@@ -913,65 +963,6 @@ class _ModelOption extends StatelessWidget {
   }
 }
 
-/// The image the model is sent, exactly: the same bytes, never a second
-/// drawing.
-class _Preview extends StatelessWidget {
-  const _Preview({required this.selection, required this.maxHeight});
-
-  static const double _placeholderHeight = 72;
-
-  final AiSelectionContext selection;
-  final double maxHeight;
-
-  @override
-  Widget build(BuildContext context) {
-    final AppColors colors = AppColors.of(context);
-    final TextTheme text = Theme.of(context).textTheme;
-    final SelectionImage? image = selection.image;
-    final BorderRadius radius = BorderRadius.circular(AppRadii.large);
-
-    return LayoutBuilder(
-      builder: (BuildContext context, BoxConstraints constraints) {
-        return Container(
-          width: double.infinity,
-          height: image == null
-              ? _placeholderHeight
-              : math.min(
-                  maxHeight,
-                  constraints.maxWidth * image.height / image.width,
-                ),
-          clipBehavior: Clip.antiAlias,
-          alignment: Alignment.center,
-          padding: image == null ? const EdgeInsets.all(AppSpacing.sm) : null,
-          decoration: BoxDecoration(
-            color: image == null
-                ? colors.background
-                : selection.snapshot.background,
-            borderRadius: radius,
-          ),
-          foregroundDecoration: BoxDecoration(
-            borderRadius: radius,
-            border: Border.all(color: colors.divider, width: AppSizes.hairline),
-          ),
-          child: image == null
-              ? Text(
-                  selection.imageError?.message ?? 'Preparing the preview',
-                  style: text.labelMedium,
-                  textAlign: TextAlign.center,
-                )
-              : Image.memory(
-                  image.png,
-                  fit: BoxFit.contain,
-                  gaplessPlayback: true,
-                  filterQuality: FilterQuality.medium,
-                  semanticLabel: 'Selected ink',
-                ),
-        );
-      },
-    );
-  }
-}
-
 /// Offered over the composer when ink outside the conversation is selected:
 /// add it to this conversation, or talk about it in a chat of its own.
 class _SelectionChoice extends StatelessWidget {
@@ -995,9 +986,7 @@ class _SelectionChoice extends StatelessWidget {
     final ThemeData theme = Theme.of(context);
     final ButtonStyle style = TextButton.styleFrom(
       foregroundColor: colors.accent,
-      shape: RoundedRectangleBorder(
-        borderRadius: BorderRadius.circular(AppRadii.medium),
-      ),
+      shape: const RoundedRectangleBorder(borderRadius: AppBorderRadius.medium),
       padding: const EdgeInsets.symmetric(horizontal: AppSpacing.sm),
     );
     return Semantics(
@@ -1005,7 +994,7 @@ class _SelectionChoice extends StatelessWidget {
       explicitChildNodes: true,
       liveRegion: true,
       child: GlassSurface(
-        borderRadius: BorderRadius.circular(AppRadii.large),
+        borderRadius: AppBorderRadius.large,
         boxShadow: AppShadows.floating(colors),
         child: Padding(
           padding: const EdgeInsetsDirectional.only(
@@ -1085,7 +1074,7 @@ class _Notice extends StatelessWidget {
                   colors.surface,
                 )
               : colors.surfaceMuted,
-          borderRadius: BorderRadius.circular(AppRadii.large),
+          borderRadius: AppBorderRadius.large,
           border: Border.all(
             color: isError
                 ? colors.danger.withValues(alpha: 0.35)
@@ -1124,10 +1113,8 @@ class _Notice extends StatelessWidget {
                         TextButton(
                           style: TextButton.styleFrom(
                             foregroundColor: colors.accent,
-                            shape: RoundedRectangleBorder(
-                              borderRadius: BorderRadius.circular(
-                                AppRadii.medium,
-                              ),
+                            shape: const RoundedRectangleBorder(
+                              borderRadius: AppBorderRadius.medium,
                             ),
                           ),
                           onPressed: action,
@@ -1256,7 +1243,7 @@ class _Composer extends StatelessWidget {
     final TextTheme textTheme = Theme.of(context).textTheme;
     OutlineInputBorder border(Color color, double width) {
       return OutlineInputBorder(
-        borderRadius: BorderRadius.circular(AppRadii.large + 6),
+        borderRadius: AppBorderRadius.circular(AppRadii.large + 6),
         borderSide: BorderSide(color: color, width: width),
       );
     }
@@ -1276,7 +1263,7 @@ class _Composer extends StatelessWidget {
             key: fieldKey,
             child: AmbientGlow(
               active: processing,
-              borderRadius: BorderRadius.circular(AppRadii.large + 6),
+              borderRadius: AppBorderRadius.circular(AppRadii.large + 6),
               child: CallbackShortcuts(
                 bindings: <ShortcutActivator, VoidCallback>{
                   const SingleActivator(

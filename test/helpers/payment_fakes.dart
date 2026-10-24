@@ -68,7 +68,8 @@ class FakeInAppPurchaseGateway implements InAppPurchaseGateway {
             title: entry.key.title,
             price: prices[entry.key]!,
           ),
-      for (final MapEntry<SubscriptionPlan, String> entry in yearlyProductIds.entries)
+      for (final MapEntry<SubscriptionPlan, String> entry
+          in yearlyProductIds.entries)
         if (ids.contains(entry.value))
           StoreProduct(
             id: entry.value,

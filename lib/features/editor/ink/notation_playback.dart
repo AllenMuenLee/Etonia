@@ -248,22 +248,43 @@ class NotationPlayback {
   /// when this was added.
   void advanceClockTo(Duration clock) => advanceTo(clock - _startedAt);
 
-  /// Follows [stroke] to [replacement], a copy of it with every point moved,
-  /// or lets it go when the copy has a different number of points. Only
-  /// `InkController` calls this.
+  /// Follows [stroke] to [replacement], preserving its place in the
+  /// animation even if editing changed its number of points. A deleted
+  /// stroke is simply let go. Only `InkController` calls this.
   void replace(Stroke stroke, Stroke? replacement) {
     final int index = _strokes.indexWhere((Stroke s) => identical(s, stroke));
     if (index < 0 || !_owned.remove(stroke)) {
       return;
     }
     releaseMeasure(index);
-    if (replacement == null ||
-        replacement.points.length != stroke.points.length) {
+    if (replacement == null) {
       return;
     }
     _strokes[index] = replacement;
+    _times[index] = _replacementTimes(_times[index], replacement.points.length);
     _lengths[index] = _cumulativeLengths(replacement.points);
     _owned.add(replacement);
+  }
+
+  /// Redistributes an existing trace's time span over edited geometry. This
+  /// keeps replacement strokes, including an eraser-created piece, in the
+  /// same part of the loop without requiring their point count to match.
+  static Float64List _replacementTimes(Float64List old, int pointCount) {
+    assert(pointCount > 0);
+    if (pointCount == old.length) {
+      return old;
+    }
+    final Float64List times = Float64List(pointCount);
+    if (pointCount == 1) {
+      times[0] = old.last;
+      return times;
+    }
+    final double start = old.first;
+    final double span = old.last - start;
+    for (int i = 0; i < pointCount; i++) {
+      times[i] = start + span * i / (pointCount - 1);
+    }
+    return times;
   }
 
   /// Hands every stroke back to the finished-ink layer. Only

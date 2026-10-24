@@ -1,8 +1,8 @@
 import 'package:flutter/foundation.dart';
 
-/// What a pointer on the page does. With [ai], writing on the page is for
-/// the assistant: a glowing stroke that is never ink, which circles a spot
-/// to ask about or is read as words for the chat.
+/// What a pointer on the page does. With [ai], the page is not written on:
+/// the chat is typed or dictated. (The ruler is no tool: it stays beside
+/// whichever tool is chosen.)
 enum EditorTool { pen, eraser, select, sticky, ai }
 
 enum EraserMode {

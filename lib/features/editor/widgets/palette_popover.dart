@@ -13,9 +13,13 @@ class PalettePopover extends StatelessWidget {
     required this.anchorBuilder,
     required this.panelBuilder,
     this.controller,
+    this.onChanged,
   });
 
   final MenuController? controller;
+
+  /// Called after the panel opens or closes.
+  final VoidCallback? onChanged;
 
   /// The edge the palette is docked against.
   final PaletteEdge paletteEdge;
@@ -49,6 +53,8 @@ class PalettePopover extends StatelessWidget {
       controller: controller,
       animated: !MediaQuery.disableAnimationsOf(context),
       consumeOutsideTap: true,
+      onOpen: onChanged,
+      onClose: onChanged,
       style: MenuStyle(alignment: alignment),
       alignmentOffset: offset,
       builder:
