@@ -1130,8 +1130,9 @@ class InkController {
     int pointer, [
     InkVector? finalPosition,
     Rect? selectablePdfBounds,
+    bool keepPaper = false,
   ]) {
-    endLasso(pointer, finalPosition, selectablePdfBounds);
+    endLasso(pointer, finalPosition, selectablePdfBounds, keepPaper);
     endTransform(pointer, finalPosition);
   }
 
@@ -1194,11 +1195,14 @@ class InkController {
   /// whose ink overlaps its [LassoGesture.outline]: the rectangle spanned by
   /// a straight drag, or the loop of a freeform one that nearly closes. That
   /// replaces the previous selection, so a lasso around nothing, one left
-  /// open, or a tap, clears it.
+  /// open, or a tap, clears it. With [keepPaper], PDF paper inside the
+  /// outline is selected along with the ink, not only when the outline
+  /// stands clear of it.
   void endLasso(
     int pointer, [
     InkVector? finalPosition,
     Rect? selectablePdfBounds,
+    bool keepPaper = false,
   ]) {
     final LassoGesture? lasso = _lasso;
     if (lasso == null || pointer != lasso.pointer) {
@@ -1208,7 +1212,12 @@ class InkController {
       updateLasso(pointer, finalPosition);
     }
     _lasso = null;
-    if (_setSelection(_enclosedBy(lasso.outline, selectablePdfBounds))) {
+    final InkSelection? enclosed = _enclosedBy(
+      lasso.outline,
+      selectablePdfBounds,
+      includePdfWithForeground: keepPaper,
+    );
+    if (_setSelection(enclosed)) {
       _completedChanged.notify();
     }
     _selectionChanged.notify();
@@ -1239,12 +1248,21 @@ class InkController {
 
   /// Selects every stroke, image, sticky note, or PDF excerpt enclosed by
   /// [outline], replacing the previous selection, or clears the selection when
-  /// [outline] encloses nothing.
-  bool selectWithOutline(List<InkVector> outline, {Rect? selectablePdfBounds}) {
+  /// [outline] encloses nothing. With [keepPaper], PDF paper inside the
+  /// outline is selected along with the ink.
+  bool selectWithOutline(
+    List<InkVector> outline, {
+    Rect? selectablePdfBounds,
+    bool keepPaper = false,
+  }) {
     if (_disposed || _isBusy) {
       return false;
     }
-    final InkSelection? enclosed = _enclosedBy(outline, selectablePdfBounds);
+    final InkSelection? enclosed = _enclosedBy(
+      outline,
+      selectablePdfBounds,
+      includePdfWithForeground: keepPaper,
+    );
     if (_setSelection(enclosed)) {
       _completedChanged.notify();
     }

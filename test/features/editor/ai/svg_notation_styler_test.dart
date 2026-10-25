@@ -53,6 +53,31 @@ void main() {
       expect(cursive.source, isNot(normal.source));
     });
 
+    test('lays out LaTeX in SVG text in the configured handwriting', () {
+      final EditableSvg vector = EditableSvg.parse(
+        _source.replaceFirst('Force = 12 N', r'$\frac{a}{b} + x^2$'),
+        modelResponse: true,
+      );
+      final EditableSvg normal = SvgNotationStyler.apply(
+        vector,
+        handwriting: HandwritingStyle.standard,
+        defaultInk: red,
+        penWidth: 4,
+      );
+      final EditableSvg cursive = SvgNotationStyler.apply(
+        vector,
+        handwriting: HandwritingFont.cursive.style!,
+        defaultInk: red,
+        penWidth: 4,
+      );
+
+      expect(normal.source, isNot(contains('<text')));
+      expect(normal.source, contains(r'aria-label="$\frac{a}{b} + x^2$"'));
+      // The fraction bar and the letters are all separate strokes.
+      expect('<path'.allMatches(normal.source).length, greaterThan(6));
+      expect(cursive.source, isNot(normal.source));
+    });
+
     test('semantic inks follow light and dark note themes', () {
       final EditableSvg styled = SvgNotationStyler.apply(
         EditableSvg.parse(_source, modelResponse: true),

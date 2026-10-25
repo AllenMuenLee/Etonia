@@ -9,6 +9,7 @@ import '../ink/ink_palette.dart';
 import '../ink/ink_sample.dart';
 import 'ink_attachment.dart';
 import 'notation_font.dart';
+import 'notation_math.dart';
 import 'svg_ink_snap.dart';
 
 /// Makes model-authored SVG look like it belongs to the handwritten note.
@@ -81,7 +82,12 @@ abstract final class SvgNotationStyler {
       element.remove();
       return null;
     }
-    if (!NotationFont.canWrite(text)) {
+    // Text holding `$…$` LaTeX is laid out as a formula, fractions, roots and
+    // scripts included, and written in the same hand as any other text.
+    final NotationMath? formula = NotationMath.hasMath(text)
+        ? NotationMath.parse(NotationMath.fromText(text))
+        : null;
+    if (formula == null && !NotationFont.canWrite(text)) {
       throw const FormatException('SVG text cannot use the handwriting font');
     }
     final double x =
@@ -107,12 +113,18 @@ abstract final class SvgNotationStyler {
     double top = double.infinity;
     double bottom = double.negativeInfinity;
     void write(double fontSize) {
-      strokes = NotationFont.write(
-        text,
-        origin: InkVector(0, baseline - fontSize),
-        size: fontSize,
-        style: handwriting,
-      );
+      strokes = formula == null
+          ? NotationFont.write(
+              text,
+              origin: InkVector(0, baseline - fontSize),
+              size: fontSize,
+              style: handwriting,
+            )
+          : formula.write(
+              origin: InkVector(0, baseline - formula.ascent * fontSize),
+              size: fontSize,
+              style: handwriting,
+            );
       left = top = double.infinity;
       right = bottom = double.negativeInfinity;
       for (final List<InkVector> stroke in strokes) {

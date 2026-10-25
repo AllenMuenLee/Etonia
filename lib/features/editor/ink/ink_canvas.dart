@@ -628,13 +628,21 @@ class SelectionCarry extends ChangeNotifier {
         }
       } else {
         bool anyForeground = false;
+        // In AI mode the paper comes with the ink; only the page the
+        // lasso began on, since the chat reads the paper of one page.
+        final bool keepPaper = origin.widget.aiActive?.value ?? false;
         for (final _InkCanvasState c in canvases) {
           final InkTransform? toC = _transformBetween(origin, c);
           if (toC == null) continue;
           final List<InkVector> localOutline = toC.isIdentity
               ? outline
               : <InkVector>[for (final InkVector p in outline) toC.apply(p)];
-          if (c.widget.controller.selectWithOutline(localOutline)) {
+          final bool withPaper = keepPaper && identical(c, origin);
+          if (c.widget.controller.selectWithOutline(
+            localOutline,
+            selectablePdfBounds: withPaper ? c.widget.selectablePdfBounds : null,
+            keepPaper: withPaper,
+          )) {
             anyForeground = true;
           }
         }
@@ -1376,7 +1384,13 @@ class InkCanvas extends StatefulWidget {
     this.onReplayStrokeTapped,
     this.ruler,
     this.pointerClaims,
+    this.aiActive,
   });
+
+  /// Whether AI mode is on. A lasso then selects the PDF paper and pictures
+  /// it encloses together with the ink, since the assistant needs the page
+  /// behind the ink to read it.
+  final ValueListenable<bool>? aiActive;
 
   /// Shared with the note's other pages, so that a selection moved onto one
   /// of them goes there. Without it a selection stays on its page.
@@ -2586,6 +2600,7 @@ class _InkCanvasState extends State<InkCanvas> with WidgetsBindingObserver {
           event.pointer,
           _position(event),
           widget.selectablePdfBounds,
+          widget.aiActive?.value ?? false,
         );
       }
     } else {

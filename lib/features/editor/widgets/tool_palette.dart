@@ -184,8 +184,8 @@ class PalettePlacement {
   int get hashCode => Object.hash(edge, along);
 }
 
-/// The floating tool palette: the pen, eraser, Select, Sticky note, image
-/// insertion, and AI mode, and, folded away behind an arrow at its end, the
+/// The floating tool palette: the pen, eraser, Select, AI mode, image
+/// insertion, and Sticky note, and, folded away behind an arrow at its end, the
 /// ruler. Each tool,
 /// pressed while selected, opens its options: the pen's ink color and
 /// width (and, folded away, its advanced settings), the eraser's mode and
@@ -375,7 +375,7 @@ class ToolPalette extends StatelessWidget {
                     EditorTool.pen => 0,
                     EditorTool.eraser => 1,
                     EditorTool.select => 2,
-                    EditorTool.sticky => stickySettings != null ? 3 : null,
+                    EditorTool.sticky => stickySettings != null ? 5 : null,
                     EditorTool.ai => null,
                   },
                   capsuleSize: dense
@@ -385,9 +385,9 @@ class ToolPalette extends StatelessWidget {
                     _penControl(),
                     _eraserControl(),
                     _selectControl(),
-                    if (stickySettings != null) _stickyControl(),
-                    _imageControl(),
                     _aiControl(),
+                    _imageControl(),
+                    if (stickySettings != null) _stickyControl(),
                   ],
                   secondary: <Widget>[
                     if (ruler != null) _rulerControl(),

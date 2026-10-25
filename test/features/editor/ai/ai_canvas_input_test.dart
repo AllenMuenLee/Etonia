@@ -10,6 +10,7 @@ import 'package:greatnote/features/editor/ai/handwriting_prediction.dart';
 import 'package:greatnote/features/editor/ink/ink_controller.dart';
 import 'package:greatnote/features/editor/ink/ink_palette.dart';
 import 'package:greatnote/features/editor/ink/ink_sample.dart';
+import 'package:greatnote/features/editor/ink/ink_selection.dart';
 import 'package:greatnote/features/editor/ink/stroke.dart';
 
 import '../../../helpers/ai_fakes.dart';
@@ -67,6 +68,45 @@ void main() {
         isTrue,
       );
       expect(controller.selection!.includesPdf, isTrue);
+    });
+  });
+
+  group('InkController lasso on PDF paper', () {
+    InkSelection? lasso({required bool keepPaper}) {
+      final InkController controller = InkController(
+        strokes: <Stroke>[
+          Stroke.fromPoints(
+            style: const StrokeStyle(ink: InkPalette.ink, width: 4),
+            points: const <InkVector>[InkVector(290, 300), InkVector(310, 300)],
+          ),
+        ],
+      );
+      addTearDown(controller.dispose);
+      // Hugs the ink, so the Select tool takes the ink alone.
+      final List<InkVector> outline = _loop(const InkVector(300, 300), 14);
+      expect(controller.beginLasso(pointer: 1, position: outline.first), isTrue);
+      for (final InkVector point in outline.skip(1)) {
+        controller.updateLasso(1, point);
+      }
+      controller.endLasso(
+        1,
+        outline.last,
+        const ui.Rect.fromLTWH(0, 0, 800, 1000),
+        keepPaper,
+      );
+      return controller.selection;
+    }
+
+    test('takes the ink alone by default', () {
+      final InkSelection? selection = lasso(keepPaper: false);
+      expect(selection!.indices, <int>[0]);
+      expect(selection.includesPdf, isFalse);
+    });
+
+    test('takes the paper with the ink when asked to keep it', () {
+      final InkSelection? selection = lasso(keepPaper: true);
+      expect(selection!.indices, <int>[0]);
+      expect(selection.includesPdf, isTrue);
     });
   });
 

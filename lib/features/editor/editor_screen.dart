@@ -2757,6 +2757,7 @@ class EditorScreenState extends State<EditorScreen>
                                     stylusOnly: _stylusOnly,
                                     ruler: _ruler,
                                     pointerClaims: _pointerClaims,
+                                    aiActive: _aiActive,
                                     selectablePdfBounds: page.pdfSource == null
                                         ? null
                                         : Offset.zero &
