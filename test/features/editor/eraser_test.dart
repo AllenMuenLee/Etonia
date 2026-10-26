@@ -616,7 +616,8 @@ void main() {
 
     // Dragged off the top of the page, over the app bar, from beside the
     // palette floating across the top.
-    final Offset inside = pageToGlobal(tester, const Offset(40, 40));
+    // Clear of the page controls at the left of the palette.
+    final Offset inside = pageToGlobal(tester, const Offset(700, 40));
     // Where the ring's top would be, off the page: it shows what was there.
     final Offset outside = inside + const Offset(0, -60 - 11);
     final Color chrome = (await captureScreen(tester)).at(outside);

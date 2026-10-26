@@ -8,6 +8,7 @@ import 'package:xml/xml.dart';
 import '../ink/ink_controller.dart';
 import '../ink/ink_sample.dart';
 import '../ink/stroke.dart';
+import '../text/note_text.dart';
 import 'document_models.dart';
 import 'document_platform.dart';
 
@@ -84,6 +85,9 @@ class SvgExporter {
         for (final Stroke stroke in controller.strokes) {
           _writeStroke(builder, stroke, brightness);
         }
+        for (final NoteTextElement element in controller.textElements) {
+          _writeText(builder, element, brightness);
+        }
       },
     );
     return builder.buildDocument().rootElement.toXmlString(pretty: true);
@@ -153,6 +157,55 @@ class SvgExporter {
     builder.element(
       'path',
       attributes: <String, String>{...attributes, 'd': '$path'},
+    );
+  }
+
+  static void _writeText(
+    XmlBuilder builder,
+    NoteTextElement element,
+    Brightness brightness,
+  ) {
+    final Color color = element.settings.ink.resolve(brightness);
+    final String paint =
+        '#${color.toARGB32().toRadixString(16).padLeft(8, '0').substring(2)}';
+    final String anchor = switch (element.settings.alignment) {
+      TextAlign.center => 'middle',
+      TextAlign.right || TextAlign.end => 'end',
+      _ => 'start',
+    };
+    final double x = switch (element.settings.alignment) {
+      TextAlign.center => element.position.x + element.width / 2,
+      TextAlign.right || TextAlign.end => element.position.x + element.width,
+      _ => element.position.x,
+    };
+    final double lineHeight = element.settings.fontSize * 1.3;
+    builder.element(
+      'text',
+      attributes: <String, String>{
+        'data-etonia-kind': 'text',
+        'data-etonia-object-id': element.id,
+        'x': _n(x),
+        'y': _n(element.position.y + element.settings.fontSize),
+        'fill': paint,
+        'font-size': _n(element.settings.fontSize),
+        'font-weight': element.settings.bold ? '700' : '400',
+        'font-style': element.settings.italic ? 'italic' : 'normal',
+        if (element.settings.underline) 'text-decoration': 'underline',
+        'text-anchor': anchor,
+      },
+      nest: () {
+        final List<String> lines = element.text.split('\n');
+        for (int i = 0; i < lines.length; i++) {
+          builder.element(
+            'tspan',
+            attributes: <String, String>{
+              'x': _n(x),
+              if (i > 0) 'dy': _n(lineHeight),
+            },
+            nest: lines[i],
+          );
+        }
+      },
     );
   }
 

@@ -10,6 +10,18 @@ void main() {
   const double aaText = 4.5;
   const double aaControl = 3;
 
+  test('modal surfaces are opaque, so nothing behind shows through', () {
+    for (final ThemeData theme in <ThemeData>[
+      AppTheme.light(),
+      AppTheme.dark(),
+    ]) {
+      expect(theme.dialogTheme.backgroundColor!.a, 1);
+      expect(theme.bottomSheetTheme.modalBackgroundColor!.a, 1);
+      expect(theme.bottomSheetTheme.backgroundColor!.a, 1);
+      expect(theme.drawerTheme.backgroundColor!.a, 1);
+    }
+  });
+
   for (final (String name, AppColors colors) in <(String, AppColors)>[
     ('light', AppColors.light),
     ('dark', AppColors.dark),

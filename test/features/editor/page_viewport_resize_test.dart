@@ -81,6 +81,59 @@ void main() {
     }
   });
 
+  testWidgets('a resize at the top leaves the column at its edge', (
+    WidgetTester tester,
+  ) async {
+    tester.view.physicalSize = const Size(1200, 900);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.reset);
+    final GlobalKey<PageViewportState> key = GlobalKey<PageViewportState>();
+    final ValueNotifier<int> current = ValueNotifier<int>(0);
+    addTearDown(current.dispose);
+
+    await tester.pumpWidget(_column(1100, key, current));
+    expect(key.currentState!.scrollOffset, Offset.zero);
+    // As when the AI panel opens beside the page: keeping the middle in view
+    // must not slide the first page down past its edge.
+    await tester.pumpWidget(_column(740, key, current));
+    expect(key.currentState!.scrollOffset.dy, 0);
+
+    // Scrolled past the edge by the reader, a resize may stay there.
+    await tester.pumpWidget(_column(1100, key, current));
+    key.currentState!.scrollBy(const Offset(0, -1000));
+    await tester.pump();
+    expect(key.currentState!.scrollOffset.dy, -48);
+    await tester.pumpWidget(_column(740, key, current));
+    expect(key.currentState!.scrollOffset.dy, lessThan(0));
+  });
+
+  testWidgets('pages filling the area scroll slightly past every edge', (
+    WidgetTester tester,
+  ) async {
+    tester.view.physicalSize = const Size(1200, 900);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.reset);
+    final GlobalKey<PageViewportState> key = GlobalKey<PageViewportState>();
+    final ValueNotifier<int> current = ValueNotifier<int>(0);
+    addTearDown(current.dispose);
+
+    await tester.pumpWidget(_column(1100, key, current));
+    final PageViewportState state = key.currentState!;
+    state.scrollBy(const Offset(-1000, -1000));
+    await tester.pump();
+    expect(state.scrollOffset, const Offset(-48, -48));
+
+    state.scrollBy(const Offset(1000, 0));
+    await tester.pump();
+    expect(state.scrollOffset.dx, 48);
+
+    const double pageHeight = 1123 * 1100 / 794;
+    const double columnHeight = _pageCount * pageHeight + (_pageCount - 1) * 16;
+    state.scrollBy(const Offset(0, 1e6));
+    await tester.pump();
+    expect(state.scrollOffset.dy, closeTo(columnHeight - 700 + 48, 0.01));
+  });
+
   testWidgets('a tap on the desk is reported; a tap on a page is not', (
     WidgetTester tester,
   ) async {

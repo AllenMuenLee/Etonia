@@ -1,10 +1,14 @@
 import 'dart:math' as math;
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 
 import '../../../app/theme/app_tokens.dart';
 import '../../../app/theme/app_icons.dart';
 import '../document_io/document_models.dart';
+import '../ink/ink_painter.dart';
+import '../ink/stroke.dart';
 import '../page/note_document.dart';
 import '../page/page_background.dart';
 import '../page/page_setup.dart';
@@ -16,7 +20,7 @@ import '../../../shared/widgets/app_controls.dart';
 enum AddPageAction { addPage, insertPdf }
 
 /// The floating card hanging from the top bar over the page at the right:
-/// holds change page, search, and the add button.
+/// holds search, page creation, and page settings.
 class FloatingPageControls extends StatelessWidget {
   const FloatingPageControls({
     super.key,
@@ -29,19 +33,10 @@ class FloatingPageControls extends StatelessWidget {
   final double width;
   final Widget child;
 
-  static double widthFor(
-    double height, {
-    required bool find,
-    required bool navigation,
-  }) {
-    const double indicator = 72;
+  static double widthFor(double height, {required bool find}) {
     const double touch = AppSizes.minTouchTarget;
     final double padding = (height - touch) / 2;
-    return (navigation ? 2 * touch : 0) +
-        indicator +
-        (find ? touch : 0) +
-        touch +
-        2 * padding;
+    return (find ? touch : 0) + 2 * touch + 2 * padding;
   }
 
   @override
@@ -76,14 +71,73 @@ class FloatingPageControls extends StatelessWidget {
   }
 }
 
-/// The page indicator, `current / count`, which opens the page panel, on
-/// wider layouts previous and next beside it, search, and the round Add button.
+/// The page overview's button, in the editor's top-left cluster. Page
+/// switching and the page number live in the overview it opens; it never
+/// opens settings.
+class PageNavigationControls extends StatelessWidget {
+  const PageNavigationControls({
+    super.key,
+    required this.onOpenOverview,
+    this.overviewOpen,
+  });
+
+  final VoidCallback onOpenOverview;
+
+  /// Whether the overview is showing, which the grid button reflects.
+  final ValueListenable<bool>? overviewOpen;
+
+  static double widthFor() => AppSizes.minTouchTarget;
+
+  static String describe(int index, int count) {
+    return 'Page ${index + 1} of $count';
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final AppColors colors = AppColors.of(context);
+    final Widget grid = ToolbarIconButton(
+      tooltip: 'Page overview',
+      onPressed: onOpenOverview,
+      icon: AppIcons.gridView,
+    );
+    if (overviewOpen == null) return grid;
+    return ValueListenableBuilder<bool>(
+      valueListenable: overviewOpen!,
+      child: grid,
+      builder: (BuildContext context, bool open, Widget? grid) {
+        return Stack(
+          alignment: Alignment.center,
+          children: <Widget>[
+            AnimatedOpacity(
+              opacity: open ? 1 : 0,
+              duration: AppMotion.resolve(
+                context,
+                open ? AppMotion.fadeIn : AppMotion.fadeOut,
+              ),
+              child: Container(
+                width: AppSizes.paletteButtonVisual,
+                height: AppSizes.paletteButtonVisual,
+                decoration: BoxDecoration(
+                  color: colors.selected,
+                  borderRadius: AppBorderRadius.medium,
+                ),
+              ),
+            ),
+            grid!,
+          ],
+        );
+      },
+    );
+  }
+}
+
+/// Page-level actions shown in the editor's top-right cluster. Page switching
+/// lives in [PageNavigationControls], separate from the settings opened here.
 class PageControls extends StatelessWidget {
   const PageControls({
     super.key,
     required this.document,
-    required this.showNavigation,
-    required this.onOpenPanel,
+    required this.onOpenSettings,
     this.canFind = false,
     this.onFind,
     this.lastAddAction,
@@ -94,12 +148,7 @@ class PageControls extends StatelessWidget {
   });
 
   final NoteDocument document;
-
-  /// Whether previous and next sit in the bar. Without them they are only
-  /// in the panel.
-  final bool showNavigation;
-
-  final VoidCallback onOpenPanel;
+  final VoidCallback onOpenSettings;
 
   final bool canFind;
 
@@ -113,36 +162,14 @@ class PageControls extends StatelessWidget {
   final VoidCallback? onTakePhoto;
   final VoidCallback? onInsertPdf;
 
-  static String describe(int index, int count) {
-    return 'Page ${index + 1} of $count';
-  }
-
   @override
   Widget build(BuildContext context) {
-    final AppColors colors = AppColors.of(context);
     return ListenableBuilder(
       listenable: document,
       builder: (BuildContext context, Widget? child) {
         return Row(
           mainAxisSize: MainAxisSize.min,
           children: <Widget>[
-            if (showNavigation)
-              ToolbarIconButton(
-                tooltip: 'Previous page',
-                onPressed: document.canGoBack ? document.previousPage : null,
-                icon: AppIcons.previous,
-              ),
-            _PageNumberSection(
-              document: document,
-              onOpenPanel: onOpenPanel,
-              colors: colors,
-            ),
-            if (showNavigation)
-              ToolbarIconButton(
-                tooltip: 'Next page',
-                onPressed: document.canGoForward ? document.nextPage : null,
-                icon: AppIcons.disclosure,
-              ),
             if (canFind && onFind != null)
               Builder(
                 builder: (BuildContext context) => ToolbarIconButton(
@@ -161,6 +188,12 @@ class PageControls extends StatelessWidget {
               lastAction: lastAddAction,
               onActionChanged: onAddActionChanged,
             ),
+            ToolbarIconButton(
+              key: const ValueKey<String>('page-settings-button'),
+              tooltip: 'Page settings',
+              onPressed: onOpenSettings,
+              icon: AppIcons.more,
+            ),
           ],
         );
       },
@@ -168,22 +201,20 @@ class PageControls extends StatelessWidget {
   }
 }
 
-class _PageNumberSection extends StatefulWidget {
-  const _PageNumberSection({
-    required this.document,
-    required this.onOpenPanel,
-    required this.colors,
-  });
+/// The current page number as a capsule in the page overview's header: a tap
+/// turns it into a field for typing the page to go to.
+class _PageNumberField extends StatefulWidget {
+  const _PageNumberField({required this.document});
+
+  static const double height = 36;
 
   final NoteDocument document;
-  final VoidCallback onOpenPanel;
-  final AppColors colors;
 
   @override
-  State<_PageNumberSection> createState() => _PageNumberSectionState();
+  State<_PageNumberField> createState() => _PageNumberFieldState();
 }
 
-class _PageNumberSectionState extends State<_PageNumberSection> {
+class _PageNumberFieldState extends State<_PageNumberField> {
   bool _isEditing = false;
 
   /// Counts rejected entries; each one shakes the field.
@@ -202,7 +233,7 @@ class _PageNumberSectionState extends State<_PageNumberSection> {
   }
 
   @override
-  void didUpdateWidget(_PageNumberSection oldWidget) {
+  void didUpdateWidget(_PageNumberField oldWidget) {
     super.didUpdateWidget(oldWidget);
     if (!_isEditing) {
       _controller.text = '${widget.document.currentIndex + 1}';
@@ -263,100 +294,111 @@ class _PageNumberSectionState extends State<_PageNumberSection> {
 
   @override
   Widget build(BuildContext context) {
+    final AppColors colors = AppColors.of(context);
     final int index = widget.document.currentIndex;
     final int count = widget.document.pageCount;
     final TextStyle labelStyle = Theme.of(context).textTheme.labelLarge!
         .copyWith(
           fontFeatures: const <FontFeature>[FontFeature.tabularFigures()],
-          color: widget.colors.textPrimary,
+          color: colors.textPrimary,
         );
+    const BorderRadius capsule = BorderRadius.all(
+      Radius.circular(_PageNumberField.height / 2),
+    );
+    // Wide enough for the longest number, so the capsule keeps its width
+    // as the page changes and while typing.
+    final TextPainter widest = TextPainter(
+      text: TextSpan(text: '$count', style: labelStyle),
+      textDirection: TextDirection.ltr,
+      textScaler: MediaQuery.textScalerOf(context),
+    )..layout();
+    final double numberWidth = math.max(AppSpacing.lg, widest.width);
+    widest.dispose();
 
-    return Stack(
-      alignment: Alignment.center,
-      children: <Widget>[
-        Opacity(
-          opacity: 0,
-          child: Text(
-            '${index + 1} / $count',
-            semanticsLabel: PageControls.describe(index, count),
-            style: labelStyle,
-          ),
-        ),
-        Row(
-          mainAxisSize: MainAxisSize.min,
-          children: <Widget>[
-            if (_isEditing)
-              Shake(
-                errorToken: _rejected == 0 ? null : _rejected,
-                child: Container(
-                  width: 36,
-                  height: 28,
-                  alignment: Alignment.center,
-                  decoration: BoxDecoration(
-                    color: widget.colors.selected.withValues(alpha: 0.5),
-                    borderRadius: BorderRadius.circular(AppRadii.small),
-                    border: Border.all(
-                      color: widget.colors.accent,
-                      width: AppSizes.hairline,
-                    ),
-                  ),
-                  child: TextField(
-                    key: const ValueKey<String>('page-number-input'),
-                    controller: _controller,
-                    focusNode: _focusNode,
-                    autofocus: true,
-                    keyboardType: TextInputType.number,
-                    textInputAction: TextInputAction.go,
-                    textAlign: TextAlign.center,
-                    style: labelStyle,
-                    cursorColor: widget.colors.accent,
-                    decoration: const InputDecoration(
-                      isDense: true,
-                      contentPadding: EdgeInsets.zero,
-                      border: InputBorder.none,
-                    ),
-                    onSubmitted: _submit,
-                  ),
+    final Widget number = _isEditing
+        ? Shake(
+            errorToken: _rejected == 0 ? null : _rejected,
+            child: SizedBox(
+              width: numberWidth + AppSpacing.xs,
+              child: TextField(
+                key: const ValueKey<String>('page-number-input'),
+                controller: _controller,
+                focusNode: _focusNode,
+                autofocus: true,
+                keyboardType: TextInputType.number,
+                textInputAction: TextInputAction.go,
+                textAlign: TextAlign.center,
+                style: labelStyle.copyWith(color: colors.accent),
+                cursorColor: colors.accent,
+                // The capsule is the field's only edge.
+                decoration: const InputDecoration(
+                  isDense: true,
+                  filled: false,
+                  contentPadding: EdgeInsets.zero,
+                  border: InputBorder.none,
+                  enabledBorder: InputBorder.none,
+                  focusedBorder: InputBorder.none,
                 ),
-              )
-            else
-              Tooltip(
-                message: 'Go to page',
-                child: InkWell(
-                  key: const ValueKey<String>('page-number-button'),
-                  canRequestFocus: false,
-                  onTap: _startEditing,
-                  borderRadius: BorderRadius.circular(AppRadii.small),
-                  child: Padding(
-                    padding: const EdgeInsets.symmetric(
-                      horizontal: AppSpacing.xxs,
-                      vertical: AppSpacing.xxs,
-                    ),
-                    child: RollingNumber(index + 1, style: labelStyle),
-                  ),
-                ),
-              ),
-            Tooltip(
-              message: 'Page setup',
-              excludeFromSemantics: true,
-              child: TextButton(
-                onPressed: widget.onOpenPanel,
-                style: TextButton.styleFrom(
-                  foregroundColor: widget.colors.textPrimary,
-                  minimumSize: const Size(0, AppSizes.minTouchTarget),
-                  padding: const EdgeInsets.symmetric(
-                    horizontal: AppSpacing.xxs,
-                  ),
-                  shape: const RoundedRectangleBorder(
-                    borderRadius: AppBorderRadius.medium,
-                  ),
-                ),
-                child: Text(' / $count', style: labelStyle),
+                onSubmitted: _submit,
               ),
             ),
-          ],
+          )
+        : SizedBox(
+            width: numberWidth + AppSpacing.xs,
+            child: Center(child: RollingNumber(index + 1, style: labelStyle)),
+          );
+
+    return Semantics(
+      button: !_isEditing,
+      label: PageNavigationControls.describe(index, count),
+      hint: _isEditing ? null : 'Go to page',
+      child: Tooltip(
+        message: 'Go to page',
+        excludeFromSemantics: true,
+        child: InkWell(
+          key: const ValueKey<String>('page-number-button'),
+          canRequestFocus: false,
+          onTap: _isEditing ? null : _startEditing,
+          borderRadius: capsule,
+          child: SizedBox(
+            height: AppSizes.minTouchTarget,
+            child: Center(
+              child: AnimatedContainer(
+                duration: AppMotion.resolve(context, AppMotion.stateFade),
+                height: _PageNumberField.height,
+                padding: const EdgeInsets.symmetric(horizontal: AppSpacing.xs),
+                decoration: BoxDecoration(
+                  color: _isEditing ? colors.selected : colors.background,
+                  borderRadius: capsule,
+                  border: Border.all(
+                    color: _isEditing ? colors.accent : colors.divider,
+                    width: AppSizes.hairline,
+                  ),
+                ),
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: <Widget>[
+                    number,
+                    ExcludeSemantics(
+                      child: Padding(
+                        padding: const EdgeInsetsDirectional.only(
+                          end: AppSpacing.xxs,
+                        ),
+                        child: Text(
+                          '/ $count',
+                          style: labelStyle.copyWith(
+                            color: colors.textSecondary,
+                          ),
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ),
         ),
-      ],
+      ),
     );
   }
 }
@@ -524,8 +566,378 @@ class _AddMenuButtonState extends State<AddMenuButton> {
   }
 }
 
-/// Opens the page panel as a card under the top bar's trailing corner,
-/// beside the control that opened it. A tap outside closes it.
+/// Hangs the page overview under [child], the top-left card that holds its
+/// button. Unlike a dialog it leaves the top bar and the cards across the top
+/// usable while it shows, so stepping through pages there updates the grid in
+/// place and the grid button closes it again. A press on the page, Escape, or
+/// choosing a page closes it too.
+class PageOverviewAnchor extends StatefulWidget {
+  const PageOverviewAnchor({
+    super.key,
+    required this.open,
+    required this.document,
+    required this.writingArea,
+    this.config = const PageConfig(),
+    required this.child,
+  });
+
+  final ValueNotifier<bool> open;
+  final NoteDocument document;
+  final Size writingArea;
+  final PageConfig config;
+  final Widget child;
+
+  @override
+  State<PageOverviewAnchor> createState() => _PageOverviewAnchorState();
+}
+
+class _PageOverviewAnchorState extends State<PageOverviewAnchor>
+    with SingleTickerProviderStateMixin {
+  final LayerLink _link = LayerLink();
+  final OverlayPortalController _portal = OverlayPortalController();
+  // Made in initState, not lazily: an overview never opened would otherwise
+  // first create its ticker in dispose, from a deactivated context.
+  late final AnimationController _reveal;
+  late final CurvedAnimation _curved;
+  late final Animation<double> _scale;
+
+  @override
+  void initState() {
+    super.initState();
+    _reveal = AnimationController(vsync: this)
+      ..addStatusListener(_onRevealStatus);
+    _curved = CurvedAnimation(
+      parent: _reveal,
+      curve: AppMotion.fadeInCurve,
+      reverseCurve: AppMotion.fadeOutCurve,
+    );
+    _scale = Tween<double>(begin: 0.94, end: 1).animate(_curved);
+    widget.open.addListener(_sync);
+    if (widget.open.value) {
+      _reveal.value = 1;
+      _portal.show();
+    }
+  }
+
+  @override
+  void didUpdateWidget(PageOverviewAnchor oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.open != widget.open) {
+      oldWidget.open.removeListener(_sync);
+      widget.open.addListener(_sync);
+      _sync();
+    }
+  }
+
+  void _sync() {
+    if (widget.open.value) {
+      _reveal.duration = AppMotion.resolve(context, AppMotion.snappy.duration);
+      _portal.show();
+      _reveal.forward();
+    } else if (_reveal.isDismissed) {
+      _portal.hide();
+    } else {
+      _reveal.reverseDuration = AppMotion.resolve(context, AppMotion.fadeOut);
+      _reveal.reverse();
+    }
+  }
+
+  void _onRevealStatus(AnimationStatus status) {
+    if (status == AnimationStatus.dismissed && _portal.isShowing) {
+      _portal.hide();
+    }
+  }
+
+  void _close() => widget.open.value = false;
+
+  @override
+  void dispose() {
+    widget.open.removeListener(_sync);
+    _curved.dispose();
+    _reveal.dispose();
+    super.dispose();
+  }
+
+  Widget _buildOverlay(BuildContext context) {
+    final MediaQueryData media = MediaQuery.of(context);
+    final RenderObject? anchor = this.context.findRenderObject();
+    // Where the card ends, in the overlay's coordinates: the page starts
+    // below it.
+    final Offset corner = anchor is RenderBox && anchor.hasSize
+        ? anchor.localToGlobal(anchor.size.bottomLeft(Offset.zero))
+        : Offset(0, media.padding.top + AppSizes.appBarHeight);
+    const double gap = AppSpacing.xs;
+    final double maxWidth = math.min(
+      PageOverviewPanel.width,
+      media.size.width - corner.dx - 2 * gap - media.padding.right,
+    );
+    final double maxHeight =
+        media.size.height - corner.dy - 2 * gap - media.padding.bottom;
+    return ValueListenableBuilder<bool>(
+      valueListenable: widget.open,
+      builder: (BuildContext context, bool open, Widget? panel) {
+        // While it fades out, presses already reach what is beneath.
+        return IgnorePointer(ignoring: !open, child: panel);
+      },
+      child: Stack(
+        children: <Widget>[
+          // Only the page closes it: the top bar and the cards beside this
+          // one stay live. The press that closes it leaves no mark.
+          Positioned(
+            left: 0,
+            right: 0,
+            top: corner.dy,
+            bottom: 0,
+            child: Semantics(
+              label: 'Close page overview',
+              onTap: _close,
+              child: Listener(
+                behavior: HitTestBehavior.opaque,
+                onPointerDown: (_) => _close(),
+              ),
+            ),
+          ),
+          Positioned(
+            left: 0,
+            top: 0,
+            child: CompositedTransformFollower(
+              link: _link,
+              targetAnchor: Alignment.bottomLeft,
+              offset: const Offset(gap, gap),
+              child: ConstrainedBox(
+                constraints: BoxConstraints(
+                  maxWidth: math.max(0, maxWidth),
+                  maxHeight: math.max(0, maxHeight),
+                ),
+                child: CallbackShortcuts(
+                  bindings: <ShortcutActivator, VoidCallback>{
+                    const SingleActivator(LogicalKeyboardKey.escape): _close,
+                  },
+                  child: Focus(
+                    autofocus: true,
+                    skipTraversal: true,
+                    child: FadeTransition(
+                      opacity: _curved,
+                      child: ScaleTransition(
+                        scale: _scale,
+                        alignment: Alignment.topLeft,
+                        child: PageOverviewPanel(
+                          document: widget.document,
+                          writingArea: widget.writingArea,
+                          config: widget.config,
+                          onSelected: _close,
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return OverlayPortal(
+      controller: _portal,
+      overlayChildBuilder: _buildOverlay,
+      child: CompositedTransformTarget(link: _link, child: widget.child),
+    );
+  }
+}
+
+/// A grid of the note's pages under a header with the page number, which can
+/// be typed into to go to a page. Selecting a thumbnail changes the current
+/// page and calls [onSelected], so the overview can close and the page is
+/// immediately usable.
+class PageOverviewPanel extends StatelessWidget {
+  const PageOverviewPanel({
+    super.key,
+    required this.document,
+    required this.writingArea,
+    this.config = const PageConfig(),
+    this.onSelected,
+  });
+
+  static const double width = 360;
+
+  final NoteDocument document;
+  final Size writingArea;
+  final PageConfig config;
+  final VoidCallback? onSelected;
+
+  Size _paperFor(NotePage page) {
+    final PdfPageSource? pdf = page.pdfSource;
+    if (pdf != null) return pdf.pageSize;
+    final PageSetup setup = page.setup;
+    if (setup.size == PageSize.custom) return setup.customSize!;
+    return setup.size.fixedSize ??
+        page.extent ??
+        (writingArea.isEmpty ? const Size(4, 3) : writingArea);
+  }
+
+  void _select(int index) {
+    document.goTo(index);
+    onSelected?.call();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final AppColors colors = AppColors.of(context);
+    final TextTheme text = Theme.of(context).textTheme;
+    // Opaque: it hangs over the palette, whose buttons would otherwise show
+    // through its header like controls of its own.
+    return GlassSurface(
+      color: colors.surface,
+      borderRadius: AppBorderRadius.large,
+      boxShadow: AppShadows.floating(colors),
+      child: Material(
+        type: MaterialType.transparency,
+        child: ListenableBuilder(
+          listenable: document,
+          builder: (BuildContext context, Widget? child) {
+            return Padding(
+              padding: const EdgeInsets.fromLTRB(
+                AppSpacing.md,
+                AppSpacing.xs,
+                AppSpacing.xs,
+                AppSpacing.md,
+              ),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: <Widget>[
+                  Row(
+                    children: <Widget>[
+                      Expanded(
+                        child: Semantics(
+                          header: true,
+                          child: Text('Pages', style: text.titleMedium),
+                        ),
+                      ),
+                      // The arrows flank the number they change; stepping
+                      // keeps the overview open, so the grid follows along.
+                      ToolbarIconButton(
+                        tooltip: 'Previous page',
+                        onPressed: document.canGoBack
+                            ? document.previousPage
+                            : null,
+                        icon: AppIcons.previous,
+                      ),
+                      _PageNumberField(document: document),
+                      ToolbarIconButton(
+                        tooltip: 'Next page',
+                        onPressed: document.canGoForward
+                            ? document.nextPage
+                            : null,
+                        icon: AppIcons.disclosure,
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: AppSpacing.xs),
+                  Flexible(
+                    child: GridView.builder(
+                      key: const ValueKey<String>('page-overview-grid'),
+                      shrinkWrap: true,
+                      // The header's capsule reaches nearer the edge than
+                      // the thumbnails do.
+                      padding: const EdgeInsetsDirectional.only(
+                        end: AppSpacing.xs,
+                      ),
+                      gridDelegate:
+                          const SliverGridDelegateWithMaxCrossAxisExtent(
+                            maxCrossAxisExtent: 148,
+                            mainAxisExtent: 174,
+                            crossAxisSpacing: AppSpacing.sm,
+                            mainAxisSpacing: AppSpacing.sm,
+                          ),
+                      itemCount: document.pageCount,
+                      itemBuilder: (BuildContext context, int index) {
+                        final NotePage page = document.pages[index];
+                        final Size paper = _paperFor(page);
+                        final bool selected = index == document.currentIndex;
+                        return Semantics(
+                          button: true,
+                          selected: selected,
+                          label: PageNavigationControls.describe(
+                            index,
+                            document.pageCount,
+                          ),
+                          child: InkWell(
+                            key: ValueKey<String>('page-thumbnail-$index'),
+                            onTap: () => _select(index),
+                            borderRadius: AppBorderRadius.medium,
+                            child: AnimatedContainer(
+                              duration: AppMotion.resolve(
+                                context,
+                                AppMotion.snappy.duration,
+                              ),
+                              padding: const EdgeInsets.all(AppSpacing.xs),
+                              decoration: BoxDecoration(
+                                color: selected ? colors.selected : null,
+                                borderRadius: AppBorderRadius.medium,
+                                border: Border.all(
+                                  color: selected
+                                      ? colors.accent
+                                      : colors.divider,
+                                  width: selected ? 2 : AppSizes.hairline,
+                                ),
+                              ),
+                              child: Column(
+                                children: <Widget>[
+                                  Expanded(
+                                    child: Center(
+                                      child: PagePreview(
+                                        paper: paper,
+                                        background: page.setup.background,
+                                        config: config,
+                                        infinite:
+                                            !document.isImportedPdf &&
+                                            page.setup.size ==
+                                                PageSize.infinite,
+                                        maxSize: const Size(116, 132),
+                                        child: _PageInkPreview(
+                                          page: page,
+                                          paper: paper,
+                                        ),
+                                      ),
+                                    ),
+                                  ),
+                                  const SizedBox(height: AppSpacing.xs),
+                                  Text(
+                                    '${index + 1}',
+                                    style: text.labelMedium?.copyWith(
+                                      color: selected
+                                          ? colors.accent
+                                          : colors.textPrimary,
+                                      fontFeatures: const <FontFeature>[
+                                        FontFeature.tabularFigures(),
+                                      ],
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            ),
+                          ),
+                        );
+                      },
+                    ),
+                  ),
+                ],
+              ),
+            );
+          },
+        ),
+      ),
+    );
+  }
+}
+
+/// Opens page settings as a card under the top bar's trailing corner,
+/// beside the ellipsis button. A tap outside closes it.
 Future<void> showPagePanel(
   BuildContext context, {
   required NoteDocument document,
@@ -593,8 +1005,8 @@ Future<void> showPagePanel(
   );
 }
 
-/// The page panel: move between pages, add and delete them, and choose the
-/// current page's size and background, with a preview of the result.
+/// Page editing controls: add or delete a page and choose the current page's
+/// size and background, with a preview of the result.
 class PagePanel extends StatelessWidget {
   const PagePanel({
     super.key,
@@ -666,7 +1078,9 @@ class PagePanel extends StatelessWidget {
     final TextTheme text = Theme.of(context).textTheme;
     final AppColors colors = AppColors.of(context);
     const BorderRadius radius = AppBorderRadius.large;
+    // Opaque, as the page overview is: it covers the cards across the top.
     return GlassSurface(
+      color: colors.surface,
       borderRadius: radius,
       boxShadow: AppShadows.floating(colors),
       child: Material(
@@ -686,10 +1100,7 @@ class PagePanel extends StatelessWidget {
                       child: Semantics(
                         header: true,
                         child: Text(
-                          PageControls.describe(
-                            document.currentIndex,
-                            document.pageCount,
-                          ),
+                          'Page settings',
                           style: text.titleMedium!.copyWith(
                             fontFeatures: const <FontFeature>[
                               FontFeature.tabularFigures(),
@@ -698,19 +1109,17 @@ class PagePanel extends StatelessWidget {
                         ),
                       ),
                     ),
-                    IconButton(
-                      tooltip: 'Previous page',
-                      onPressed: document.canGoBack
-                          ? document.previousPage
-                          : null,
-                      icon: const Icon(AppIcons.previous),
-                    ),
-                    IconButton(
-                      tooltip: 'Next page',
-                      onPressed: document.canGoForward
-                          ? document.nextPage
-                          : null,
-                      icon: const Icon(AppIcons.disclosure),
+                    Text(
+                      PageNavigationControls.describe(
+                        document.currentIndex,
+                        document.pageCount,
+                      ),
+                      style: text.labelMedium?.copyWith(
+                        color: colors.textSecondary,
+                        fontFeatures: const <FontFeature>[
+                          FontFeature.tabularFigures(),
+                        ],
+                      ),
                     ),
                   ],
                 ),
@@ -974,6 +1383,7 @@ class PagePreview extends StatelessWidget {
     this.config = const PageConfig(),
     this.ruleScale = 0.4,
     this.infinite = false,
+    this.child,
   });
 
   final Size paper;
@@ -981,6 +1391,7 @@ class PagePreview extends StatelessWidget {
   final Size maxSize;
   final PageConfig config;
   final double ruleScale;
+  final Widget? child;
 
   /// Marks a page that grows as it is written on.
   final bool infinite;
@@ -1023,6 +1434,7 @@ class PagePreview extends StatelessWidget {
                     config: scaled,
                   ),
                 ),
+                ?child,
                 if (infinite)
                   Align(
                     alignment: AlignmentDirectional.bottomEnd,
@@ -1041,5 +1453,74 @@ class PagePreview extends StatelessWidget {
         ),
       ),
     );
+  }
+}
+
+/// The handwriting layer inside one page-overview thumbnail. It listens only
+/// to that page, so editing another page does not repaint every preview.
+class _PageInkPreview extends StatelessWidget {
+  const _PageInkPreview({required this.page, required this.paper});
+
+  final NotePage page;
+  final Size paper;
+
+  @override
+  Widget build(BuildContext context) {
+    return ListenableBuilder(
+      listenable: page.ink.documentRevisionListenable,
+      builder: (BuildContext context, Widget? child) {
+        return CustomPaint(
+          painter: _PageInkPreviewPainter(
+            strokes: List<Stroke>.of(page.ink.strokes),
+            paper: paper,
+            brightness: Theme.of(context).brightness,
+            revision: page.ink.documentRevision,
+          ),
+        );
+      },
+    );
+  }
+}
+
+class _PageInkPreviewPainter extends CustomPainter {
+  const _PageInkPreviewPainter({
+    required this.strokes,
+    required this.paper,
+    required this.brightness,
+    required this.revision,
+  });
+
+  final List<Stroke> strokes;
+  final Size paper;
+  final Brightness brightness;
+  final int revision;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    if (size.isEmpty || paper.isEmpty) return;
+    final double scale = size.width / paper.width;
+    canvas
+      ..save()
+      ..scale(scale);
+    for (final Stroke stroke in strokes) {
+      paintInkStroke(
+        canvas,
+        color: stroke.style.resolve(brightness),
+        width: stroke.style.width,
+        path: stroke.path,
+        origin: stroke.points.first,
+        isDot: stroke.isDot,
+        outline: stroke.outline,
+        writing: stroke.style.writing,
+      );
+    }
+    canvas.restore();
+  }
+
+  @override
+  bool shouldRepaint(_PageInkPreviewPainter oldDelegate) {
+    return oldDelegate.paper != paper ||
+        oldDelegate.brightness != brightness ||
+        oldDelegate.revision != revision;
   }
 }

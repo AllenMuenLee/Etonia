@@ -17,6 +17,18 @@ void main() {
       'EMS Readability',
     ], await rootBundle.loadString('third_party/ems_readability/OFL.txt'));
   });
+  // Letters a writer did not write out are shaped by a model learned from
+  // UJI Pen Characters v2.
+  LicenseRegistry.addLicense(() async* {
+    yield const LicenseEntryWithLineBreaks(
+      <String>['UJI Pen Characters v2'],
+      'The handwriting model is learned from UJI Pen Characters v2 (Prat, '
+      'Castro, Llorens, Marzal & Vilar), UCI Machine Learning Repository, '
+      'https://archive.ics.uci.edu/dataset/177, licensed under the '
+      'Creative Commons Attribution 4.0 International license: '
+      'https://creativecommons.org/licenses/by/4.0/',
+    );
+  });
   runApp(const GreatnoteApp(home: _StartupHome()));
 }
 

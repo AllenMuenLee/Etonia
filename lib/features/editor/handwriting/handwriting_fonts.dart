@@ -71,7 +71,7 @@ enum HandwritingFont {
   ),
 
   /// The writer's own letters; its style is whatever they wrote.
-  custom('Your handwriting', 'Write 18 letters to make your own', null);
+  custom('Your handwriting', 'Write 15 letters to make your own', null);
 
   const HandwritingFont(this.label, this.description, this.style);
 

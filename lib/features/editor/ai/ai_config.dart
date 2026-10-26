@@ -733,15 +733,21 @@ abstract final class AiPrompts {
       'and the message desc.';
 
   static const String _svgNotationOn =
-      ' Notation is on: add a useful editable vector annotation when it '
-      'helps. The root viewBox must be "0 0 W H", using the exact logical '
+      ' Notation is on: actively look for a useful editable vector '
+      'annotation and add one whenever it can clarify, reinforce, or '
+      'connect the answer to the user\'s notes. Omit visible notation only '
+      'when no meaningful visual would help. The root viewBox must be '
+      '"0 0 W H", using the exact logical '
       'paper width W and height H from the note metadata. Use ordinary SVG '
       'groups, paths, lines, polylines, polygons, rects, circles, ellipses, '
-      'text, markers, gradients, and local defs. Keep every visible point '
+      'and text. Every visible contour is converted to an independent ink '
+      'stroke, so draw arrowheads explicitly as short lines and shading as '
+      'hatch strokes. Do not use markers, gradients, patterns, masks, clips, '
+      'filters, <use>, dash patterns, or filled background regions. Keep '
+      'every visible point '
       'inside the paper. Set data-etonia-bounds="x y width height" on the '
-      'root to the tight finite box around all visible content; this is the '
-      'object the user selects, moves, scales, rotates, copies, erases, and '
-      'exports. The SVG is transparent and must blend into handwriting '
+      'root to the tight finite box around all visible content so placement '
+      'can be validated. The SVG is transparent and must blend into handwriting '
       'already on the paper: use rounded strokes, mostly the normal ink, '
       'and at most one or two accent inks. Give each painted element '
       'data-etonia-stroke-ink and/or data-etonia-fill-ink using only ink, '
@@ -755,10 +761,24 @@ abstract final class AiPrompts {
       '\$x = \\frac{-b \\pm \\sqrt{b^2 - 4ac}}{2a}\$ (escape < and & as XML): '
       'the app lays it out and handwrites it, and y is its first '
       'baseline. Draw uncommon symbols as vector paths. '
+      'Give stacked lines of working or of a memo room to read and to '
+      'write between: baselines at least 2 font-sizes apart, and a further '
+      'font-size under a fraction, root, or sum with limits. The app '
+      'widens any tighter gap, moving the lines below and their '
+      'underlines and leaders down, so leave room under a stack. Put '
+      'data-etonia-fixed="1" on a label whose exact spot matters, such as '
+      'a tick number or a vertex or point name, so it is never moved. '
       'Prefer concise labels, clear diagrams, graphs, arrows, '
-      'underlines, circles, checks, and corrections. Use readable text and '
-      'few colors. Build on selected_ink coordinates where parts should '
-      'touch. To complete, finish, continue, label, or fix the user\'s '
+      'underlines, circles, checks, and corrections. Keep the written text '
+      'short, like a teacher\'s margin note: key results, labels, and '
+      'corrections only, never sentences or the explanation from the '
+      'message; at most about 6 words or one formula per line and at most '
+      '4 lines in all. Use readable text and few colors.Try hard to refer directly to the notes the user took: '
+      'anchor the annotation to their actual ink with a leader arrow, '
+      'underline, circle, or mark, or place a short memo immediately beside '
+      'the relevant stroke. Prefer this over a detached explanation or a '
+      'separate generic diagram. Build on selected_ink coordinates where '
+      'parts should touch. To complete, finish, continue, label, or fix the user\'s '
       'drawing, add only what is missing: new parts that start exactly on '
       'their strokes, taking the touching points from selected_ink, and '
       'never a second copy of a shape already on the paper. For example, '
@@ -770,11 +790,25 @@ abstract final class AiPrompts {
       'elements and omit data-etonia-bounds.';
 
   static const String _svgAnimationOn =
-      ' Animation is enabled. For meaningful motion or staged explanation, '
-      'put data-etonia-step="1", then 2, and so on (maximum 24) on the '
-      'groups or elements that appear in sequence. Fixed labels and the '
-      'reference figure have no step. Set data-etonia-duration-ms on the '
-      'root from 300 through 20000. The steps loop until the user stops '
+      ' Animation is permitted, not requested; the default is a completely '
+      'static notation. Animate only when understanding specifically depends '
+      'on seeing a state evolve over time: an object physically moving or '
+      'changing shape, something propagating or flowing through a system, or '
+      'parts joining, separating, or transforming. Do not animate merely to '
+      'reveal content, show drawing or reasoning order, introduce stages, '
+      'emphasize a result, attract attention, or decorate. If uncertain, keep '
+      'it static. Any content whose semantic purpose is to identify, name, '
+      'measure, orient, reference, explain, or provide a fixed framework is '
+      'always static. This rule covers all words, formulas, symbols, guides, '
+      'markers, annotations, and structural reference marks regardless of '
+      'the subject; examples are illustrative, not exceptions. Never put '
+      'text or fixed informational content in a stepped group. Only a visual '
+      'object that truly changes over time may carry both '
+      'data-etonia-motion="1" and data-etonia-step="1", then 2, and so on '
+      '(maximum 24). A step without data-etonia-motion="1" is ignored. Put '
+      'data-etonia-static="1" on fixed children that must sit inside a moving '
+      'group. Set data-etonia-duration-ms on the root from 300 through 20000 '
+      'only when eligible motion exists. The steps loop until the user stops '
       'animation. Do not use JavaScript or external animation resources.';
 
   static const String _svgAnimationOff =
@@ -791,17 +825,16 @@ abstract final class AiPrompts {
 
   // ignore: unused_field
   static const String _animationOn =
-      ' Animation is enabled: use it readily, but only for what moves: a '
-      'flow travelling along a path, a body or wave moving, forces acting '
-      'in turn, stages of a process, atoms that combine or separate, a '
-      'point traced along a curve. Animations also stay correct when their '
-      'strokes are replaced or erased. Never animate fixed labeling (labels, '
-      'axes, text, formulas, pointer arrows, the figure itself): give fixed '
-      'items no step, so they appear at once; a notation with nothing that '
-      'moves has no steps. Give a moving item a step, a whole number from '
-      '1: steps are drawn in order, and items that share a step are drawn '
-      'together. The animation repeats until the user stops it; fixed items '
-      'are not redrawn. The app sets the pace, so never give times.';
+      ' Animation is permitted but static is the default. Use steps only '
+      'when comprehension requires seeing physical movement or deformation, '
+      'propagation or flow, or parts joining, separating, or transforming. '
+      'Never animate a reveal, explanation sequence, emphasis, decoration, '
+      'or anything whose purpose is fixed identification, measurement, '
+      'orientation, reference, structure, or explanation. If uncertain, use '
+      'no steps. Fixed items appear at once and are not redrawn. Animations '
+      'also stay correct when their strokes are replaced or erased. The '
+      'animation repeats until the user stops it. The app sets the pace, so '
+      'never give times.';
 
   // ignore: unused_field
   static const String _animationOff =
@@ -842,9 +875,9 @@ abstract final class AiPrompts {
 /// How large the assistant writes text on the note, as the writer prefers:
 /// the range of capital heights, in logical units, it is asked to keep to.
 enum AiTextSize {
-  small('Small', 14, 22),
-  medium('Medium', 18, 30),
-  large('Large', 26, 40);
+  small('Small', 10, 15),
+  medium('Medium', 12, 19),
+  large('Large', 16, 26);
 
   const AiTextSize(this.label, this.min, this.max);
 

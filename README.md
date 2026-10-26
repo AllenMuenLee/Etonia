@@ -16,7 +16,7 @@ saved yet.
 | Dart | 3.12.2 (bundled with that Flutter) |
 | Android `minSdk` | 24 (Android 7.0), set in `android/app/build.gradle.kts` |
 | Android `compileSdk` / `targetSdk` | 36, from the Flutter Gradle plugin |
-| iOS deployment target | 13.0, set in `ios/Runner.xcodeproj` |
+| iOS deployment target | 14.0, set in `ios/Runner.xcodeproj` |
 | Application ID / bundle ID | `com.etonia.app` |
 
 The layout targets tablets. Widths below 600 logical pixels get a working
@@ -919,10 +919,14 @@ Without configured account services, local editing works and paid AI fails close
 
 ### Models and privacy
 
-The picker offers Haiku, Luna, Sonnet, Sol, Opus, Argon, and Astra. Provider model
-IDs, token rates, and output limits come from the server's `AI_MODEL_CONFIG`, with
-an example in `supabase/model-config.example.json`. The selected alias is a local
-preference; the client cannot choose an arbitrary provider URL, price, or balance.
+The picker offers Haiku, Luna, Sonnet, Sol, Opus, Argon, and Astra for the
+answer. The notation/animation model is not user-selectable: the server chooses
+it through `AI_NOTATION_MODEL`, defaulting to Luna. Provider model IDs, token
+rates, and output limits come from the server's `AI_MODEL_CONFIG`, with an
+example in `supabase/model-config.example.json`. Answer models use the
+provider/model's default reasoning behavior; the separate notation pass always
+uses high reasoning. The client cannot choose an arbitrary provider URL,
+notation model, price, or balance.
 
 Each AI request temporarily forwards the current question, at most 12 complete
 turns from that selection's conversation, and the selected PNG crop. Older turns

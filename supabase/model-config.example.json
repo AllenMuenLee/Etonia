@@ -1,8 +1,8 @@
 {
   "haiku": { "provider": "claude", "model": "YOUR_HAIKU_MODEL_ID", "inputMicroPerKilo": 100, "outputMicroPerKilo": 500, "maxOutputTokens": 16384 },
-  "luna": { "provider": "openai", "model": "YOUR_LUNA_MODEL_ID", "inputMicroPerKilo": 100, "outputMicroPerKilo": 500, "maxOutputTokens": 16384, "reasoningEffort": "medium" },
+  "luna": { "provider": "openai", "model": "YOUR_LUNA_MODEL_ID", "inputMicroPerKilo": 100, "outputMicroPerKilo": 500, "maxOutputTokens": 16384 },
   "sonnet": { "provider": "claude", "model": "YOUR_SONNET_MODEL_ID", "inputMicroPerKilo": 2000, "outputMicroPerKilo": 10000, "maxOutputTokens": 16384 },
-  "sol": { "provider": "openai", "model": "YOUR_SOL_MODEL_ID", "inputMicroPerKilo": 2000, "cachedInputMicroPerKilo": 200, "outputMicroPerKilo": 10000, "maxOutputTokens": 16384, "reasoningEffort": "low" },
+  "sol": { "provider": "openai", "model": "YOUR_SOL_MODEL_ID", "inputMicroPerKilo": 2000, "cachedInputMicroPerKilo": 200, "outputMicroPerKilo": 10000, "maxOutputTokens": 16384 },
   "opus": { "provider": "claude", "model": "YOUR_OPUS_MODEL_ID", "inputMicroPerKilo": 4000, "outputMicroPerKilo": 20000, "maxOutputTokens": 16384 },
   "argon": { "provider": "gemini", "model": "YOUR_ARGON_MODEL_ID", "inputMicroPerKilo": 4000, "outputMicroPerKilo": 20000, "maxOutputTokens": 16384 },
   "astra": { "provider": "openai", "model": "YOUR_ASTRA_MODEL_ID", "inputMicroPerKilo": 10000, "outputMicroPerKilo": 50000, "maxOutputTokens": 16384 }

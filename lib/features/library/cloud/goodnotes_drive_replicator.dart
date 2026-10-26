@@ -82,6 +82,7 @@ class ReplicationSummary {
 /// Finds the Goodnotes folder in Google Drive and replicates it into the
 /// library: the same folders nested directly under the chosen destination,
 /// with every `.goodnotes` notebook and PDF imported as a note in its folder.
+/// A PDF that is only the export of a notebook beside it is left out.
 ///
 /// Running it again reuses the folders already made, matched by name and
 /// place, and leaves out files imported before that have not changed since;
@@ -243,10 +244,18 @@ class GoodnotesDriveReplicator {
             ),
           );
         } else {
-          files.add(_RemoteFile(child, folder.localId, path));
+          files.add(_RemoteFile(child, folder.item.id, folder.localId, path));
         }
       }
     }
+
+    // Goodnotes backs each notebook up twice: as its `.goodnotes` file and,
+    // beside it, as a PDF export with the ink printed on the pages. The
+    // export of a notebook that came in is left out, so the notebook's ink
+    // is the only copy and stays editable; it comes in only when the
+    // notebook could not. Files are in name order, so a notebook comes
+    // before its export.
+    final Set<String> notebooksIn = <String>{};
 
     final Map<String, Object?> imports = _importsFrom(await state.read());
     final Map<String, NoteEntry> liveNotes = await _liveNotes();
@@ -290,6 +299,18 @@ class GoodnotesDriveReplicator {
       final NoteEntry? previousEntry = previousNote == null
           ? null
           : liveNotes[previousNote];
+      if (kind == _FileKind.pdf && notebooksIn.contains(file.notebookKey)) {
+        // An export an earlier run imported goes to Recently Deleted.
+        if (previousEntry != null) {
+          await repository.deleteNote(previousEntry.id);
+        }
+        if (imports.remove(file.item.id) != null) {
+          await state.update((Map<String, Object?> values) {
+            values[_importsKey] = imports;
+          });
+        }
+        continue;
+      }
       final bool previousExists = previousEntry != null;
       if (previousExists &&
           (previous! as Map<String, Object?>)['modified'] == modified) {
@@ -297,6 +318,7 @@ class GoodnotesDriveReplicator {
         if (existing.folderId != file.localFolderId) {
           await repository.moveNote(existing.id, file.localFolderId);
         }
+        if (kind == _FileKind.goodnotes) notebooksIn.add(file.notebookKey);
         unchanged++;
         continue;
       }
@@ -333,6 +355,7 @@ class GoodnotesDriveReplicator {
         continue;
       }
       imported.add(file.path);
+      if (kind == _FileKind.goodnotes) notebooksIn.add(file.notebookKey);
       if (previousEntry != null && previousEntry.id != note.id) {
         await repository.deleteNote(previousEntry.id);
       }
@@ -445,9 +468,24 @@ class _RemoteFolder {
 }
 
 class _RemoteFile {
-  _RemoteFile(this.item, this.localFolderId, this.path);
+  _RemoteFile(this.item, this.folderId, this.localFolderId, this.path);
 
   final GoogleDriveItem item;
+
+  /// The Drive folder it is in.
+  final String folderId;
   final String? localFolderId;
   final String path;
+
+  /// The same for a notebook and its PDF export: `X.goodnotes` and `X.pdf`
+  /// in the same folder.
+  String get notebookKey {
+    final String name = item.name.toLowerCase();
+    final String base = name.endsWith('.goodnotes')
+        ? name.substring(0, name.length - '.goodnotes'.length)
+        : name.endsWith('.pdf')
+        ? name.substring(0, name.length - '.pdf'.length)
+        : name;
+    return '$folderId/$base';
+  }
 }

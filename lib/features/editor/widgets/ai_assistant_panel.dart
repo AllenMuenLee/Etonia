@@ -503,8 +503,8 @@ class _AiAssistantPanelState extends State<AiAssistantPanel> {
     }
     cursor += controller.messages.length;
 
-    // The answer as it is written. It becomes a message, and any drawing
-    // is added to the note, once all of it has arrived.
+    // The answer as it is written. In a two-phase request its completed text
+    // remains visible here while the notation model finishes separately.
     final String? partial = controller.requestState == AiRequestState.sending
         ? controller.partialAnswer
         : null;
@@ -521,6 +521,28 @@ class _AiAssistantPanelState extends State<AiAssistantPanel> {
     }
     if (controller.requestState == AiRequestState.sending) {
       if (index == cursor++) {
+        if (controller.isLoadingNotation) {
+          return Padding(
+            padding: const EdgeInsets.only(bottom: AppSpacing.sm),
+            child: Row(
+              children: <Widget>[
+                const EtoniaBarsLoader(
+                  size: 32,
+                  semanticsLabel: 'Notation is loading',
+                ),
+                const SizedBox(width: AppSpacing.sm),
+                Expanded(
+                  child: Text(
+                    'Notation is loading…',
+                    style: text.bodyMedium?.copyWith(
+                      color: colors.textSecondary,
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          );
+        }
         // Where the answer will be written, until its first words arrive.
         return const Padding(
           padding: EdgeInsets.only(bottom: AppSpacing.sm),
@@ -1191,7 +1213,9 @@ class _MessageBubble extends StatelessWidget {
                     ? Text(message.displayText, style: text.bodyMedium)
                     : SelectionArea(
                         child: GptMarkdown(
-                          delimitBareMath(message.displayText),
+                          delimitBareMath(
+                            normalizeInlineMath(message.displayText),
+                          ),
                           style: text.bodyMedium,
                           textDirection: Directionality.of(context),
                           useDollarSignsForLatex: true,

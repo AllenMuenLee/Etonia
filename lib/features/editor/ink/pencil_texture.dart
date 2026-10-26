@@ -3,12 +3,21 @@ import 'dart:ui';
 
 import 'ink_sample.dart';
 
+/// How opaque each strength of graphite dot is, lightest first.
+const List<double> _dotOpacity = <double>[0.2, 0.42, 0.72];
+
+/// A dot's diameter by strength, as a share of the base dot: the darker the
+/// dot, the finer the point of graphite that left it.
+const List<double> _dotScale = <double>[1.15, 0.95, 0.75];
+
 /// Paints a stable graphite texture over a stroke.
 ///
-/// The texture is made from many short deposits across the full nib width,
-/// like graphite catching on paper fibres. It uses only Flutter's canvas
-/// primitives, so the same stroke is reproduced on every supported platform
-/// and in previews, thumbnails, snapshots, and image exports.
+/// The stroke is made of many round dots of graphite scattered across its
+/// whole width and along its length. Dots overlap and so join into one mark;
+/// some are darker and some lighter, which gives the grain. It uses only
+/// Flutter's canvas primitives, so the same stroke is reproduced on every
+/// supported platform and in previews, thumbnails, snapshots, and image
+/// exports, and a stroke being drawn looks as it will when finished.
 void paintPencilTexture(
   Canvas canvas, {
   required Color color,
@@ -18,13 +27,15 @@ void paintPencilTexture(
   required bool isDot,
   Path? outline,
 }) {
+  final double dot = (width * 0.2).clamp(0.55, 2.4);
   if (isDot) {
-    _paintGraphiteDot(canvas, color, width, origin);
+    _paintGraphiteDot(canvas, color, width, dot, origin);
     return;
   }
 
+  // A faint ground keeps the dots from reading as separate specks.
   final Paint body = Paint()
-    ..color = color.withValues(alpha: color.a * 0.24)
+    ..color = color.withValues(alpha: color.a * 0.1)
     ..isAntiAlias = true;
 
   if (outline != null) {
@@ -43,16 +54,20 @@ void paintPencilTexture(
     );
   }
 
-  final List<Path> deposits = List<Path>.generate(3, (_) => Path());
+  final List<List<Offset>> dots = List<List<Offset>>.generate(
+    _dotOpacity.length,
+    (_) => <Offset>[],
+  );
   int state = _seed(origin, width);
   double randomUnit() {
     state = (state * 1103515245 + 12345) & 0x7fffffff;
     return state / 0x7fffffff;
   }
 
-  final double radius = math.max(0.35, width / 2);
-  final double spacing = (width * 0.17).clamp(0.42, 1.15);
-  final int density = (width * 1.4).ceil().clamp(3, 14);
+  final double radius = math.max(0.3, width / 2 - dot * 0.35);
+  // Close enough along the stroke that neighbouring dots overlap.
+  final double spacing = (dot * 0.55).clamp(0.3, 1.2);
+  final int density = (width * 1.6 / dot).ceil().clamp(3, 18);
   for (final PathMetric metric in path.computeMetrics()) {
     double distance = randomUnit() * spacing;
     while (distance < metric.length) {
@@ -66,39 +81,29 @@ void paintPencilTexture(
       );
       final Offset normal = Offset(-direction.dy, direction.dx);
       for (int i = 0; i < density; i++) {
-        // Adding two random values concentrates graphite toward the middle,
-        // while still leaving the softly broken edge of a real pencil mark.
-        final double across = (randomUnit() + randomUnit() - 1) * radius * 0.94;
-        final double along = (randomUnit() - 0.5) * spacing;
-        final Offset start =
-            tangent.position + direction * along + normal * across;
-        final double length = spacing * (0.3 + randomUnit() * 1.15);
-        final Offset end =
-            start +
-            direction * length +
-            normal * ((randomUnit() - 0.5) * width * 0.08);
-        final int strength = randomUnit() < 0.18
+        final double across = (randomUnit() * 2 - 1) * radius;
+        final double along = (randomUnit() - 0.5) * spacing * 2;
+        final double pick = randomUnit();
+        final int strength = pick < 0.22
             ? 2
-            : randomUnit() < 0.48
+            : pick < 0.58
             ? 1
             : 0;
-        deposits[strength]
-          ..moveTo(start.dx, start.dy)
-          ..lineTo(end.dx, end.dy);
+        dots[strength].add(
+          tangent.position + direction * along + normal * across,
+        );
       }
       distance += spacing;
     }
   }
 
-  const List<double> opacity = <double>[0.18, 0.29, 0.43];
-  const List<double> thickness = <double>[0.075, 0.105, 0.14];
-  for (int i = 0; i < deposits.length; i++) {
-    canvas.drawPath(
-      deposits[i],
+  for (int i = 0; i < dots.length; i++) {
+    canvas.drawPoints(
+      PointMode.points,
+      dots[i],
       Paint()
-        ..color = color.withValues(alpha: color.a * opacity[i])
-        ..style = PaintingStyle.stroke
-        ..strokeWidth = (width * thickness[i]).clamp(0.22, 0.9)
+        ..color = color.withValues(alpha: color.a * _dotOpacity[i])
+        ..strokeWidth = dot * _dotScale[i]
         ..strokeCap = StrokeCap.round
         ..isAntiAlias = true,
     );
@@ -113,6 +118,7 @@ void _paintGraphiteDot(
   Canvas canvas,
   Color color,
   double width,
+  double dot,
   InkVector origin,
 ) {
   final Offset center = Offset(origin.x, origin.y);
@@ -121,7 +127,7 @@ void _paintGraphiteDot(
     center,
     radius,
     Paint()
-      ..color = color.withValues(alpha: color.a * 0.24)
+      ..color = color.withValues(alpha: color.a * 0.1)
       ..isAntiAlias = true,
   );
 
@@ -131,32 +137,33 @@ void _paintGraphiteDot(
     return state / 0x7fffffff;
   }
 
-  final List<List<Offset>> deposits = List<List<Offset>>.generate(
-    3,
+  final List<List<Offset>> dots = List<List<Offset>>.generate(
+    _dotOpacity.length,
     (_) => <Offset>[],
   );
-  final int count = math.max(8, (width * width * 1.7).round());
+  final double reach = math.max(0.3, radius - dot * 0.35);
+  final int count = math.max(10, (width * width * 2.2 / (dot * dot)).round());
   for (int i = 0; i < count; i++) {
-    final double distance = math.sqrt(randomUnit()) * radius * 0.9;
+    final double distance = math.sqrt(randomUnit()) * reach;
     final double angle = randomUnit() * math.pi * 2;
-    final int strength = randomUnit() < 0.16
+    final double pick = randomUnit();
+    final int strength = pick < 0.22
         ? 2
-        : randomUnit() < 0.46
+        : pick < 0.58
         ? 1
         : 0;
-    deposits[strength].add(
+    dots[strength].add(
       center + Offset(math.cos(angle), math.sin(angle)) * distance,
     );
   }
 
-  const List<double> opacity = <double>[0.20, 0.32, 0.48];
-  for (int i = 0; i < deposits.length; i++) {
+  for (int i = 0; i < dots.length; i++) {
     canvas.drawPoints(
       PointMode.points,
-      deposits[i],
+      dots[i],
       Paint()
-        ..color = color.withValues(alpha: color.a * opacity[i])
-        ..strokeWidth = (width * (0.08 + i * 0.025)).clamp(0.25, 0.8)
+        ..color = color.withValues(alpha: color.a * _dotOpacity[i])
+        ..strokeWidth = dot * _dotScale[i]
         ..strokeCap = StrokeCap.round
         ..isAntiAlias = true,
     );

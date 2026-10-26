@@ -9,12 +9,7 @@ export interface ModelConfig {
   /** What a cached input token costs, from the provider's price list. Without
    * it, cached input is billed as any other input. */
   cachedInputMicroPerKilo?: number;
-  /** How hard the model thinks before answering: OpenAI's reasoning_effort, or
-   * Gemini's thinkingLevel. Reasoning is billed as output, so a lower effort is
-   * the largest saving per answer. Without it, the provider's default. */
-  reasoningEffort?: string;
 }
-const reasoningEfforts = ["none", "minimal", "low", "medium", "high"];
 export const aliases = ["haiku", "luna", "sonnet", "sol", "opus", "argon", "astra"];
 export interface AiInput {
   requestId: string;
@@ -48,10 +43,11 @@ const maxHistoryMessages = 24;
 const maxSchemaBytes = 256000;
 const hardMaxOutputTokens = 16384;
 /** With Notation on, the user's model writes the words only, within this many
- * output tokens; the drawing is left to [drawingModel]. */
+ * output tokens; the drawing is left to the separately selected model. */
 export const answerOutputCap = 8192;
-/** The model that turns an answer into the editable notation SVG. */
-export const drawingModel = "luna";
+/** The model that turns an answer into editable notation when the client has
+ * not made a separate choice. */
+export const defaultDrawingModel = "luna";
 
 export function validatePng(image: unknown): asserts image is string {
   if (
@@ -173,10 +169,28 @@ export function modelConfig(catalog: Record<string, ModelConfig>, alias: string)
     (model.cachedInputMicroPerKilo !== undefined &&
       (!Number.isSafeInteger(model.cachedInputMicroPerKilo) ||
         model.cachedInputMicroPerKilo < 0 ||
-        model.cachedInputMicroPerKilo > model.inputMicroPerKilo)) ||
-    (model.reasoningEffort !== undefined &&
-      !reasoningEfforts.includes(model.reasoningEffort))
+    model.cachedInputMicroPerKilo > model.inputMicroPerKilo))
   ) throw new Failure("not_configured", 503);
+  return model;
+}
+
+/** The stricter of the answer and notation model for plan authorization.
+ * The database needs one alias: frontier outranks standard, which outranks
+ * the always-included models. Cost reservation still uses both real models. */
+export function billingModel(answer: string, notation?: string): string {
+  const rank = (model: string) =>
+    ["opus", "argon", "astra"].includes(model) ? 2 :
+      ["sonnet", "sol"].includes(model) ? 1 : 0;
+  return notation !== undefined && rank(notation) > rank(answer)
+    ? notation
+    : answer;
+}
+
+/** The server-controlled model used for notation and animation. A missing or
+ * blank environment value preserves Luna; clients cannot override it. */
+export function configuredDrawingModel(value: string | undefined): string {
+  const model = value?.trim() || defaultDrawingModel;
+  if (!aliases.includes(model)) throw new Failure("not_configured", 503);
   return model;
 }
 /** Which request an input bound is for: a plain one, or the answer or drawing
@@ -299,8 +313,9 @@ function instruction(input: AiInput, notation = false): string {
   return fixedInstruction(input, notation) + (notation ? " " + requestInstruction(input) : "");
 }
 
-/** One phase of a notation-enabled request: the user's model writes the words
- * from the clean crop, then [drawingModel] draws them from the gridded one. */
+/** One phase of a notation-enabled request: the user's answer model writes the
+ * words from the clean crop, then its separately selected notation model draws
+ * them from the gridded one. */
 export type AiStep =
   | { step: "text" }
   | { step: "notation"; message: string; visual?: "static" };
@@ -380,13 +395,22 @@ export function drawingRequest(input: AiInput, visual?: "static"): string {
     (earlier.length > 0
       ? `\nEarlier in this conversation they asked: ${earlier.map((t) => JSON.stringify(t)).join("; ")}`
       : "") +
-    "\nFollowing your explanation, put on the note what this request calls for. If it asks you to " +
+    "\nFollowing your explanation, actively look for a useful note-grounded visual and add one " +
+    "whenever it can clarify or reinforce the answer. Put on the note what this request calls for. " +
+    "If it asks you to " +
     "draw, complete, label, mark, plot, or fix something, do that directly on their own ink, adding " +
-    "only what is missing. " +
+    "only what is missing. Whenever possible, connect the annotation to the user's actual notes: " +
+    "point a leader arrow at the relevant ink, mark it directly, or place a short memo beside it, " +
+    "instead of making a detached generic visual. " +
     (visual === "static"
       ? ""
-      : "If it asks for something to move or unfold in stages, animate it with steps. ") +
-    "Otherwise add only the useful visual, or no visible elements when none helps.";
+      : "Animation is optional and the default is static. Use it only when understanding requires " +
+        "seeing physical motion, propagation or flow, or parts joining, separating, or transforming. " +
+        "Never animate content merely to reveal it, sequence an explanation, emphasize it, or decorate. " +
+        "Anything that identifies, measures, or provides fixed explanatory or reference information " +
+        "must remain static, regardless of the subject. If uncertain, keep everything static. ") +
+    "Keep its words few: short labels, key results, and corrections, never the explanation itself. " +
+    "Add only the useful visual, and omit visible elements only when no meaningful visual helps.";
 }
 
 export function providerRequest(
@@ -400,6 +424,9 @@ export function providerRequest(
   headers: Record<string, string>;
   body: Record<string, unknown>;
 } {
+  // Answering models use their provider/model default. Drawing is the one
+  // deliberately expensive pass: every provider gets its high setting.
+  const drawing = aiStep?.step === "notation";
   const system = instruction(input, aiStep?.step === "notation") +
     (aiStep?.step === "text" ? textStep : aiStep?.step === "notation"
       ? notationStep +
@@ -419,7 +446,7 @@ export function providerRequest(
         store: false,
         stream: false,
         max_completion_tokens: maxOutput,
-        ...(model.reasoningEffort ? { reasoning_effort: model.reasoningEffort } : {}),
+        ...(drawing ? { reasoning_effort: "high" } : {}),
         messages: [
           { role: "system", content: system },
           ...requestHistory,
@@ -456,6 +483,9 @@ export function providerRequest(
         model: model.model,
         max_tokens: maxOutput,
         stream: false,
+        ...(drawing
+          ? { thinking: { type: "adaptive" }, output_config: { effort: "high" } }
+          : {}),
         // The fixed instructions are cached: later requests within five
         // minutes read them at a tenth of the price.
         system: [
@@ -530,9 +560,7 @@ export function providerRequest(
       ],
       generationConfig: {
         maxOutputTokens: maxOutput,
-        ...(model.reasoningEffort
-          ? { thinkingConfig: { thinkingLevel: model.reasoningEffort } }
-          : {}),
+        ...(drawing ? { thinkingConfig: { thinkingLevel: "HIGH" } } : {}),
         responseMimeType: "text/plain",
       },
     },

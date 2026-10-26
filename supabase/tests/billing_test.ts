@@ -134,19 +134,19 @@ Deno.test("Postgres billing: permissions, ownership, renewals, expiry and atomic
     await assert.rejects(() => reserve(), /plan_required/); // Free never unlocks AI.
     await apply(snapshot());
     assert.equal((await state()).plan, "pro1299");
-    assert.equal((await state()).remainingCreditsMicroUsd, 5000000);
+    assert.equal((await state()).remainingCreditsMicroUsd, 4000000);
     // Requests run alongside each other, each holding only its own cap.
     await reserve(req1, "sol", 1000000);
     await reserve(req2, "sol", 1000000);
-    assert.equal((await state()).remainingCreditsMicroUsd, 3000000);
+    assert.equal((await state()).remainingCreditsMicroUsd, 2000000);
     await settle();
-    assert.equal((await state()).remainingCreditsMicroUsd, 3900000);
+    assert.equal((await state()).remainingCreditsMicroUsd, 2900000);
     await settle();
-    assert.equal((await state()).remainingCreditsMicroUsd, 3900000);
+    assert.equal((await state()).remainingCreditsMicroUsd, 2900000);
     await settle(req2, true);
-    assert.equal((await state()).remainingCreditsMicroUsd, 4900000);
+    assert.equal((await state()).remainingCreditsMicroUsd, 3900000);
     await apply(snapshot());
-    assert.equal((await state()).remainingCreditsMicroUsd, 4900000);
+    assert.equal((await state()).remainingCreditsMicroUsd, 3900000);
     await assert.rejects(() => reserve(), /request_in_progress/);
     await assert.rejects(() => reserve(crypto.randomUUID(), "sol", 0), /rejected/);
     // At most four at once; one stuck pending for ten minutes stops counting
@@ -160,15 +160,15 @@ Deno.test("Postgres billing: permissions, ownership, renewals, expiry and atomic
     const after = crypto.randomUUID();
     await reserve(after, "sol", 1000);
     for (const id of [...running.slice(1), after]) await settle(id, true);
-    assert.equal((await state()).remainingCreditsMicroUsd, 4899000);
+    assert.equal((await state()).remainingCreditsMicroUsd, 3899000);
     await assert.rejects(() => apply(snapshot(), other), /purchase_owner/);
     const last = crypto.randomUUID();
     await reserve(last); // Without a cap, the whole balance is held.
     assert.equal((await state()).remainingCreditsMicroUsd, 0);
     await apply(snapshot("renewal"));
-    assert.equal((await state()).remainingCreditsMicroUsd, 5000000);
+    assert.equal((await state()).remainingCreditsMicroUsd, 4000000);
     await settle(last, true); // Old request must never add credits to a new grant.
-    assert.equal((await state()).remainingCreditsMicroUsd, 5000000);
+    assert.equal((await state()).remainingCreditsMicroUsd, 4000000);
     await apply(snapshot("renewal", false));
     assert.equal((await state()).activePlan, null);
     await assert.rejects(() => reserve("cccccccc-cccc-4ccc-8ccc-cccccccccccc"), /plan_required/);
@@ -216,6 +216,8 @@ Deno.test("Postgres billing: permissions, ownership, renewals, expiry and atomic
       "account_plans",
       "accounts",
       "devices",
+      "gift_codes",
+      "gift_redemptions",
       "grants",
       "plans",
       "products",

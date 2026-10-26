@@ -14,6 +14,7 @@ import '../editor/page/page_background.dart';
 import '../editor/page/page_setup.dart';
 import '../editor/sticky/sticky_note.dart';
 import '../editor/sticky/sticky_note_painter.dart';
+import '../editor/text/note_text.dart';
 import 'library_models.dart';
 import 'note_content.dart';
 import 'note_repository.dart';
@@ -738,6 +739,10 @@ class NoteThumbnailPainter extends CustomPainter {
       right = math.max(right, note.bounds.right);
       bottom = math.max(bottom, note.bounds.bottom);
     }
+    for (final NoteTextElement text in page.textElements) {
+      right = math.max(right, text.bounds.right);
+      bottom = math.max(bottom, text.bounds.bottom);
+    }
     return Size(right, bottom);
   }
 
@@ -783,6 +788,20 @@ class NoteThumbnailPainter extends CustomPainter {
           continue;
         }
         paintStickyNote(canvas, note);
+      }
+      for (final NoteTextElement element in page.textElements) {
+        if (element.bounds.top > visible.height) continue;
+        final TextPainter painter = TextPainter(
+          text: TextSpan(
+            text: element.text,
+            style: element.settings.resolve(brightness),
+          ),
+          textAlign: element.settings.alignment,
+          textDirection: TextDirection.ltr,
+        )..layout(maxWidth: element.width);
+        painter
+          ..paint(canvas, Offset(element.position.x, element.position.y))
+          ..dispose();
       }
     }
     canvas.restore();

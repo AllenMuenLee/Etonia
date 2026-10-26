@@ -1,6 +1,6 @@
 import 'dart:collection';
 import 'dart:math' as math;
-import 'dart:ui' show Rect, Size;
+import 'dart:ui' show Offset, Rect, Size;
 
 import 'package:flutter/foundation.dart';
 
@@ -21,6 +21,7 @@ import 'stroke.dart';
 import 'stroke_spatial_index.dart';
 import '../document_io/document_models.dart';
 import '../sticky/sticky_note.dart';
+import '../text/note_text.dart';
 
 @immutable
 class InkRecordingContext {
@@ -75,12 +76,14 @@ class InkController {
     Iterable<Stroke> strokes = const <Stroke>[],
     Iterable<NoteImageElement> images = const <NoteImageElement>[],
     Iterable<StickyNoteElement> stickyNotes = const <StickyNoteElement>[],
+    Iterable<NoteTextElement> textElements = const <NoteTextElement>[],
     Iterable<ErasedStrokeRecord> erasedStrokeRecords =
         const <ErasedStrokeRecord>[],
   }) : assert(historyLimit >= 0),
        _strokes = List<Stroke>.of(strokes),
        _images = List<NoteImageElement>.of(images),
        _stickies = List<StickyNoteElement>.of(stickyNotes),
+       _texts = List<NoteTextElement>.of(textElements),
        _erasedStrokeRecords = List<ErasedStrokeRecord>.of(erasedStrokeRecords) {
     _committed = _snapshot();
   }
@@ -107,6 +110,7 @@ class InkController {
   final _Notifier _svgAnimationChanged = _Notifier();
   final _Notifier _hiddenChanged = _Notifier();
   final _Notifier _stickyEditChanged = _Notifier();
+  final _Notifier _textEditChanged = _Notifier();
   final Set<Stroke> _hidden = HashSet<Stroke>.identity();
   final List<ValueChanged<Map<Stroke, Stroke>>> _replacementListeners =
       <ValueChanged<Map<Stroke, Stroke>>>[];
@@ -119,6 +123,18 @@ class InkController {
 
   /// The page's sticky notes, in paint order: above images and completed page ink.
   List<StickyNoteElement> _stickies;
+
+  /// Typed text boxes, in paint order above ink and sticky notes.
+  List<NoteTextElement> _texts;
+  String? _editingTextId;
+  bool _textEditHasHistoryStep = false;
+
+  /// Whether the open text box was made by this editing session: it is not
+  /// in the history until something is typed into it or it is styled.
+  bool _textEditInserted = false;
+
+  /// How many steps of history the open box has made this session.
+  int _textEditSteps = 0;
 
   /// The sticky note open for writing, if any: strokes and erasing that
   /// start on it go to its own ink.
@@ -175,6 +191,15 @@ class InkController {
   List<StickyNoteElement> get stickyNotes =>
       UnmodifiableListView<StickyNoteElement>(_stickies);
 
+  List<NoteTextElement> get textElements =>
+      UnmodifiableListView<NoteTextElement>(_texts);
+
+  /// Fires when typed text changes, or a text box opens or closes. Strokes
+  /// and erasing never fire it, so the text layer stays put while they run.
+  Listenable get textEditingListenable => _textEditChanged;
+
+  NoteTextElement? get editingText => _textById(_editingTextId);
+
   /// Fires when a sticky note opens for writing or closes.
   Listenable get stickyEditingListenable => _stickyEditChanged;
 
@@ -204,6 +229,29 @@ class InkController {
     for (final StickyNoteElement note in _stickies) {
       if (note.id == id) {
         return note;
+      }
+    }
+    return null;
+  }
+
+  NoteTextElement? _textById(String? id) {
+    if (id == null) return null;
+    for (final NoteTextElement text in _texts) {
+      if (text.id == id) return text;
+    }
+    return null;
+  }
+
+  int _textIndex(String id) =>
+      _texts.indexWhere((NoteTextElement text) => text.id == id);
+
+  NoteTextElement? textAt(InkVector position) {
+    if (!position.isFinite) return null;
+    for (int i = _texts.length - 1; i >= 0; i--) {
+      if (_texts[i].bounds
+          .inflate(8)
+          .contains(Offset(position.x, position.y))) {
+        return _texts[i];
       }
     }
     return null;
@@ -531,6 +579,7 @@ class InkController {
       List<Stroke>.unmodifiable(_strokes),
       List<NoteImageElement>.unmodifiable(_images),
       List<StickyNoteElement>.unmodifiable(_stickies),
+      List<NoteTextElement>.unmodifiable(_texts),
     );
   }
 
@@ -550,6 +599,11 @@ class InkController {
     _strokes = List<Stroke>.of(_committed.strokes);
     _images = List<NoteImageElement>.of(_committed.images);
     _stickies = List<StickyNoteElement>.of(_committed.stickies);
+    _texts = List<NoteTextElement>.of(_committed.texts);
+    _editingTextId = null;
+    _textEditHasHistoryStep = false;
+    _textEditInserted = false;
+    _textEditSteps = 0;
     _selection = null;
     // A note open for writing that went away is closed.
     if (_editingStickyId != null && _stickyById(_editingStickyId) == null) {
@@ -560,6 +614,7 @@ class InkController {
     _revisionBumped();
     _completedChanged.notify();
     _selectionChanged.notify();
+    _textEditChanged.notify();
   }
 
   /// Starts a stroke for [pointer]. Returns false, and changes nothing, when
@@ -1484,6 +1539,220 @@ class InkController {
       _selectionChanged.notify();
     }
     return true;
+  }
+
+  /// Adds a text box at [position] and opens the keyboard editor for it.
+  /// The empty box is not a change yet: its first edit is one step of
+  /// history, and left empty it goes without a trace.
+  bool insertText(
+    InkVector position,
+    TextSettings settings, {
+    required Rect pageBounds,
+  }) {
+    if (_isBusy || !position.isFinite || pageBounds.isEmpty) return false;
+    finishTextEditing();
+    const double preferredWidth = 280;
+    const double edgeInset = 12;
+    final double available = math.max(
+      80,
+      pageBounds.right - position.x - edgeInset,
+    );
+    final double width = math.min(preferredWidth, available);
+    final InkVector topLeft = InkVector(
+      position.x.clamp(pageBounds.left + edgeInset, pageBounds.right - 80),
+      position.y.clamp(pageBounds.top + edgeInset, pageBounds.bottom - 40),
+    );
+    final NoteTextElement element = NoteTextElement(
+      id: NoteTextElement.newId(),
+      position: topLeft,
+      text: '',
+      width: width,
+      settings: settings,
+    );
+    _texts = <NoteTextElement>[..._texts, element];
+    _editingTextId = element.id;
+    _textEditHasHistoryStep = false;
+    _textEditInserted = true;
+    _textEditSteps = 0;
+    _selection = null;
+    _completedChanged.notify();
+    _textEditChanged.notify();
+    _selectionChanged.notify();
+    return true;
+  }
+
+  /// Reopens an existing text box. Its first actual edit gets its own undo
+  /// step; merely tapping it does not change the document.
+  bool editText(String id) {
+    if (_isBusy || _textById(id) == null) return false;
+    if (_editingTextId == id) return true;
+    finishTextEditing();
+    _editingTextId = id;
+    _textEditHasHistoryStep = false;
+    _textEditInserted = false;
+    _textEditSteps = 0;
+    _textEditChanged.notify();
+    return true;
+  }
+
+  /// Applies typing or formatting to the open text box.
+  bool updateEditingText({String? text, TextSettings? settings}) =>
+      _changeEditingText(
+        (NoteTextElement current) =>
+            current.copyWith(text: text, settings: settings),
+      );
+
+  /// Moves the open text box to [position] and gives it [width], clamped
+  /// into [pageBounds]. With [commit] false it only shows the change, as a
+  /// handle is dragged; the commit that ends the drag is one change.
+  bool setEditingTextFrame({
+    InkVector? position,
+    double? width,
+    required Rect pageBounds,
+    bool commit = true,
+  }) {
+    final NoteTextElement? current = editingText;
+    if (_disposed || current == null || pageBounds.isEmpty) return false;
+    final double nextWidth = (width ?? current.width).clamp(
+      80.0,
+      math.max(80.0, math.min(1200.0, pageBounds.width)),
+    );
+    final InkVector at = position ?? current.position;
+    final InkVector nextPosition = InkVector(
+      at.x.clamp(
+        pageBounds.left,
+        math.max(pageBounds.left, pageBounds.right - nextWidth),
+      ),
+      at.y.clamp(
+        pageBounds.top,
+        math.max(pageBounds.top, pageBounds.bottom - 24),
+      ),
+    );
+    if (!commit) {
+      final int index = _textIndex(current.id);
+      _texts = List<NoteTextElement>.of(_texts)
+        ..[index] = current.copyWith(position: nextPosition, width: nextWidth);
+      _completedChanged.notify();
+      _textEditChanged.notify();
+      return true;
+    }
+    // The drag's preview already moved the box: what changes is measured
+    // against the document as last committed.
+    final NoteTextElement? committed = _committed.texts
+        .where((NoteTextElement text) => text.id == current.id)
+        .firstOrNull;
+    final NoteTextElement next = current.copyWith(
+      position: nextPosition,
+      width: nextWidth,
+    );
+    final int index = _textIndex(current.id);
+    if (committed == null) {
+      // A box not typed into yet is not in the document: moving it is no
+      // change either.
+      _texts = List<NoteTextElement>.of(_texts)..[index] = next;
+      _completedChanged.notify();
+      _textEditChanged.notify();
+      return true;
+    }
+    if (committed.position == next.position &&
+        committed.width == next.width &&
+        committed.text == next.text &&
+        committed.settings == next.settings) {
+      _texts = List<NoteTextElement>.of(_texts)..[index] = committed;
+      _completedChanged.notify();
+      _textEditChanged.notify();
+      return false;
+    }
+    // Each drag is a step of its own, apart from the typing around it.
+    return _changeEditingText((_) => next, force: true, newStep: true);
+  }
+
+  /// Removes the open text box, as one change. An empty box made by this
+  /// session goes without a trace.
+  bool deleteEditingText() {
+    final int index = _textIndex(_editingTextId ?? '');
+    if (_disposed || _isBusy || index < 0) return false;
+    final bool empty = _texts[index].text.trim().isEmpty;
+    _texts = List<NoteTextElement>.of(_texts)..removeAt(index);
+    if (!empty || !_dropAbandonedTextStep()) {
+      _documentChanged();
+    }
+    _editingTextId = null;
+    _textEditHasHistoryStep = false;
+    _textEditInserted = false;
+    _textEditSteps = 0;
+    _completedChanged.notify();
+    _textEditChanged.notify();
+    return true;
+  }
+
+  /// Applies [change] to the open box. Typing and styling in a row are one
+  /// step of history; with [newStep] the change is a step of its own, and
+  /// the typing after it starts another.
+  bool _changeEditingText(
+    NoteTextElement Function(NoteTextElement current) change, {
+    bool force = false,
+    bool newStep = false,
+  }) {
+    final int index = _textIndex(_editingTextId ?? '');
+    if (_disposed || index < 0) return false;
+    final NoteTextElement current = _texts[index];
+    final NoteTextElement next = change(current);
+    if (!force &&
+        next.text == current.text &&
+        next.settings == current.settings &&
+        next.position == current.position &&
+        next.width == current.width) {
+      return false;
+    }
+    _texts = List<NoteTextElement>.of(_texts)..[index] = next;
+    final bool amend = !newStep && _textEditHasHistoryStep;
+    _documentChanged(amendLast: amend);
+    if (!amend) _textEditSteps++;
+    _textEditHasHistoryStep = !newStep;
+    _completedChanged.notify();
+    _textEditChanged.notify();
+    return true;
+  }
+
+  /// Called with the open box, left empty, already taken out of [_texts]:
+  /// takes back without a trace what it left in the history, when it is a
+  /// box this session made and nothing else happened to it. Returns whether
+  /// it did; the page is then as it was before the box.
+  bool _dropAbandonedTextStep() {
+    final String? id = _editingTextId;
+    if (!_committed.texts.any((NoteTextElement text) => text.id == id)) {
+      // Never typed into: the document never had it.
+      _completedChanged.notify();
+      return true;
+    }
+    if (!_textEditInserted ||
+        _textEditSteps != 1 ||
+        !_history._lastIsOf(this, 1)) {
+      return false;
+    }
+    _committed = _history._dropLast(1);
+    _texts = List<NoteTextElement>.of(_committed.texts);
+    _revisionBumped();
+    return true;
+  }
+
+  /// Closes the text editor, dropping a text box that was left empty.
+  void finishTextEditing() {
+    final int index = _textIndex(_editingTextId ?? '');
+    if (_editingTextId == null) return;
+    if (index >= 0 && _texts[index].text.trim().isEmpty) {
+      _texts = List<NoteTextElement>.of(_texts)..removeAt(index);
+      if (!_dropAbandonedTextStep()) {
+        _documentChanged(amendLast: _textEditHasHistoryStep);
+      }
+      _completedChanged.notify();
+    }
+    _editingTextId = null;
+    _textEditHasHistoryStep = false;
+    _textEditInserted = false;
+    _textEditSteps = 0;
+    _textEditChanged.notify();
   }
 
   /// Gives the sticky note [id] another paper color or pattern, as one
@@ -2984,6 +3253,7 @@ class InkController {
     _svgAnimationChanged.dispose();
     _hiddenChanged.dispose();
     _stickyEditChanged.dispose();
+    _textEditChanged.dispose();
   }
 }
 
@@ -3356,11 +3626,12 @@ class _HistoryStep {
 }
 
 class _InkSnapshot {
-  const _InkSnapshot(this.strokes, this.images, this.stickies);
+  const _InkSnapshot(this.strokes, this.images, this.stickies, this.texts);
 
   final List<Stroke> strokes;
   final List<NoteImageElement> images;
   final List<StickyNoteElement> stickies;
+  final List<NoteTextElement> texts;
 }
 
 /// A sticky note being placed: shown where it would land while its pointer

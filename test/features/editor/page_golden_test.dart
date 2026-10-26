@@ -113,7 +113,7 @@ void main() {
     );
     document.addPage();
     await tester.pumpAndSettle();
-    await tester.tap(find.byTooltip('Page setup'));
+    await tester.tap(find.byTooltip('Page settings'));
     await tester.pumpAndSettle();
     await expectLater(
       find.byType(GreatnoteApp),

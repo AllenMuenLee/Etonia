@@ -75,4 +75,36 @@ void main() {
       }
     });
   });
+
+  group('normalizeInlineMath', () {
+    test('rewrites formulas the strict dollar rule leaves as source', () {
+      expect(
+        normalizeInlineMath(r'So $ \int x\,dx $ here'),
+        r'So \(\int x\,dx\) here',
+      );
+      expect(
+        normalizeInlineMath('So \$\\int_2^3\\left(x\\right)\ndx\$ is it'),
+        r'So \(\int_2^3\left(x\right) dx\) is it',
+      );
+      expect(normalizeInlineMath(r'$2 \pi r$ long'), r'\(2 \pi r\) long');
+      expect(normalizeInlineMath(r'$x^2$5'), r'\(x^2\)5');
+      expect(normalizeInlineMath(r'Tight $x$ too'), r'Tight \(x\) too');
+    });
+
+    test('leaves prices, display maths, escapes, and code alone', () {
+      const List<String> unchanged = <String>[
+        r'Costs $5 and $10 here',
+        r'From $5-$10',
+        r'Escaped \$5 and \$6',
+        '\$\$\n\\frac{a}{b}\n\$\$',
+        r'Code `$x $` here',
+        '```\n\$ a \\b \$\n```',
+        r'Open $\frac{1}{2} still streaming',
+        'Para \$ \\alpha\n\nnext \$ para',
+      ];
+      for (final String text in unchanged) {
+        expect(normalizeInlineMath(text), text);
+      }
+    });
+  });
 }

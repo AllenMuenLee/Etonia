@@ -1,4 +1,4 @@
-﻿import 'dart:math' as math;
+import 'dart:math' as math;
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/gestures.dart';
@@ -151,9 +151,21 @@ class PageViewport extends StatefulWidget {
 class PageViewportState extends State<PageViewport>
     with SingleTickerProviderStateMixin {
   final Map<Key, ValueNotifier<Rect>> _visible = <Key, ValueNotifier<Rect>>{};
+
+  /// What [PageViewport.pageBuilder] made for each page on screen. Scrolling
+  /// rebuilds this viewport on every frame, but a page's layers do not
+  /// change with it, so they are kept, and not built again, until the
+  /// parent builds again or the theme changes.
+  final Map<Key, Widget> _builtPages = <Key, Widget>{};
+  AppColors? _builtPagesColors;
   final Map<int, Offset> _touches = <int, Offset>{};
   Offset _offset = Offset.zero;
   Offset _maxScroll = Offset.zero;
+
+  /// How far the column scrolls past each of its edges, along each axis.
+  /// Only pages that fill the area along an axis get room there; a column
+  /// already set on the desk stays put.
+  Offset _room = Offset.zero;
   bool _scrolling = false;
 
   late final Ticker _inertiaTicker;
@@ -192,6 +204,10 @@ class PageViewportState extends State<PageViewport>
   /// before they are taken for a pull.
   static const double _pullSlop = 24;
 
+  /// How far past each edge of the column it can be scrolled, in viewport
+  /// pixels, so a page's border can be brought in from the screen's edge.
+  static const double _overscroll = 48;
+
   /// How far the column is scrolled, in viewport pixels.
   Offset get scrollOffset => _offset;
 
@@ -220,6 +236,7 @@ class PageViewportState extends State<PageViewport>
     // changed bound immediately when a page is converted while this viewport
     // keeps its state.
     _zoom = _zoom.clamp(widget.minZoom, widget.maxZoom).toDouble();
+    _builtPages.clear();
     if (widget.currentPage != oldWidget.currentPage &&
         widget.currentPage != _shownPage) {
       _shownPage = widget.currentPage;
@@ -271,8 +288,8 @@ class PageViewportState extends State<PageViewport>
 
   Offset _clamp(Offset offset) {
     return Offset(
-      offset.dx.clamp(0, _maxScroll.dx),
-      offset.dy.clamp(0, _maxScroll.dy),
+      offset.dx.clamp(-_room.dx, _maxScroll.dx + _room.dx),
+      offset.dy.clamp(-_room.dy, _maxScroll.dy + _room.dy),
     );
   }
 
@@ -388,7 +405,7 @@ class PageViewportState extends State<PageViewport>
     if (widget.onPullToAddPage == null || dy == 0) {
       return;
     }
-    final bool atEnd = _offset.dy >= _maxScroll.dy - 0.5;
+    final bool atEnd = _offset.dy >= _maxScroll.dy + _room.dy - 0.5;
     if (dy > 0 && atEnd) {
       _pull.value += dy;
     } else if (dy < 0 && _pull.value > 0) {
@@ -541,10 +558,19 @@ class PageViewportState extends State<PageViewport>
           _zoom,
           lead: _lead,
         );
+        // The room past the column's edges is the reader's to scroll into:
+        // a resize, such as the AI panel opening, that keeps the same place
+        // in view lands there only if the column was already past an edge.
+        bool withinEdges = false;
         if (previous != null &&
             previous.viewport != viewport &&
             previous.rects.length == layout.rects.length &&
             !_jumpPending) {
+          withinEdges =
+              _offset.dx >= 0 &&
+              _offset.dy >= 0 &&
+              _offset.dx <= _maxScroll.dx &&
+              _offset.dy <= _maxScroll.dy;
           _offset = _anchoredOffset(previous, layout);
         }
         // Pages added below the one shown leave it exactly where it was on
@@ -578,11 +604,23 @@ class PageViewportState extends State<PageViewport>
           math.max(0, layout.size.width - viewport.width),
           math.max(0, layout.size.height + layout.top - viewport.height),
         );
+        _room = Offset(
+          layout.rects.any((Rect rect) => rect.width >= viewport.width - 0.5)
+              ? _overscroll
+              : 0,
+          layout.size.height >= viewport.height - 0.5 ? _overscroll : 0,
+        );
         if (_jumpPending && widget.currentPage < widget.pages.length) {
           _jumpPending = false;
           _offset = Offset(0, layout.rects[widget.currentPage].top);
         }
         _offset = _clamp(_offset);
+        if (withinEdges) {
+          _offset = Offset(
+            _offset.dx.clamp(0, _maxScroll.dx),
+            _offset.dy.clamp(0, _maxScroll.dy),
+          );
+        }
 
         // Forget the pages that are gone.
         final Set<Key> keys = widget.pageKeys.toSet();
@@ -598,12 +636,25 @@ class PageViewportState extends State<PageViewport>
         // Pages within a screen of the visible area are built.
         final Rect builtArea = area.inflate(viewport.height);
         final AppColors colors = AppColors.of(context);
+        if (!identical(colors, _builtPagesColors)) {
+          _builtPagesColors = colors;
+          _builtPages.clear();
+        }
+        final Set<Key> builtKeys = <Key>{};
         // A lone page that fills the area is the writing surface itself;
-        // otherwise each page is a sheet of its own on the background.
-        final bool coversArea =
-            widget.pages.length == 1 &&
-            layout.rects.single.width >= viewport.width &&
-            layout.rects.single.height >= viewport.height;
+        // otherwise, or scrolled past an edge, each page is a sheet of its
+        // own on the background.
+        bool coversArea = false;
+        if (widget.pages.length == 1) {
+          final Rect onScreen = layout.rects.single.shift(
+            Offset(-_offset.dx, layout.top - _offset.dy),
+          );
+          coversArea =
+              onScreen.left <= 0 &&
+              onScreen.top <= 0 &&
+              onScreen.right >= viewport.width &&
+              onScreen.bottom >= viewport.height;
+        }
         final bool isDark = Theme.of(context).brightness == Brightness.dark;
         final Color deskColor = Color.lerp(
           colors.background,
@@ -667,6 +718,7 @@ class PageViewportState extends State<PageViewport>
             );
           }
           final PageGeometry geometry = widget.pages[i];
+          builtKeys.add(widget.pageKeys[i]);
           // Only the painter of the page's rules listens, so this is safe
           // during layout.
           final ValueNotifier<Rect> visible = _visibleFor(widget.pageKeys[i])
@@ -686,12 +738,19 @@ class PageViewportState extends State<PageViewport>
                 alignment: Alignment.topLeft,
                 child: ColoredBox(
                   color: colors.writingSurface,
-                  child: widget.pageBuilder(context, i, visible),
+                  child: _builtPages[widget.pageKeys[i]] ??= widget.pageBuilder(
+                    context,
+                    i,
+                    visible,
+                  ),
                 ),
               ),
             ),
           );
         }
+        _builtPages.removeWhere(
+          (Key key, Widget _) => !builtKeys.contains(key),
+        );
         return Listener(
           behavior: HitTestBehavior.translucent,
           onPointerDown: _onPointerDown,
@@ -728,7 +787,10 @@ class PageViewportState extends State<PageViewport>
                     child: CustomPaint(
                       key: const ValueKey<String>('page-scroll-indicators'),
                       painter: _ScrollIndicatorPainter(
-                        offset: _offset,
+                        offset: Offset(
+                          _offset.dx.clamp(0, _maxScroll.dx),
+                          _offset.dy.clamp(0, _maxScroll.dy),
+                        ),
                         maxScroll: _maxScroll,
                         color: colors.textSecondary.withValues(alpha: 0.45),
                       ),

@@ -112,9 +112,10 @@ class HandwritingStyle {
   final HandGlyphs? glyphs;
 
   /// The saved format: 3 added [lineProfile] and [curveProfile], 4 the
-  /// [features] measured from the letters g, a, p, i and w, and 5 made
-  /// them curves of the third degree.
-  static const int version = 5;
+  /// [features] measured from the letters g, a, p, i and w, 5 made them
+  /// cubic curves, 6 learned r directly, and 7 reduced calibration to 14
+  /// letters by building b, f, v and D from shared handwriting variables.
+  static const int version = 7;
 
   /// Gap between letters at [widthScale] 1, in grid units.
   static const double letterSpacing = 1.6;

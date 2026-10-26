@@ -99,8 +99,7 @@ void main() {
     test('a slow stroke is steadier than with the scale off', () {
       // 60 px/s along x with 1 px of alternating sideways shake.
       final List<RawInkSample> samples = <RawInkSample>[
-        for (int i = 0; i < 60; i++)
-          _at(i * 1.0, i.isEven ? 1 : -1, i * 16),
+        for (int i = 0; i < 60; i++) _at(i * 1.0, i.isEven ? 1 : -1, i * 16),
       ];
       double wobble(SmoothingConfig config) {
         final List<InkVector> out = _run(samples, config: config);

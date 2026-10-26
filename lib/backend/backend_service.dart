@@ -205,6 +205,93 @@ class BackendService extends BillingBackend with WidgetsBindingObserver {
     }
   }
 
+  /// Invokes an Edge Function that may answer with server-sent JSON events.
+  /// A normal JSON response is exposed as a one-event stream too, so callers
+  /// can use this during a gradual server rollout.
+  Future<Stream<Map<String, dynamic>>> invokeStream(
+    String name,
+    Map<String, Object?> body, {
+    bool allowAnonymous = false,
+  }) async {
+    final client = _client;
+    String? owner() => allowAnonymous ? client?.auth.currentUser?.id : userId;
+    final before = owner();
+    if (client == null) throw const BackendFailure('not_configured');
+    if (before == null) throw const BackendFailure('unauthorized');
+    try {
+      final response = await client.functions.invoke(
+        name,
+        headers: const <String, String>{'Accept': 'text/event-stream'},
+        body: body,
+        abortSignal: Future<void>.delayed(const Duration(seconds: 115)),
+      );
+      if (before != owner()) throw const BackendFailure('unauthorized');
+      final Object? data = response.data;
+      if (data is Map<String, dynamic>) {
+        return Stream<Map<String, dynamic>>.value(data);
+      }
+      if (data is! Stream) {
+        throw const BackendFailure('server');
+      }
+      final Stream<List<int>> bytes = data.map<List<int>>((Object? chunk) {
+        if (chunk is! List<int>) throw const BackendFailure('server');
+        return chunk;
+      });
+      return _decodeEvents(bytes, owner: owner, expectedOwner: before);
+    } on FunctionException catch (error) {
+      throw _functionFailure(error);
+    }
+  }
+
+  static Stream<Map<String, dynamic>> _decodeEvents(
+    Stream<List<int>> bytes, {
+    required String? Function() owner,
+    required String? expectedOwner,
+  }) async* {
+    try {
+      await for (final String line
+          in bytes
+              .transform(utf8.decoder)
+              .transform(const LineSplitter())
+              .timeout(const Duration(seconds: 115))) {
+        if (owner() != expectedOwner) {
+          throw const BackendFailure('unauthorized');
+        }
+        if (!line.startsWith('data:')) continue;
+        final Object? event = jsonDecode(line.substring(5).trimLeft());
+        if (event is! Map<String, dynamic>) {
+          throw const BackendFailure('server');
+        }
+        yield event;
+      }
+    } on BackendFailure {
+      rethrow;
+    } on Object {
+      throw const BackendFailure('server');
+    }
+  }
+
+  static BackendFailure _functionFailure(FunctionException error) {
+    final details = error.details;
+    const allowed = {
+      'unauthorized',
+      'plan_required',
+      'insufficient_credits',
+      'rate_limited',
+      'purchase_owner',
+      'verification_failed',
+      'not_configured',
+      'request_in_progress',
+      'invalid_code',
+      'code_redeemed',
+      'code_exhausted',
+      'rejected',
+      'server',
+    };
+    final code = details is Map ? details['error'] : null;
+    return BackendFailure(allowed.contains(code) ? code as String : 'server');
+  }
+
   @override
   Future<SubscriptionState> fetchSubscription() async {
     if (userId == null) {

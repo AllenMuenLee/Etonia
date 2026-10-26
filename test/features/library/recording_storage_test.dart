@@ -70,7 +70,7 @@ void main() {
     final NoteContent restored = NoteContent.fromJson(
       jsonDecode(jsonEncode(content.toJson())) as Map<String, Object?>,
     );
-    expect(storageSchema, 6);
+    expect(storageSchema, 8);
     expect(restored.recordings.single.assetPath, 'asset-audio');
     final Stroke restoredStroke = restored.pages.single.strokes.single;
     expect(restoredStroke.completedAtMs, 900);

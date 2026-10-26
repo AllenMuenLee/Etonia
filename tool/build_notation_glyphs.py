@@ -137,6 +137,16 @@ def convert(char, strokes):
     if char in ',;':
         # The font outlines its comma; a pen flicks it.
         out = [s if len(s) == 1 else _comma(s) for s in out]
+    if char == 'I':
+        # A bare upright is a vertical-bar symbol, not a readable capital I.
+        # Keep the distinction in every preset, even before calibration.
+        width = 5.2
+        out = [
+            [(0.0, 0.0), (width, 0.0)],
+            [(width / 2, 0.0), (width / 2, 10.0)],
+            [(0.0, 10.0), (width, 10.0)],
+        ]
+        return width, out
     return right - left, out
 
 

@@ -292,10 +292,19 @@ void main() {
       notationEnabled: true,
       animationEnabled: true,
     );
-    expect(on, contains('Animation is enabled'));
+    expect(on, contains('Animation is permitted, not requested'));
+    expect(on, contains('the default is a completely static notation'));
+    expect(on, contains('Do not animate merely to reveal content'));
+    expect(on, contains('identify, name, measure, orient, reference'));
+    expect(on, contains('all words, formulas, symbols, guides'));
+    expect(on, contains('If uncertain, keep it static'));
+    expect(on, contains('actively look for a useful editable vector'));
+    expect(on, contains('anchor the annotation to their actual ink'));
+    expect(on, contains('place a short memo immediately beside'));
     expect(on, contains('data-etonia-step="1"'));
+    expect(on, contains('data-etonia-motion="1"'));
+    expect(on, contains('data-etonia-static="1"'));
     expect(on, contains('(maximum 24)'));
-    expect(on, contains('Fixed labels and the reference figure have no step'));
     expect(on, contains('The steps loop until the user stops animation'));
     expect(on, contains('data-etonia-duration-ms on the root from 300'));
     expect(on, contains('Do not use JavaScript'));

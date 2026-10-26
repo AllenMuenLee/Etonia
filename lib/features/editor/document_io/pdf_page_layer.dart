@@ -12,6 +12,7 @@ import 'document_models.dart';
 import 'document_platform.dart';
 import 'image_layer.dart';
 import 'asset_byte_cache.dart';
+import 'pdf_paper.dart';
 
 /// A page the editor is about to show, for [PdfPageRenderCache.focus].
 typedef PdfFocusPage = ({PdfPageSource source, Size displayedSize});
@@ -210,7 +211,7 @@ class PdfPageRenderCache {
     _queue.remove(entry);
     _rendering = true;
     entry
-        .start(_loadImage(entry.source, entry.width, entry.height))
+        .start(_loadPaper(entry.source, entry.width, entry.height))
         .whenComplete(() {
           _rendering = false;
           _documentInUse = null;
@@ -289,13 +290,13 @@ class PdfPageRenderCache {
 
   /// Shows [source] at [displayedSize]: [onImage] gets a quick preview
   /// first, unless the sharp render is ready, then the sharp one. Each
-  /// image is the caller's to dispose. Cancel the ticket once the page no
+  /// paper is the caller's to dispose. Cancel the ticket once the page no
   /// longer needs its paper.
   PdfPageTicket show(
     PdfPageSource source,
     Size displayedSize,
     double devicePixelRatio, {
-    required void Function(ui.Image image, bool sharp) onImage,
+    required void Function(PdfPaper paper, bool sharp) onImage,
     required void Function(Object error) onError,
   }) {
     final (int width, int height) = _pixels(displayedSize, devicePixelRatio);
@@ -311,26 +312,26 @@ class PdfPageRenderCache {
     }
     _trimAll();
     _pump();
-    preview?.borrowImage().then(
-      (ui.Image image) {
+    preview?.borrowPaper().then(
+      (PdfPaper paper) {
         if (ticket._cancelled || ticket._sharpShown) {
-          image.dispose();
+          paper.dispose();
           return;
         }
-        onImage(image, false);
+        onImage(paper, false);
       },
       // The sharp render reports failures.
       onError: (Object _) {},
     );
-    sharp.borrowImage().then(
-      (ui.Image image) {
+    sharp.borrowPaper().then(
+      (PdfPaper paper) {
         if (ticket._cancelled) {
-          image.dispose();
+          paper.dispose();
           return;
         }
         ticket._sharpShown = true;
         _release(ticket);
-        onImage(image, true);
+        onImage(paper, true);
       },
       onError: (Object error) {
         if (!ticket._cancelled) onError(error);
@@ -404,7 +405,7 @@ class PdfPageRenderCache {
     return requested * (config.maxPdfRenderDimension / longest);
   }
 
-  Future<ui.Image> _loadImage(
+  Future<PdfPaper> _loadPaper(
     PdfPageSource source,
     int width,
     int height,
@@ -416,10 +417,20 @@ class PdfPageRenderCache {
         rasterizer as PdfDocumentRasterizer,
       );
       _documentInUse = opening;
-      return (await opening).renderImage(
-        source.pageIndex,
-        pixelWidth: width,
-        pixelHeight: height,
+      final OpenPdf open = await opening;
+      if (open is PdfBandRenderer) {
+        return (open as PdfBandRenderer).renderPaper(
+          source.pageIndex,
+          pixelWidth: width,
+          pixelHeight: height,
+        );
+      }
+      return PdfPaper.single(
+        await open.renderImage(
+          source.pageIndex,
+          pixelWidth: width,
+          pixelHeight: height,
+        ),
       );
     }
     final Uint8List? bytes = await _sources.load(source.assetId);
@@ -427,11 +438,13 @@ class PdfPageRenderCache {
       throw StateError('PDF asset missing');
     }
     if (rasterizer is PdfImageRasterizer) {
-      return (rasterizer as PdfImageRasterizer).renderImage(
-        bytes,
-        source.pageIndex,
-        pixelWidth: width,
-        pixelHeight: height,
+      return PdfPaper.single(
+        await (rasterizer as PdfImageRasterizer).renderImage(
+          bytes,
+          source.pageIndex,
+          pixelWidth: width,
+          pixelHeight: height,
+        ),
       );
     }
     final Uint8List png = (await rasterizer.render(
@@ -442,7 +455,7 @@ class PdfPageRenderCache {
     )).png;
     final ui.Codec codec = await ui.instantiateImageCodec(png);
     try {
-      return (await codec.getNextFrame()).image;
+      return PdfPaper.single((await codec.getNextFrame()).image);
     } finally {
       codec.dispose();
     }
@@ -568,7 +581,7 @@ class _PdfRenderCancelled implements Exception {
 class _PdfRenderEntry {
   _PdfRenderEntry(this.source, this.width, this.height, {required this.preview})
     : cost = width * height * 4 {
-    image = _done.future.then((ui.Image resolved) {
+    image = _done.future.then((PdfPaper resolved) {
       _resolved = resolved;
       cost = resolved.width * resolved.height * 4;
       return resolved;
@@ -581,7 +594,7 @@ class _PdfRenderEntry {
   final int width;
   final int height;
   final bool preview;
-  final Completer<ui.Image> _done = Completer<ui.Image>();
+  final Completer<PdfPaper> _done = Completer<PdfPaper>();
 
   /// Pages being shown that wait on this render.
   int waiters = 0;
@@ -590,18 +603,18 @@ class _PdfRenderEntry {
   /// cancel: it runs first and is never dropped.
   bool urgent = false;
 
-  late final Future<ui.Image> image;
+  late final Future<PdfPaper> image;
   Future<Uint8List>? _bytes;
-  ui.Image? _resolved;
+  PdfPaper? _resolved;
   int _borrowers = 0;
   bool _evicted = false;
   int cost;
 
   bool get isReady => _resolved != null;
 
-  Future<void> start(Future<ui.Image> loading) {
+  Future<void> start(Future<PdfPaper> loading) {
     return loading.then(
-      (ui.Image resolved) {
+      (PdfPaper resolved) {
         if (_done.isCompleted) {
           resolved.dispose();
         } else {
@@ -627,7 +640,12 @@ class _PdfRenderEntry {
     try {
       // Await encoding before releasing the borrow: toByteData still needs
       // the native image while its asynchronous encoding is in progress.
-      return await _encodePng(await image);
+      final ui.Image whole = await (await image).toImage();
+      try {
+        return await _encodePng(whole);
+      } finally {
+        whole.dispose();
+      }
     } finally {
       // Export/AI own the returned bytes. Never retain a second PNG copy.
       _bytes = null;
@@ -644,10 +662,21 @@ class _PdfRenderEntry {
     return data.buffer.asUint8List(data.offsetInBytes, data.lengthInBytes);
   }
 
-  Future<ui.Image> borrowImage() async {
+  Future<PdfPaper> borrowPaper() async {
     _borrowers++;
     try {
       return (await image).clone();
+    } finally {
+      _borrowers--;
+      if (_evicted) unawaited(_disposeWhenUnused());
+    }
+  }
+
+  /// The whole page as one image the caller owns.
+  Future<ui.Image> borrowImage() async {
+    _borrowers++;
+    try {
+      return await (await image).toImage();
     } finally {
       _borrowers--;
       if (_evicted) unawaited(_disposeWhenUnused());
@@ -694,7 +723,7 @@ class PdfPageLayer extends StatefulWidget {
 }
 
 class _PdfPageLayerState extends State<PdfPageLayer> {
-  ui.Image? _image;
+  PdfPaper? _paper;
   bool _sharp = false;
   Object? _error;
   double? _pixelRatio;
@@ -728,8 +757,8 @@ class _PdfPageLayerState extends State<PdfPageLayer> {
     _ticket?.cancel();
     _error = null;
     if (!keepShown) {
-      _image?.dispose();
-      _image = null;
+      _paper?.dispose();
+      _paper = null;
       _sharp = false;
     }
     late final PdfPageTicket ticket;
@@ -737,15 +766,15 @@ class _PdfPageLayerState extends State<PdfPageLayer> {
       widget.source,
       widget.displayedSize,
       _pixelRatio ?? 1,
-      onImage: (ui.Image image, bool sharp) {
+      onImage: (PdfPaper paper, bool sharp) {
         // A preview never replaces sharp paper, even stretched paper.
         if (!mounted || !identical(_ticket, ticket) || (_sharp && !sharp)) {
-          image.dispose();
+          paper.dispose();
           return;
         }
-        final ui.Image? previous = _image;
+        final PdfPaper? previous = _paper;
         setState(() {
-          _image = image;
+          _paper = paper;
           _sharp = sharp;
         });
         previous?.dispose();
@@ -765,7 +794,7 @@ class _PdfPageLayerState extends State<PdfPageLayer> {
   void dispose() {
     _ticket?.cancel();
     _ticket = null;
-    _image?.dispose();
+    _paper?.dispose();
     super.dispose();
   }
 
@@ -779,13 +808,15 @@ class _PdfPageLayerState extends State<PdfPageLayer> {
       child: LoadingReveal(
         timing: LoadTimings.pdfPage,
         semanticsLabel: 'Loading PDF page',
-        child: _image != null
+        child: _paper != null
             ? SizedBox.expand(
-                child: RawImage(
-                  image: _image,
-                  fit: BoxFit.fill,
-                  filterQuality: FilterQuality.medium,
-                ),
+                child: _paper!.isSingle
+                    ? RawImage(
+                        image: _paper!.bands.single,
+                        fit: BoxFit.fill,
+                        filterQuality: FilterQuality.medium,
+                      )
+                    : CustomPaint(painter: PdfPaperPainter(_paper!)),
               )
             : _error != null
             ? const Center(child: Text('PDF page unavailable'))

@@ -12,6 +12,30 @@ Widget _wrap(Widget child) {
 }
 
 void main() {
+  testWidgets('a page overview that was never opened is disposed cleanly', (
+    WidgetTester tester,
+  ) async {
+    final NoteDocument doc = NoteDocument();
+    addTearDown(doc.dispose);
+    final ValueNotifier<bool> open = ValueNotifier<bool>(false);
+    addTearDown(open.dispose);
+
+    await tester.pumpWidget(
+      _wrap(
+        PageOverviewAnchor(
+          open: open,
+          document: doc,
+          writingArea: const Size(800, 1000),
+          child: const SizedBox(width: 120, height: 48),
+        ),
+      ),
+    );
+    // Leaving the editor unmounts it; its animation must not be made then,
+    // from a context that can no longer be read.
+    await tester.pumpWidget(_wrap(const SizedBox()));
+    expect(tester.takeException(), isNull);
+  });
+
   group('AddMenuButton', () {
     testWidgets('initial tap opens menu when no action is remembered', (
       WidgetTester tester,
@@ -173,67 +197,93 @@ void main() {
     });
   });
 
-  group('PageControls and FloatingPageControls', () {
-    testWidgets('shows previous, indicator, next, search, and add', (
+  group('page navigation and actions', () {
+    testWidgets('keeps navigation separate from settings and actions', (
       WidgetTester tester,
     ) async {
       final NoteDocument doc = NoteDocument();
       addTearDown(doc.dispose);
       doc.addPage(); // 2 pages total
 
-      bool openedPanel = false;
+      bool openedOverview = false;
+      bool openedSettings = false;
       bool searched = false;
 
       await tester.pumpWidget(
         _wrap(
-          FloatingPageControls(
-            height: 48,
-            width: FloatingPageControls.widthFor(
-              48,
-              find: true,
-              navigation: true,
-            ),
-            child: PageControls(
-              document: doc,
-              showNavigation: true,
-              canFind: true,
-              onFind: (_) => searched = true,
-              onOpenPanel: () => openedPanel = true,
-            ),
+          Row(
+            mainAxisSize: MainAxisSize.min,
+            children: <Widget>[
+              PageNavigationControls(
+                onOpenOverview: () => openedOverview = true,
+              ),
+              PageControls(
+                document: doc,
+                canFind: true,
+                onFind: (_) => searched = true,
+                onOpenSettings: () => openedSettings = true,
+              ),
+            ],
           ),
         ),
       );
 
-      expect(find.byTooltip('Previous page'), findsOneWidget);
-      expect(find.text('2 / 2'), findsOneWidget);
-      expect(find.byTooltip('Next page'), findsOneWidget);
+      // The page number and the arrows live in the overview, not in the bar.
+      expect(
+        find.byKey(const ValueKey<String>('page-number-button')),
+        findsNothing,
+      );
+      expect(find.byTooltip('Previous page'), findsNothing);
+      expect(find.byTooltip('Next page'), findsNothing);
       expect(find.byTooltip('Find handwriting'), findsOneWidget);
       expect(find.byTooltip('Add'), findsOneWidget);
+      expect(find.byTooltip('Page overview'), findsOneWidget);
+      expect(find.byTooltip('Page settings'), findsOneWidget);
 
       // Tap search
       await tester.tap(find.byTooltip('Find handwriting'));
       await tester.pumpAndSettle();
       expect(searched, isTrue);
 
-      // Tap page indicator
-      await tester.tap(find.byTooltip('Page setup'));
+      await tester.tap(find.byTooltip('Page overview'));
       await tester.pumpAndSettle();
-      expect(openedPanel, isTrue);
+      expect(openedOverview, isTrue);
 
-      // Previous page
+      await tester.tap(find.byTooltip('Page settings'));
+      await tester.pumpAndSettle();
+      expect(openedSettings, isTrue);
+    });
+
+    testWidgets('the overview header steps between pages with its arrows', (
+      WidgetTester tester,
+    ) async {
+      final NoteDocument doc = NoteDocument();
+      addTearDown(doc.dispose);
+      doc.addPage(); // 2 pages total, on the second
+
+      await tester.pumpWidget(
+        _wrap(
+          SizedBox(
+            width: PageOverviewPanel.width,
+            height: 600,
+            child: PageOverviewPanel(
+              document: doc,
+              writingArea: const Size(800, 600),
+            ),
+          ),
+        ),
+      );
+
       await tester.tap(find.byTooltip('Previous page'));
       await tester.pumpAndSettle();
       expect(doc.currentIndex, 0);
-      expect(find.text('1 / 2'), findsOneWidget);
 
-      // Next page
       await tester.tap(find.byTooltip('Next page'));
       await tester.pumpAndSettle();
       expect(doc.currentIndex, 1);
-      expect(find.text('2 / 2'), findsOneWidget);
     });
 
-    testWidgets('allows typing in what page to go to in page number section', (
+    testWidgets('the overview header shows the page number to type into', (
       WidgetTester tester,
     ) async {
       final NoteDocument doc = NoteDocument();
@@ -245,9 +295,18 @@ void main() {
 
       await tester.pumpWidget(
         _wrap(
-          PageControls(document: doc, showNavigation: true, onOpenPanel: () {}),
+          SizedBox(
+            width: PageOverviewPanel.width,
+            height: 600,
+            child: PageOverviewPanel(
+              document: doc,
+              writingArea: const Size(800, 600),
+            ),
+          ),
         ),
       );
+
+      expect(find.text('/ 4'), findsOneWidget);
 
       expect(doc.currentIndex, 0);
       final Finder button = find.byKey(

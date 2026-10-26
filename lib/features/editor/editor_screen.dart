@@ -30,6 +30,7 @@ import 'ai/notation_layout.dart';
 import 'ai/notation_font.dart';
 import 'ai/notation_space.dart';
 import 'ai/selection_image_renderer.dart';
+import 'ai/svg_ink_converter.dart';
 import 'ai/svg_notation_styler.dart';
 import 'handwriting/handwriting_calibration.dart';
 import 'handwriting/handwriting_calibration_screen.dart';
@@ -53,6 +54,7 @@ import 'ink/shape_config.dart';
 import 'ink/stroke.dart';
 import 'page/note_document.dart';
 import 'sticky/sticky_note.dart';
+import 'text/note_text.dart';
 import 'page/page_background.dart';
 import 'page/page_setup.dart';
 import 'page/page_viewport.dart';
@@ -284,6 +286,13 @@ class EditorScreenState extends State<EditorScreen>
   /// The tool AI mode hands the page back to when it is turned off.
   EditorTool _writingTool = EditorTool.pen;
 
+  /// What is drawn on the page with the AI tool: a glowing loop around
+  /// something, which is never ink.
+  late final AiCanvasInputController _aiInput = AiCanvasInputController(
+    config: widget.aiCanvasConfig,
+    onCircle: _onAiCircle,
+  );
+
   /// Ordinary pen ink waiting for on-device recognition.
   final List<(Stroke, String?)> _indexingPending = <(Stroke, String?)>[];
   final Set<Stroke> _knownPageStrokes = Set<Stroke>.identity();
@@ -370,7 +379,7 @@ class EditorScreenState extends State<EditorScreen>
     // An open menu hangs over the page wherever it likes, and its size is
     // not known here: while one is open, the pen is left to Flutter, which
     // lets the menu take the press.
-    if (_paletteController.hasOpenPopover) {
+    if (_paletteController.hasOpenPopover || _pageOverviewOpen.value) {
       return const <Rect>[Rect.fromLTRB(-1e6, -1e6, 1e6, 1e6)];
     }
     final Size paletteSize = ToolPalette.sizeFor(
@@ -416,6 +425,25 @@ class EditorScreenState extends State<EditorScreen>
   /// chooses otherwise, then remembered for the session.
   final ValueNotifier<StickyNoteSettings> _stickySettings =
       ValueNotifier<StickyNoteSettings>(const StickyNoteSettings());
+
+  final ValueNotifier<TextSettings> _textSettings = ValueNotifier<TextSettings>(
+    const TextSettings(),
+  );
+
+  void _onTextSettingsChanged(TextSettings next) {
+    _textSettings.value = next;
+    final NoteTextElement? editing = _inkController.editingText;
+    _inkController.updateEditingText(
+      text: editing == null
+          ? null
+          : formattedText(
+              editing.text,
+              from: editing.settings.listStyle,
+              to: next.listStyle,
+            ),
+      settings: next,
+    );
+  }
 
   /// A choice in the sticky note options: it sets the look of the next
   /// note, and restyles the note open for writing, as one step of history.
@@ -981,6 +1009,7 @@ class EditorScreenState extends State<EditorScreen>
   void _onScrollStart(Set<int> pointers) {
     _scrolling = true;
     for (final int pointer in pointers) {
+      _aiInput.cancel(pointer);
       _selectionCarry.cancelPointer(pointer);
     }
     for (final NotePage page in _document.pages) {
@@ -1062,7 +1091,17 @@ class EditorScreenState extends State<EditorScreen>
     }
   }
 
-  Future<void> _openPagePanel() {
+  /// Whether the page overview hangs under the top-left card.
+  late final ValueNotifier<bool> _pageOverviewOpen = ValueNotifier<bool>(false)
+    // Over the page, it takes the pen from the native layer, as a popover
+    // does.
+    ..addListener(_paletteController.popoverChanged.notify);
+
+  void _togglePageOverview() {
+    _pageOverviewOpen.value = !_pageOverviewOpen.value;
+  }
+
+  Future<void> _openPageSettings() {
     return showPagePanel(
       context,
       document: _document,
@@ -1260,39 +1299,78 @@ class EditorScreenState extends State<EditorScreen>
         bounds.isEmpty) {
       return const AiNotationApplication(AiNotationStatus.notAppliedInvalid);
     }
-    final EditableSvg cropped;
+    final StrokeStyle userPenStyle = _penSettings.value.strokeStyle();
+    final EditableSvg styled;
     try {
-      final PenSettings pen = _penSettings.value;
-      cropped = SvgNotationStyler.apply(
+      styled = SvgNotationStyler.apply(
         vector,
         handwriting:
             HandwritingCalibration.current.value ?? HandwritingStyle.standard,
-        defaultInk: pen.ink,
-        penWidth: pen.width,
+        defaultInk: userPenStyle.ink,
+        penWidth: userPenStyle.width,
         snapper: InkSnapper(<List<InkVector>>[
           for (final Stroke stroke in controller.strokes) stroke.points,
         ], reach: const AiNotationConfig().inkSnapDistance),
-      ).croppedToContent();
+        maxTextSize: HandwritingCalibration.textSize.value.max,
+      );
     } on FormatException {
       return const AiNotationApplication(AiNotationStatus.notAppliedInvalid);
     }
-    final NoteImageElement element = NoteImageElement(
-      id: 'svg-ai-${DateTime.now().microsecondsSinceEpoch.toRadixString(36)}',
-      assetId: '',
-      pixelSize: cropped.viewBox.size,
-      center: InkVector(
-        cropped.contentBounds.center.dx,
-        cropped.contentBounds.center.dy,
-      ),
-      size: cropped.contentBounds.size,
-      fileName: '${vector.label}.svg',
-      vector: cropped,
-      aiGenerated: true,
-    );
-    if (!controller.insertImage(element)) {
+    final SvgInkConversion conversion;
+    try {
+      conversion = SvgInkConverter.convert(
+        styled,
+        defaultInk: userPenStyle.ink,
+        defaultWidth: userPenStyle.width,
+        animate:
+            controller.svgAnimationsEnabled &&
+            !MediaQuery.disableAnimationsOf(context),
+      );
+    } on FormatException {
       return const AiNotationApplication(AiNotationStatus.notAppliedInvalid);
     }
-    return const AiNotationApplication(AiNotationStatus.applied);
+    final AddNotationResult result = controller.addAiNotation(
+      traces: conversion.traces,
+      expectedRevision: requestContext.revision,
+      surfaceSize: requestContext.logicalSize,
+      playbackDuration: conversion.playbackDuration,
+      limits: const GeneratedInkLimits(
+        maxPointsPerTrace: 8192,
+        maxTotalPoints: 250000,
+        maxPlaybackDuration: Duration(seconds: 20),
+      ),
+    );
+    List<Stroke> added() {
+      final List<Stroke> strokes = controller.strokes.sublist(
+        controller.strokes.length - conversion.traces.length,
+      );
+      if (!_showAiNotes) controller.setStrokesHidden(strokes, true);
+      return strokes;
+    }
+
+    return switch (result) {
+      AddNotationResult.added => AiNotationApplication(
+        AiNotationStatus.applied,
+        strokes: added(),
+      ),
+      AddNotationResult.addedWithPlayback => AiNotationApplication(
+        AiNotationStatus.animating,
+        presentation: _PlaybackPresentation(
+          controller,
+          controller.notationPlayback!,
+        ),
+        strokes: added(),
+      ),
+      AddNotationResult.stale => const AiNotationApplication(
+        AiNotationStatus.notAppliedStale,
+      ),
+      AddNotationResult.busy => const AiNotationApplication(
+        AiNotationStatus.notAppliedBusy,
+      ),
+      AddNotationResult.invalid => const AiNotationApplication(
+        AiNotationStatus.notAppliedInvalid,
+      ),
+    };
   }
 
   /// The paper of the assistant's sticky notes, told apart from the user's
@@ -1812,6 +1890,18 @@ class EditorScreenState extends State<EditorScreen>
     return bitmaps;
   }
 
+  /// A loop drawn in AI mode around something on the page: what it
+  /// encloses is selected and becomes what the assistant is asked about.
+  void _onAiCircle(List<InkVector> outline, Object page) {
+    if (!mounted || !identical(page, _inkController)) return;
+    final PdfPageSource? pdf = _document.current.pdfSource;
+    final bool selected = _inkController.selectEnclosed(
+      outline,
+      selectablePdfBounds: pdf == null ? null : Offset.zero & pdf.pageSize,
+    );
+    if (selected) unawaited(_captureForAi(open: true));
+  }
+
   /// Closing the chat turns AI mode off with it.
   void _closeAi() => _setAiActive(false);
 
@@ -2230,6 +2320,7 @@ class EditorScreenState extends State<EditorScreen>
       _document = _createDocument();
       _document.addListener(_onDocumentChanged);
       _adoptAiSession();
+      _aiInput.clear();
       _setAiNotesHidden(!_showAiNotes);
       _onDocumentChanged();
       owned?.dispose();
@@ -2279,12 +2370,15 @@ class EditorScreenState extends State<EditorScreen>
       ..removeListener(AppHaptics.toolSwitch)
       ..removeListener(_onToolChanged)
       ..dispose();
+    _aiInput.dispose();
     _aiActive.dispose();
     _ownedPenSettings?.dispose();
     _ownedPalettePlacement?.dispose();
     _paletteDragCenter.dispose();
     _eraserSettings.dispose();
     _stickySettings.dispose();
+    _textSettings.dispose();
+    _pageOverviewOpen.dispose();
     _pastePrompt.dispose();
     _handwritingFindTarget.dispose();
     _ownedStylusOnly?.dispose();
@@ -2563,7 +2657,6 @@ class EditorScreenState extends State<EditorScreen>
     // What the body's SafeArea already keeps clear at the bottom; constant
     // while the keyboard moves, unlike the padding.
     final double bottomSafeArea = MediaQuery.viewPaddingOf(context).bottom;
-    final bool showNavigation = sizeClass != WindowSizeClass.compact;
     if (panelSide == null && _resizingAiPanel) {
       // Closed under the finger: its handle went with it, and never ended
       // the drag.
@@ -2613,13 +2706,14 @@ class EditorScreenState extends State<EditorScreen>
               size.height,
             );
             _paletteRegion = region;
-            final double historyWidth = FloatingHistoryControls.widthFor(
-              ToolPalette.sizeFor(Axis.horizontal).height,
-            );
+            final double historyWidth =
+                FloatingHistoryControls.widthFor(
+                  ToolPalette.sizeFor(Axis.horizontal).height,
+                ) +
+                PageNavigationControls.widthFor();
             final double pageControlsWidth = FloatingPageControls.widthFor(
               ToolPalette.sizeFor(Axis.horizontal).height,
               find: _canFind,
-              navigation: showNavigation,
             );
             final bool isAiOpen = panelSide != null;
             final EditorLayout layout = EditorLayout.compute(
@@ -2758,12 +2852,17 @@ class EditorScreenState extends State<EditorScreen>
                                     ruler: _ruler,
                                     pointerClaims: _pointerClaims,
                                     aiActive: _aiActive,
+                                    aiInput: _aiInput,
                                     selectablePdfBounds: page.pdfSource == null
                                         ? null
                                         : Offset.zero &
                                               page.pdfSource!.pageSize,
                                     stickySettings: _stickySettings,
                                     onStickyPlaced: _onStickyPlaced,
+                                    textSettings: _textSettings,
+                                    onTextSelected: (TextSettings settings) {
+                                      _textSettings.value = settings;
+                                    },
                                     pageGrows:
                                         page.setup.size == PageSize.infinite,
                                     carry: _selectionCarry,
@@ -2860,16 +2959,26 @@ class EditorScreenState extends State<EditorScreen>
                   curve: AppMotion.fadeInCurve,
                   left: layout.history.left,
                   top: layout.history.top,
-                  child: FloatingHistoryControls(
-                    height: layout.history.height,
-                    width: layout.history.width,
-                    children: <Widget>[
-                      HistoryControls(
-                        controller: _inkController,
-                        onUndo: _undo,
-                        onRedo: _redo,
-                      ),
-                    ],
+                  child: PageOverviewAnchor(
+                    open: _pageOverviewOpen,
+                    document: _document,
+                    writingArea: _viewportSize,
+                    config: widget.pageConfig,
+                    child: FloatingHistoryControls(
+                      height: layout.history.height,
+                      width: layout.history.width,
+                      children: <Widget>[
+                        HistoryControls(
+                          controller: _inkController,
+                          onUndo: _undo,
+                          onRedo: _redo,
+                        ),
+                        PageNavigationControls(
+                          onOpenOverview: _togglePageOverview,
+                          overviewOpen: _pageOverviewOpen,
+                        ),
+                      ],
+                    ),
                   ),
                 ),
                 AnimatedPositioned(
@@ -2886,8 +2995,7 @@ class EditorScreenState extends State<EditorScreen>
                     width: layout.pageControls.width,
                     child: PageControls(
                       document: _document,
-                      showNavigation: showNavigation,
-                      onOpenPanel: _openPagePanel,
+                      onOpenSettings: _openPageSettings,
                       canFind: _canFind,
                       onFind: _openHandwritingFind,
                       lastAddAction: _lastAddAction,
@@ -2944,6 +3052,8 @@ class EditorScreenState extends State<EditorScreen>
                       onOpen: (NoteRecordingTrack track) =>
                           unawaited(_openReplay(track)),
                     ),
+                    textSettings: _textSettings,
+                    onTextSettingsChanged: _onTextSettingsChanged,
                     stickySettings: _stickySettings,
                     onStickySettingsChanged: _onStickySettingsChanged,
                     stickyTargetLabel: () =>
@@ -3719,10 +3829,12 @@ class EditorLayout {
   final Offset paletteOrigin;
   final PaletteEdge paletteEdge;
 
-  /// Where the card of Undo and Redo hangs: in the top left corner.
+  /// Where Undo, Redo, current-page information, and the page overview hang:
+  /// in the top-left corner.
   final Rect history;
 
-  /// Where the card of change page, search, and add button hangs: in the top right corner.
+  /// Where search, add, and the page-settings ellipsis hang: in the top-right
+  /// corner.
   final Rect pageControls;
 
   static Rect _historyRect(Rect region, double width) {

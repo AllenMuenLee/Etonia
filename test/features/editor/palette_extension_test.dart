@@ -125,15 +125,15 @@ Future<_Palette> _pump(
 
 void main() {
   group('size', () {
-    test('grows by the two secondary tools when expanded', () {
+    test('grows by the three secondary tools when expanded', () {
       final Size row = ToolPalette.sizeFor(Axis.horizontal);
       final Size wide = ToolPalette.sizeFor(Axis.horizontal, expanded: true);
       final Size column = ToolPalette.sizeFor(Axis.vertical);
       final Size tall = ToolPalette.sizeFor(Axis.vertical, expanded: true);
 
-      expect(wide.width - row.width, 2 * 44);
+      expect(wide.width - row.width, 3 * 44);
       expect(wide.height, row.height);
-      expect(tall.height - column.height, 2 * 44);
+      expect(tall.height - column.height, 3 * 44);
       expect(tall.width, column.width);
       // Six tools and the arrow.
       expect(row.width, 6 * 44 + AppSizes.minTouchTarget + 2 * AppSpacing.xxs);
@@ -200,7 +200,7 @@ void main() {
       );
     });
 
-    testWidgets('unfolds the recordings and the ruler, and folds them again', (
+    testWidgets('unfolds recordings, text, and ruler, then folds them again', (
       WidgetTester tester,
     ) async {
       final _Palette palette = await _pump(tester);
@@ -209,8 +209,9 @@ void main() {
       await tester.pumpAndSettle();
 
       expect(palette.controller.expanded.value, isTrue);
-      expect(find.byType(PaletteButton), findsNWidgets(9));
+      expect(find.byType(PaletteButton), findsNWidgets(10));
       expect(find.byTooltip('Recordings'), findsOneWidget);
+      expect(find.byTooltip('Text'), findsOneWidget);
       expect(find.byTooltip('Show ruler'), findsOneWidget);
       expect(find.byTooltip('Collapse toolbar'), findsOneWidget);
       expect(find.byIcon(CupertinoIcons.chevron_left), findsOneWidget);
@@ -224,6 +225,14 @@ void main() {
       expect(
         arrow.left,
         greaterThan(tester.getRect(find.byTooltip('Show ruler')).left),
+      );
+      expect(
+        tester.getRect(find.byTooltip('Recordings')).left,
+        lessThan(tester.getRect(find.byTooltip('Text')).left),
+      );
+      expect(
+        tester.getRect(find.byTooltip('Text')).left,
+        lessThan(tester.getRect(find.byTooltip('Show ruler')).left),
       );
 
       await tester.tap(find.byTooltip('Collapse toolbar'));
@@ -311,7 +320,7 @@ void main() {
       await tester.pumpAndSettle();
 
       expect(announced, <String>[
-        'Tools expanded, 2 additional tools available',
+        'Tools expanded, 3 additional tools available',
         'Tools collapsed',
       ]);
     });

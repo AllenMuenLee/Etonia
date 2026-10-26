@@ -50,7 +50,8 @@ class HistoryControls extends StatelessWidget {
 }
 
 /// One small card of controls hanging from the top bar over the page at the
-/// left, with the tool palette's look and exactly its [height]: Undo and Redo.
+/// left, with the tool palette's look and exactly its [height]. It starts with
+/// Undo and Redo and can also hold the page-navigation controls.
 class FloatingHistoryControls extends StatelessWidget {
   const FloatingHistoryControls({
     super.key,
@@ -80,7 +81,7 @@ class FloatingHistoryControls extends StatelessWidget {
     return Semantics(
       container: true,
       explicitChildNodes: true,
-      label: 'History',
+      label: 'History and page navigation',
       child: SizedBox(
         key: const ValueKey<String>('history-card'),
         height: height,

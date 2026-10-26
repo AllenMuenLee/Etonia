@@ -30,6 +30,7 @@ dependencies:
   supabase_flutter: ^2.18.3
   flutter_secure_storage: ^10.3.4
   flutter_svg: ^2.2.1
+  path_parsing: ^1.1.0
   xml: ^7.0.1
 
 dev_dependencies:

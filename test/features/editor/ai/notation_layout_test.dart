@@ -183,26 +183,28 @@ void main() {
       expect(NotationFont.canWrite('日本'), isFalse);
 
       // "I" at size 20 from (100, 50): its stem runs the full cap height,
-      // leaning forward, with the slight drift of the handwriting
-      // treatment.
+      // with a top and bottom bar so it cannot read as `|`, leaning forward
+      // with the slight drift of the handwriting treatment.
       final List<List<InkVector>> i = NotationFont.write(
         'I',
         origin: const InkVector(100, 50),
         size: 20,
       );
-      final InkVector top = i.single.reduce(
+      expect(i, hasLength(3));
+      final InkVector top = i[1].reduce(
         (InkVector a, InkVector b) => a.y < b.y ? a : b,
       );
-      final InkVector foot = i.single.reduce(
+      final InkVector foot = i[1].reduce(
         (InkVector a, InkVector b) => a.y > b.y ? a : b,
       );
       expect(top.y, closeTo(50, 0.6));
       expect(foot.y, closeTo(70, 0.6));
-      expect(foot.x, inInclusiveRange(99.5, 101));
+      // The stem is centred between the two 5.2-unit bars.
+      expect(foot.x, inInclusiveRange(104.5, 106));
       // Leaning forward by the standard slant.
       expect(top.x - foot.x, closeTo(20 * 0.12, 0.6));
 
-      // Wider with more letters, and lines stacked 1.6 sizes apart.
+      // Wider with more letters, and lines stacked 2 sizes apart.
       expect(
         NotationFont.width('ab', 20),
         greaterThan(NotationFont.width('a', 20)),
@@ -212,13 +214,13 @@ void main() {
         NotationFont.width('long line', 20),
       );
       final double two = NotationFont.height('a\nb', 20);
-      expect(two, closeTo(20 * 1.6 + 20 * 1.3, 1e-9));
+      expect(two, closeTo(20 * 2.0 + 20 * 1.3, 1e-9));
       final List<List<InkVector>> lines = NotationFont.write(
         'l\nl',
         origin: InkVector.zero,
         size: 20,
       );
-      expect(lines[1].first.y - lines[0].first.y, closeTo(32, 1));
+      expect(lines[1].first.y - lines[0].first.y, closeTo(40, 1));
       expect(
         () => NotationFont.write('é', origin: InkVector.zero, size: 20),
         throwsArgumentError,

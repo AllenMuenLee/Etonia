@@ -9,22 +9,26 @@ import 'streaming_ai_client.dart';
 
 typedef BackendInvoke =
     Future<Map<String, dynamic>> Function(String, Map<String, Object?>);
+typedef BackendInvokeStream =
+    Future<Stream<Map<String, dynamic>>> Function(String, Map<String, Object?>);
 
 /// The conversation text, selected crop, and drawing coordinates are forwarded
 /// transiently. Full note images and PDFs are never sent; with Notation on, the
 /// rest of the note is described only as coordinates.
 class BackendAiClient implements AiModelRouter {
-  BackendAiClient({BackendService? backend, this.invoke})
+  BackendAiClient({BackendService? backend, this.invoke, this.invokeStream})
     : _backend = backend ?? BackendService.instance;
   final BackendService _backend;
   final BackendInvoke? invoke;
+  final BackendInvokeStream? invokeStream;
   bool _closed = false;
   @override
   AiModelId get defaultModel => AiModelId.sol;
   @override
   List<AiModelId> get models => AiModelId.values;
   @override
-  bool get isConfigured => invoke != null || _backend.isConfigured;
+  bool get isConfigured =>
+      invoke != null || invokeStream != null || _backend.isConfigured;
   @override
   bool isModelConfigured(AiModelId model) => isConfigured;
   @override
@@ -120,7 +124,7 @@ class BackendAiClient implements AiModelRouter {
       final bool notation =
           request.notationEnabled && note != null && validFocus;
       final history = _history(request.messages, latestIndex);
-      final response = await (invoke ?? _backend.invoke)('ai', {
+      final Map<String, Object?> body = <String, Object?>{
         'requestId': _requestId(),
         'model': (request.model ?? defaultModel).name,
         'prompt': latest.text,
@@ -152,7 +156,12 @@ class BackendAiClient implements AiModelRouter {
             'right': clampedRight,
             'bottom': clampedBottom,
           },
-      });
+      };
+      final Map<String, dynamic> response = await _invoke(
+        body,
+        notation: notation,
+        onPartial: onPartial,
+      );
       if (_closed) return const AiError(AiFailure(AiFailureKind.interrupted));
       final String raw = stripJsonFence(response['answer'] as String);
       final AiAssistantResponse answer;
@@ -198,8 +207,49 @@ class BackendAiClient implements AiModelRouter {
     } on Object {
       return const AiError(AiFailure(AiFailureKind.network));
     } finally {
-      if (invoke == null) _backend.billingChanged();
+      if (invoke == null && invokeStream == null) _backend.billingChanged();
     }
+  }
+
+  Future<Map<String, dynamic>> _invoke(
+    Map<String, Object?> body, {
+    required bool notation,
+    required AiPartialCallback? onPartial,
+  }) async {
+    final BackendInvokeStream? streamCall =
+        invokeStream ?? (invoke == null ? _backend.invokeStream : null);
+    if (!notation || streamCall == null) {
+      return (invoke ?? _backend.invoke)('ai', body);
+    }
+    Map<String, dynamic>? result;
+    await for (final Map<String, dynamic> event in await streamCall(
+      'ai',
+      body,
+    )) {
+      switch (event['type']) {
+        case 'message':
+          final Object? message = event['message'];
+          if (message is! String || message.trim().isEmpty) {
+            throw const BackendFailure('server');
+          }
+          onPartial?.call(message, true);
+        case 'result':
+          if (event['answer'] is! String ||
+              event['usage'] is! Map<String, dynamic>) {
+            throw const BackendFailure('server');
+          }
+          result = event;
+        case 'error':
+          final Object? code = event['error'];
+          throw BackendFailure(code is String ? code : 'server');
+        case null:
+          // A non-streaming server response during rollout.
+          result = event;
+        default:
+          throw const BackendFailure('server');
+      }
+    }
+    return result ?? (throw const BackendFailure('server'));
   }
 
   @override

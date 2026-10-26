@@ -23,15 +23,27 @@ class InkColorPicker extends StatelessWidget {
   final List<InkColor> colors;
   final bool allowPalette;
 
-  Future<void> _openPalette(BuildContext context) async {
+  Future<void> _openPalette(BuildContext context, InkColor from) async {
     final Color? picked = await showColorPaletteDialog(
       context,
-      initialColor: selected.resolve(Theme.of(context).brightness),
+      initialColor: from.resolve(Theme.of(context).brightness),
       title: 'Ink color',
     );
     if (picked != null) {
       onSelected(InkPalette.custom(picked));
     }
+  }
+
+  /// A first tap picks the ink; a second, on the one already picked, opens
+  /// the palette to customize it.
+  VoidCallback _tapOf(BuildContext context, InkColor ink) {
+    return () {
+      if (ink == selected && allowPalette) {
+        _openPalette(context, ink);
+      } else {
+        onSelected(ink);
+      }
+    };
   }
 
   @override
@@ -55,18 +67,18 @@ class InkColorPicker extends StatelessWidget {
                 key: ValueKey<String>('ink-swatch-${ink.id}'),
                 ink: ink,
                 selected: ink == selected,
-                onTap: () => onSelected(ink),
+                onTap: _tapOf(context, ink),
               ),
             if (hasCustomSelected)
               _InkSwatch(
                 key: ValueKey<String>('ink-swatch-${selected.id}'),
                 ink: selected,
                 selected: true,
-                onTap: () => onSelected(selected),
+                onTap: _tapOf(context, selected),
               ),
             if (allowPalette)
               ColorPaletteButton(
-                onTap: () => _openPalette(context),
+                onTap: () => _openPalette(context, selected),
                 tooltip: 'Ink palette',
               ),
           ],

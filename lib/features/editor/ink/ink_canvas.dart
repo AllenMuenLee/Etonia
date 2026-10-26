@@ -9,6 +9,7 @@ import 'package:flutter/semantics.dart';
 
 import '../../../app/theme/app_tokens.dart';
 import '../../../shared/feedback/app_haptics.dart';
+import '../ai/ai_canvas_input.dart';
 import '../document_io/document_models.dart';
 import 'eraser_settings.dart';
 import 'ink_controller.dart';
@@ -28,6 +29,8 @@ import 'ruler_layer.dart';
 import 'selection_transform.dart';
 import 'stroke.dart';
 import '../sticky/sticky_note.dart';
+import '../text/note_text.dart';
+import '../text/text_elements_layer.dart';
 import '../audio/stroke_replay_controller.dart';
 
 /// Coordinates cross-page lasso selection and smooth cross-page selection
@@ -640,7 +643,9 @@ class SelectionCarry extends ChangeNotifier {
           final bool withPaper = keepPaper && identical(c, origin);
           if (c.widget.controller.selectWithOutline(
             localOutline,
-            selectablePdfBounds: withPaper ? c.widget.selectablePdfBounds : null,
+            selectablePdfBounds: withPaper
+                ? c.widget.selectablePdfBounds
+                : null,
             keepPaper: withPaper,
           )) {
             anyForeground = true;
@@ -1373,6 +1378,8 @@ class InkCanvas extends StatefulWidget {
     this.selectablePdfBounds,
     this.stickySettings,
     this.onStickyPlaced,
+    this.textSettings,
+    this.onTextSelected,
     this.pageGrows = false,
     this.carry,
     this.onSelectionCarried,
@@ -1385,12 +1392,18 @@ class InkCanvas extends StatefulWidget {
     this.ruler,
     this.pointerClaims,
     this.aiActive,
+    this.aiInput,
   });
 
   /// Whether AI mode is on. A lasso then selects the PDF paper and pictures
   /// it encloses together with the ink, since the assistant needs the page
   /// behind the ink to read it.
   final ValueListenable<bool>? aiActive;
+
+  /// Where a stroke drawn with [EditorTool.ai] goes: a glowing loop that
+  /// circles a spot for the assistant, never ink. Without it the AI tool
+  /// draws nothing.
+  final AiCanvasInputController? aiInput;
 
   /// Shared with the note's other pages, so that a selection moved onto one
   /// of them goes there. Without it a selection stays on its page.
@@ -1406,6 +1419,10 @@ class InkCanvas extends StatefulWidget {
   /// Called once a sticky note has been placed, so the writing tool can
   /// come back for writing on it.
   final VoidCallback? onStickyPlaced;
+
+  /// Formatting defaults for newly placed typed text.
+  final ValueListenable<TextSettings>? textSettings;
+  final ValueChanged<TextSettings>? onTextSelected;
 
   /// Whether the page grows to the right and down, as an infinite page
   /// does, so a sticky note placed near those edges is not pushed back.
@@ -1517,6 +1534,9 @@ class _InkCanvasState extends State<InkCanvas> with WidgetsBindingObserver {
   /// soon after opens the note for writing.
   _StickyTap? _lastStickyTap;
 
+  /// The open text box's move grip or width tab, while a pointer holds it.
+  _TextFrameDrag? _textFrameDrag;
+
   /// A pointer whose press opened a sticky note, so the rest of its
   /// gesture is not ink.
   int? _consumedPointer;
@@ -1555,6 +1575,7 @@ class _InkCanvasState extends State<InkCanvas> with WidgetsBindingObserver {
     widget.stylusOnly?.addListener(_onNativeSettingsChanged);
     widget.exclusionsChanged?.addListener(_onNativeSettingsChanged);
     widget.replay?.addListener(_onNativeSettingsChanged);
+    widget.visible?.addListener(_onNativeSettingsChanged);
     widget.ruler?.addListener(_onRulerChanged);
     widget.carry?._attach(this);
     _scheduleNativeSync();
@@ -1596,6 +1617,10 @@ class _InkCanvasState extends State<InkCanvas> with WidgetsBindingObserver {
       oldWidget.replay?.removeListener(_onNativeSettingsChanged);
       widget.replay?.addListener(_onNativeSettingsChanged);
     }
+    if (oldWidget.visible != widget.visible) {
+      oldWidget.visible?.removeListener(_onNativeSettingsChanged);
+      widget.visible?.addListener(_onNativeSettingsChanged);
+    }
     if (oldWidget.ruler != widget.ruler) {
       oldWidget.ruler?.removeListener(_onRulerChanged);
       widget.ruler?.addListener(_onRulerChanged);
@@ -1624,6 +1649,7 @@ class _InkCanvasState extends State<InkCanvas> with WidgetsBindingObserver {
     widget.stylusOnly?.removeListener(_onNativeSettingsChanged);
     widget.exclusionsChanged?.removeListener(_onNativeSettingsChanged);
     widget.replay?.removeListener(_onNativeSettingsChanged);
+    widget.visible?.removeListener(_onNativeSettingsChanged);
     widget.ruler?.removeListener(_onRulerChanged);
     _releaseClaims();
     _rulerReadout.dispose();
@@ -1644,6 +1670,7 @@ class _InkCanvasState extends State<InkCanvas> with WidgetsBindingObserver {
   void _endGesture() {
     _cancelHold();
     _cancelShapeHold();
+    widget.aiInput?.clear();
     widget.carry?.finalizeSelectionGesture();
     widget.controller.finalizeActiveGesture();
   }
@@ -1774,6 +1801,9 @@ class _InkCanvasState extends State<InkCanvas> with WidgetsBindingObserver {
     widget.pastePrompt?.value = null;
     final EditorTool tool = widget.tool.value;
     final InkController controller = widget.controller;
+    if (tool != EditorTool.text) {
+      controller.finishTextEditing();
+    }
     if (tool == EditorTool.select) {
       controller.exitStickyEditing();
       return;
@@ -1781,6 +1811,11 @@ class _InkCanvasState extends State<InkCanvas> with WidgetsBindingObserver {
     if (tool == EditorTool.ai) {
       // What is selected stays: it is what the assistant was asked about.
       controller.exitStickyEditing();
+      return;
+    }
+    if (tool == EditorTool.text) {
+      controller.exitStickyEditing();
+      controller.clearSelection();
       return;
     }
     final InkSelection? selection = controller.selection;
@@ -1914,6 +1949,95 @@ class _InkCanvasState extends State<InkCanvas> with WidgetsBindingObserver {
     return false;
   }
 
+  /// A Text tool tap at [position]: it reopens the text box there, or
+  /// starts a new one.
+  void _textTap(InkVector position) {
+    final InkController controller = widget.controller;
+    widget.carry?.clearSelection();
+    controller.exitStickyEditing();
+    final NoteTextElement? existing = controller.textAt(position);
+    if (existing != null) {
+      controller.editText(existing.id);
+      widget.onTextSelected?.call(existing.settings);
+    } else {
+      controller.insertText(
+        position,
+        widget.textSettings?.value ?? const TextSettings(),
+        pageBounds: Offset.zero & _pageSize,
+      );
+    }
+  }
+
+  /// Takes a press on the open text box or its handles. A handle is held
+  /// and dragged; the words and the delete button answer for themselves.
+  /// Returns whether the press was there.
+  bool _beginTextFrame(PointerDownEvent event) {
+    if (widget.tool.value != EditorTool.text) return false;
+    final NoteTextElement? editing = widget.controller.editingText;
+    if (editing == null) return false;
+    final Rect bounds = editing.bounds;
+    if (!TextFrame.chrome(bounds).contains(event.localPosition)) return false;
+    final TextFrameHandle? handle = TextFrame.handleAt(
+      bounds,
+      event.localPosition,
+    );
+    if (handle == null ||
+        _textFrameDrag != null ||
+        (widget.isInputBlocked?.call() ?? false)) {
+      return true;
+    }
+    _textFrameDrag = _TextFrameDrag(
+      pointer: event.pointer,
+      handle: handle,
+      start: event.localPosition,
+      element: editing,
+    );
+    widget.pointerClaims?.claim(event.pointer);
+    return true;
+  }
+
+  /// Carries a held text box handle. Returns whether it was one.
+  bool _moveTextFrame(PointerMoveEvent event) {
+    final _TextFrameDrag? drag = _textFrameDrag;
+    if (drag == null || drag.pointer != event.pointer) return false;
+    _placeTextFrame(drag, event.localPosition, commit: false);
+    return true;
+  }
+
+  /// Lets go of a held text box handle: the move or resize is one change,
+  /// and a cancelled one puts the box back. Returns whether it was one.
+  bool _endTextFrame(PointerEvent event, {bool cancelled = false}) {
+    final _TextFrameDrag? drag = _textFrameDrag;
+    if (drag == null || drag.pointer != event.pointer) return false;
+    _textFrameDrag = null;
+    widget.pointerClaims?.release(event.pointer);
+    _placeTextFrame(
+      drag,
+      cancelled ? drag.start : event.localPosition,
+      commit: true,
+    );
+    return true;
+  }
+
+  void _placeTextFrame(
+    _TextFrameDrag drag,
+    Offset point, {
+    required bool commit,
+  }) {
+    final Offset delta = point - drag.start;
+    final NoteTextElement start = drag.element;
+    widget.controller.setEditingTextFrame(
+      position: drag.handle == TextFrameHandle.move
+          ? start.position + InkVector(delta.dx, delta.dy)
+          : start.position,
+      width: drag.handle == TextFrameHandle.resize
+          ? start.width + delta.dx
+          : start.width,
+      pageBounds: Offset.zero & _pageSize,
+      commit: commit,
+    );
+  }
+
   /// A stroke or erase begins at [page]: if it starts at the ruler's edge it
   /// follows it. Returns where it starts.
   Offset _beginGuide(PointerEvent event, Offset page) {
@@ -1958,8 +2082,10 @@ class _InkCanvasState extends State<InkCanvas> with WidgetsBindingObserver {
   }
 
   /// Registers the canvas's current screen transform with the native input
-  /// observer. This runs after layout, and again whenever the page viewport
-  /// rebuilds while scrolling or zooming.
+  /// observer. This runs after layout, and again whenever [InkCanvas.visible]
+  /// moves: the page viewport keeps each page's widgets while scrolling or
+  /// zooming, so this canvas is not rebuilt then, and a stale transform would
+  /// place native strokes far from the pen and size the wet ink wrongly.
   void _scheduleNativeSync() {
     if (_nativeSyncScheduled || !mounted) {
       return;
@@ -1996,9 +2122,12 @@ class _InkCanvasState extends State<InkCanvas> with WidgetsBindingObserver {
     // tab's stale rectangle must not compete with the two visible panes, and
     // native code then only tests the surfaces the pen can actually land on.
     final bool enabled = _paneVisible && _nativePenTool;
-    // A translucent preview would compound with Flutter's active highlighter.
-    // Highlighter input is still captured at full native sample rate.
-    final bool previewEnabled = enabled && !style.isHighlighter;
+    // A translucent preview would compound with Flutter's active highlighter,
+    // and the native wet ink has no pencil grain: it would show a plain
+    // stroke until the pen lifts. Their input is still captured at full
+    // native sample rate; Flutter draws the stroke as it will finish.
+    final bool previewEnabled =
+        enabled && !style.isHighlighter && !style.isPencil;
     final Color color = style.resolve(Theme.of(context).brightness);
     final List<Rect> exclusions =
         widget.exclusionRects?.call() ?? const <Rect>[];
@@ -2259,6 +2388,12 @@ class _InkCanvasState extends State<InkCanvas> with WidgetsBindingObserver {
     if (_beginRuler(event, kind)) {
       return;
     }
+    // The open text box's handles take a finger too, and a press anywhere
+    // on the box or its handles works that box rather than starting
+    // another.
+    if (_beginTextFrame(event)) {
+      return;
+    }
     if (kind == InkDeviceKind.touch && (widget.stylusOnly?.value ?? false)) {
       // Fingers only move the page here, but a tap still deselects. A
       // second finger makes it a pinch.
@@ -2302,6 +2437,9 @@ class _InkCanvasState extends State<InkCanvas> with WidgetsBindingObserver {
       return;
     }
     if (widget.tool.value == EditorTool.ai) {
+      if (!controller.isBusy) {
+        widget.aiInput?.begin(event.pointer, controller, _sample(event, kind));
+      }
       return;
     }
     if (widget.tool.value == EditorTool.sticky) {
@@ -2324,6 +2462,10 @@ class _InkCanvasState extends State<InkCanvas> with WidgetsBindingObserver {
         settings: widget.stickySettings?.value ?? const StickyNoteSettings(),
         growsDown: widget.pageGrows,
       );
+      return;
+    }
+    if (widget.tool.value == EditorTool.text) {
+      _textTap(position);
       return;
     }
     if (widget.tool.value == EditorTool.select) {
@@ -2471,6 +2613,9 @@ class _InkCanvasState extends State<InkCanvas> with WidgetsBindingObserver {
     if (_moveRuler(event)) {
       return;
     }
+    if (_moveTextFrame(event)) {
+      return;
+    }
     if (_nativeOwns(event)) {
       return;
     }
@@ -2480,6 +2625,10 @@ class _InkCanvasState extends State<InkCanvas> with WidgetsBindingObserver {
     if (event.pointer == _fingerTapPointer &&
         (event.position - _fingerTapStart).distance > kTouchSlop) {
       _fingerTapPointer = -1;
+    }
+    if (_isDrawingForAi(event)) {
+      widget.aiInput!.add(event.pointer, _samples(event));
+      return;
     }
     if (_isPlacing(event)) {
       widget.controller.updateStickyPlacement(event.pointer, _position(event));
@@ -2536,6 +2685,9 @@ class _InkCanvasState extends State<InkCanvas> with WidgetsBindingObserver {
     if (_endRuler(event)) {
       return;
     }
+    if (_endTextFrame(event)) {
+      return;
+    }
     if (_nativeOwns(event)) {
       return;
     }
@@ -2549,7 +2701,14 @@ class _InkCanvasState extends State<InkCanvas> with WidgetsBindingObserver {
           event.timeStamp - _fingerTapTime < kLongPressTimeout;
       _fingerTapPointer = null;
       if (tapped) {
-        _deselectUnlessOnSelection(_position(event));
+        // Fingers that only move the page still place and open text: the
+        // Text tool has no ink for a palm to leave.
+        if (widget.tool.value == EditorTool.text &&
+            !(widget.isInputBlocked?.call() ?? false)) {
+          _textTap(_position(event));
+        } else {
+          _deselectUnlessOnSelection(_position(event));
+        }
       }
       return;
     }
@@ -2558,6 +2717,10 @@ class _InkCanvasState extends State<InkCanvas> with WidgetsBindingObserver {
     }
     if (event.pointer == _shapePointer) {
       _cancelShapeHold();
+    }
+    if (_isDrawingForAi(event)) {
+      widget.aiInput!.end(event.pointer, _samples(event));
+      return;
     }
     if (_isPlacing(event)) {
       final StickyNoteElement? placed = widget.controller.endStickyPlacement(
@@ -2632,6 +2795,9 @@ class _InkCanvasState extends State<InkCanvas> with WidgetsBindingObserver {
     if (_endRuler(event)) {
       return;
     }
+    if (_endTextFrame(event, cancelled: true)) {
+      return;
+    }
     _endGuide(event);
     if (_nativeOwns(event)) {
       return;
@@ -2647,6 +2813,7 @@ class _InkCanvasState extends State<InkCanvas> with WidgetsBindingObserver {
     widget.controller
       ..cancelStickyPlacement(event.pointer)
       ..cancelStickyDrag(event.pointer);
+    widget.aiInput?.cancel(event.pointer);
     if (event.pointer == _holdPointer) {
       _cancelHold();
     }
@@ -2661,6 +2828,13 @@ class _InkCanvasState extends State<InkCanvas> with WidgetsBindingObserver {
       ..cancelStroke(event.pointer)
       ..cancelErase(event.pointer)
       ..cancelSelectionGesture(event.pointer);
+  }
+
+  bool _isDrawingForAi(PointerEvent event) {
+    final AiCanvasInputController? input = widget.aiInput;
+    return input != null &&
+        input.activePointer == event.pointer &&
+        identical(input.page, widget.controller);
   }
 
   bool _isPlacing(PointerEvent event) {
@@ -2816,13 +2990,22 @@ class _InkCanvasState extends State<InkCanvas> with WidgetsBindingObserver {
                 }
               },
             ),
+            TextElementsLayer(controller: widget.controller, tool: widget.tool),
+            // The layers above typed text only paint: a CustomPaint answers
+            // hit tests by default, which would keep taps from the open
+            // text box beneath them. The page's pointers reach the Listener
+            // above whatever these do.
             // An AI notation still being drawn, above the finished ink.
-            NotationPlaybackLayer(controller: widget.controller),
-            RepaintBoundary(
-              child: CustomPaint(
-                painter: ActiveStrokePainter(
-                  controller: widget.controller,
-                  brightness: brightness,
+            IgnorePointer(
+              child: NotationPlaybackLayer(controller: widget.controller),
+            ),
+            IgnorePointer(
+              child: RepaintBoundary(
+                child: CustomPaint(
+                  painter: ActiveStrokePainter(
+                    controller: widget.controller,
+                    brightness: brightness,
+                  ),
                 ),
               ),
             ),
@@ -2830,34 +3013,61 @@ class _InkCanvasState extends State<InkCanvas> with WidgetsBindingObserver {
             // strokes are painted here, not in the completed layer, so a
             // transform preview repaints this layer alone.
             ExcludeSemantics(
-              child: RepaintBoundary(
-                child: CustomPaint(
-                  key: const ValueKey<String>('selection-layer'),
-                  painter: SelectionPainter(
-                    controller: widget.controller,
-                    brightness: brightness,
-                    color: colors.accent,
-                    handleColor: colors.writingSurface,
-                    crossPageListenable: carry,
-                    crossPageOverlay: carry == null
-                        ? null
-                        : () => carry._overlayFor(this),
-                    scale: _screenScale(),
-                    scaleProvider: _screenScale,
+              child: IgnorePointer(
+                child: RepaintBoundary(
+                  child: CustomPaint(
+                    key: const ValueKey<String>('selection-layer'),
+                    painter: SelectionPainter(
+                      controller: widget.controller,
+                      brightness: brightness,
+                      color: colors.accent,
+                      handleColor: colors.writingSurface,
+                      crossPageListenable: carry,
+                      crossPageOverlay: carry == null
+                          ? null
+                          : () => carry._overlayFor(this),
+                      scale: _screenScale(),
+                      scaleProvider: _screenScale,
+                    ),
                   ),
                 ),
               ),
             ),
-            ExcludeSemantics(
-              child: RepaintBoundary(
-                child: CustomPaint(
-                  key: const ValueKey<String>('eraser-indicator'),
-                  painter: EraserIndicatorPainter(
-                    controller: widget.controller,
-                    color: colors.textPrimary,
-                    haloColor: colors.writingSurface,
-                    scale: _screenScale(),
-                    scaleProvider: _screenScale,
+            // What is drawn for the assistant glows above everything else,
+            // and repaints alone as it is drawn.
+            if (widget.aiInput != null)
+              IgnorePointer(
+                child: ExcludeSemantics(
+                  child: RepaintBoundary(
+                    child: CustomPaint(
+                      key: const ValueKey<String>('ai-canvas-stroke-layer'),
+                      painter: AiCanvasStrokePainter(
+                        input: widget.aiInput!,
+                        page: widget.controller,
+                        color: colors.accent,
+                        core: Color.lerp(
+                          colors.accent,
+                          const Color(0xFFFFFFFF),
+                          0.7,
+                        )!,
+                        width: widget.aiInput!.config.glowWidth,
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+            IgnorePointer(
+              child: ExcludeSemantics(
+                child: RepaintBoundary(
+                  child: CustomPaint(
+                    key: const ValueKey<String>('eraser-indicator'),
+                    painter: EraserIndicatorPainter(
+                      controller: widget.controller,
+                      color: colors.textPrimary,
+                      haloColor: colors.writingSurface,
+                      scale: _screenScale(),
+                      scaleProvider: _screenScale,
+                    ),
                   ),
                 ),
               ),
@@ -2877,6 +3087,25 @@ class _InkCanvasState extends State<InkCanvas> with WidgetsBindingObserver {
       ),
     );
   }
+}
+
+/// A handle of the open text box, held by a pointer.
+class _TextFrameDrag {
+  const _TextFrameDrag({
+    required this.pointer,
+    required this.handle,
+    required this.start,
+    required this.element,
+  });
+
+  final int pointer;
+  final TextFrameHandle handle;
+
+  /// Where the press began, in page coordinates.
+  final Offset start;
+
+  /// The box as it was when the press began.
+  final NoteTextElement element;
 }
 
 /// A tap that left a dot on a sticky note.

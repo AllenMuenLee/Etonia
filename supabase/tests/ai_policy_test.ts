@@ -1,6 +1,8 @@
 import { strict as assert } from "node:assert";
 import {
+  billingModel,
   combineSteps,
+  configuredDrawingModel,
   drawingRequest,
   costOf,
   modelConfig,
@@ -218,6 +220,8 @@ Deno.test("with Notation on, the chosen model writes the words and a second mode
     bottom: 0.5,
   };
   const claude = { ...config, provider: "claude" as const };
+  const openai = { ...config, provider: "openai" as const };
+  const gemini = { ...config, provider: "gemini" as const };
   const notationOptions = {
     notationInstruction: "Notation is on. Return the drawing SVG.",
     animationAllowed: true,
@@ -229,6 +233,20 @@ Deno.test("with Notation on, the chosen model writes the words and a second mode
     { ...config, provider: "openai" },
     { ...input, ...notationOptions, notationContext },
   ));
+  assert.throws(() =>
+    validateInput({
+      ...input,
+      ...notationOptions,
+      notationContext,
+      notationModel: "luna",
+    })
+  );
+  assert.equal(configuredDrawingModel(undefined), "luna");
+  assert.equal(configuredDrawingModel("  astra  "), "astra");
+  assert.throws(() => configuredDrawingModel("unknown"));
+  assert.equal(billingModel("luna", "sol"), "sol");
+  assert.equal(billingModel("astra", "luna"), "astra");
+  assert.equal(billingModel("haiku", "luna"), "haiku");
 
   for (const provider of ["openai", "claude", "gemini"] as const) {
     const routed = {
@@ -290,7 +308,8 @@ Deno.test("with Notation on, the chosen model writes the words and a second mode
   assert(
     JSON.stringify(notation.body.system).includes("self-contained SVG"),
   );
-  assert.equal(notation.body.output_config, undefined);
+  // Only the drawing pass asks for high effort.
+  assert.deepEqual(notation.body.output_config, { effort: "high" });
   const turns = notation.body.messages as { role: string; content: unknown }[];
   assert.deepEqual(turns.map((t) => t.role), ["user", "assistant", "user"]);
   assert.equal(turns[1].content, "The hypotenuse is 5.");
@@ -318,10 +337,17 @@ Deno.test("with Notation on, the chosen model writes the words and a second mode
       assert(body.includes('The user asked: \\"complete the inverted op amp\\"'));
       assert(body.includes('\\"what is this?\\"'));
       assert(!body.includes("A triangle."));
-      assert(body.includes("animate it with steps"));
+      assert(body.includes("actively look for a useful note-grounded visual"));
+      assert(body.includes("connect the annotation to the user's actual notes"));
+      assert(body.includes("point a leader arrow at the relevant ink"));
+      assert(body.includes("Animation is optional and the default is static"));
+      assert(body.includes("physical motion, propagation or flow"));
+      assert(body.includes("Never animate content merely to reveal it"));
+      assert(body.includes("If uncertain, keep everything static"));
     }
     const staticText = drawingRequest(asked, "static");
     assert(staticText.includes("adding only what is missing"));
+    assert(staticText.includes("connect the annotation to the user's actual notes"));
     assert(!staticText.includes("animate"));
     assert(
       drawingRequest({ ...asked, prompt: "x".repeat(5000) }).length < 2500,
@@ -387,17 +413,17 @@ Deno.test("the fixed instructions are a cacheable prefix, billed at the cached r
   assert(system.startsWith("Notation is on."));
   assert(system.indexOf("Notation is on.") < system.indexOf("Metadata: {}"));
   assert(JSON.stringify(openai.body).includes('"detail":"high"'));
-  assert.equal(openai.body.reasoning_effort, undefined);
-  const low = providerRequest(
-    { ...config, reasoningEffort: "low" },
+  assert.equal(openai.body.reasoning_effort, "high");
+  // A stale AI_MODEL_CONFIG may still carry the removed reasoningEffort
+  // field; answers keep the provider default regardless.
+  const legacy = { ...config, reasoningEffort: "low" };
+  const defaultEffort = providerRequest(
+    legacy,
     input,
     1234,
     "k",
   );
-  assert.equal(low.body.reasoning_effort, "low");
-  assert.throws(() =>
-    modelConfig({ sol: { ...config, reasoningEffort: "max" } }, "sol")
-  );
+  assert.equal(defaultEffort.body.reasoning_effort, undefined);
 
   // Claude: the fixed block carries the cache marker, the rest does not.
   const claude = providerRequest(
@@ -416,6 +442,39 @@ Deno.test("the fixed instructions are a cacheable prefix, billed at the cached r
   assert(!blocks[0].text.includes("Metadata: {}"));
   assert(blocks[1].text.includes("Metadata: {}"));
   assert.equal(blocks[1].cache_control, undefined);
+  assert.deepEqual(claude.body.thinking, { type: "adaptive" });
+  assert.deepEqual(claude.body.output_config, { effort: "high" });
+  const claudeDefault = providerRequest(
+    { ...config, provider: "claude" },
+    input,
+    1234,
+    "k",
+  );
+  assert.equal(claudeDefault.body.thinking, undefined);
+  assert.equal(claudeDefault.body.output_config, undefined);
+
+  const gemini = providerRequest(
+    { ...config, provider: "gemini" },
+    withNote,
+    1234,
+    "k",
+    { step: "notation", message: "Answer.", visual: "static" },
+  );
+  assert.deepEqual(
+    (gemini.body.generationConfig as Record<string, unknown>).thinkingConfig,
+    { thinkingLevel: "HIGH" },
+  );
+  const geminiDefault = providerRequest(
+    { ...legacy, provider: "gemini" as const },
+    input,
+    1234,
+    "k",
+  );
+  assert.equal(
+    (geminiDefault.body.generationConfig as Record<string, unknown>)
+      .thinkingConfig,
+    undefined,
+  );
 
   // Cached input costs what the config says; without a rate, full price.
   const cachedConfig = { ...config, cachedInputMicroPerKilo: 200 };

@@ -14,6 +14,7 @@ import '../editor/ink/stroke.dart';
 import '../editor/page/note_document.dart';
 import '../editor/page/page_setup.dart';
 import '../editor/sticky/sticky_note.dart';
+import '../editor/text/note_text.dart';
 import 'note_recording_track.dart';
 
 /// Schema 2 adds PDF sources, images, fixed custom sizes, and Fit history.
@@ -23,7 +24,8 @@ import 'note_recording_track.dart';
 /// Schema 5 adds searchable handwriting and its reusable normalized strokes.
 /// Schema 6 adds local audio tracks and synchronized stroke/erase timing.
 /// Schema 7 keeps editable SVG source inline with vector page elements.
-const int storageSchema = 7;
+/// Schema 8 adds editable typed text boxes.
+const int storageSchema = 8;
 
 /// A note's reading was dropped part way: no one waited for it any more.
 class LoadAbandoned implements Exception {
@@ -242,6 +244,7 @@ class StoredPage {
     this.images = const <NoteImageElement>[],
     this.playbacks = const <StoredPlayback>[],
     this.stickyNotes = const <StickyNoteElement>[],
+    this.textElements = const <NoteTextElement>[],
     this.recognizedWords = const <StoredRecognizedInkWord>[],
     this.erasedStrokeRecords = const <ErasedStrokeRecord>[],
   });
@@ -323,6 +326,7 @@ class StoredPage {
       ],
       strokes: strokes,
       stickyNotes: stickyNotes,
+      textElements: _textElementsFromJson(json['textElements']),
       // Unusable strokes are left out, which moves the indices of those
       // after them; playbacks are only kept when none was.
       playbacks: strokes.length == rawStrokes.length
@@ -359,6 +363,69 @@ class StoredPage {
 
   /// In paint order, each with its ink in its own coordinates.
   final List<StickyNoteElement> stickyNotes;
+
+  /// Editable typed text in paint order.
+  final List<NoteTextElement> textElements;
+
+  static List<NoteTextElement> _textElementsFromJson(Object? json) {
+    if (json is! List) return const <NoteTextElement>[];
+    final List<NoteTextElement> elements = <NoteTextElement>[];
+    final Set<String> ids = <String>{};
+    for (final Object? raw in json) {
+      if (raw is! Map<String, Object?>) continue;
+      final Object? id = raw['id'];
+      final Object? position = raw['position'];
+      final Object? text = raw['text'];
+      final Object? width = raw['width'];
+      final Object? fontSize = raw['fontSize'];
+      if (id is! String ||
+          id.isEmpty ||
+          ids.contains(id) ||
+          position is! List ||
+          position.length != 2 ||
+          text is! String ||
+          width is! num ||
+          fontSize is! num ||
+          position[0] is! num ||
+          position[1] is! num) {
+        continue;
+      }
+      final InkColor ink = raw['color'] is String
+          ? InkPalette.byId(raw['color']! as String) ?? InkPalette.ink
+          : InkPalette.ink;
+      final NoteTextElement element = NoteTextElement(
+        id: id,
+        position: InkVector(
+          (position[0]! as num).toDouble(),
+          (position[1]! as num).toDouble(),
+        ),
+        text: text,
+        width: width.toDouble(),
+        settings: TextSettings(
+          fontSize: fontSize.toDouble(),
+          ink: ink,
+          bold: raw['bold'] == true,
+          italic: raw['italic'] == true,
+          underline: raw['underline'] == true,
+          alignment: _byName(
+            TextAlign.values,
+            raw['alignment'],
+            TextAlign.left,
+          ),
+          listStyle: _byName(
+            TextListStyle.values,
+            raw['listStyle'],
+            TextListStyle.none,
+          ),
+        ),
+      );
+      if (element.isValid) {
+        ids.add(id);
+        elements.add(element);
+      }
+    }
+    return elements;
+  }
 
   /// Reads the sticky notes of a page, as far as they are usable. A page
   /// written before sticky notes has none. A malformed note is skipped,
@@ -528,6 +595,23 @@ class StoredPage {
     if (stickyNotes.isNotEmpty)
       'stickyNotes': <Object?>[
         for (final StickyNoteElement note in stickyNotes) _stickyToJson(note),
+      ],
+    if (textElements.isNotEmpty)
+      'textElements': <Object?>[
+        for (final NoteTextElement element in textElements)
+          <String, Object?>{
+            'id': element.id,
+            'position': <double>[element.position.x, element.position.y],
+            'text': element.text,
+            'width': element.width,
+            'fontSize': element.settings.fontSize,
+            'color': element.settings.ink.id,
+            if (element.settings.bold) 'bold': true,
+            if (element.settings.italic) 'italic': true,
+            if (element.settings.underline) 'underline': true,
+            'alignment': element.settings.alignment.name,
+            'listStyle': element.settings.listStyle.name,
+          },
       ],
     if (erasedStrokeRecords.isNotEmpty)
       'erasedStrokes': <Object?>[
@@ -759,6 +843,7 @@ class NoteContent {
             images: List<NoteImageElement>.of(page.ink.images),
             strokes: List<Stroke>.of(page.ink.strokes),
             stickyNotes: List<StickyNoteElement>.of(page.ink.stickyNotes),
+            textElements: List<NoteTextElement>.of(page.ink.textElements),
             playbacks: _playbacksOf(page.ink),
             recognizedWords: _recognizedWordsOf(page),
             erasedStrokeRecords: List<ErasedStrokeRecord>.of(
@@ -953,7 +1038,8 @@ class NoteContent {
     final InkController blank = create();
     if (page.strokes.isEmpty &&
         page.images.isEmpty &&
-        page.stickyNotes.isEmpty) {
+        page.stickyNotes.isEmpty &&
+        page.textElements.isEmpty) {
       return blank;
     }
     final InkController filled = InkController(
@@ -963,6 +1049,7 @@ class NoteContent {
       strokes: page.strokes,
       images: page.images,
       stickyNotes: page.stickyNotes,
+      textElements: page.textElements,
       erasedStrokeRecords: page.erasedStrokeRecords,
     );
     blank.dispose();
@@ -998,13 +1085,13 @@ class NoteContent {
 
   /// Text recognized from ink, used by the library index without loading
   /// stroke geometry during every search.
-  String get searchableText => pages
-      .expand((StoredPage page) => page.recognizedWords)
-      .where(
-        (StoredRecognizedInkWord word) =>
-            word.confidence != null &&
-            word.confidence! >= searchableHandwritingConfidence,
-      )
-      .map((StoredRecognizedInkWord word) => word.text)
-      .join(' ');
+  String get searchableText => <String>[
+    for (final StoredPage page in pages) ...<String>[
+      for (final StoredRecognizedInkWord word in page.recognizedWords)
+        if (word.confidence != null &&
+            word.confidence! >= searchableHandwritingConfidence)
+          word.text,
+      for (final NoteTextElement element in page.textElements) element.text,
+    ],
+  ].join(' ');
 }

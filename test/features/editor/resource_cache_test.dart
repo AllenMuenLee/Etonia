@@ -9,6 +9,7 @@ import 'package:greatnote/features/editor/document_io/document_models.dart';
 import 'package:greatnote/features/editor/document_io/document_platform.dart';
 import 'package:greatnote/features/editor/document_io/page_image_cache.dart';
 import 'package:greatnote/features/editor/document_io/pdf_page_layer.dart';
+import 'package:greatnote/features/editor/document_io/pdf_paper.dart';
 
 class _Rasterizer implements PdfRasterizer, PdfImageRasterizer {
   int renders = 0;
@@ -136,7 +137,7 @@ void main() {
         rasterizer: rasterizer,
       );
       final shown = <String>[];
-      final images = <ui.Image>[];
+      final images = <PdfPaper>[];
       cache.show(
         _source(0),
         _page,

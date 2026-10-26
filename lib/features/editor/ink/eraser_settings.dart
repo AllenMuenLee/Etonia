@@ -3,7 +3,7 @@ import 'package:flutter/foundation.dart';
 /// What a pointer on the page does. With [ai], the page is not written on:
 /// the chat is typed or dictated. (The ruler is no tool: it stays beside
 /// whichever tool is chosen.)
-enum EditorTool { pen, eraser, select, sticky, ai }
+enum EditorTool { pen, eraser, select, sticky, ai, text }
 
 enum EraserMode {
   /// Removes only the ink under the eraser; crossed strokes are cut.

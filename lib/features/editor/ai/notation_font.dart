@@ -25,8 +25,10 @@ abstract final class NotationFont {
   /// Gap between glyphs, in grid units.
   static const double spacing = HandwritingStyle.letterSpacing;
 
-  /// Lines are this many text sizes apart.
-  static const double lineHeight = 1.6;
+  /// Lines are this many text sizes apart: room enough between one line's
+  /// descenders and the next line's capitals to read easily and to write
+  /// in.
+  static const double lineHeight = 2.0;
 
   /// Every character the font can write.
   static Iterable<String> get characters => _glyphs.keys;

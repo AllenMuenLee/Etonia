@@ -329,6 +329,100 @@ void main() {
     );
 
     test(
+      'a notebook comes in without its PDF export, whose ink is printed on',
+      () async {
+        final GoogleDriveItem root = drive.addFolder('GoodNotes');
+        final GoogleDriveItem course = drive.addFolder(
+          'Bio255',
+          parentId: root.id,
+        );
+        drive.addFile(
+          'Lecture.goodnotes',
+          syntheticGoodnotesNotebook(),
+          parentId: course.id,
+        );
+        final GoogleDriveItem export = drive.addFile(
+          'Lecture.pdf',
+          _pdf('lecture, flattened'),
+          parentId: course.id,
+          mimeType: 'application/pdf',
+        );
+        // The same name in another folder is another document.
+        drive.addFile(
+          'Lecture.pdf',
+          _pdf('other lecture'),
+          parentId: root.id,
+          mimeType: 'application/pdf',
+        );
+
+        final ReplicationSummary summary = await replicator().replicate(root);
+
+        expect(summary.imported, <String>[
+          'Lecture.pdf',
+          'Bio255/Lecture.goodnotes',
+        ]);
+        expect(summary.skipped, isEmpty);
+        expect(await library(), <String, List<String>>{
+          '': <String>['Lecture'],
+          'Bio255': <String>['Lecture'],
+        });
+        final NoteEntry notebook = (await repository.list(
+          (await repository.allFolders()).single.id,
+        )).notes.single;
+        final NoteContent content = await repository.loadNote(notebook.id);
+        expect(content.pages.single.strokes, hasLength(1));
+
+        // An export imported by an earlier version goes to Recently Deleted.
+        final NoteEntry stale = await repository.createNote(title: 'Lecture');
+        await state.update((Map<String, Object?> values) {
+          final Map<String, Object?> imports = Map<String, Object?>.of(
+            values['goodnotesImports']! as Map<String, Object?>,
+          );
+          imports[export.id] = <String, Object?>{
+            'noteId': stale.id,
+            'modified': '',
+          };
+          values['goodnotesImports'] = imports;
+        });
+
+        final ReplicationSummary again = await replicator().replicate(root);
+
+        expect(again.imported, isEmpty);
+        expect(again.unchanged, 2);
+        expect((await repository.trash()).single.id, stale.id);
+        expect(
+          ((await state.read())['goodnotesImports']! as Map<String, Object?>)
+              .containsKey(export.id),
+          isFalse,
+        );
+      },
+    );
+
+    test('a PDF export comes in when its notebook cannot', () async {
+      final GoogleDriveItem root = drive.addFolder('GoodNotes');
+      drive.addFile('Lecture.goodnotes', <int>[
+        0x50,
+        0x4B,
+        0x03,
+        0x04,
+        1,
+        2,
+        3,
+      ], parentId: root.id);
+      drive.addFile(
+        'Lecture.pdf',
+        _pdf('lecture'),
+        parentId: root.id,
+        mimeType: 'application/pdf',
+      );
+
+      final ReplicationSummary summary = await replicator().replicate(root);
+
+      expect(summary.failed.single.path, 'Lecture.goodnotes');
+      expect(summary.imported, <String>['Lecture.pdf']);
+    });
+
+    test(
       'a file that cannot be read is listed, and the rest still come in',
       () async {
         final GoogleDriveItem root = drive.addFolder('GoodNotes');

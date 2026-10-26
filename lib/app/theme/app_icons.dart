@@ -20,6 +20,7 @@ abstract final class AppIcons {
   // Marks.
   static const IconData check = CupertinoIcons.checkmark;
   static const IconData add = CupertinoIcons.plus;
+  static const IconData remove = CupertinoIcons.minus;
 
   // Library.
   static const IconData library = CupertinoIcons.book;

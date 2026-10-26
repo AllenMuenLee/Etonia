@@ -59,21 +59,18 @@ by the provider account's own settings and terms, not by this Supabase code.
    app configuration, **not a claim about current provider pricing**. Rates are
    integer micro-USD per 1,000 tokens: $2/million tokens means `2000`.
    Model routing, rates, output limits and allowed aliases are server-controlled.
-   Two optional fields per model cut the cost of a request:
-   - `reasoningEffort` (`none`, `minimal`, `low`, `medium`, `high`): sent as
-     OpenAI's `reasoning_effort` or Gemini's `thinkingLevel`. Reasoning is
-     billed as output, usually the largest part of a request; `low` is a good
-     start for tutoring. Leave it out for a model that does not reason (or for
-     Claude, which ignores it), or the provider rejects the request.
-   - `cachedInputMicroPerKilo`: the provider's price for cached input. Fixed
-     instructions can then be served from cache. With Notation on, a request
-     is two passes: the model the user picked writes the words from the clean
-     crop, then the `luna` entry (required) reads the gridded crop, that answer
-     and the large notation grammar, and returns the drawing JSON. Give
-     `luna` `"reasoningEffort": "medium"`: laying a drawing out cleanly takes
-     some thinking. The
-     picked model never sees the grammar; both passes are billed at their own
-     model's rates against the same hold.
+   The optional `cachedInputMicroPerKilo` field is the provider's price for
+   cached input, allowing fixed instructions to be served from cache. With
+   Notation on, a request
+   is two passes: the model the user picked writes the words from the clean
+   crop, then the server-selected notation model reads the gridded crop,
+   that answer and the large notation grammar, and returns the drawing SVG.
+   Set the server-only `AI_NOTATION_MODEL` environment variable to one of the
+   configured aliases; when it is absent or blank, Luna is used. Clients cannot
+   override it. Answering models use their own provider/model reasoning default;
+   the notation pass always requests high reasoning. The picked answer model
+   never sees the grammar; both passes are billed at their own model's rates
+   against the same hold.
 6. Generate `PURCHASE_TOKEN_ENCRYPTION_KEY` from 32 cryptographically random bytes
    and base64-encode them. Back it up securely. Rotating it requires re-encrypting
    existing locators; changing it alone makes old subscriptions unreadable.

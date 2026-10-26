@@ -1,4 +1,4 @@
-﻿import 'package:flutter/gestures.dart';
+import 'package:flutter/gestures.dart';
 import 'dart:async';
 
 import 'package:flutter/material.dart';
@@ -13,7 +13,9 @@ import 'package:greatnote/features/editor/ink/ink_controller.dart';
 import 'package:greatnote/features/editor/ink/ink_sample.dart';
 import 'package:greatnote/features/editor/ink/stroke.dart';
 import 'package:greatnote/features/editor/ink/ink_palette.dart';
+import 'package:greatnote/features/editor/page/note_document.dart';
 import 'package:greatnote/features/editor/page/page_setup.dart';
+import 'package:greatnote/features/editor/widgets/page_controls.dart';
 import 'package:greatnote/features/editor/document_io/document_platform.dart';
 import 'package:greatnote/features/library/library_models.dart';
 import 'package:greatnote/features/library/library_screen.dart';
@@ -176,6 +178,22 @@ Future<void> _drawLine(WidgetTester tester, Offset from, Offset to) async {
 }
 
 void main() {
+  testWidgets('with large system text the cards widen to keep their captions', (
+    WidgetTester tester,
+  ) async {
+    final InMemoryNoteRepository repository = _repository();
+    final NoteEntry note = await repository.createNote(title: 'Plan');
+    final Finder card = find.byKey(ValueKey<String>('note-${note.id}'));
+    await _pumpLibrary(tester, repository);
+    final double width = tester.getSize(card).width;
+
+    // Otherwise the title and date are cut short and the page shrinks.
+    tester.platformDispatcher.textScaleFactorTestValue = 1.5;
+    addTearDown(tester.platformDispatcher.clearTextScaleFactorTestValue);
+    await tester.pumpAndSettle();
+    expect(tester.getSize(card).width, greaterThan(width * 1.3));
+  });
+
   testWidgets(
     'library refresh starts independent reads together',
     (WidgetTester tester) async {
@@ -458,11 +476,18 @@ void main() {
     await tester.tap(find.text('Kept'));
     await tester.pumpAndSettle();
 
-    expect(find.text('1 / 2'), findsOneWidget);
     expect(
       find.byKey(const ValueKey<String>('page-background')),
       findsOneWidget,
     );
+    // The overview shows both pages, on the first.
+    await tester.tap(find.byTooltip('Page overview'));
+    await tester.pumpAndSettle();
+    final NoteDocument opened = tester
+        .widget<PageOverviewPanel>(find.byType(PageOverviewPanel))
+        .document;
+    expect(opened.pageCount, 2);
+    expect(opened.currentIndex, 0);
     await tester.tap(find.byTooltip('Next page'));
     await tester.pumpAndSettle();
     expect(tester.getSize(find.byType(InkCanvas).at(1)), const Size(794, 1123));
@@ -592,7 +617,7 @@ void main() {
     expect((await repository.list(null)).notes.single.title, 'Final essay');
   });
 
-  testWidgets('New note offers a blank note and both PDF imports', (
+  testWidgets('New note offers a blank note and a PDF import', (
     WidgetTester tester,
   ) async {
     await _pumpLibrary(tester, _repository());
@@ -604,7 +629,7 @@ void main() {
     await tester.pumpAndSettle();
     expect(find.text('Blank note'), findsOneWidget);
     expect(find.text('Import PDF'), findsOneWidget);
-    expect(find.text('Import editable PDF'), findsOneWidget);
+    expect(find.text('Import editable PDF'), findsNothing);
     final Finder menu = find
         .ancestor(
           of: find.widgetWithText(MenuItemButton, 'Blank note'),

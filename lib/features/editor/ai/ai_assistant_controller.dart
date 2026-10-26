@@ -346,6 +346,14 @@ class AiAssistantController extends ChangeNotifier {
   bool get partialAnswerComplete =>
       _conversation?.partialAnswerComplete ?? false;
 
+  /// The readable answer is complete and visible, while the separately
+  /// generated notation is still on its way.
+  bool get isLoadingNotation =>
+      requestState == AiRequestState.sending &&
+      sendingWithNotation &&
+      partialAnswerComplete &&
+      (partialAnswer?.trim().isNotEmpty ?? false);
+
   /// Whether the request in flight was sent with Notation on, and so may
   /// still draw when it ends.
   bool get sendingWithNotation {

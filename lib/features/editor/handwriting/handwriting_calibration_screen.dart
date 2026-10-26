@@ -357,7 +357,7 @@ class _HandwritingCalibrationScreenState
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: <Widget>[
         Text(
-          'Choose how the AI writes on your notes, or write 18 letters to '
+          'Choose how the AI writes on your notes, or write 15 letters to '
           'make it write like you.',
           style: text.bodyMedium!.copyWith(color: colors.textPrimary),
         ),
@@ -670,7 +670,7 @@ class _FontCard extends StatelessWidget {
                             const SizedBox(width: AppSpacing.xs),
                             Expanded(
                               child: Text(
-                                'Write 18 letters, and the AI will write in '
+                                'Write 15 letters, and the AI will write in '
                                 'your handwriting.',
                                 style: text.bodySmall!.copyWith(
                                   color: colors.textPrimary,

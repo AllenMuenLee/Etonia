@@ -12,11 +12,7 @@ void main() {
   testWidgets('starting page strictly uses the logo provided in assets', (
     WidgetTester tester,
   ) async {
-    await tester.pumpWidget(
-      const MaterialApp(
-        home: StartupWordmark(),
-      ),
-    );
+    await tester.pumpWidget(const MaterialApp(home: StartupWordmark()));
 
     final Scaffold scaffold = tester.widget<Scaffold>(find.byType(Scaffold));
     expect(scaffold.backgroundColor, Colors.black);

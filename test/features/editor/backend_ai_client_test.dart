@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:typed_data';
 import 'dart:ui';
@@ -11,6 +12,55 @@ import 'package:greatnote/features/editor/ai/note_image_renderer.dart';
 import 'package:greatnote/features/editor/ai/streaming_ai_client.dart';
 
 void main() {
+  test('shows the completed chat answer before notation finishes', () async {
+    final Completer<void> notation = Completer<void>();
+    final List<(String, bool)> partials = <(String, bool)>[];
+    final client = BackendAiClient(
+      invokeStream: (_, _) async => (() async* {
+        yield <String, dynamic>{
+          'type': 'message',
+          'message': 'The answer is 42.',
+        };
+        await notation.future;
+        yield <String, dynamic>{
+          'type': 'result',
+          'answer':
+              '<svg xmlns="http://www.w3.org/2000/svg" '
+              'data-etonia-version="1" viewBox="0 0 100 100" '
+              'data-etonia-bounds="10 10 80 20">'
+              '<title>Answer</title>'
+              '<desc data-etonia-role="message">The answer is 42.</desc>'
+              '<path d="M10 20 L90 20" fill="none" stroke="black"/>'
+              '</svg>',
+          'usage': <String, dynamic>{'inputTokens': 10, 'outputTokens': 20},
+        };
+      })(),
+    );
+    final Future<AiResult> pending = client.send(
+      AiRequest(
+        systemInstruction: 'words',
+        notationInstruction: 'drawing',
+        notationEnabled: true,
+        imagePng: Uint8List.fromList(<int>[1]),
+        noteImage: NoteImage(
+          logicalSize: const Size(100, 100),
+          revision: 0,
+          normalizedFocusBounds: const Rect.fromLTRB(.1, .1, .9, .9),
+        ),
+        messages: const <AiMessage>[AiMessage.user('Explain it')],
+      ),
+      onPartial: (String message, bool complete) =>
+          partials.add((message, complete)),
+    );
+
+    await pumpEventQueue();
+    expect(partials, <(String, bool)>[('The answer is 42.', true)]);
+
+    notation.complete();
+    final AiSuccess answer = await pending as AiSuccess;
+    expect(answer.notation?.vector, isNotNull);
+  });
+
   test(
     'conversation history, current prompt, and selected crop are sent but the full note is not',
     () async {

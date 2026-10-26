@@ -64,7 +64,7 @@ double _scale(WidgetTester tester) {
 }
 
 Future<void> _openPanel(WidgetTester tester) async {
-  await tester.tap(find.byTooltip('Page setup'));
+  await tester.tap(find.byTooltip('Page settings'));
   await tester.pumpAndSettle();
 }
 
@@ -82,6 +82,17 @@ Future<void> _choose(WidgetTester tester, String dropdown, String label) async {
   await tester.pumpAndSettle();
   // The open menu's entry is the last one built.
   await tester.tap(find.text(label).last);
+  await tester.pumpAndSettle();
+}
+
+/// Steps a page with the overview's arrow [tooltip], opening the overview
+/// for it and closing it after.
+Future<void> _stepPage(WidgetTester tester, String tooltip) async {
+  await tester.tap(find.byTooltip('Page overview'));
+  await tester.pumpAndSettle();
+  await tester.tap(find.byTooltip(tooltip));
+  await tester.pumpAndSettle();
+  await tester.tap(find.byTooltip('Page overview'));
   await tester.pumpAndSettle();
 }
 
@@ -266,7 +277,8 @@ void main() {
 
     await tester.tap(find.text('Add blank page'));
     await tester.pumpAndSettle();
-    expect(find.text('2 / 2'), findsOneWidget);
+    expect(document.pageCount, 2);
+    expect(document.currentIndex, 1);
     expect(document.current.ink.strokes, isEmpty);
     await _drawLine(
       tester,
@@ -279,9 +291,8 @@ void main() {
       origin + const Offset(300, 300),
     );
 
-    await tester.tap(find.byTooltip('Previous page'));
-    await tester.pumpAndSettle();
-    expect(find.text('1 / 2'), findsOneWidget);
+    await _stepPage(tester, 'Previous page');
+    expect(document.currentIndex, 0);
     expect(document.pages[0].ink.strokes, hasLength(1));
     expect(document.pages[1].ink.strokes, hasLength(2));
   });
@@ -363,6 +374,7 @@ void main() {
   ) async {
     final NoteDocument document = await _pumpDocument(tester);
     await _openPanel(tester);
+    expect(find.text('Page settings'), findsOneWidget);
     expect(find.text('Page 1 of 1'), findsOneWidget);
     // The panel sits under the top bar, at its trailing end.
     final Rect panel = tester.getRect(find.byType(PagePanel));
@@ -396,6 +408,76 @@ void main() {
       findsOneWidget,
     );
     expect(tester.getSize(find.byType(InkCanvas)), const Size(1123, 794));
+  });
+
+  testWidgets('the top-left overview switches pages from a preview grid', (
+    WidgetTester tester,
+  ) async {
+    final NoteDocument document = await _pumpDocument(tester);
+    document.addPage();
+    document.addPage();
+    document.goTo(0);
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.byTooltip('Page overview'));
+    await tester.pumpAndSettle();
+
+    final Finder panel = find.byType(PageOverviewPanel);
+    expect(panel, findsOneWidget);
+    expect(tester.getRect(panel).left, lessThan(40));
+    // It hangs below the top-left card rather than over it.
+    final Rect card = tester.getRect(
+      find.byKey(const ValueKey<String>('history-card')),
+    );
+    expect(tester.getRect(panel).top, greaterThanOrEqualTo(card.bottom));
+    expect(
+      find.byKey(const ValueKey<String>('page-overview-grid')),
+      findsOneWidget,
+    );
+    // The page number shows in the overview.
+    expect(
+      find.descendant(
+        of: panel,
+        matching: find.byKey(const ValueKey<String>('page-number-button')),
+      ),
+      findsOneWidget,
+    );
+
+    // Its arrows step pages and leave it open, the grid following along.
+    await tester.tap(find.byTooltip('Next page'));
+    await tester.pumpAndSettle();
+    expect(document.currentIndex, 1);
+    expect(find.byType(PageOverviewPanel), findsOneWidget);
+    await tester.tap(find.byTooltip('Previous page'));
+    await tester.pumpAndSettle();
+    expect(document.currentIndex, 0);
+
+    // The bar stays usable while it shows: the grid button closes it, and
+    // opens it again.
+    await tester.tap(find.byTooltip('Page overview'));
+    await tester.pumpAndSettle();
+    expect(find.byType(PageOverviewPanel), findsNothing);
+    await tester.tap(find.byTooltip('Page overview'));
+    await tester.pumpAndSettle();
+    expect(find.byType(PageOverviewPanel), findsOneWidget);
+    expect(
+      find.byKey(const ValueKey<String>('page-thumbnail-0')),
+      findsOneWidget,
+    );
+    expect(
+      find.byKey(const ValueKey<String>('page-thumbnail-2')),
+      findsOneWidget,
+    );
+    expect(
+      find.byKey(const ValueKey<String>('page-size-dropdown')),
+      findsNothing,
+    );
+
+    await tester.tap(find.byKey(const ValueKey<String>('page-thumbnail-2')));
+    await tester.pumpAndSettle();
+
+    expect(document.currentIndex, 2);
+    expect(find.byType(PageOverviewPanel), findsNothing);
   });
 
   testWidgets('pointer positions map to page coordinates when scaled and '
@@ -595,7 +677,7 @@ void main() {
     document.addPage();
     document.goTo(0);
     await tester.pumpAndSettle();
-    expect(find.text('1 / 2'), findsOneWidget);
+    expect(document.currentIndex, 0);
     final Rect area = tester.getRect(find.byType(PageViewport));
 
     final TestPointer mouse = TestPointer(1, PointerDeviceKind.mouse);
@@ -603,10 +685,8 @@ void main() {
     await tester.sendEventToBinding(mouse.scroll(Offset(0, area.height * 0.6)));
     await tester.pumpAndSettle();
     expect(document.currentIndex, 1);
-    expect(find.text('2 / 2'), findsOneWidget);
 
-    await tester.tap(find.byTooltip('Previous page'));
-    await tester.pumpAndSettle();
+    await _stepPage(tester, 'Previous page');
     expect(
       tester.getRect(find.byType(InkCanvas).first).top,
       closeTo(area.top, 0.5),
@@ -1040,7 +1120,7 @@ void main() {
     expect(canvasRect(tester), tester.getRect(surface));
   });
 
-  testWidgets('compact layouts reach page navigation through the panel', (
+  testWidgets('compact layouts reach page editing through settings', (
     WidgetTester tester,
   ) async {
     final NoteDocument document = await _pumpDocument(

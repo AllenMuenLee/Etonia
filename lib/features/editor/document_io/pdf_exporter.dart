@@ -16,6 +16,7 @@ import '../ink/stroke.dart';
 import '../page/page_setup.dart';
 import '../sticky/sticky_note.dart';
 import '../sticky/sticky_note_painter.dart';
+import '../text/note_text.dart';
 import 'document_io_config.dart';
 import 'document_models.dart';
 import 'document_platform.dart';
@@ -330,15 +331,59 @@ class _PreparedPage {
          for (final StickyNoteElement note in page.stickyNotes)
            if (note.isValid) _PreparedSticky.of(note),
        ],
+       texts = <_PreparedText>[
+         for (final NoteTextElement text in page.textElements)
+           if (text.isValid) _PreparedText.of(text),
+       ],
        strokes = <_PreparedStroke>[
          for (final stroke in page.strokes) _prepareStroke(stroke),
        ];
   final PageBackground background;
   final List<NoteImageElement> images;
   final List<_PreparedSticky> stickies;
+  final List<_PreparedText> texts;
   final List<_PreparedStroke> strokes;
   final ExportPageGeometry geometry;
   final Uint8List? pdfBackground;
+}
+
+class _PreparedText {
+  const _PreparedText({
+    required this.text,
+    required this.x,
+    required this.y,
+    required this.width,
+    required this.fontSize,
+    required this.color,
+    required this.bold,
+    required this.italic,
+    required this.underline,
+    required this.alignment,
+  });
+
+  factory _PreparedText.of(NoteTextElement element) => _PreparedText(
+    text: element.text,
+    x: element.position.x,
+    y: element.position.y,
+    width: element.width,
+    fontSize: element.settings.fontSize,
+    color: element.settings.ink.resolve(Brightness.light).toARGB32(),
+    bold: element.settings.bold,
+    italic: element.settings.italic,
+    underline: element.settings.underline,
+    alignment: element.settings.alignment.name,
+  );
+
+  final String text;
+  final double x;
+  final double y;
+  final double width;
+  final double fontSize;
+  final int color;
+  final bool bold;
+  final bool italic;
+  final bool underline;
+  final String alignment;
 }
 
 /// [stroke] as plain data, its points carried through [map] and its width
@@ -632,6 +677,36 @@ Future<Uint8List> _generatePdf(_PreparedExport export) async {
                 _paintPreparedSticky(canvas, note, scale);
               }
             },
+          ),
+        ),
+      for (final _PreparedText text in prepared.texts)
+        pw.Positioned(
+          left: text.x * scale,
+          top: text.y * scale,
+          child: pw.SizedBox(
+            width: text.width * scale,
+            child: pw.Text(
+              text.text,
+              textAlign: switch (text.alignment) {
+                'center' => pw.TextAlign.center,
+                'right' || 'end' => pw.TextAlign.right,
+                _ => pw.TextAlign.left,
+              },
+              style: pw.TextStyle(
+                color: PdfColor.fromInt(text.color),
+                fontSize: text.fontSize * scale,
+                fontWeight: text.bold
+                    ? pw.FontWeight.bold
+                    : pw.FontWeight.normal,
+                fontStyle: text.italic
+                    ? pw.FontStyle.italic
+                    : pw.FontStyle.normal,
+                decoration: text.underline
+                    ? pw.TextDecoration.underline
+                    : pw.TextDecoration.none,
+                height: 1.3,
+              ),
+            ),
           ),
         ),
     ];

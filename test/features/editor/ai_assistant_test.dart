@@ -1,4 +1,4 @@
-﻿import 'package:flutter/material.dart';
+import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:greatnote/app/theme/app_icons.dart';
@@ -7,6 +7,8 @@ import 'package:greatnote/app/theme/app_tokens.dart';
 import 'package:greatnote/features/editor/ai/ai_assistant_controller.dart';
 import 'package:greatnote/features/editor/ai/ai_client.dart';
 import 'package:greatnote/features/editor/ai/ai_config.dart';
+import 'package:greatnote/features/editor/ai/ai_notation.dart';
+import 'package:greatnote/features/editor/document_io/svg_document.dart';
 import 'package:greatnote/features/editor/editor_screen.dart';
 import 'package:greatnote/features/editor/handwriting/handwriting_calibration.dart';
 import 'package:greatnote/features/editor/handwriting/handwriting_style.dart';
@@ -935,21 +937,76 @@ void main() {
         findsWidgets,
       );
       expect(find.byType(EtoniaBarsLoader), findsOneWidget);
-      expect(find.textContaining('Drawing'), findsNothing);
+      expect(find.text('Notation is loading…'), findsNothing);
 
       // The words are all in; the drawing is still coming.
-      client.stream('Two **parallel** lines.', isComplete: true);
+      client.stream(r'Two **parallel** lines: $y = 2x + 1$.', isComplete: true);
       await tester.pump();
-      expect(find.textContaining('Drawing'), findsNothing);
+      final Finder notationLoading = find.text('Notation is loading…');
+      expect(notationLoading, findsOneWidget);
+      expect(
+        find.descendant(
+          of: live,
+          matching: find.byWidgetPredicate(
+            (Widget widget) => widget.runtimeType.toString() == 'Math',
+          ),
+        ),
+        findsOneWidget,
+      );
+      expect(
+        tester.getTopLeft(live).dy,
+        lessThan(tester.getTopLeft(notationLoading).dy),
+      );
       expect(controller.strokes, hasLength(strokes));
 
-      client.answer('Two **parallel** lines.');
+      client.answer(r'Two **parallel** lines: $y = 2x + 1$.');
       await tester.pumpAndSettle();
 
       expect(live, findsNothing);
-      expect(find.textContaining('Drawing'), findsNothing);
+      expect(find.text('Notation is loading…'), findsNothing);
       expect(find.byType(EtoniaBarsLoader), findsNothing);
       expect(find.text('Assistant'), findsOneWidget);
+      expect(tester.takeException(), isNull);
+    });
+
+    testWidgets('a completed SVG response appears as native notation ink', (
+      WidgetTester tester,
+    ) async {
+      final (InkController controller, FakeAiClient client) = await _pumpOpen(
+        tester,
+      );
+      final int before = controller.strokes.length;
+      _assistant(tester).setNotationEnabled(true);
+      await tester.pump();
+      await tester.tap(_quickAction('Explain this'));
+      await settleAi(tester);
+      final Size page = client.requests.single.noteImage!.logicalSize;
+      final String width = page.width.toString();
+      final String height = page.height.toString();
+      final EditableSvg svg = EditableSvg.parse(
+        '<svg xmlns="http://www.w3.org/2000/svg" data-etonia-version="1" '
+        'viewBox="0 0 $width $height" data-etonia-bounds="100 80 160 40">'
+        '<title>Formula</title>'
+        '<desc data-etonia-role="message">Here is the annotation.</desc>'
+        r'<text x="100" y="110" font-size="24" fill="black">$x = 42$</text>'
+        '</svg>',
+        modelResponse: true,
+      );
+
+      client.answerResponse(
+        AiAssistantResponse(
+          message: 'Here is the annotation.',
+          notation: AiNotation.vector(svg),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      expect(controller.images, isEmpty);
+      expect(controller.strokes.length, greaterThan(before + 1));
+      expect(
+        _assistant(tester).messages.last.notationStatus,
+        AiNotationStatus.applied,
+      );
       expect(tester.takeException(), isNull);
     });
 

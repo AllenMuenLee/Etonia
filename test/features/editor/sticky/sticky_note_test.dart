@@ -720,8 +720,8 @@ void main() {
       expect(page.toJson().containsKey('stickyNotes'), isFalse);
     });
 
-    test('schema 3 notes still open; the schema is now 5', () {
-      expect(storageSchema, 6);
+    test('schema 3 notes still open in the current schema', () {
+      expect(storageSchema, 8);
       final NoteContent content = NoteContent.fromJson(<String, Object?>{
         'schema': 3,
         'pages': <Object?>[

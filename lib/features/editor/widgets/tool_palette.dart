@@ -29,9 +29,24 @@ import 'select_options.dart';
 import 'sticky_options.dart';
 import 'stroke_width_picker.dart';
 import '../sticky/sticky_note.dart';
+import '../text/note_text.dart';
+import 'text_options_bar.dart';
 
 class PopoverChanged extends ChangeNotifier {
   void notify() => notifyListeners();
+}
+
+class _ConstantTextSettings implements ValueListenable<TextSettings> {
+  const _ConstantTextSettings();
+
+  @override
+  TextSettings get value => const TextSettings();
+
+  @override
+  void addListener(VoidCallback listener) {}
+
+  @override
+  void removeListener(VoidCallback listener) {}
 }
 
 /// Handles to the palette's popovers, for code outside the palette that
@@ -231,13 +246,15 @@ class ToolPalette extends StatelessWidget {
     this.onChooseSvg,
     this.ruler,
     this.recording,
+    this.textSettings,
+    this.onTextSettingsChanged,
   });
 
   static const double _padding = AppSpacing.xxs;
 
   /// The tools always shown; an arrow folds the rest in and out.
   static const int _primaryCount = 6;
-  static const int _secondaryCount = 2;
+  static const int _secondaryCount = 3;
   static const double _buttonStep = 44;
 
   /// How long the secondary tools take to fold in or out.
@@ -250,6 +267,14 @@ class ToolPalette extends StatelessWidget {
   /// The microphone and the note's recordings. Without it there is no Record
   /// button.
   final RecordingToolData? recording;
+
+  /// Formatting defaults and active-text formatting. Without these there is
+  /// no Text tool.
+  final ValueListenable<TextSettings>? textSettings;
+  final ValueChanged<TextSettings>? onTextSettingsChanged;
+
+  ValueListenable<TextSettings> get _effectiveTextSettings =>
+      textSettings ?? const _ConstantTextSettings();
 
   /// Callbacks for inserting images from gallery or camera.
   final VoidCallback? onChooseImageFromGallery;
@@ -332,7 +357,7 @@ class ToolPalette extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return _LiftableSurface(
+    final Widget palette = _LiftableSurface(
       semanticLabel: 'Move tools, docked at the ${edge.label}',
       moveActions: <CustomSemanticsAction, VoidCallback>{
         if (onMoveTo != null)
@@ -377,6 +402,7 @@ class ToolPalette extends StatelessWidget {
                     EditorTool.select => 2,
                     EditorTool.sticky => stickySettings != null ? 5 : null,
                     EditorTool.ai => null,
+                    EditorTool.text => null,
                   },
                   capsuleSize: dense
                       ? AppSizes.paletteButtonVisualDense
@@ -390,8 +416,9 @@ class ToolPalette extends StatelessWidget {
                     if (stickySettings != null) _stickyControl(),
                   ],
                   secondary: <Widget>[
-                    if (ruler != null) _rulerControl(),
                     if (recording != null) _recordingControl(),
+                    _textControl(),
+                    if (ruler != null) _rulerControl(),
                   ],
                   toggle: controller == null
                       ? null
@@ -402,6 +429,27 @@ class ToolPalette extends StatelessWidget {
           ),
         ),
       ),
+    );
+    final ValueListenable<TextSettings> settings = _effectiveTextSettings;
+    return ListenableBuilder(
+      listenable: Listenable.merge(<Listenable>[tool, settings]),
+      builder: (BuildContext context, Widget? _) {
+        final bool showOptions = tool.value == EditorTool.text;
+        return Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: <Widget>[
+            palette,
+            if (showOptions) ...<Widget>[
+              const SizedBox(height: AppSpacing.xxs),
+              TextOptionsBar(
+                settings: settings.value,
+                onChanged: onTextSettingsChanged ?? (_) {},
+              ),
+            ],
+          ],
+        );
+      },
     );
   }
 
@@ -425,7 +473,7 @@ class ToolPalette extends StatelessWidget {
               : _choose(() => tool.value = EditorTool.pen),
           child: _PenIcon(
             ink: pen.activeInk,
-            highlighter: pen.isHighlighter,
+            style: pen.style,
             opacity: penConfig.highlighterOpacity,
           ),
         );
@@ -675,6 +723,20 @@ class ToolPalette extends StatelessWidget {
     );
   }
 
+  /// Selects typed text placement; its formatting controls appear below.
+  Widget _textControl() {
+    final bool selected = tool.value == EditorTool.text;
+    return PaletteButton(
+      key: const ValueKey<String>('text-tool'),
+      tooltip: 'Text',
+      semanticLabel: 'Text',
+      selected: selected,
+      dense: dense,
+      onPressed: _choose(() => tool.value = EditorTool.text),
+      child: const _TextGlyph(),
+    );
+  }
+
   /// Shows and hides the ruler. It is no tool: the one in use stays chosen.
   Widget _rulerControl() {
     final RulerController guide = ruler!;
@@ -760,6 +822,52 @@ class _AiGlyph extends StatelessWidget {
       ),
     );
   }
+}
+
+/// A typesetting-style T with a baseline, distinct from the pen nib.
+class _TextGlyph extends StatelessWidget {
+  const _TextGlyph();
+
+  @override
+  Widget build(BuildContext context) {
+    final Color color =
+        IconTheme.of(context).color ?? AppColors.of(context).textPrimary;
+    return SizedBox.square(
+      dimension: AppSizes.icon,
+      child: CustomPaint(painter: _TextGlyphPainter(color)),
+    );
+  }
+}
+
+class _TextGlyphPainter extends CustomPainter {
+  const _TextGlyphPainter(this.color);
+  final Color color;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final double unit = size.shortestSide / 24;
+    final Paint paint = Paint()
+      ..color = color
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 1.7 * unit
+      ..strokeCap = StrokeCap.round;
+    canvas
+      ..drawLine(Offset(4 * unit, 5 * unit), Offset(20 * unit, 5 * unit), paint)
+      ..drawLine(
+        Offset(12 * unit, 5 * unit),
+        Offset(12 * unit, 19 * unit),
+        paint,
+      )
+      ..drawLine(
+        Offset(8 * unit, 19 * unit),
+        Offset(16 * unit, 19 * unit),
+        paint,
+      );
+  }
+
+  @override
+  bool shouldRepaint(_TextGlyphPainter oldDelegate) =>
+      oldDelegate.color != color;
 }
 
 /// Lays out the palette buttons along [axis] spaced by [step] while
@@ -1308,40 +1416,42 @@ class _PictureIconPainter extends CustomPainter {
 }
 
 /// The writing tool's glyph with a sample of the current ink at its
-/// corner: a dot for the pen, a translucent bar for the highlighter.
+/// corner: a dot for the pen and pencil, a translucent bar for the
+/// highlighter. The pencil and highlighter are drawn as in the style picker,
+/// so what is chosen there is what the toolbar shows.
 class _PenIcon extends StatelessWidget {
   const _PenIcon({
     required this.ink,
-    required this.highlighter,
+    required this.style,
     required this.opacity,
   });
 
   static const double _dot = 9;
 
   final InkColor ink;
-  final bool highlighter;
+  final WritingStyle style;
   final double opacity;
 
   @override
   Widget build(BuildContext context) {
     final AppColors colors = AppColors.of(context);
     final Color color = ink.resolve(Theme.of(context).brightness);
+    final bool highlighter = style == WritingStyle.highlighter;
     return SizedBox.square(
       dimension: AppSizes.icon + AppSpacing.xxs,
       child: Stack(
         children: <Widget>[
           Align(
-            alignment: highlighter ? Alignment.topLeft : Alignment.center,
-            child: highlighter
-                ? const Icon(AppIcons.highlighter)
-                : const PenIcon(),
+            child: style == WritingStyle.pen
+                ? const PenIcon()
+                : _WritingToolGlyph(style: style),
           ),
           Positioned(
             right: 0,
             bottom: 0,
             child: Container(
               key: const ValueKey<String>('pen-ink-dot'),
-              width: highlighter ? _dot * 1.6 : _dot,
+              width: highlighter ? _dot * 1.3 : _dot,
               height: _dot,
               decoration: BoxDecoration(
                 color: highlighter ? color.withValues(alpha: opacity) : color,
@@ -1447,6 +1557,25 @@ class _WritingTipGlyph extends StatelessWidget {
   }
 }
 
+/// [_WritingTipPainter] at the toolbar's icon size, in the icon's color.
+class _WritingToolGlyph extends StatelessWidget {
+  const _WritingToolGlyph({required this.style});
+
+  final WritingStyle style;
+
+  @override
+  Widget build(BuildContext context) {
+    final Color color =
+        IconTheme.of(context).color ?? AppColors.of(context).textPrimary;
+    return SizedBox.square(
+      dimension: AppSizes.icon + AppSpacing.xxs,
+      child: CustomPaint(
+        painter: _WritingTipPainter(style: style, color: color),
+      ),
+    );
+  }
+}
+
 class _WritingTipPainter extends CustomPainter {
   const _WritingTipPainter({required this.style, required this.color});
 
@@ -1506,31 +1635,36 @@ class _WritingTipPainter extends CustomPainter {
               ..isAntiAlias = true,
           );
       case WritingStyle.highlighter:
-        // Wide felt nib ending in the highlighter's characteristic chisel.
+        // A marker: barrel with a grip band, a tapering shoulder, and a
+        // solid chisel tip cut at a slant.
         canvas
           ..drawRRect(
             RRect.fromRectAndRadius(
-              const Rect.fromLTRB(6.5, 3, 17.5, 12),
+              const Rect.fromLTRB(7, 3, 17, 12),
               const Radius.circular(1.5),
             ),
             outline,
           )
+          ..drawLine(const Offset(7, 7.5), const Offset(17, 7.5), outline)
           ..drawPath(
             Path()
-              ..moveTo(7.5, 12)
-              ..lineTo(16.5, 12)
-              ..lineTo(15.25, 17.5)
-              ..lineTo(7, 20)
+              ..moveTo(8.75, 12)
+              ..lineTo(15.25, 12)
+              ..lineTo(13.75, 17)
+              ..lineTo(10.25, 17)
               ..close(),
             outline,
           )
-          ..drawLine(
-            const Offset(7, 20),
-            const Offset(15.25, 17.5),
+          ..drawPath(
+            Path()
+              ..moveTo(10.25, 17)
+              ..lineTo(13.75, 17)
+              ..lineTo(13.75, 19)
+              ..lineTo(10.25, 21)
+              ..close(),
             Paint()
               ..color = color
-              ..strokeWidth = 2.6
-              ..strokeCap = StrokeCap.square
+              ..style = PaintingStyle.fill
               ..isAntiAlias = true,
           );
     }

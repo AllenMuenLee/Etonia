@@ -35,15 +35,16 @@ Future<void> _pumpComponent(WidgetTester tester, Widget child) {
 
 void main() {
   // Previous and next page are disabled on a one-page note, so they are
-  // skipped; on compact widths they live in the page panel.
+  // skipped; the overview remains available at every width.
   List<String> tooltipsAt(TestViewport viewport) {
     if (viewport == TestViewport.compact) {
       return <String>[
         'Open navigation menu',
         'Rename note',
         'Settings',
-        'Page setup',
+        'Page overview',
         'Add',
+        'Page settings',
         'Pen',
         'Eraser',
         'Select',
@@ -53,14 +54,15 @@ void main() {
       'Open navigation menu',
       'Rename note',
       'Settings',
+      'Page overview',
       'Pen',
       'Eraser',
       'Select',
       'Turn on AI',
       'Sticky note',
       'Expand toolbar',
-      'Page setup',
       'Add',
+      'Page settings',
     ];
   }
 

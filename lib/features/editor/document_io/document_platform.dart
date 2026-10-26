@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:io';
+import 'dart:math' as math;
 import 'dart:ui' as ui;
 
 import 'package:file_picker/file_picker.dart';
@@ -7,6 +8,8 @@ import 'package:flutter/services.dart';
 import 'package:image_picker/image_picker.dart' as image_picker;
 import 'package:pdfrx/pdfrx.dart' as pdfrx;
 import 'package:share_plus/share_plus.dart';
+
+import 'pdf_paper.dart';
 
 @pragma('vm:immutable')
 class PickedDocument {
@@ -19,9 +22,6 @@ enum DocumentImageSource { gallery, camera }
 
 abstract interface class DocumentPicker {
   Future<PickedDocument?> pickPdf();
-
-  /// A PDF exported from Goodnotes or a native `.goodnotes` notebook.
-  Future<PickedDocument?> pickGoodnotes();
   Future<PickedDocument?> pickImage(DocumentImageSource source);
 }
 
@@ -41,11 +41,6 @@ class SystemDocumentPicker implements DocumentPicker, SvgDocumentPicker {
   @override
   Future<PickedDocument?> pickSvg() =>
       _pick(FileType.custom, const <String>['svg']);
-
-  /// Any file: `.goodnotes` is not a type every platform's picker can
-  /// filter by, so what is picked is told apart by its contents.
-  @override
-  Future<PickedDocument?> pickGoodnotes() => _pick(FileType.any, null);
 
   @override
   Future<PickedDocument?> pickImage(DocumentImageSource source) async {
@@ -143,6 +138,16 @@ abstract interface class OpenPdf {
   });
 
   Future<void> dispose();
+}
+
+/// An [OpenPdf] that can hand a big page to the engine in bands, so that no
+/// single copy keeps the UI isolate from running a frame. See [PdfPaper].
+abstract interface class PdfBandRenderer {
+  Future<PdfPaper> renderPaper(
+    int pageIndex, {
+    required int pixelWidth,
+    required int pixelHeight,
+  });
 }
 
 /// PDFium-backed implementation. Every one-off operation owns and closes
@@ -269,7 +274,7 @@ class PdfrxRasterizer
   }
 }
 
-class _PdfrxOpenPdf implements OpenPdf {
+class _PdfrxOpenPdf implements OpenPdf, PdfBandRenderer {
   _PdfrxOpenPdf(this._document);
 
   final pdfrx.PdfDocument _document;
@@ -282,10 +287,17 @@ class _PdfrxOpenPdf implements OpenPdf {
   }) => _renderPdfrxImage(_document, pageIndex, pixelWidth, pixelHeight);
 
   @override
+  Future<PdfPaper> renderPaper(
+    int pageIndex, {
+    required int pixelWidth,
+    required int pixelHeight,
+  }) => _renderPdfrxPaper(_document, pageIndex, pixelWidth, pixelHeight);
+
+  @override
   Future<void> dispose() => _document.dispose();
 }
 
-Future<ui.Image> _renderPdfrxImage(
+Future<pdfrx.PdfImage> _renderPdfrxBitmap(
   pdfrx.PdfDocument document,
   int pageIndex,
   int pixelWidth,
@@ -304,10 +316,104 @@ Future<ui.Image> _renderPdfrxImage(
   if (rendered == null) {
     throw StateError('The PDF page could not be rendered.');
   }
+  return rendered;
+}
+
+Future<ui.Image> _renderPdfrxImage(
+  pdfrx.PdfDocument document,
+  int pageIndex,
+  int pixelWidth,
+  int pixelHeight,
+) async {
+  final pdfrx.PdfImage rendered = await _renderPdfrxBitmap(
+    document,
+    pageIndex,
+    pixelWidth,
+    pixelHeight,
+  );
   try {
     return await rendered.createImage();
   } finally {
     rendered.dispose();
+  }
+}
+
+/// Pixels handed to the engine at a time. The copy blocks the UI isolate at
+/// about a millisecond per megapixel on a tablet, and a frame at 120 Hz is
+/// eight; half a megapixel leaves room for the frame itself.
+const int _bandPixels = 1 << 19;
+
+Future<PdfPaper> _renderPdfrxPaper(
+  pdfrx.PdfDocument document,
+  int pageIndex,
+  int pixelWidth,
+  int pixelHeight,
+) async {
+  final pdfrx.PdfImage rendered = await _renderPdfrxBitmap(
+    document,
+    pageIndex,
+    pixelWidth,
+    pixelHeight,
+  );
+  try {
+    final int width = rendered.width;
+    final int height = rendered.height;
+    if (width * height <= _bandPixels * 3 ~/ 2) {
+      return PdfPaper.single(await rendered.createImage());
+    }
+    final int count = (width * height / _bandPixels).ceil();
+    final int rows = (height / count).ceil();
+    final List<ui.Image> bands = <ui.Image>[];
+    try {
+      for (int top = 0; top < height; top += rows) {
+        final int bandRows = math.min(rows, height - top);
+        bands.add(
+          await _imageFromBgra(
+            Uint8List.sublistView(
+              rendered.pixels,
+              top * width * 4,
+              (top + bandRows) * width * 4,
+            ),
+            width,
+            bandRows,
+          ),
+        );
+      }
+    } on Object {
+      for (final ui.Image band in bands) {
+        band.dispose();
+      }
+      rethrow;
+    }
+    return PdfPaper(bands);
+  } finally {
+    rendered.dispose();
+  }
+}
+
+/// What pdfrx's `createImage` does, for [pixels] of a bitmap [width] wide:
+/// the copy into the engine's buffer is the part that blocks.
+Future<ui.Image> _imageFromBgra(Uint8List pixels, int width, int height) async {
+  final ui.ImmutableBuffer buffer = await ui.ImmutableBuffer.fromUint8List(
+    pixels,
+  );
+  ui.ImageDescriptor? descriptor;
+  try {
+    descriptor = ui.ImageDescriptor.raw(
+      buffer,
+      width: width,
+      height: height,
+      pixelFormat: ui.PixelFormat.bgra8888,
+    );
+    final ui.Codec codec = await descriptor.instantiateCodec();
+    try {
+      return (await codec.getNextFrame()).image;
+    } finally {
+      codec.dispose();
+    }
+  } finally {
+    descriptor?.dispose();
+    buffer.dispose();
   }
 }
 

@@ -375,11 +375,9 @@ private final class NativeInkOverlay: PKCanvasView {
     alwaysBounceVertical = false
     showsHorizontalScrollIndicator = false
     showsVerticalScrollIndicator = false
+    // PencilKit already draws at the display's full ProMotion rate; a frame
+    // rate range belongs to a CADisplayLink or CAAnimation, not a CALayer.
     bounces = false
-    if #available(iOS 15.0, *) {
-      layer.preferredFrameRateRange = CAFrameRateRange(
-        minimum: 80, maximum: 120, preferred: 120)
-    }
   }
 
   required init?(coder: NSCoder) { nil }

@@ -178,6 +178,59 @@ void main() {
         findsOneWidget,
       );
     });
+
+    testWidgets('a second tap on the chosen swatch opens the palette', (
+      WidgetTester tester,
+    ) async {
+      InkColor selected = InkPalette.ink;
+      await tester.pumpWidget(
+        MaterialApp(
+          theme: ThemeData.light().copyWith(
+            extensions: <ThemeExtension<dynamic>>[AppColors.light],
+          ),
+          home: Scaffold(
+            body: StatefulBuilder(
+              builder: (BuildContext context, StateSetter setState) {
+                return InkColorPicker(
+                  selected: selected,
+                  onSelected: (InkColor next) {
+                    setState(() => selected = next);
+                  },
+                );
+              },
+            ),
+          ),
+        ),
+      );
+
+      // The first tap only chooses the ink.
+      await tester.tap(find.byKey(const ValueKey<String>('ink-swatch-blue')));
+      await tester.pumpAndSettle();
+      expect(selected.id, 'blue');
+      expect(
+        find.byKey(const ValueKey<String>('color-hex-input')),
+        findsNothing,
+      );
+
+      // The second opens the palette, starting from that ink.
+      await tester.tap(find.byKey(const ValueKey<String>('ink-swatch-blue')));
+      await tester.pumpAndSettle();
+      expect(
+        find.byKey(const ValueKey<String>('color-hex-input')),
+        findsOneWidget,
+      );
+      await tester.enterText(
+        find.byKey(const ValueKey<String>('color-hex-input')),
+        'E91E63',
+      );
+      await tester.pumpAndSettle();
+      await tester.tap(
+        find.byKey(const ValueKey<String>('color-select-button')),
+      );
+      await tester.pumpAndSettle();
+
+      expect(selected.id, 'custom-ffe91e63');
+    });
   });
 
   group('StickyOptions 色盤 integration', () {

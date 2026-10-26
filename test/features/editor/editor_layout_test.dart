@@ -75,6 +75,20 @@ void main() {
           expect(history.contains(undo.center), isTrue);
           expect(history.contains(redo.center), isTrue);
 
+          // The page grid lives with the top-left controls, separate from
+          // page editing; the page number shows in the grid, not here.
+          expect(
+            find.byKey(const ValueKey<String>('page-number-button')),
+            findsNothing,
+          );
+          expect(
+            find.descendant(
+              of: card,
+              matching: find.byTooltip('Page overview'),
+            ),
+            findsOneWidget,
+          );
+
           // On the right: page controls card hanging from the top bar.
           final Finder pageCard = find.byKey(
             const ValueKey<String>('page-controls-card'),
@@ -89,6 +103,13 @@ void main() {
             find.descendant(of: pageCard, matching: find.byTooltip('Add')),
           );
           expect(pageControls.contains(add.center), isTrue);
+          expect(
+            find.descendant(
+              of: pageCard,
+              matching: find.byTooltip('Page settings'),
+            ),
+            findsOneWidget,
+          );
           expect(tester.takeException(), isNull);
         },
       );

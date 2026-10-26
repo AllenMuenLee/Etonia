@@ -19,11 +19,12 @@ import 'stroke_runs.dart';
 /// few rows of letters, one box for each. The [keyLetters], on the first
 /// page, must be written: the rest of the alphabet is built from their
 /// strokes. Any of the others may be written too, to be used as written;
-/// digits left out are written in the built-in font.
+/// zero is inferred from the writer's round forms; other digits left out are
+/// written in the built-in font shaped by the measured hand.
 const List<List<String>> customFontPages = <List<String>>[
-  <String>['abdefghi', 'mostvw', 'AERD'],
-  <String>['cjklnp', 'qruxyz'],
-  <String>['BCFGHIJ', 'KLMNOPQS', 'TUVWXYZ'],
+  <String>['adeghi', 'norstw', 'AER'],
+  <String>['bcfjkl', 'mpquvxyz'],
+  <String>['BCDFGHIJ', 'KLMNOPQS', 'TUVWXYZ'],
   <String>['01234', '56789'],
 ];
 
@@ -663,9 +664,10 @@ class FileHandwritingProfileStore implements HandwritingProfileStore {
       _queued(() => _writeAtomically(file, jsonEncode(state.toJson())));
 
   /// Beside the hand, so half-written letters outlive the app. Named for
-  /// the key letters, so letters left half-written in the boxes of an
-  /// older calibration are not put in its boxes.
-  File get _draftFile => File('${file.path}.key.draft');
+  /// the key letters, fifteen since the n joined them, so letters left
+  /// half-written in the boxes of an older calibration are not put in its
+  /// boxes.
+  File get _draftFile => File('${file.path}.key15.draft');
 
   @override
   Future<List<List<List<InkVector>>>> readDraft() async {

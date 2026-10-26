@@ -367,8 +367,12 @@ abstract final class AppTheme {
         textStyle: text.bodyMedium,
         menuStyle: _menuStyle(colors),
       ),
+      // Modal surfaces are opaque. Without a live backdrop blur (see
+      // GlassBlur), the glass tint would show the screen behind a form or a
+      // message sharp, competing with its words; the barrier already sets
+      // them apart.
       dialogTheme: DialogThemeData(
-        backgroundColor: AppGlass.surface(colors),
+        backgroundColor: colors.surface,
         surfaceTintColor: Colors.transparent,
         elevation: 8,
         shadowColor: colors.shadow.withValues(alpha: 0.4),
@@ -392,9 +396,9 @@ abstract final class AppTheme {
         barrierColor: colors.shadow.withValues(alpha: 0.32),
       ),
       bottomSheetTheme: BottomSheetThemeData(
-        backgroundColor: AppGlass.surface(colors),
+        backgroundColor: colors.surface,
         surfaceTintColor: Colors.transparent,
-        modalBackgroundColor: AppGlass.surface(colors),
+        modalBackgroundColor: colors.surface,
         modalBarrierColor: colors.shadow.withValues(alpha: 0.32),
         elevation: 0,
         modalElevation: 0,
@@ -408,7 +412,7 @@ abstract final class AppTheme {
         ),
       ),
       drawerTheme: DrawerThemeData(
-        backgroundColor: AppGlass.surface(colors),
+        backgroundColor: colors.surface,
         surfaceTintColor: Colors.transparent,
         scrimColor: colors.shadow.withValues(alpha: 0.32),
         elevation: 0,

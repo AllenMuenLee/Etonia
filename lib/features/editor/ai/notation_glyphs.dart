@@ -654,9 +654,11 @@ notationGlyphs = <String, (double, List<List<double>>)>{
     ],
   ),
   'I': (
-    0,
+    5.2,
     <List<double>>[
-      <double>[0, 10, 0, 0.05],
+      <double>[0, 0, 5.2, 0],
+      <double>[2.6, 0, 2.6, 10],
+      <double>[0, 10, 5.2, 10],
     ],
   ),
   'J': (

@@ -82,6 +82,131 @@ String repairLatexEscapes(String source) {
 
 final RegExp _command = RegExp(r'\\[A-Za-z]+');
 
+/// Signs only a formula holds: a command, a script, a brace, or `=`.
+final RegExp _mathSign = RegExp(r'\\[A-Za-z]|[\^_{}=]');
+
+/// [markdown] with each `$…$` formula the renderer's strict Pandoc rule
+/// would leave as source rewritten as `\(…\)`: one with a space inside a
+/// dollar (`$ x $`), one wrapped onto the next line, one led by a digit
+/// with a space in it (`$2 \pi r$`), or one with a digit after it. A tight
+/// pair is always a formula; a loose one only when it holds [_mathSign],
+/// so prices such as `$5 and $10` stay prose. `$$…$$`, `\$`, and code are
+/// left alone.
+String normalizeInlineMath(String markdown) {
+  if (!markdown.contains(r'$')) {
+    return markdown;
+  }
+  final StringBuffer out = StringBuffer();
+  final int n = markdown.length;
+  bool inFence = false;
+  int i = 0;
+  while (i < n) {
+    final bool lineStart = i == 0 || markdown.codeUnitAt(i - 1) == 0x0A;
+    if (lineStart) {
+      final int lineEnd = markdown.indexOf('\n', i);
+      final int end = lineEnd < 0 ? n : lineEnd + 1;
+      final String trimmed = markdown.substring(i, end).trimLeft();
+      if (trimmed.startsWith('```') || trimmed.startsWith('~~~')) {
+        inFence = !inFence;
+        out.write(markdown.substring(i, end));
+        i = end;
+        continue;
+      }
+      if (inFence) {
+        out.write(markdown.substring(i, end));
+        i = end;
+        continue;
+      }
+    }
+    final String char = markdown[i];
+    if (char == r'\' && i + 1 < n && markdown[i + 1] != '\n') {
+      out.write(markdown.substring(i, i + 2));
+      i += 2;
+      continue;
+    }
+    if (char == '`') {
+      // A code span, closed within its paragraph.
+      int run = 1;
+      while (i + run < n && markdown[i + run] == '`') {
+        run++;
+      }
+      final String ticks = '`' * run;
+      final int close = markdown.indexOf(ticks, i + run);
+      final int end = close < 0 || close > _paragraphEnd(markdown, i)
+          ? i + run
+          : close + run;
+      out.write(markdown.substring(i, end));
+      i = end;
+      continue;
+    }
+    if (char != r'$') {
+      out.write(char);
+      i++;
+      continue;
+    }
+    if (i + 1 < n && markdown[i + 1] == r'$') {
+      // A display formula is the renderer's to read.
+      final int close = markdown.indexOf(r'$$', i + 2);
+      final int end = close < 0 ? i + 2 : close + 2;
+      out.write(markdown.substring(i, end));
+      i = end;
+      continue;
+    }
+    final int close = _closingDollar(
+      markdown,
+      i + 1,
+      _paragraphEnd(markdown, i),
+    );
+    if (close >= 0) {
+      final String body = markdown.substring(i + 1, close);
+      final bool tight =
+          body.isNotEmpty &&
+          body.trim() == body &&
+          !body.contains('\n') &&
+          !(close + 1 < n && _isDigit(markdown.codeUnitAt(close + 1)));
+      if (body.trim().isNotEmpty && (tight || _mathSign.hasMatch(body))) {
+        out
+          ..write(r'\(')
+          ..write(body.trim().replaceAll(RegExp(r'\s*\n\s*'), ' '))
+          ..write(r'\)');
+        i = close + 1;
+        continue;
+      }
+    }
+    out.write(char);
+    i++;
+  }
+  return out.toString();
+}
+
+/// The next lone, unescaped `$` in [text] from [from] before [limit], or -1.
+int _closingDollar(String text, int from, int limit) {
+  int k = from;
+  while (k < limit) {
+    final String char = text[k];
+    if (char == r'\') {
+      k += 2;
+      continue;
+    }
+    if (char == r'$') {
+      return k + 1 < text.length && text[k + 1] == r'$' ? -1 : k;
+    }
+    k++;
+  }
+  return -1;
+}
+
+/// The end of the paragraph holding [i]: the first blank line after it, or
+/// the end of [text].
+int _paragraphEnd(String text, int i) {
+  final Match? blank = RegExp(
+    r'\n[ \t]*(?:\n|$)',
+  ).firstMatch(text.substring(i));
+  return blank == null ? text.length : i + blank.start;
+}
+
+bool _isDigit(int unit) => unit >= 0x30 && unit <= 0x39;
+
 /// Math delimiters, code, and environments: a line with any of them is
 /// left as it is.
 final RegExp _marked = RegExp(r'\$|\\\(|\\\)|\\\[|\\\]|\\begin\{|\\end\{|`');

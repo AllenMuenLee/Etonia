@@ -31,6 +31,28 @@ List<InkVector> _loop(
   ];
 }
 
+List<RawInkSample> _samples(List<InkVector> points) => <RawInkSample>[
+  for (int i = 0; i < points.length; i++)
+    RawInkSample(
+      position: points[i],
+      timestamp: Duration(milliseconds: 8 * i),
+    ),
+];
+
+/// Draws [points] as one stroke into [input].
+void _draw(
+  AiCanvasInputController input,
+  InkController page,
+  List<InkVector> points, {
+  int pointer = 1,
+}) {
+  final List<RawInkSample> samples = _samples(points);
+  input
+    ..begin(pointer, page, samples.first)
+    ..add(pointer, samples.sublist(1, samples.length - 1))
+    ..end(pointer, <RawInkSample>[samples.last]);
+}
+
 void main() {
   group('InkController.selectEnclosed', () {
     test('selects the ink a loop encloses, or leaves the selection', () {
@@ -71,6 +93,125 @@ void main() {
     });
   });
 
+  group('AiCanvasGestures.contextLoop', () {
+    const InkVector center = InkVector(300, 300);
+
+    test('a closed circle around a spot is a loop', () {
+      expect(AiCanvasGestures.contextLoop(_loop(center, 80)), isNotNull);
+    });
+
+    test('a loop that overshoots and crosses itself is a loop', () {
+      final List<InkVector> outline = AiCanvasGestures.contextLoop(
+        _loop(center, 80, turn: 1.25),
+      )!;
+      // Only the enclosed part, from the crossing, is kept.
+      expect(outline.length, lessThan(80));
+    });
+
+    test('a nearly closed loop is a loop', () {
+      expect(
+        AiCanvasGestures.contextLoop(_loop(center, 80, turn: 0.95)),
+        isNotNull,
+      );
+    });
+
+    test('a small o, an open arc, a line, or a dot is not', () {
+      expect(AiCanvasGestures.contextLoop(_loop(center, 12)), isNull);
+      expect(
+        AiCanvasGestures.contextLoop(_loop(center, 80, turn: 0.6)),
+        isNull,
+      );
+      expect(
+        AiCanvasGestures.contextLoop(<InkVector>[
+          for (int i = 0; i < 40; i++) InkVector(100.0 + i * 10, 100),
+        ]),
+        isNull,
+      );
+      expect(
+        AiCanvasGestures.contextLoop(const <InkVector>[center, center]),
+        isNull,
+      );
+    });
+
+    test('a long loop around a line of writing is a loop', () {
+      final List<InkVector> wide = <InkVector>[
+        for (int i = 0; i <= 40; i++) InkVector(100.0 + i * 10, 300),
+        for (int i = 40; i >= 0; i--) InkVector(100.0 + i * 10, 360),
+        const InkVector(100, 300),
+      ];
+      expect(AiCanvasGestures.contextLoop(wide), isNotNull);
+    });
+
+    test('a closed scribble too thin to enclose a spot is not', () {
+      final List<InkVector> thin = <InkVector>[
+        for (int i = 0; i <= 40; i++) InkVector(100.0 + i * 10, 300),
+        for (int i = 40; i >= 0; i--) InkVector(100.0 + i * 10, 316),
+        const InkVector(100, 300),
+      ];
+      expect(AiCanvasGestures.contextLoop(thin), isNull);
+      // Tall enough, but a sliver: not round enough.
+      final List<InkVector> sliver = <InkVector>[
+        for (int i = 0; i <= 40; i++) InkVector(100.0 + i * 25, 300),
+        const InkVector(1100, 360),
+        for (int i = 40; i >= 0; i--) InkVector(100.0 + i * 25, 302),
+      ];
+      expect(AiCanvasGestures.contextLoop(sliver), isNull);
+    });
+  });
+
+  group('AiCanvasInputController', () {
+    late InkController page;
+
+    setUp(() => page = InkController());
+    tearDown(() => page.dispose());
+
+    test('hands a loop to onCircle and clears the glow', () {
+      final List<(List<InkVector>, Object)> circled =
+          <(List<InkVector>, Object)>[];
+      final AiCanvasInputController input = AiCanvasInputController(
+        onCircle: (List<InkVector> outline, Object page) =>
+            circled.add((outline, page)),
+      );
+      addTearDown(input.dispose);
+      _draw(input, page, _loop(const InkVector(300, 300), 80));
+      expect(circled, hasLength(1));
+      expect(circled.single.$2, same(page));
+      expect(input.isEmpty, isTrue);
+      expect(input.page, isNull);
+    });
+
+    test('drops anything that is not a loop, reading nothing', () {
+      int circled = 0;
+      final AiCanvasInputController input = AiCanvasInputController(
+        onCircle: (List<InkVector> outline, Object page) => circled++,
+      );
+      addTearDown(input.dispose);
+      _draw(input, page, <InkVector>[
+        for (int i = 0; i < 40; i++) InkVector(100.0 + i * 10, 100),
+      ]);
+      expect(circled, 0);
+      expect(input.isEmpty, isTrue);
+    });
+
+    test('shows the stroke as it is drawn, and a cancel drops it', () {
+      final AiCanvasInputController input = AiCanvasInputController();
+      addTearDown(input.dispose);
+      final List<RawInkSample> samples = _samples(
+        _loop(const InkVector(300, 300), 80),
+      );
+      expect(input.begin(1, page, samples.first), isTrue);
+      expect(input.begin(2, page, samples.first), isFalse);
+      input.add(1, samples.sublist(1, 20));
+      expect(input.activePointer, 1);
+      expect(input.activePoints.length, greaterThan(1));
+      input.cancel(2);
+      expect(input.isEmpty, isFalse);
+      input.cancel(1);
+      expect(input.isEmpty, isTrue);
+      expect(input.activePoints, isEmpty);
+    });
+  });
+
   group('InkController lasso on PDF paper', () {
     InkSelection? lasso({required bool keepPaper}) {
       final InkController controller = InkController(
@@ -84,7 +225,10 @@ void main() {
       addTearDown(controller.dispose);
       // Hugs the ink, so the Select tool takes the ink alone.
       final List<InkVector> outline = _loop(const InkVector(300, 300), 14);
-      expect(controller.beginLasso(pointer: 1, position: outline.first), isTrue);
+      expect(
+        controller.beginLasso(pointer: 1, position: outline.first),
+        isTrue,
+      );
       for (final InkVector point in outline.skip(1)) {
         controller.updateLasso(1, point);
       }

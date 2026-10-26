@@ -165,6 +165,10 @@ class NotationMath {
   /// a math-delimited run with a command, a script, or a brace in it.
   static bool hasMath(String text) => _inlineMath.hasMatch(text);
 
+  /// Whether [text] explicitly delimits any formula, including a simple one
+  /// such as `$x = 2$` that needs no LaTeX command or script.
+  static bool hasDelimitedMath(String text) => _anyMath.hasMatch(text);
+
   /// [text] with its `$…$` runs as LaTeX and the rest as `\text`, one line
   /// of it per LaTeX line, so plain text with formulas in it can be laid
   /// out as one formula.
@@ -1842,7 +1846,9 @@ class _Layout {
       x += widths[column];
     }
     final double width = x;
-    final double leading = grid.centered ? 0.32 * scale : 0.45 * scale;
+    // Lines of working are spaced like lines of text; a matrix or cases
+    // stays compact.
+    final double leading = grid.centered ? 0.32 * scale : 0.7 * scale;
     final List<_Op> ops = <_Op>[];
     double y = 0;
     double firstAscent = 0;

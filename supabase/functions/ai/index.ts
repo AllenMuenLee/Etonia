@@ -10,9 +10,10 @@ import {
 } from "../_shared/common.ts";
 import {
   answerReserve,
+  billingModel,
   combineSteps,
+  configuredDrawingModel,
   costOf,
-  drawingModel,
   modelConfig,
   outputBudget,
   providerAnswer,
@@ -30,6 +31,54 @@ const providerKeys = {
   gemini: "GEMINI_API_KEY",
 };
 
+function eventStream(
+  message: string,
+  finish: () => Promise<Record<string, unknown>>,
+): Response {
+  const encoder = new TextEncoder();
+  let open = true;
+  return new Response(
+    new ReadableStream<Uint8Array>({
+      async start(controller) {
+        const send = (event: Record<string, unknown>) => {
+          if (!open) return;
+          try {
+            controller.enqueue(
+              encoder.encode(`data: ${JSON.stringify(event)}\n\n`),
+            );
+          } catch {
+            open = false;
+          }
+        };
+        // Phase one is useful on its own. Deliver it before waiting for the
+        // separate notation model and keep doing the billed work even if the
+        // client disconnects after receiving the words.
+        send({ type: "message", message });
+        try {
+          send({ type: "result", ...await finish() });
+        } catch (error) {
+          send({
+            type: "error",
+            error: error instanceof Failure ? error.code : "server",
+          });
+        } finally {
+          if (open) controller.close();
+        }
+      },
+      cancel() {
+        open = false;
+      },
+    }),
+    {
+      headers: {
+        "Content-Type": "text/event-stream",
+        "Cache-Control": "no-store",
+        "Connection": "keep-alive",
+      },
+    },
+  );
+}
+
 Deno.serve(endpoint(async (req) => {
   const db = admin();
   const user = await userFor(req, db);
@@ -38,17 +87,20 @@ Deno.serve(endpoint(async (req) => {
   const catalog = JSON.parse(secret("AI_MODEL_CONFIG"));
   const model = modelConfig(catalog, input.model);
   const key = secret(providerKeys[model.provider]);
-  // With Notation on, the user's model writes the words and a cheap fixed
-  // model turns them into the drawing.
+  // The answer model is user-selected. Notation/animation is controlled only
+  // by the server environment, with Luna as the default.
   const two = twoStep(model, input);
-  const drawer = two ? modelConfig(catalog, drawingModel) : undefined;
+  const drawerAlias = two
+    ? configuredDrawingModel(Deno.env.get("AI_NOTATION_MODEL"))
+    : undefined;
+  const drawer = drawerAlias ? modelConfig(catalog, drawerAlias) : undefined;
   const drawerKey = drawer ? secret(providerKeys[drawer.provider]) : "";
   // Live store verification fails closed, including renewals, refunds and expiry.
   await reconcile(db, user);
   const reservation = await rpc(db, "ai_reserve", {
     p_user: user,
     p_request: input.requestId,
-    p_model: input.model,
+    p_model: billingModel(input.model, drawerAlias),
     p_max: reservationCap(model, input, drawer),
   });
   const settle = (cost: number, tokensIn = 0, tokensOut = 0, release = false) =>
@@ -134,40 +186,52 @@ Deno.serve(endpoint(async (req) => {
         settled = true;
         throw error;
       }
-      let notationAnswer: string | undefined;
-      try {
-        // Within the app's wait for the whole answer, so the words still
-        // arrive when the drawing runs long.
-        const second = await ask(
-          providerRequest(
+      const finishNotation = async () => {
+        let notationAnswer: string | undefined;
+        try {
+          const second = await ask(
+            providerRequest(
+              drawer,
+              input,
+              outputBudget(drawer, input, 0, true),
+              drawerKey,
+              {
+                step: "notation",
+                message,
+                visual: input.animationAllowed === true ? undefined : "static",
+              },
+            ),
             drawer,
-            input,
-            outputBudget(drawer, input, 0, true),
-            drawerKey,
-            {
-              step: "notation",
-              message,
-              visual: input.animationAllowed === true ? undefined : "static",
-            },
-          ),
-          drawer,
-          Math.max(5000, 105000 - (Date.now() - started)),
-        );
-        if (second.result) {
-          const { input: used, output, cached, cacheWrites } = second.result;
-          cost += costOf(drawer, used, output, cached, cacheWrites);
-          tokensIn += used;
-          tokensOut += output;
-          notationAnswer = second.result.answer;
+            Math.max(5000, 105000 - (Date.now() - started)),
+          );
+          if (second.result) {
+            const { input: used, output, cached, cacheWrites } = second.result;
+            cost += costOf(drawer, used, output, cached, cacheWrites);
+            tokensIn += used;
+            tokensOut += output;
+            notationAnswer = second.result.answer;
+          }
+        } catch {
+          // Timed out or unreadable: keep the completed words. Its usage, if
+          // any, is unknown and not billed.
         }
-      } catch {
-        // Timed out or unreadable: words without a drawing. Its usage, if
-        // any, is unknown and not billed.
+        answer = combineSteps(message, notationAnswer);
+        await settle(cost, tokensIn, tokensOut);
+        settled = true;
+        return {
+          answer,
+          usage: { inputTokens: tokensIn, outputTokens: tokensOut },
+        };
+      };
+      if (req.headers.get("accept")?.includes("text/event-stream")) {
+        return eventStream(message, finishNotation);
       }
-      answer = combineSteps(message, notationAnswer);
+      await finishNotation();
     }
-    await settle(cost, tokensIn, tokensOut);
-    settled = true;
+    if (!settled) {
+      await settle(cost, tokensIn, tokensOut);
+      settled = true;
+    }
     if (typeof answer !== "string" || !answer) throw new Failure("server", 503);
     return json({
       answer,

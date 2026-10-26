@@ -888,35 +888,25 @@ class _LibraryScreenState extends State<LibraryScreen> {
     }
   }
 
-  /// Imports a PDF as a new note. A [fromGoodnotes] export also has its
-  /// handwriting extracted into editable strokes, and a native `.goodnotes`
-  /// notebook comes in whole: pages, paper, and editable ink.
-  Future<void> _importPdf({bool fromGoodnotes = false}) async {
-    final PickedDocument? picked = fromGoodnotes
-        ? await widget.documentPicker.pickGoodnotes()
-        : await widget.documentPicker.pickPdf();
+  /// Imports a PDF as a new note.
+  Future<void> _importPdf() async {
+    final PickedDocument? picked = await widget.documentPicker.pickPdf();
     if (picked == null || !mounted) return;
-    await _importPickedDocument(picked, fromGoodnotes: fromGoodnotes);
+    await _importPickedDocument(picked);
   }
 
-  Future<void> _importPickedDocument(
-    PickedDocument picked, {
-    bool fromGoodnotes = false,
-  }) async {
+  /// Imports a PDF, or a native `.goodnotes` notebook whole: pages, paper,
+  /// and editable ink.
+  Future<void> _importPickedDocument(PickedDocument picked) async {
     if (!mounted) return;
     final bool notebook = GoodnotesArchiveExtractor.isGoodnotesArchive(
       picked.bytes,
     );
     NoteEntry? note;
-    bool noInk = false;
     final ImportCancellationToken cancellation = ImportCancellationToken();
     final DocumentIoProgressResult result = await showDocumentIoProgress(
       context,
-      title: notebook
-          ? 'Importing Goodnotes notebook'
-          : fromGoodnotes
-          ? 'Importing Goodnotes PDF'
-          : 'Importing PDF',
+      title: notebook ? 'Importing Goodnotes notebook' : 'Importing PDF',
       onCancel: cancellation.cancel,
       operation: (_) async {
         note =
@@ -928,22 +918,10 @@ class _LibraryScreenState extends State<LibraryScreen> {
               picked: picked,
               folderId: _showingTrash ? null : _folderId,
               cancellation: cancellation,
-              recoverGoodnotesInk: fromGoodnotes,
-              onNoInkRecovered: () => noInk = true,
             );
       },
     );
     if (result.error == null && note != null && mounted) {
-      if (noInk) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text(
-              'No Goodnotes handwriting was found, so this was imported as '
-              'a regular PDF',
-            ),
-          ),
-        );
-      }
       await _openNote(note!);
     } else if (result.error != null && !result.cancelled) {
       if (!mounted) return;
@@ -1532,7 +1510,12 @@ class _LibraryScreenState extends State<LibraryScreen> {
         drawer: drawer
             ? Drawer(
                 backgroundColor: Colors.transparent,
-                child: GlassSurface(child: SafeArea(child: sidebar)),
+                // Opaque: it slides over the notes, whose titles would show
+                // through the folder names.
+                child: GlassSurface(
+                  color: AppColors.of(context).surface,
+                  child: SafeArea(child: sidebar),
+                ),
               )
             : null,
         // Beside the sidebar, the bar spans only the items, so the sidebar
@@ -1540,11 +1523,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
         appBar: drawer ? bar : null,
         floatingActionButton: _selecting || _showingTrash
             ? null
-            : _NewNoteButton(
-                onNewNote: _newNote,
-                onImportPdf: () => _importPdf(),
-                onImportGoodnotesPdf: () => _importPdf(fromGoodnotes: true),
-              ),
+            : _NewNoteButton(onNewNote: _newNote, onImportPdf: _importPdf),
         body: drawer
             ? SafeArea(top: false, child: _buildBody(context, compact))
             // Tab goes through the bar first, then the folders, then the
@@ -1708,6 +1687,11 @@ class _LibraryScreenState extends State<LibraryScreen> {
       // Room for the floating button.
       AppSpacing.xxl + AppSpacing.xl,
     );
+    // Larger system text takes fewer, wider cards, so a title and its date
+    // still fit beside the menu and the page keeps its size.
+    final double textScale = MediaQuery.textScalerOf(
+      context,
+    ).scale(1).clamp(1.0, 2.0);
     return Align(
       key: ValueKey<int>(_scene),
       alignment: Alignment.topCenter,
@@ -1718,7 +1702,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
             ? GridView.builder(
                 padding: padding,
                 gridDelegate: SliverGridDelegateWithMaxCrossAxisExtent(
-                  maxCrossAxisExtent: compact ? 180 : 200,
+                  maxCrossAxisExtent: (compact ? 180 : 200) * textScale,
                   mainAxisSpacing: AppSpacing.lg,
                   crossAxisSpacing: compact ? AppSpacing.md : AppSpacing.lg,
                   childAspectRatio: 0.72,
@@ -2520,18 +2504,12 @@ class _Breadcrumbs extends StatelessWidget {
 
 /// The primary action, floating at the bottom: the accent color and the
 /// floating shadow, like the editor's palette. Its menu makes a blank note
-/// from a template, or imports a PDF as one: any PDF as it is, or one
-/// exported from Goodnotes with its handwriting made editable.
+/// from a template, or imports a PDF as one.
 class _NewNoteButton extends StatelessWidget {
-  const _NewNoteButton({
-    required this.onNewNote,
-    required this.onImportPdf,
-    required this.onImportGoodnotesPdf,
-  });
+  const _NewNoteButton({required this.onNewNote, required this.onImportPdf});
 
   final VoidCallback onNewNote;
   final VoidCallback onImportPdf;
-  final VoidCallback onImportGoodnotesPdf;
 
   @override
   Widget build(BuildContext context) {
@@ -2568,13 +2546,6 @@ class _NewNoteButton extends StatelessWidget {
               leadingIcon: const Icon(AppIcons.pdf),
               onPressed: onImportPdf,
               child: const Text('Import PDF'),
-            ),
-          ),
-          reads(
-            MenuItemButton(
-              leadingIcon: const Icon(AppIcons.pen),
-              onPressed: onImportGoodnotesPdf,
-              child: const Text('Import editable PDF'),
             ),
           ),
         ],
