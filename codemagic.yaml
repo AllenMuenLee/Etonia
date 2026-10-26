@@ -44,9 +44,9 @@ workflows:
     artifacts:
       - build/ios/ipa/*.ipa
       - /tmp/xcodebuild_logs/*.log
+    # The "Etonia Internal" TestFlight group has access to every build, so
+    # Apple refuses to have builds assigned to it; it gets each one anyway.
     publishing:
       app_store_connect:
         auth: integration
         submit_to_testflight: true
-        beta_groups:
-          - Etonia Internal
