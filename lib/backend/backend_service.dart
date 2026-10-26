@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'dart:math';
 
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/widgets.dart';
 import 'package:google_sign_in/google_sign_in.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
@@ -41,6 +42,11 @@ class BackendService extends BillingBackend with WidgetsBindingObserver {
   );
   final SupabaseClient? _client;
   StreamSubscription<AuthState>? _authChanges;
+  String? _analyticsSessionId;
+  DateTime? _analyticsBackgroundedAt;
+
+  /// Supplied by release builds so launch metrics can be split by version.
+  static const String _appVersion = String.fromEnvironment('APP_VERSION');
 
   /// A random ID made on first launch and kept in secure storage, so the
   /// server remembers this device before, and after, Google sign-in. It is
@@ -50,7 +56,14 @@ class BackendService extends BillingBackend with WidgetsBindingObserver {
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
-    if (state == AppLifecycleState.resumed) notifyListeners();
+    if (state == AppLifecycleState.resumed) {
+      notifyListeners();
+      _startAnalyticsSessionIfNeeded();
+    } else if (state == AppLifecycleState.paused ||
+        state == AppLifecycleState.inactive ||
+        state == AppLifecycleState.hidden) {
+      _analyticsBackgroundedAt = DateTime.now();
+    }
   }
 
   static bool _isPublicClientKey(String key) {
@@ -130,6 +143,7 @@ class BackendService extends BillingBackend with WidgetsBindingObserver {
       if (client.auth.currentUser == null) {
         await client.auth.signInAnonymously();
       }
+      _startAnalyticsSessionIfNeeded();
       if (_isAnonymous) await _anonymousStatus();
     } on Object {
       // Anonymous sign-in may be disabled or offline; retried on next launch.
@@ -137,6 +151,48 @@ class BackendService extends BillingBackend with WidgetsBindingObserver {
   }
 
   bool get _isAnonymous => _client?.auth.currentUser?.isAnonymous ?? false;
+
+  /// Starts a new analytics session after 30 minutes away. This is kept
+  /// separate from billing refreshes so DAU/MAU means actual app use.
+  void _startAnalyticsSessionIfNeeded() {
+    if (_client?.auth.currentUser == null) return;
+    final DateTime now = DateTime.now();
+    final DateTime? backgrounded = _analyticsBackgroundedAt;
+    if (_analyticsSessionId != null &&
+        (backgrounded == null ||
+            now.difference(backgrounded) < const Duration(minutes: 30))) {
+      return;
+    }
+    _analyticsBackgroundedAt = null;
+    _analyticsSessionId = _randomUuid();
+    unawaited(trackProductEvent('app_open'));
+  }
+
+  /// Records one approved, content-free product event. Analytics must never
+  /// delay or break local note-taking, so delivery is best effort.
+  @override
+  Future<void> trackProductEvent(String name, {String? detail}) async {
+    final SupabaseClient? client = _client;
+    final String? owner = client?.auth.currentUser?.id;
+    if (client == null || owner == null) return;
+    _analyticsSessionId ??= _randomUuid();
+    try {
+      final Map<String, Object?> body = <String, Object?>{
+        'eventId': _randomUuid(),
+        'sessionId': _analyticsSessionId,
+        'name': name,
+        'platform': defaultTargetPlatform.name,
+        'deviceId': deviceId,
+        if (_appVersion.isNotEmpty) 'appVersion': _appVersion,
+        'detail': ?detail,
+      };
+      await client.functions
+          .invoke('analytics', body: body)
+          .timeout(const Duration(seconds: 8));
+    } on Object {
+      // Product analytics is non-critical; later events still capture activity.
+    }
+  }
 
   Future<SubscriptionState> _anonymousStatus() async {
     try {
@@ -347,6 +403,8 @@ class BackendService extends BillingBackend with WidgetsBindingObserver {
           provider: OAuthProvider.google,
           idToken: idToken,
         );
+        _analyticsSessionId = _randomUuid();
+        unawaited(trackProductEvent('sign_in'));
         return;
       } on AuthException {
         // Fall through to a normal sign-in.
@@ -356,6 +414,8 @@ class BackendService extends BillingBackend with WidgetsBindingObserver {
       provider: OAuthProvider.google,
       idToken: idToken,
     );
+    _analyticsSessionId = _randomUuid();
+    unawaited(trackProductEvent('sign_in'));
   }
 
   @override
@@ -379,6 +439,8 @@ class BackendService extends BillingBackend with WidgetsBindingObserver {
       await HttpGoogleDriveClient.signOutShared();
     }
     await _client?.auth.signOut(scope: SignOutScope.local);
+    _analyticsSessionId = null;
+    _analyticsBackgroundedAt = null;
     unawaited(_ensureDeviceAccount());
   }
 

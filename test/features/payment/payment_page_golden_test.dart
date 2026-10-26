@@ -19,7 +19,7 @@ Future<void> _pumpPlans(WidgetTester tester, ThemeMode themeMode) async {
   );
   addTearDown(controller.dispose);
   await controller.load();
-  controller.activate(SubscriptionPlan.pro1299);
+  controller.activate(SubscriptionPlan.pro1499);
   setViewportSize(tester, TestViewport.tabletLandscape.size);
   await tester.pumpWidget(
     GreatnoteApp(

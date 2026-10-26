@@ -737,6 +737,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
     _thumbnails.pause();
     _openNotes.open(note);
     setState(() => _tabsShowing = true);
+    unawaited(BackendService.instance.trackProductEvent('note_opened'));
   }
 
   void _showLibrary() {
@@ -831,6 +832,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
     unawaited(_openNote(note));
     try {
       await saved;
+      unawaited(BackendService.instance.trackProductEvent('note_created'));
     } on Object {
       if (!mounted) return;
       _openNotes.close(note.id);
@@ -922,6 +924,12 @@ class _LibraryScreenState extends State<LibraryScreen> {
       },
     );
     if (result.error == null && note != null && mounted) {
+      unawaited(
+        BackendService.instance.trackProductEvent(
+          'note_imported',
+          detail: notebook ? 'goodnotes' : 'pdf',
+        ),
+      );
       await _openNote(note!);
     } else if (result.error != null && !result.cancelled) {
       if (!mounted) return;
@@ -1022,6 +1030,13 @@ class _LibraryScreenState extends State<LibraryScreen> {
           if (result.error != null && !result.cancelled && mounted) {
             ScaffoldMessenger.of(context).showSnackBar(
               const SnackBar(content: Text('This note could not be exported')),
+            );
+          } else if (!result.cancelled) {
+            unawaited(
+              BackendService.instance.trackProductEvent(
+                'note_exported',
+                detail: 'pdf',
+              ),
             );
           }
         }

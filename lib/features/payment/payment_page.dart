@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 
 import '../../app/theme/app_icons.dart';
@@ -14,6 +16,7 @@ Future<void> showPaymentPage(
   BuildContext context,
   SubscriptionController controller,
 ) {
+  unawaited(controller.backend?.trackProductEvent('paywall_viewed'));
   return showStorePage(context, PaymentPage(controller: controller));
 }
 
@@ -520,7 +523,7 @@ class _PlanCard extends StatelessWidget {
     final TextTheme text = Theme.of(context).textTheme;
     final SubscriptionPlan? active = controller.activePlan;
     final bool current = plan == active;
-    final bool recommended = plan == SubscriptionPlan.pro1299;
+    final bool recommended = plan == SubscriptionPlan.pro1499;
     final bool busy = controller.activity != StoreActivity.idle;
     final bool buying =
         controller.activity == StoreActivity.purchasing &&

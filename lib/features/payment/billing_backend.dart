@@ -16,4 +16,8 @@ abstract class BillingBackend extends ChangeNotifier {
   Future<SubscriptionState> redeemGiftCode(String code);
   Future<void> signInWithGoogle();
   Future<void> signOut();
+
+  /// Best-effort, content-free product analytics. Test and offline backends
+  /// inherit the no-op implementation.
+  Future<void> trackProductEvent(String name, {String? detail}) async {}
 }

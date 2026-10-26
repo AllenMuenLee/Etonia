@@ -1,1 +1,3 @@
 #include "Generated.xcconfig"
+// Written by .github/workflows/release-ios.yml for App Store signing.
+#include? "Signing.xcconfig"

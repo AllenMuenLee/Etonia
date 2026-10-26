@@ -353,6 +353,12 @@ class SubscriptionController extends ChangeNotifier with AiUsageGate {
     _activity = StoreActivity.purchasing;
     _pendingPlan = plan;
     _notify();
+    unawaited(
+      backend?.trackProductEvent(
+        'purchase_started',
+        detail: '${plan.name}_${cycle.name}',
+      ),
+    );
     try {
       await gateway.buySubscription(product);
     } on Object {

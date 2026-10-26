@@ -1,0 +1,155 @@
+name: iOS release
+
+# Builds a signed App Store IPA and uploads it to TestFlight. Run it by hand
+# from the Actions tab; it never submits for App Review.
+#
+# Repository secrets:
+#   ASC_KEY_ID, ASC_ISSUER_ID   App Store Connect API key (Admin role)
+#   ASC_PRIVATE_KEY_B64         base64 of the AuthKey_*.p8 file
+#   IOS_DIST_P12_B64            base64 of the Apple Distribution .p12
+#   IOS_DIST_P12_PASSWORD       password of that .p12
+#   IOS_APPSTORE_PROFILE_B64    base64 of the App Store .mobileprovision
+#   DART_DEFINES_B64            base64 of dart_defines.json
+# Repository variables:
+#   ASC_APP_ID                  App Store Connect app ID
+#   APPLE_TEAM_ID               Apple Developer team ID
+#   IOS_APPSTORE_PROFILE_NAME   name of the App Store provisioning profile
+#   TESTFLIGHT_GROUP            beta group name(s) the build is added to
+
+on:
+  workflow_dispatch:
+    inputs:
+      test_notes:
+        description: What to Test notes for testers
+        required: false
+        default: ''
+
+concurrency:
+  group: release-ios
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  ASC_VERSION: 5.17.0
+  ASC_SHA256: 12dcc37c4d5e8143548256a5eb716e738fbaffd5dbf6bf0376c5dd0abc657619
+
+jobs:
+  testflight:
+    name: Build and upload to TestFlight
+    runs-on: macos-latest
+    timeout-minutes: 60
+    env:
+      ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
+      ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
+      ASC_PRIVATE_KEY_B64: ${{ secrets.ASC_PRIVATE_KEY_B64 }}
+      ASC_APP_ID: ${{ vars.ASC_APP_ID }}
+      SIGNING_DIR: ${{ runner.temp }}/signing
+    steps:
+      - uses: actions/checkout@v4
+      - uses: kuhnroyal/flutter-fvm-config-action/setup@v3
+
+      - name: Install asc
+        run: |
+          curl -fsSL -o "$RUNNER_TEMP/asc" \
+            "https://github.com/rudrankriyam/App-Store-Connect-CLI/releases/download/${ASC_VERSION}/asc_${ASC_VERSION}_macOS_arm64"
+          echo "${ASC_SHA256}  $RUNNER_TEMP/asc" | shasum -a 256 -c -
+          chmod +x "$RUNNER_TEMP/asc"
+          echo "$RUNNER_TEMP" >> "$GITHUB_PATH"
+
+      - name: Install signing identity and profile
+        env:
+          P12_B64: ${{ secrets.IOS_DIST_P12_B64 }}
+          P12_PASSWORD: ${{ secrets.IOS_DIST_P12_PASSWORD }}
+          PROFILE_B64: ${{ secrets.IOS_APPSTORE_PROFILE_B64 }}
+          TEAM_ID: ${{ vars.APPLE_TEAM_ID }}
+          PROFILE_NAME: ${{ vars.IOS_APPSTORE_PROFILE_NAME }}
+        run: |
+          mkdir -p "$SIGNING_DIR" && chmod 700 "$SIGNING_DIR"
+          echo "$P12_B64" | base64 --decode > "$SIGNING_DIR/dist.p12"
+          echo "$PROFILE_B64" | base64 --decode > "$SIGNING_DIR/appstore.mobileprovision"
+          printf '%s' "$P12_PASSWORD" > "$SIGNING_DIR/p12-password"
+          openssl rand -hex 24 | tr -d '\n' > "$SIGNING_DIR/keychain-password"
+          chmod 600 "$SIGNING_DIR"/*
+          asc signing keychain install \
+            --identity "$SIGNING_DIR/dist.p12" \
+            --identity-password-file "$SIGNING_DIR/p12-password" \
+            --keychain "$SIGNING_DIR/release.keychain-db" \
+            --keychain-password-file "$SIGNING_DIR/keychain-password" \
+            --add-to-search-list --confirm
+          asc profiles local install --path "$SIGNING_DIR/appstore.mobileprovision" --force
+          # Flutter/Release.xcconfig includes this file, so only the Runner
+          # target signs manually; Swift package targets are left alone.
+          cat > ios/Flutter/Signing.xcconfig <<EOF
+          DEVELOPMENT_TEAM = ${TEAM_ID}
+          CODE_SIGN_STYLE = Manual
+          CODE_SIGN_IDENTITY = Apple Distribution
+          CODE_SIGN_IDENTITY[sdk=iphoneos*] = Apple Distribution
+          PROVISIONING_PROFILE_SPECIFIER = ${PROFILE_NAME}
+          EOF
+          /usr/libexec/PlistBuddy \
+            -c "Add :method string app-store-connect" \
+            -c "Add :destination string export" \
+            -c "Add :signingStyle string manual" \
+            -c "Add :teamID string ${TEAM_ID}" \
+            -c "Add :uploadSymbols bool true" \
+            -c "Add :provisioningProfiles dict" \
+            -c "Add :provisioningProfiles:com.etonia.app string ${PROFILE_NAME}" \
+            "$SIGNING_DIR/ExportOptions.plist"
+
+      - name: Write dart defines
+        env:
+          DART_DEFINES_B64: ${{ secrets.DART_DEFINES_B64 }}
+        run: echo "$DART_DEFINES_B64" | base64 --decode > dart_defines.json
+
+      - run: flutter pub get
+
+      - name: Pick build number
+        id: build_number
+        run: |
+          next=$(asc builds next-build-number --app "$ASC_APP_ID" --platform IOS --output json | jq -r '.nextBuildNumber')
+          echo "Build number: $next"
+          echo "value=$next" >> "$GITHUB_OUTPUT"
+
+      - name: Generate Flutter Xcode config
+        run: |
+          flutter build ios --release --config-only \
+            --build-number "${{ steps.build_number.outputs.value }}" \
+            --dart-define-from-file=dart_defines.json
+
+      - name: Archive
+        run: |
+          asc xcode archive \
+            --workspace ios/Runner.xcworkspace \
+            --scheme Runner \
+            --configuration Release \
+            --clean \
+            --archive-path build/asc/Runner.xcarchive \
+            --xcodebuild-flag=-destination \
+            --xcodebuild-flag=generic/platform=iOS
+
+      - name: Export IPA
+        run: |
+          asc xcode export \
+            --archive-path build/asc/Runner.xcarchive \
+            --export-options "$SIGNING_DIR/ExportOptions.plist" \
+            --ipa-path build/asc/Runner.ipa
+
+      - name: Upload to TestFlight
+        env:
+          TEST_NOTES: ${{ inputs.test_notes }}
+          GROUP: ${{ vars.TESTFLIGHT_GROUP }}
+        run: |
+          args=(--app "$ASC_APP_ID" --ipa build/asc/Runner.ipa --wait --timeout 45m --output table)
+          if [ -n "$GROUP" ]; then args+=(--group "$GROUP"); else args+=(--upload-only); fi
+          if [ -n "$TEST_NOTES" ]; then args+=(--test-notes "$TEST_NOTES" --locale en-US); fi
+          asc publish testflight "${args[@]}"
+
+      - name: Remove signing keychain
+        if: always()
+        run: |
+          if [ -f "$SIGNING_DIR/release.keychain-db" ]; then
+            asc signing keychain delete --keychain "$SIGNING_DIR/release.keychain-db" --confirm || true
+          fi
+          rm -rf "$SIGNING_DIR" ios/Flutter/Signing.xcconfig dart_defines.json

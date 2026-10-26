@@ -940,9 +940,15 @@ Responses currently arrive in full after server-side accounting.
 
 | Plan | Display price | Included models without credit charges | AI credits |
 | --- | --- | --- | --- |
-| Starter | $4.99/month | Haiku, Luna | $1.20 for Sonnet & Sol |
-| Pro | $12.99/month | Haiku, Luna | $4.00 for all metered models |
-| Max | $29.99/month | Haiku, Luna | $10.00 for all metered models |
+| Starter | $6.99/month, $69.99/year | Haiku, Luna | $2.45/month ($29.40/year) for Sonnet & Sol |
+| Pro | $14.99/month, $149.99/year | Haiku, Luna | $5.25/month ($63.00/year) for all metered models |
+| Max | $24.99/month, $249.99/year | Haiku, Luna | $8.75/month ($105.00/year) for all metered models |
+
+Store products: `com.etonia.app.plan.{699,1499,2499}.{monthly,yearly}` on the
+App Store and `etonia_plan_{699,1499,2499}_{monthly,yearly}` on Google Play.
+The earlier `499`/`1299`/`2999` products are retired; the database keeps them on
+the renamed tiers, with their old allowances, for any subscription already on
+them.
 
 Actual localized prices come from the store. Product mappings and allowances
 live in the database migration and must match the products configured in Apple

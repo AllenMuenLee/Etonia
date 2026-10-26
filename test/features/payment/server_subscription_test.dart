@@ -24,7 +24,7 @@ class TestBillingBackend extends BillingBackend {
   @override
   String? get email => 'person@example.com';
   SubscriptionState result = SubscriptionState(
-    activePlan: SubscriptionPlan.pro1299,
+    activePlan: SubscriptionPlan.pro1499,
     remainingCreditsMicroUsd: 123456,
     expiresAt: DateTime.now().add(const Duration(days: 1)),
   );
@@ -76,7 +76,7 @@ void main() {
   test('local balance and debug grants cannot override server state', () async {
     final backend = TestBillingBackend();
     final store = InMemorySubscriptionStore({
-      'activePlan': 'max2999',
+      'activePlan': 'max2499',
       'remainingCreditsMicroUsd': 999999999,
       'grantedPurchaseId': 'forged',
       'preferredModel': 'sol',
@@ -84,14 +84,14 @@ void main() {
     final controller = SubscriptionController(
       store: store,
       backend: backend,
-      config: const PaymentConfig(debugPlan: 'max2999'),
+      config: const PaymentConfig(debugPlan: 'max2499'),
     );
     addTearDown(controller.dispose);
     await controller.load();
-    expect(controller.activePlan, SubscriptionPlan.pro1299);
+    expect(controller.activePlan, SubscriptionPlan.pro1499);
     expect(controller.remainingCreditsMicroUsd, 123456);
-    controller.activate(SubscriptionPlan.max2999, purchaseId: 'forged');
-    expect(controller.activePlan, SubscriptionPlan.pro1299);
+    controller.activate(SubscriptionPlan.max2499, purchaseId: 'forged');
+    expect(controller.activePlan, SubscriptionPlan.pro1499);
     controller.recordUsage(
       AiModelId.sol,
       const AiTokenUsage(inputTokens: 1000, outputTokens: 1000),
@@ -112,7 +112,7 @@ void main() {
     await controller.load();
     expect(controller.accessFor(AiModelId.sol), AiModelAccess.metered);
     backend.result = SubscriptionState(
-      activePlan: SubscriptionPlan.pro1299,
+      activePlan: SubscriptionPlan.pro1499,
       remainingCreditsMicroUsd: 5000000,
       expiresAt: DateTime.now().subtract(const Duration(seconds: 1)),
     );
@@ -224,7 +224,7 @@ void main() {
       addTearDown(gateway.close);
       await controller.load();
       await controller.connectStore();
-      await controller.purchase(SubscriptionPlan.pro1299);
+      await controller.purchase(SubscriptionPlan.pro1499);
       await pumpEventQueue();
       expect(gateway.boundAccountId, backend.userId);
       expect(gateway.completed, isEmpty);
@@ -249,7 +249,7 @@ void main() {
       addTearDown(gateway.close);
       await controller.load();
       await controller.connectStore();
-      await controller.purchase(SubscriptionPlan.pro1299);
+      await controller.purchase(SubscriptionPlan.pro1499);
       await pumpEventQueue();
       expect(gateway.completed, isEmpty);
       expect(controller.activePlan, isNull);
@@ -270,14 +270,14 @@ void main() {
     addTearDown(gateway.close);
     await controller.load();
     await controller.connectStore();
-    await controller.purchase(SubscriptionPlan.pro1299);
+    await controller.purchase(SubscriptionPlan.pro1499);
     await pumpEventQueue();
     await backend.signOut();
     backend.verification!.complete(backend.result);
     await pumpEventQueue();
     expect(controller.activePlan, isNull);
     expect(gateway.completed, isEmpty);
-    await controller.purchase(SubscriptionPlan.pro1299);
+    await controller.purchase(SubscriptionPlan.pro1499);
     expect(gateway.bought, hasLength(1));
   });
 
@@ -349,7 +349,7 @@ void main() {
           find.byKey(const ValueKey<String>('account-tab-subscription')),
         );
         await tester.pumpAndSettle();
-        expect(find.text('Pro · \$12.99 / month'), findsOneWidget);
+        expect(find.text('Pro · \$14.99 / month'), findsOneWidget);
         expect(find.text('person@example.com'), findsNothing);
         // Every plan is listed here, not one tap away.
         for (final SubscriptionPlan plan in SubscriptionPlan.values) {
@@ -364,7 +364,7 @@ void main() {
         await tester.pumpAndSettle();
         expect(find.text('backup section'), findsOneWidget);
         expect(
-          find.byKey(const ValueKey<String>('plan-pro1299')),
+          find.byKey(const ValueKey<String>('plan-pro1499')),
           findsNothing,
         );
         controller.dispose();

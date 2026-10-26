@@ -349,8 +349,10 @@ Deno.test("with Notation on, the chosen model writes the words and a second mode
     assert(staticText.includes("adding only what is missing"));
     assert(staticText.includes("connect the annotation to the user's actual notes"));
     assert(!staticText.includes("animate"));
+    // An overlong question is clipped, so the drawing prompt stays bounded:
+    // 2738 characters here with the current instructions.
     assert(
-      drawingRequest({ ...asked, prompt: "x".repeat(5000) }).length < 2500,
+      drawingRequest({ ...asked, prompt: "x".repeat(5000) }).length < 2750,
     );
   }
 

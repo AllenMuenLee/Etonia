@@ -17,16 +17,16 @@ class FakeInAppPurchaseGateway implements InAppPurchaseGateway {
   }) : prices =
            prices ??
            const <SubscriptionPlan, String>{
-             SubscriptionPlan.starter499: '\$4.99',
-             SubscriptionPlan.pro1299: '\$12.99',
-             SubscriptionPlan.max2999: '\$29.99',
+             SubscriptionPlan.starter699: '\$6.99',
+             SubscriptionPlan.pro1499: '\$14.99',
+             SubscriptionPlan.max2499: '\$24.99',
            },
        yearlyPrices =
            yearlyPrices ??
            const <SubscriptionPlan, String>{
-             SubscriptionPlan.starter499: '\$49.99',
-             SubscriptionPlan.pro1299: '\$129.99',
-             SubscriptionPlan.max2999: '\$299.99',
+             SubscriptionPlan.starter699: '\$69.99',
+             SubscriptionPlan.pro1499: '\$149.99',
+             SubscriptionPlan.max2499: '\$249.99',
            };
 
   bool available;

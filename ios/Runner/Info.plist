@@ -34,6 +34,8 @@
 	<string>Record audio with your handwritten notes or dictate a prompt.</string>
 	<key>NSSpeechRecognitionUsageDescription</key>
 	<string>Convert a spoken AI prompt into text.</string>
+	<key>ITSAppUsesNonExemptEncryption</key>
+	<false/>
 	<key>UIApplicationSceneManifest</key>
 	<dict>
 		<key>UIApplicationSupportsMultipleScenes</key>
