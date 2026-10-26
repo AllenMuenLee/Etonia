@@ -2056,6 +2056,14 @@ class EditorScreenState extends State<EditorScreen>
           ),
     );
     _onIoFinished(result);
+    if (!result.cancelled && result.error == null) {
+      unawaited(
+        widget.subscription?.backend?.trackProductEvent(
+          'note_exported',
+          detail: 'pdf',
+        ),
+      );
+    }
   }
 
   Future<void> _exportSvg() async {
@@ -2068,6 +2076,12 @@ class EditorScreenState extends State<EditorScreen>
         pageSize: _surfaceSize,
         controller: _inkController,
         brightness: Theme.of(context).brightness,
+      );
+      unawaited(
+        widget.subscription?.backend?.trackProductEvent(
+          'note_exported',
+          detail: 'svg',
+        ),
       );
       if (mounted) AppHaptics.success();
     } on Object catch (error) {

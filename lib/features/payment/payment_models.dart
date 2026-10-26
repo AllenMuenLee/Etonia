@@ -62,33 +62,33 @@ enum BillingCycle {
 
 /// The three subscription plans.
 enum SubscriptionPlan {
-  starter499(
+  starter699(
     title: 'Starter',
-    priceLabel: '\$4.99 / month',
-    yearlyPriceLabel: '\$49.99 / year',
-    includedCreditsMicroUsd: 1200000,
-    yearlyIncludedCreditsMicroUsd: 14400000,
+    priceLabel: '\$6.99 / month',
+    yearlyPriceLabel: '\$69.99 / year',
+    includedCreditsMicroUsd: 2450000,
+    yearlyIncludedCreditsMicroUsd: 29400000,
     tokenPoolScale: 0.28,
     meteredModels: <AiModelId>{AiModelId.sonnet, AiModelId.sol},
     creditDescription: 'AI tokens for Sonnet & Sol combined',
   ),
-  pro1299(
+  pro1499(
     title: 'Pro',
-    priceLabel: '\$12.99 / month',
-    yearlyPriceLabel: '\$129.99 / year',
-    includedCreditsMicroUsd: 4000000,
-    yearlyIncludedCreditsMicroUsd: 48000000,
-    tokenPoolScale: 0.55,
+    priceLabel: '\$14.99 / month',
+    yearlyPriceLabel: '\$149.99 / year',
+    includedCreditsMicroUsd: 5250000,
+    yearlyIncludedCreditsMicroUsd: 63000000,
+    tokenPoolScale: 0.6,
     meteredModels: _allMetered,
     creditDescription:
         'AI tokens for Sonnet, Sol, Opus, Argon & Astra combined',
   ),
-  max2999(
+  max2499(
     title: 'Max',
-    priceLabel: '\$29.99 / month',
-    yearlyPriceLabel: '\$299.99 / year',
-    includedCreditsMicroUsd: 10000000,
-    yearlyIncludedCreditsMicroUsd: 120000000,
+    priceLabel: '\$24.99 / month',
+    yearlyPriceLabel: '\$249.99 / year',
+    includedCreditsMicroUsd: 8750000,
+    yearlyIncludedCreditsMicroUsd: 105000000,
     tokenPoolScale: 1.0,
     meteredModels: _allMetered,
     creditDescription:
@@ -134,9 +134,9 @@ enum SubscriptionPlan {
   /// How much more token allowance this plan provides compared to the previous plan.
   String get tokenComparisonText {
     return switch (this) {
-      SubscriptionPlan.starter499 => 'Essential AI access',
-      SubscriptionPlan.pro1299 => '3.3× more tokens than Starter',
-      SubscriptionPlan.max2999 => '2.5× more tokens than Pro (8.3× Starter)',
+      SubscriptionPlan.starter699 => 'Essential AI access',
+      SubscriptionPlan.pro1499 => '2.1× more tokens than Starter',
+      SubscriptionPlan.max2499 => '1.7× more tokens than Pro (3.6× Starter)',
     };
   }
 
@@ -203,59 +203,59 @@ class PaymentConfig {
   const PaymentConfig.fromEnvironment()
     : this(
         androidProductIds: const <SubscriptionPlan, String>{
-          SubscriptionPlan.starter499: String.fromEnvironment(
-            'IAP_ANDROID_PLAN_499_ID',
-            defaultValue: 'etonia_plan_499_monthly',
+          SubscriptionPlan.starter699: String.fromEnvironment(
+            'IAP_ANDROID_PLAN_699_ID',
+            defaultValue: 'etonia_plan_699_monthly',
           ),
-          SubscriptionPlan.pro1299: String.fromEnvironment(
-            'IAP_ANDROID_PLAN_1299_ID',
-            defaultValue: 'etonia_plan_1299_monthly',
+          SubscriptionPlan.pro1499: String.fromEnvironment(
+            'IAP_ANDROID_PLAN_1499_ID',
+            defaultValue: 'etonia_plan_1499_monthly',
           ),
-          SubscriptionPlan.max2999: String.fromEnvironment(
-            'IAP_ANDROID_PLAN_2999_ID',
-            defaultValue: 'etonia_plan_2999_monthly',
+          SubscriptionPlan.max2499: String.fromEnvironment(
+            'IAP_ANDROID_PLAN_2499_ID',
+            defaultValue: 'etonia_plan_2499_monthly',
           ),
         },
         androidYearlyProductIds: const <SubscriptionPlan, String>{
-          SubscriptionPlan.starter499: String.fromEnvironment(
-            'IAP_ANDROID_PLAN_499_YEARLY_ID',
-            defaultValue: 'etonia_plan_499_yearly',
+          SubscriptionPlan.starter699: String.fromEnvironment(
+            'IAP_ANDROID_PLAN_699_YEARLY_ID',
+            defaultValue: 'etonia_plan_699_yearly',
           ),
-          SubscriptionPlan.pro1299: String.fromEnvironment(
-            'IAP_ANDROID_PLAN_1299_YEARLY_ID',
-            defaultValue: 'etonia_plan_1299_yearly',
+          SubscriptionPlan.pro1499: String.fromEnvironment(
+            'IAP_ANDROID_PLAN_1499_YEARLY_ID',
+            defaultValue: 'etonia_plan_1499_yearly',
           ),
-          SubscriptionPlan.max2999: String.fromEnvironment(
-            'IAP_ANDROID_PLAN_2999_YEARLY_ID',
-            defaultValue: 'etonia_plan_2999_yearly',
+          SubscriptionPlan.max2499: String.fromEnvironment(
+            'IAP_ANDROID_PLAN_2499_YEARLY_ID',
+            defaultValue: 'etonia_plan_2499_yearly',
           ),
         },
         iosProductIds: const <SubscriptionPlan, String>{
-          SubscriptionPlan.starter499: String.fromEnvironment(
-            'IAP_IOS_PLAN_499_ID',
-            defaultValue: 'com.etonia.app.plan.499.monthly',
+          SubscriptionPlan.starter699: String.fromEnvironment(
+            'IAP_IOS_PLAN_699_ID',
+            defaultValue: 'com.etonia.app.plan.699.monthly',
           ),
-          SubscriptionPlan.pro1299: String.fromEnvironment(
-            'IAP_IOS_PLAN_1299_ID',
-            defaultValue: 'com.etonia.app.plan.1299.monthly',
+          SubscriptionPlan.pro1499: String.fromEnvironment(
+            'IAP_IOS_PLAN_1499_ID',
+            defaultValue: 'com.etonia.app.plan.1499.monthly',
           ),
-          SubscriptionPlan.max2999: String.fromEnvironment(
-            'IAP_IOS_PLAN_2999_ID',
-            defaultValue: 'com.etonia.app.plan.2999.monthly',
+          SubscriptionPlan.max2499: String.fromEnvironment(
+            'IAP_IOS_PLAN_2499_ID',
+            defaultValue: 'com.etonia.app.plan.2499.monthly',
           ),
         },
         iosYearlyProductIds: const <SubscriptionPlan, String>{
-          SubscriptionPlan.starter499: String.fromEnvironment(
-            'IAP_IOS_PLAN_499_YEARLY_ID',
-            defaultValue: 'com.etonia.app.plan.499.yearly',
+          SubscriptionPlan.starter699: String.fromEnvironment(
+            'IAP_IOS_PLAN_699_YEARLY_ID',
+            defaultValue: 'com.etonia.app.plan.699.yearly',
           ),
-          SubscriptionPlan.pro1299: String.fromEnvironment(
-            'IAP_IOS_PLAN_1299_YEARLY_ID',
-            defaultValue: 'com.etonia.app.plan.1299.yearly',
+          SubscriptionPlan.pro1499: String.fromEnvironment(
+            'IAP_IOS_PLAN_1499_YEARLY_ID',
+            defaultValue: 'com.etonia.app.plan.1499.yearly',
           ),
-          SubscriptionPlan.max2999: String.fromEnvironment(
-            'IAP_IOS_PLAN_2999_YEARLY_ID',
-            defaultValue: 'com.etonia.app.plan.2999.yearly',
+          SubscriptionPlan.max2499: String.fromEnvironment(
+            'IAP_IOS_PLAN_2499_YEARLY_ID',
+            defaultValue: 'com.etonia.app.plan.2499.yearly',
           ),
         },
         debugPlan: const String.fromEnvironment('IAP_DEBUG_PLAN'),
@@ -263,30 +263,30 @@ class PaymentConfig {
 
   static const Map<SubscriptionPlan, String> defaultAndroidProductIds =
       <SubscriptionPlan, String>{
-        SubscriptionPlan.starter499: 'etonia_plan_499_monthly',
-        SubscriptionPlan.pro1299: 'etonia_plan_1299_monthly',
-        SubscriptionPlan.max2999: 'etonia_plan_2999_monthly',
+        SubscriptionPlan.starter699: 'etonia_plan_699_monthly',
+        SubscriptionPlan.pro1499: 'etonia_plan_1499_monthly',
+        SubscriptionPlan.max2499: 'etonia_plan_2499_monthly',
       };
 
   static const Map<SubscriptionPlan, String> defaultAndroidYearlyProductIds =
       <SubscriptionPlan, String>{
-        SubscriptionPlan.starter499: 'etonia_plan_499_yearly',
-        SubscriptionPlan.pro1299: 'etonia_plan_1299_yearly',
-        SubscriptionPlan.max2999: 'etonia_plan_2999_yearly',
+        SubscriptionPlan.starter699: 'etonia_plan_699_yearly',
+        SubscriptionPlan.pro1499: 'etonia_plan_1499_yearly',
+        SubscriptionPlan.max2499: 'etonia_plan_2499_yearly',
       };
 
   static const Map<SubscriptionPlan, String> defaultIosProductIds =
       <SubscriptionPlan, String>{
-        SubscriptionPlan.starter499: 'com.etonia.app.plan.499.monthly',
-        SubscriptionPlan.pro1299: 'com.etonia.app.plan.1299.monthly',
-        SubscriptionPlan.max2999: 'com.etonia.app.plan.2999.monthly',
+        SubscriptionPlan.starter699: 'com.etonia.app.plan.699.monthly',
+        SubscriptionPlan.pro1499: 'com.etonia.app.plan.1499.monthly',
+        SubscriptionPlan.max2499: 'com.etonia.app.plan.2499.monthly',
       };
 
   static const Map<SubscriptionPlan, String> defaultIosYearlyProductIds =
       <SubscriptionPlan, String>{
-        SubscriptionPlan.starter499: 'com.etonia.app.plan.499.yearly',
-        SubscriptionPlan.pro1299: 'com.etonia.app.plan.1299.yearly',
-        SubscriptionPlan.max2999: 'com.etonia.app.plan.2999.yearly',
+        SubscriptionPlan.starter699: 'com.etonia.app.plan.699.yearly',
+        SubscriptionPlan.pro1499: 'com.etonia.app.plan.1499.yearly',
+        SubscriptionPlan.max2499: 'com.etonia.app.plan.2499.yearly',
       };
 
   /// List prices per million tokens, as micro-dollars per thousand.
@@ -314,7 +314,7 @@ class PaymentConfig {
   final Map<SubscriptionPlan, String> iosYearlyProductIds;
   final Map<AiModelId, AiModelRate> rates;
 
-  /// A plan's enum name, such as `pro1299`, granted on launch to a debug
+  /// A plan's enum name, such as `pro1499`, granted on launch to a debug
   /// or profile build with no plan, so AI can be tried before the store
   /// products exist. Ignored in release builds.
   final String debugPlan;

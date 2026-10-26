@@ -1,0 +1,50 @@
+name: iOS visual tour
+
+# Runs integration_test/visual_tour_test.dart on iPad and iPhone simulators
+# and uploads a screenshot of every screen plus a recording of each run.
+# The app is built without dart-defines, so it has no backend.
+
+on:
+  workflow_dispatch:
+    inputs:
+      devices:
+        description: >-
+          Comma-separated device keys (ipad-mini, ipad, ipad-air-11,
+          ipad-air-13, ipad-pro-11, ipad-pro-13, iphone-pro-max,
+          iphone-small); empty for all
+        required: false
+        default: ''
+  push:
+    branches:
+      - ci/ios-visual-tour
+
+concurrency:
+  group: ios-visual-tour-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  tour:
+    name: Simulators
+    runs-on: macos-latest
+    timeout-minutes: 150
+    steps:
+      - uses: actions/checkout@v4
+      - uses: kuhnroyal/flutter-fvm-config-action/setup@v3
+      - run: flutter pub get
+      - name: Run the tour on each simulator
+        run: bash tool/ios_visual_tour.sh "${{ inputs.devices }}"
+      - name: Summary
+        if: always()
+        run: |
+          if [ -f build/visual_tour/ios/summary.md ]; then
+            cat build/visual_tour/ios/summary.md >> "$GITHUB_STEP_SUMMARY"
+          fi
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: ios-visual-tour
+          path: build/visual_tour/ios
+          retention-days: 7

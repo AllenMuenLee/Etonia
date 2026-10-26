@@ -61,18 +61,18 @@ void main() {
     for (final (SubscriptionPlan plan, String price, String tokens)
         in <(SubscriptionPlan, String, String)>[
           (
-            SubscriptionPlan.starter499,
-            '\$4.99 / month',
+            SubscriptionPlan.starter699,
+            '\$6.99 / month',
             'AI tokens for Sonnet & Sol combined',
           ),
           (
-            SubscriptionPlan.pro1299,
-            '\$12.99 / month',
+            SubscriptionPlan.pro1499,
+            '\$14.99 / month',
             'AI tokens for Sonnet, Sol, Opus, Argon & Astra combined',
           ),
           (
-            SubscriptionPlan.max2999,
-            '\$29.99 / month',
+            SubscriptionPlan.max2499,
+            '\$24.99 / month',
             'AI tokens for all models (Sonnet, Sol, Opus, Argon & '
                 'Astra combined)',
           ),
@@ -95,7 +95,7 @@ void main() {
     // Starter locks the frontier models.
     expect(
       find.descendant(
-        of: _card(SubscriptionPlan.starter499),
+        of: _card(SubscriptionPlan.starter699),
         matching: find.text('Opus · Locked'),
       ),
       findsOneWidget,
@@ -110,7 +110,7 @@ void main() {
     expect(find.text('Restore Purchases'), findsOneWidget);
     expect(
       find.descendant(
-        of: _card(SubscriptionPlan.pro1299),
+        of: _card(SubscriptionPlan.pro1499),
         matching: find.byKey(const ValueKey<String>('pro-recommended')),
       ),
       findsOneWidget,
@@ -125,13 +125,13 @@ void main() {
       tester,
       gateway: FakeInAppPurchaseGateway(
         prices: const <SubscriptionPlan, String>{
-          SubscriptionPlan.starter499: '4,99 €',
-          SubscriptionPlan.pro1299: '12,99 €',
-          SubscriptionPlan.max2999: '29,99 €',
+          SubscriptionPlan.starter699: '6,99 €',
+          SubscriptionPlan.pro1499: '14,99 €',
+          SubscriptionPlan.max2499: '24,99 €',
         },
       ),
     );
-    expect(find.text('4,99 € / month'), findsOneWidget);
+    expect(find.text('6,99 € / month'), findsOneWidget);
   });
 
   testWidgets('toggle switches between monthly and yearly billing', (
@@ -139,25 +139,25 @@ void main() {
   ) async {
     await _pumpPage(tester);
 
-    expect(find.text('\$4.99 / month'), findsOneWidget);
-    expect(find.text('\$12.99 / month'), findsOneWidget);
-    expect(find.text('\$29.99 / month'), findsOneWidget);
+    expect(find.text('\$6.99 / month'), findsOneWidget);
+    expect(find.text('\$14.99 / month'), findsOneWidget);
+    expect(find.text('\$24.99 / month'), findsOneWidget);
 
     await tester.tap(
       find.byKey(const ValueKey<String>('billing-cycle-yearly')),
     );
     await tester.pumpAndSettle();
 
-    expect(find.text('\$49.99 / year'), findsOneWidget);
-    expect(find.text('\$129.99 / year'), findsOneWidget);
-    expect(find.text('\$299.99 / year'), findsOneWidget);
+    expect(find.text('\$69.99 / year'), findsOneWidget);
+    expect(find.text('\$149.99 / year'), findsOneWidget);
+    expect(find.text('\$249.99 / year'), findsOneWidget);
   });
 
   for (final (SubscriptionPlan plan, String meter)
       in <(SubscriptionPlan, String)>[
-        (SubscriptionPlan.starter499, '100%'),
-        (SubscriptionPlan.pro1299, '100%'),
-        (SubscriptionPlan.max2999, '100%'),
+        (SubscriptionPlan.starter699, '100%'),
+        (SubscriptionPlan.pro1499, '100%'),
+        (SubscriptionPlan.max2499, '100%'),
       ]) {
     testWidgets('buying ${plan.title} goes pending, then purchased, and '
         'fills the meter', (WidgetTester tester) async {
@@ -213,22 +213,22 @@ void main() {
   testWidgets('a higher plan offers Upgrade and a lower one Switch Plan', (
     WidgetTester tester,
   ) async {
-    await _pumpPage(tester, plan: SubscriptionPlan.pro1299);
+    await _pumpPage(tester, plan: SubscriptionPlan.pro1499);
     expect(
       find.descendant(
-        of: _card(SubscriptionPlan.max2999),
+        of: _card(SubscriptionPlan.max2499),
         matching: find.text('Upgrade'),
       ),
       findsOneWidget,
     );
     expect(
       find.descendant(
-        of: _card(SubscriptionPlan.starter499),
+        of: _card(SubscriptionPlan.starter699),
         matching: find.text('Switch Plan'),
       ),
       findsOneWidget,
     );
-    expect(find.text('Pro · \$12.99 / month'), findsOneWidget);
+    expect(find.text('Pro · \$14.99 / month'), findsOneWidget);
   });
 
   testWidgets('Restore Purchases restores an earlier subscription', (
@@ -237,7 +237,7 @@ void main() {
     final FakeInAppPurchaseGateway gateway = FakeInAppPurchaseGateway()
       ..restorable = const <StorePurchaseUpdate>[
         StorePurchaseUpdate(
-          productId: 'etonia_plan_1299_monthly',
+          productId: 'etonia_plan_1499_monthly',
           purchaseId: 'earlier',
           status: StorePurchaseStatus.restored,
           pendingCompletePurchase: true,
@@ -253,7 +253,7 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(gateway.restores, 1);
-    expect(controller.activePlan, SubscriptionPlan.pro1299);
+    expect(controller.activePlan, SubscriptionPlan.pro1499);
     expect(_balance(tester), '100%');
     expect(find.text('Restored your Pro plan.'), findsOneWidget);
     expect(gateway.completed.single.purchaseId, 'earlier');
@@ -268,10 +268,10 @@ void main() {
         tester,
         gateway: gateway,
       );
-      await _tapButton(tester, SubscriptionPlan.max2999);
+      await _tapButton(tester, SubscriptionPlan.max2499);
       gateway.deliver(const <StorePurchaseUpdate>[
         StorePurchaseUpdate(
-          productId: 'etonia_plan_2999_monthly',
+          productId: 'etonia_plan_2499_monthly',
           status: StorePurchaseStatus.canceled,
         ),
       ]);
@@ -301,13 +301,13 @@ void main() {
           tester,
           viewport: viewport,
           themeMode: mode,
-          plan: SubscriptionPlan.starter499,
+          plan: SubscriptionPlan.starter699,
         );
         expect(tester.takeException(), isNull);
 
         // Side by side on tablets, stacked on phones.
-        final Rect starter = tester.getRect(_card(SubscriptionPlan.starter499));
-        final Rect pro = tester.getRect(_card(SubscriptionPlan.pro1299));
+        final Rect starter = tester.getRect(_card(SubscriptionPlan.starter699));
+        final Rect pro = tester.getRect(_card(SubscriptionPlan.pro1499));
         if (viewport == TestViewport.compact) {
           expect(pro.top, greaterThan(starter.bottom));
         } else {
@@ -322,7 +322,7 @@ void main() {
         );
         expect(tester.getSize(restore).height, greaterThanOrEqualTo(48));
         final BuildContext context = tester.element(
-          _card(SubscriptionPlan.pro1299),
+          _card(SubscriptionPlan.pro1499),
         );
         final AppColors colors = AppColors.of(context);
         for (final SubscriptionPlan plan in SubscriptionPlan.values) {

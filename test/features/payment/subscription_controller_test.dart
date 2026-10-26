@@ -35,20 +35,20 @@ const AiTokenUsage _turn = AiTokenUsage(inputTokens: 1000, outputTokens: 1000);
 
 void main() {
   group('plans', () {
-    test('Starter: unlimited Haiku and Luna, \$1.20 for Sonnet and Sol, the '
+    test('Starter: unlimited Haiku and Luna, \$2.45 for Sonnet and Sol, the '
         'rest locked', () async {
       final SubscriptionController plan = await loadedSubscription(
-        plan: SubscriptionPlan.starter499,
+        plan: SubscriptionPlan.starter699,
       );
-      expect(plan.remainingCreditsMicroUsd, 1200000);
-      expect(plan.includedCreditsMicroUsd, 1200000);
+      expect(plan.remainingCreditsMicroUsd, 2450000);
+      expect(plan.includedCreditsMicroUsd, 2450000);
       for (final AiModelId model in _unlimited) {
         expect(plan.accessFor(model), AiModelAccess.unlimited);
         expect(plan.checkAccess(model), isNull);
         plan.recordUsage(model, _turn);
       }
       // \$0 for any number of unlimited turns.
-      expect(plan.remainingCreditsMicroUsd, 1200000);
+      expect(plan.remainingCreditsMicroUsd, 2450000);
       for (final AiModelId model in <AiModelId>[
         AiModelId.sonnet,
         AiModelId.sol,
@@ -64,7 +64,7 @@ void main() {
         expect(plan.accessFor(model), AiModelAccess.locked);
         expect(plan.checkAccess(model)?.kind, AiFailureKind.planRequired);
       }
-      expect(SubscriptionPlan.starter499.lockedModels, <AiModelId>{
+      expect(SubscriptionPlan.starter699.lockedModels, <AiModelId>{
         AiModelId.opus,
         AiModelId.argon,
         AiModelId.astra,
@@ -75,8 +75,8 @@ void main() {
 
     for (final (SubscriptionPlan tier, int credits, String label)
         in <(SubscriptionPlan, int, String)>[
-          (SubscriptionPlan.pro1299, 4000000, '100% tokens'),
-          (SubscriptionPlan.max2999, 10000000, '100% tokens'),
+          (SubscriptionPlan.pro1499, 5250000, '100% tokens'),
+          (SubscriptionPlan.max2499, 8750000, '100% tokens'),
         ]) {
       test('${tier.title}: unlimited Haiku and Luna, $label across all five '
           'metered models', () async {
@@ -139,7 +139,7 @@ void main() {
 
     test('spent credits stop metered models but never Haiku or Luna', () async {
       final SubscriptionController plan = await loadedSubscription(
-        plan: SubscriptionPlan.max2999,
+        plan: SubscriptionPlan.max2499,
       );
       plan.recordUsage(AiModelId.sonnet, _huge);
       // Clamped at zero.
@@ -162,7 +162,7 @@ void main() {
     test('the assistant refuses a locked model without sending, and charges '
         'a metered answer', () async {
       final SubscriptionController plan = await loadedSubscription(
-        plan: SubscriptionPlan.starter499,
+        plan: SubscriptionPlan.starter699,
       );
       final FakeAiModelRouter client = FakeAiModelRouter();
       final InkController ink = InkController(
@@ -203,7 +203,7 @@ void main() {
       expect(client.requests.single.model, AiModelId.haiku);
       client.complete(const AiSuccess('Hi.', usage: _turn));
       await pumpEventQueue();
-      expect(plan.remainingCreditsMicroUsd, 1200000);
+      expect(plan.remainingCreditsMicroUsd, 2450000);
 
       assistant.selectModel(AiModelId.sonnet);
       expect(assistant.send('More'), isTrue);
@@ -211,7 +211,7 @@ void main() {
       expect(client.requests.last.model, AiModelId.sonnet);
       client.complete(const AiSuccess('More.', usage: _turn));
       await pumpEventQueue();
-      expect(plan.remainingCreditsMicroUsd, 1200000 - 12000);
+      expect(plan.remainingCreditsMicroUsd, 2450000 - 12000);
 
       // Without reported usage, a deterministic estimate is charged.
       expect(assistant.send('Again'), isTrue);
@@ -223,7 +223,7 @@ void main() {
       expect(estimate.estimated, isTrue);
       expect(
         plan.remainingCreditsMicroUsd,
-        1200000 - 12000 - plan.config.costOf(AiModelId.sonnet, estimate),
+        2450000 - 12000 - plan.config.costOf(AiModelId.sonnet, estimate),
       );
     });
   });
@@ -234,18 +234,18 @@ void main() {
       final InMemorySubscriptionStore store = InMemorySubscriptionStore();
       final SubscriptionController first = await loadedSubscription(
         store: store,
-        plan: SubscriptionPlan.starter499,
+        plan: SubscriptionPlan.starter699,
       );
       first.recordUsage(AiModelId.sol, _turn);
-      first.activate(SubscriptionPlan.pro1299, purchaseId: 'order-2');
+      first.activate(SubscriptionPlan.pro1499, purchaseId: 'order-2');
       first.setPreferredModel(AiModelId.argon);
       await first.saved;
 
       final SubscriptionController reloaded = await loadedSubscription(
         store: store,
       );
-      expect(reloaded.activePlan, SubscriptionPlan.pro1299);
-      expect(reloaded.remainingCreditsMicroUsd, 4000000);
+      expect(reloaded.activePlan, SubscriptionPlan.pro1499);
+      expect(reloaded.remainingCreditsMicroUsd, 5250000);
       expect(reloaded.preferredModel, AiModelId.argon);
       expect(reloaded.accessFor(AiModelId.argon), AiModelAccess.metered);
     });
@@ -262,17 +262,17 @@ void main() {
         await plan.load();
         await plan.connectStore();
         expect(plan.storeAvailable, isTrue);
-        expect(plan.priceFor(SubscriptionPlan.pro1299), '\$12.99 / month');
+        expect(plan.priceFor(SubscriptionPlan.pro1499), '\$14.99 / month');
 
         final List<StoreActivity> seen = <StoreActivity>[];
         plan.addListener(() => seen.add(plan.activity));
-        await plan.purchase(SubscriptionPlan.pro1299);
+        await plan.purchase(SubscriptionPlan.pro1499);
         await pumpEventQueue();
 
         expect(seen, contains(StoreActivity.purchasing));
         expect(plan.activity, StoreActivity.idle);
-        expect(plan.activePlan, SubscriptionPlan.pro1299);
-        expect(plan.remainingCreditsMicroUsd, 4000000);
+        expect(plan.activePlan, SubscriptionPlan.pro1499);
+        expect(plan.remainingCreditsMicroUsd, 5250000);
         expect(gateway.completed.single.purchaseId, 'order-1');
       },
     );
@@ -283,12 +283,12 @@ void main() {
         final FakeInAppPurchaseGateway gateway = FakeInAppPurchaseGateway()
           ..restorable = const <StorePurchaseUpdate>[
             StorePurchaseUpdate(
-              productId: 'etonia_plan_499_monthly',
+              productId: 'etonia_plan_699_monthly',
               purchaseId: 'old-1',
               status: StorePurchaseStatus.restored,
             ),
             StorePurchaseUpdate(
-              productId: 'etonia_plan_2999_monthly',
+              productId: 'etonia_plan_2499_monthly',
               purchaseId: 'old-2',
               status: StorePurchaseStatus.restored,
               pendingCompletePurchase: true,
@@ -304,15 +304,15 @@ void main() {
         await plan.restorePurchases();
         await pumpEventQueue();
         // The highest plan delivered is the one in force.
-        expect(plan.activePlan, SubscriptionPlan.max2999);
-        expect(plan.remainingCreditsMicroUsd, 10000000);
+        expect(plan.activePlan, SubscriptionPlan.max2499);
+        expect(plan.remainingCreditsMicroUsd, 8750000);
         expect(plan.notice, contains('Restored'));
         expect(gateway.completed.single.purchaseId, 'old-2');
 
         plan.recordUsage(AiModelId.opus, _turn);
         await plan.restorePurchases();
         await pumpEventQueue();
-        expect(plan.remainingCreditsMicroUsd, 10000000 - 24000);
+        expect(plan.remainingCreditsMicroUsd, 8750000 - 24000);
       },
     );
 
@@ -326,10 +326,10 @@ void main() {
       );
       await plan.load();
       await plan.connectStore();
-      await plan.purchase(SubscriptionPlan.starter499);
+      await plan.purchase(SubscriptionPlan.starter699);
       gateway.deliver(const <StorePurchaseUpdate>[
         StorePurchaseUpdate(
-          productId: 'etonia_plan_499_monthly',
+          productId: 'etonia_plan_699_monthly',
           status: StorePurchaseStatus.canceled,
         ),
       ]);
@@ -345,10 +345,10 @@ void main() {
         platform: TargetPlatform.iOS,
       );
       expect(
-        plan.planForProduct('com.etonia.app.plan.1299.monthly'),
-        SubscriptionPlan.pro1299,
+        plan.planForProduct('com.etonia.app.plan.1499.monthly'),
+        SubscriptionPlan.pro1499,
       );
-      expect(plan.planForProduct('etonia_plan_1299_monthly'), isNull);
+      expect(plan.planForProduct('etonia_plan_1499_monthly'), isNull);
     });
 
     test('the file store keeps the subscription beside the library', () async {
@@ -361,15 +361,15 @@ void main() {
         store: FileSubscriptionStore(file),
       );
       await first.load();
-      first.activate(SubscriptionPlan.starter499);
+      first.activate(SubscriptionPlan.starter699);
       await first.saved;
 
       final SubscriptionController second = SubscriptionController(
         store: FileSubscriptionStore(file),
       );
       await second.load();
-      expect(second.activePlan, SubscriptionPlan.starter499);
-      expect(second.remainingCreditsMicroUsd, 1200000);
+      expect(second.activePlan, SubscriptionPlan.starter699);
+      expect(second.remainingCreditsMicroUsd, 2450000);
     });
   });
 }

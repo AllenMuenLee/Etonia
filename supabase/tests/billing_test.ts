@@ -81,12 +81,48 @@ Deno.test("free credit: one time, Google accounts only, once per device", async 
   }
 });
 
+Deno.test("final pricing: plans, credits, and old products on their renamed tiers", async () => {
+  const db = await migrated();
+  try {
+    const plans = (await db.query(
+      "select plan, rank, title, monthly_price_cents from billing_private.plans order by rank",
+    )).rows;
+    assert.deepEqual(plans, [
+      { plan: "free", rank: 0, title: "Free", monthly_price_cents: 0 },
+      { plan: "starter699", rank: 1, title: "Starter", monthly_price_cents: 699 },
+      { plan: "pro1499", rank: 2, title: "Pro", monthly_price_cents: 1499 },
+      { plan: "max2499", rank: 3, title: "Max", monthly_price_cents: 2499 },
+    ]);
+    const product = async (id: string) =>
+      (await db.query("select plan, rank, allowance::int from billing_private.products where product_id = $1", [
+        id,
+      ])).rows[0];
+    assert.deepEqual(await product("etonia_plan_699_monthly"), { plan: "starter699", rank: 1, allowance: 2450000 });
+    assert.deepEqual(await product("com.etonia.app.plan.1499.monthly"), { plan: "pro1499", rank: 2, allowance: 5250000 });
+    assert.deepEqual(await product("etonia_plan_2499_monthly"), { plan: "max2499", rank: 3, allowance: 8750000 });
+    assert.deepEqual(await product("com.etonia.app.plan.699.yearly"), { plan: "starter699", rank: 1, allowance: 29400000 });
+    assert.deepEqual(await product("etonia_plan_1499_yearly"), { plan: "pro1499", rank: 2, allowance: 63000000 });
+    assert.deepEqual(await product("com.etonia.app.plan.2499.yearly"), { plan: "max2499", rank: 3, allowance: 105000000 });
+    // Retired, but still honoured for a subscription already on it.
+    assert.deepEqual(await product("etonia_plan_1299_monthly"), { plan: "pro1499", rank: 2, allowance: 4000000 });
+    assert.equal(
+      (await db.query<{ n: number }>(
+        "select count(*)::int n from billing_private.products where plan not in ('starter699','pro1499','max2499')",
+      ))
+        .rows[0].n,
+      0,
+    );
+  } finally {
+    await db.close();
+  }
+});
+
 Deno.test("Postgres billing: permissions, ownership, renewals, expiry and atomic credits", async () => {
   const db = await migrated();
   try {
     const snapshot = (tx = "first", active = true, future = true) => ({
       platform: "google_play",
-      productId: "etonia_plan_1299_monthly",
+      productId: "etonia_plan_1499_monthly",
       chainKey: "google:chain",
       transactionKey: `google:${tx}`,
       locatorCiphertext: "encrypted",
@@ -133,20 +169,20 @@ Deno.test("Postgres billing: permissions, ownership, renewals, expiry and atomic
     assert.equal((await state()).plan, "free");
     await assert.rejects(() => reserve(), /plan_required/); // Free never unlocks AI.
     await apply(snapshot());
-    assert.equal((await state()).plan, "pro1299");
-    assert.equal((await state()).remainingCreditsMicroUsd, 4000000);
+    assert.equal((await state()).plan, "pro1499");
+    assert.equal((await state()).remainingCreditsMicroUsd, 5250000);
     // Requests run alongside each other, each holding only its own cap.
     await reserve(req1, "sol", 1000000);
     await reserve(req2, "sol", 1000000);
-    assert.equal((await state()).remainingCreditsMicroUsd, 2000000);
+    assert.equal((await state()).remainingCreditsMicroUsd, 3250000);
     await settle();
-    assert.equal((await state()).remainingCreditsMicroUsd, 2900000);
+    assert.equal((await state()).remainingCreditsMicroUsd, 4150000);
     await settle();
-    assert.equal((await state()).remainingCreditsMicroUsd, 2900000);
+    assert.equal((await state()).remainingCreditsMicroUsd, 4150000);
     await settle(req2, true);
-    assert.equal((await state()).remainingCreditsMicroUsd, 3900000);
+    assert.equal((await state()).remainingCreditsMicroUsd, 5150000);
     await apply(snapshot());
-    assert.equal((await state()).remainingCreditsMicroUsd, 3900000);
+    assert.equal((await state()).remainingCreditsMicroUsd, 5150000);
     await assert.rejects(() => reserve(), /request_in_progress/);
     await assert.rejects(() => reserve(crypto.randomUUID(), "sol", 0), /rejected/);
     // At most four at once; one stuck pending for ten minutes stops counting
@@ -160,28 +196,28 @@ Deno.test("Postgres billing: permissions, ownership, renewals, expiry and atomic
     const after = crypto.randomUUID();
     await reserve(after, "sol", 1000);
     for (const id of [...running.slice(1), after]) await settle(id, true);
-    assert.equal((await state()).remainingCreditsMicroUsd, 3899000);
+    assert.equal((await state()).remainingCreditsMicroUsd, 5149000);
     await assert.rejects(() => apply(snapshot(), other), /purchase_owner/);
     const last = crypto.randomUUID();
     await reserve(last); // Without a cap, the whole balance is held.
     assert.equal((await state()).remainingCreditsMicroUsd, 0);
     await apply(snapshot("renewal"));
-    assert.equal((await state()).remainingCreditsMicroUsd, 4000000);
+    assert.equal((await state()).remainingCreditsMicroUsd, 5250000);
     await settle(last, true); // Old request must never add credits to a new grant.
-    assert.equal((await state()).remainingCreditsMicroUsd, 4000000);
+    assert.equal((await state()).remainingCreditsMicroUsd, 5250000);
     await apply(snapshot("renewal", false));
     assert.equal((await state()).activePlan, null);
     await assert.rejects(() => reserve("cccccccc-cccc-4ccc-8ccc-cccccccccccc"), /plan_required/);
     await apply(snapshot("renewal", true, false));
     assert.equal((await state()).activePlan, null);
-    const starter = { ...snapshot("starter"), productId: "etonia_plan_499_monthly" };
+    const starter = { ...snapshot("starter"), productId: "etonia_plan_699_monthly" };
     await apply(starter);
     await assert.rejects(
       () => reserve("cccccccc-cccc-4ccc-8ccc-cccccccccccc", "astra"),
       /plan_required/,
     );
     await reserve("cccccccc-cccc-4ccc-8ccc-cccccccccccc", "haiku");
-    assert.equal((await state()).remainingCreditsMicroUsd, 1200000);
+    assert.equal((await state()).remainingCreditsMicroUsd, 2450000);
     // A device seen first anonymously, then under a Google account.
     const device = "dddddddd-dddd-4ddd-8ddd-dddddddddddd";
     await db.query("select public.billing_touch($1, true, $2)", [other, device]);
@@ -195,13 +231,13 @@ Deno.test("Postgres billing: permissions, ownership, renewals, expiry and atomic
       return rows;
     };
     assert.deepEqual(await plans(), [
-      { user_id: user, is_anonymous: false, plan: "starter499", devices: 0 },
+      { user_id: user, is_anonymous: false, plan: "starter699", devices: 0 },
       { user_id: other, is_anonymous: true, plan: "free", devices: 1 },
     ]);
     await db.query("select public.billing_touch($1, false, $2)", [user, device]);
     await db.query("select public.billing_touch($1, false, null)", [other]);
     assert.deepEqual(await plans(), [
-      { user_id: user, is_anonymous: false, plan: "starter499", devices: 1 },
+      { user_id: user, is_anonymous: false, plan: "starter699", devices: 1 },
       { user_id: other, is_anonymous: false, plan: "free", devices: 0 },
     ]);
     await db.exec("reset role");

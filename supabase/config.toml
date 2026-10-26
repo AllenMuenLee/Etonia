@@ -9,6 +9,9 @@ verify_jwt = false
 [functions.store-events]
 verify_jwt = false
 
+[functions.analytics]
+verify_jwt = false
+
 # Each function validates its own user token or webhook credential. This also
 # supports the current Supabase publishable keys and asymmetric user JWTs.
 

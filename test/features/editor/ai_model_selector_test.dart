@@ -72,7 +72,7 @@ void main() {
     WidgetTester tester,
   ) async {
     final SubscriptionController plan = await loadedSubscription(
-      plan: SubscriptionPlan.pro1299,
+      plan: SubscriptionPlan.pro1499,
     );
     final FakeAiModelRouter client = await _pumpOpen(tester, plan);
 
@@ -102,7 +102,7 @@ void main() {
   testWidgets('on Starter, Opus, Argon, and Astra carry a lock and lead to '
       'the plans', (WidgetTester tester) async {
     final SubscriptionController plan = await loadedSubscription(
-      plan: SubscriptionPlan.starter499,
+      plan: SubscriptionPlan.starter699,
     );
     await _pumpOpen(tester, plan);
 
@@ -131,7 +131,7 @@ void main() {
     WidgetTester tester,
   ) async {
     final SubscriptionController plan = await loadedSubscription(
-      plan: SubscriptionPlan.starter499,
+      plan: SubscriptionPlan.starter699,
     );
     await _pumpOpen(tester, plan);
 
@@ -166,7 +166,7 @@ void main() {
   testWidgets('out of credits, the failure offers the plans and a switch to '
       'an unlimited model that asks again', (WidgetTester tester) async {
     final SubscriptionController plan = await loadedSubscription(
-      plan: SubscriptionPlan.starter499,
+      plan: SubscriptionPlan.starter699,
     );
     plan.recordUsage(
       AiModelId.sol,
@@ -199,7 +199,7 @@ void main() {
     WidgetTester tester,
   ) async {
     final SubscriptionController plan = await loadedSubscription(
-      plan: SubscriptionPlan.max2999,
+      plan: SubscriptionPlan.max2499,
     );
     await _pumpOpen(tester, plan, unconfigured: <AiModelId>{AiModelId.astra});
     await tester.tap(_selector);
@@ -215,7 +215,7 @@ void main() {
       WidgetTester tester,
     ) async {
       final SubscriptionController plan = await loadedSubscription(
-        plan: SubscriptionPlan.max2999,
+        plan: SubscriptionPlan.max2499,
       );
       await _pumpOpen(tester, plan, viewport: viewport);
       await _choose(tester, AiModelId.astra);
