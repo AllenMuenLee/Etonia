@@ -80,52 +80,69 @@ while IFS='|' read -r key runtime type name; do
     --batteryState charged --batteryLevel 100 --wifiBars 3 --cellularBars 4 || true
 
   # Simulator.app shows the device so it can be turned: iPads ignore the
-  # app's own orientation requests.
+  # app's own orientation requests. It stays open from device to device.
   open -a Simulator --args -CurrentDeviceUDID "$udid" || true
   sleep 5
 
   xcrun simctl io "$udid" recordVideo --codec=h264 --force "$dir/raw.mp4" \
-    > /dev/null 2>&1 &
+    > /dev/null 2>&1 < /dev/null &
   recorder=$!
   sleep 2
 
-  : > "$dir/drive.log"
-  TOUR_OUT="$dir" flutter drive \
-    --driver=test_driver/visual_tour_driver.dart \
-    --target=integration_test/visual_tour_test.dart \
-    -d "$udid" > "$dir/drive.log" 2>&1 &
-  drive=$!
+  # A launch now and then never reaches the test; give each attempt
+  # 15 minutes and retry once.
+  for attempt in 1 2; do
+    : > "$dir/drive.log"
+    TOUR_OUT="$dir" flutter drive \
+      --driver=test_driver/visual_tour_driver.dart \
+      --target=integration_test/visual_tour_test.dart \
+      -d "$udid" > "$dir/drive.log" 2>&1 < /dev/null &
+    drive=$!
 
-  # The test prints TOUR_TURN when it wants the device turned; Cmd-Left
-  # and Cmd-Right turn the simulator. Needs accessibility access for
-  # System Events, which GitHub's macOS runners grant.
-  tail -n +1 -f "$dir/drive.log" | while IFS= read -r line; do
-    case "$line" in
-      *"TOUR_TURN landscape"*) arrow=123 ;;
-      *"TOUR_TURN portrait"*) arrow=124 ;;
-      *) continue ;;
-    esac
-    osascript -e 'tell application "Simulator" to activate' \
-      -e "tell application \"System Events\" to key code $arrow using command down" \
-      >> "$dir/turn.log" 2>&1 || echo "turn failed" >> "$dir/turn.log"
-  done &
-  watcher=$!
-
-  wait "$drive"
-  status=$?
-  kill "$watcher" 2> /dev/null
-  pkill -f "tail -n +1 -f $dir/drive.log" 2> /dev/null || true
+    # The test prints TOUR_TURN when it wants the device turned; Cmd-Left
+    # and Cmd-Right turn the simulator. Needs accessibility access for
+    # System Events, which GitHub's macOS runners grant. osascript gets 20
+    # seconds, so a permission prompt cannot hang the run.
+    handled=0
+    started=$SECONDS
+    timed_out=0
+    while kill -0 "$drive" 2> /dev/null; do
+      turns=$(grep -c "TOUR_TURN" "$dir/drive.log" 2> /dev/null || true)
+      while [ "$handled" -lt "${turns:-0}" ]; do
+        handled=$((handled + 1))
+        case "$(grep "TOUR_TURN" "$dir/drive.log" | sed -n "${handled}p")" in
+          *landscape*) arrow=123 ;;
+          *) arrow=124 ;;
+        esac
+        perl -e 'alarm 20; exec @ARGV' osascript \
+          -e 'tell application "Simulator" to activate' \
+          -e "tell application \"System Events\" to key code $arrow using command down" \
+          >> "$dir/turn.log" 2>&1 < /dev/null || echo "turn failed" >> "$dir/turn.log"
+      done
+      if [ $((SECONDS - started)) -gt 900 ]; then
+        timed_out=1
+        pkill -P "$drive" 2> /dev/null || true
+        kill "$drive" 2> /dev/null || true
+        echo "Timed out after 15 minutes (attempt $attempt)" >> "$dir/drive.log"
+        break
+      fi
+      sleep 1
+    done
+    wait "$drive"
+    status=$?
+    [ "$timed_out" -eq 1 ] && status=124
+    [ "$status" -ne 124 ] && break
+  done
 
   kill -INT "$recorder" 2> /dev/null
   wait "$recorder" 2> /dev/null
-  osascript -e 'quit app "Simulator"' 2> /dev/null || true
   xcrun simctl shutdown "$udid" || true
   xcrun simctl delete "$udid" || true
 
-  # Keep the artifact small: a 720p recording, JPEG screenshots. avconvert
-  # ships with macOS; ffmpeg may not be installed.
+  # Keep the artifact small: a 960x540 recording, JPEG screenshots.
+  # avconvert ships with macOS; ffmpeg may not be installed.
   if [ -s "$dir/raw.mp4" ]; then
-    if avconvert --source "$dir/raw.mp4" --preset Preset1280x720 \
+    if avconvert --source "$dir/raw.mp4" --preset Preset960x540 \
       --output "$dir/recording.mp4" --replace > /dev/null 2>&1; then
       rm "$dir/raw.mp4"
     else
