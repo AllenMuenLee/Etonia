@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'dart:math';
 
 import 'package:crypto/crypto.dart';
 import 'package:flutter/foundation.dart';
@@ -82,6 +83,8 @@ class BackupSummary {
     this.addedHere = 0,
     this.movedToDeleted = 0,
     this.deletedForGood = 0,
+    this.updatedHere = 0,
+    this.keptBoth = 0,
   });
 
   final DateTime exportedAt;
@@ -99,6 +102,13 @@ class BackupSummary {
 
   /// Notes deleted for good here, as they were deleted for good elsewhere.
   final int deletedForGood;
+
+  /// Notes changed here to how they were changed elsewhere.
+  final int updatedHere;
+
+  /// Notes changed both here and elsewhere: the other version came in
+  /// beside this one.
+  final int keptBoth;
 
   /// Note contents and assets sent this time.
   final int uploadedFiles;
@@ -129,6 +139,35 @@ class RestoreSummary {
   final int deletedRestored;
 }
 
+/// What bringing another device's backup here changed.
+@immutable
+class SyncSummary {
+  const SyncSummary({
+    required this.backupMadeAt,
+    this.added = 0,
+    this.movedToDeleted = 0,
+    this.deletedForGood = 0,
+    this.updated = 0,
+    this.keptBoth = 0,
+  });
+
+  /// When the other device made the backup.
+  final DateTime backupMadeAt;
+  final int added;
+  final int movedToDeleted;
+  final int deletedForGood;
+
+  /// Notes changed, renamed or moved as they were there.
+  final int updated;
+
+  /// Notes changed on both devices: the other version came in beside.
+  final int keptBoth;
+
+  /// How many notes changed here.
+  int get changedNotes =>
+      added + movedToDeleted + deletedForGood + updated + keptBoth;
+}
+
 /// Backs the library up to, and restores it from, an `Etonia` folder in
 /// Google Drive.
 ///
@@ -153,6 +192,7 @@ class GoogleDriveBackupService {
     required this.repository,
     CloudStateStore? state,
     this.flushPendingSaves,
+    this.isNoteOpen,
     DateTime Function()? clock,
   }) : state = state ?? InMemoryCloudStateStore(),
        _clock = clock ?? DateTime.now;
@@ -180,6 +220,18 @@ class GoogleDriveBackupService {
   /// What older versions kept in place of [_syncedKey].
   static const String _legacyKnownNotesKey = 'backedUpNoteIds';
 
+  /// A random id for this installation, written into each backup it makes,
+  /// so another device can tell the backup did not come from itself.
+  static const String _deviceKey = 'deviceId';
+
+  /// Each note's version in the backup, by id, when this device last synced
+  /// with it, and the note's modified time here then.
+  static const String _versionsKey = 'syncedNoteVersions';
+
+  /// When the backup this device last brought in from another device was
+  /// made.
+  static const String _pulledKey = 'lastPulledExportAt';
+
   /// Backups and restores run one at a time, in the order asked for.
   Future<void> _queue = Future<void>.value();
 
@@ -196,6 +248,11 @@ class GoogleDriveBackupService {
   /// Saves edits still waiting for their autosave, before anything is
   /// read.
   final Future<void> Function()? flushPendingSaves;
+
+  /// Whether the note is open in the editor. An open note is not changed
+  /// to another device's version, since the editor would save over it;
+  /// the next sync brings it.
+  final bool Function(String noteId)? isNoteOpen;
   final DateTime Function() _clock;
 
   /// When this device last finished a backup.
@@ -272,11 +329,17 @@ class GoogleDriveBackupService {
       check: check,
       onProgress: onProgress,
     );
-    if (sync.changedHere) {
+    // Edits made elsewhere since the last sync come here before anything is
+    // sent, so an older copy here does not replace them in Drive.
+    final _Edits edits = previous == null
+        ? _Edits()
+        : await _pullEdits(previous, check: check, onProgress: onProgress);
+    if (sync.changedHere || edits.changedHere) {
       folders = await repository.allFolders();
       notes = await _allNotes(folders);
       deleted = await repository.trash();
     }
+    final Map<String, _Version> versions = <String, _Version>{};
     final Map<String, List<NoteAsset>> assets = <String, List<NoteAsset>>{
       for (final NoteEntry note in <NoteEntry>[...notes, ...deleted])
         note.id: await repository.listAssets(note.id),
@@ -339,6 +402,14 @@ class GoogleDriveBackupService {
         uploaded++;
       }
       done++;
+      if (note.deleted == null) {
+        versions[note.id] = _Version(
+          hash: contentHash,
+          title: note.title,
+          path: _pathOf(note.folderId, folders),
+          modified: note.modified,
+        );
+      }
 
       final List<Map<String, Object?>> assetRecords = <Map<String, Object?>>[];
       for (final NoteAsset asset in assets[note.id]!) {
@@ -405,6 +476,7 @@ class GoogleDriveBackupService {
       'schema': schema,
       'storageSchema': storageSchema,
       'exportedAt': exportedAt.toUtc().toIso8601String(),
+      'deviceId': await _deviceId(),
       'folderCount': folders.length,
       'noteCount': notes.length,
       'folders': <Object?>[
@@ -452,6 +524,8 @@ class GoogleDriveBackupService {
     }
 
     await _saveSynced(sync.synced);
+    // Every note here is now as it is in Drive.
+    await _saveVersions(versions);
     await state.update((Map<String, Object?> values) {
       values[_lastBackupKey] = exportedAt.millisecondsSinceEpoch;
     });
@@ -465,6 +539,83 @@ class GoogleDriveBackupService {
       addedHere: sync.addedHere,
       movedToDeleted: sync.movedToDeleted,
       deletedForGood: sync.deletedForGood,
+      updatedHere: edits.updated,
+      keptBoth: edits.keptBoth,
+    );
+  }
+
+  /// Brings the library up to date with the backup when the backup was
+  /// last made on another device and has not been brought here yet: notes
+  /// made, changed, renamed, moved or deleted there. Nothing is sent. Null
+  /// when there was nothing to bring: no backup, one made here, or one
+  /// already brought.
+  ///
+  /// A note changed both here and there since the last sync keeps this
+  /// device's version, and the other comes in beside it, so neither is
+  /// lost. A note open in the editor is left for the next sync.
+  Future<SyncSummary?> pullIfChangedElsewhere({
+    ValueChanged<CloudProgress>? onProgress,
+    ImportCancellationToken? cancellation,
+  }) {
+    return _exclusive(
+      () => _pull(onProgress: onProgress, cancellation: cancellation),
+    );
+  }
+
+  Future<SyncSummary?> _pull({
+    ValueChanged<CloudProgress>? onProgress,
+    ImportCancellationToken? cancellation,
+  }) async {
+    void check() {
+      if (cancellation?.isCancelled ?? false) {
+        throw const CloudCancelledException();
+      }
+    }
+
+    _Manifest? remote;
+    for (final GoogleDriveItem folder in await client.searchFoldersByName(
+      rootFolderName,
+    )) {
+      remote = await _readManifest(folder.id);
+      if (remote != null) break;
+    }
+    if (remote == null || remote.deviceId == await _deviceId()) return null;
+    final Object? pulled = (await state.read())[_pulledKey];
+    if (pulled == remote.exportedAt.millisecondsSinceEpoch) return null;
+    check();
+
+    await flushPendingSaves?.call();
+    final List<Folder> folders = await repository.allFolders();
+    final _Reconciled sync = await _reconcile(
+      remote,
+      folders,
+      await _allNotes(folders),
+      await repository.trash(),
+      check: check,
+      onProgress: onProgress,
+      pullOnly: true,
+    );
+    final _Edits edits = await _pullEdits(
+      remote,
+      check: check,
+      onProgress: onProgress,
+      broughtIn: sync.broughtIn,
+    );
+    await _saveSynced(sync.synced);
+    await _saveVersions(edits.versions);
+    // A note left as it was, being open, is tried again on the next launch.
+    if (!edits.leftOpen) {
+      await state.update((Map<String, Object?> values) {
+        values[_pulledKey] = remote!.exportedAt.millisecondsSinceEpoch;
+      });
+    }
+    return SyncSummary(
+      backupMadeAt: remote.exportedAt,
+      added: sync.addedHere,
+      movedToDeleted: sync.movedToDeleted,
+      deletedForGood: sync.deletedForGood,
+      updated: edits.updated,
+      keptBoth: edits.keptBoth,
     );
   }
 
@@ -599,6 +750,7 @@ class GoogleDriveBackupService {
     List<NoteEntry> deleted, {
     required VoidCallback check,
     ValueChanged<CloudProgress>? onProgress,
+    bool pullOnly = false,
   }) async {
     final Map<String, NoteEntry> live = <String, NoteEntry>{
       for (final NoteEntry note in notes) note.id: note,
@@ -722,6 +874,7 @@ class GoogleDriveBackupService {
                 await repository.restoreNote(id);
               } else {
                 await bringIn(id);
+                result.broughtIn.add(id);
               }
               result.addedHere++;
             case NoteStatus.deleted:
@@ -756,7 +909,13 @@ class GoogleDriveBackupService {
         result.changedHere = true;
       }
       result.log[id] = latest;
-      result.synced[id] = latest.status;
+      if (pullOnly && !identical(latest, there)) {
+        // Changed here and not yet backed up: still changed since the last
+        // sync, so the next backup sends it rather than taking the log's.
+        if (was != null) result.synced[id] = was;
+      } else {
+        result.synced[id] = latest.status;
+      }
     }
     return result;
   }
@@ -835,17 +994,19 @@ class GoogleDriveBackupService {
   }
 
   /// Makes a note in the library from [note], with [id] or a new one, in
-  /// [folderId], and moves it to Recently Deleted when it was [deleted]
-  /// then. Nothing is left of it if that fails part way.
+  /// [folderId], titled [title] or as it was, and moves it to Recently
+  /// Deleted when it was [deleted] then. Nothing is left of it if that
+  /// fails part way.
   Future<NoteEntry> _createNote(
     _DownloadedNote note, {
     String? id,
     required String? folderId,
+    String? title,
     DateTime? deleted,
   }) async {
     final NoteEntry created = await repository.createNote(
       id: id,
-      title: note.record.entry.title,
+      title: title ?? note.record.entry.title,
       folderId: folderId,
     );
     try {
@@ -871,6 +1032,205 @@ class GoogleDriveBackupService {
       rethrow;
     }
     return created;
+  }
+
+  /// Brings what changed in each note elsewhere since the last sync: its
+  /// pages and assets, title and folder. A note also changed here since
+  /// keeps this version, and the other comes in beside it as a new note.
+  /// [broughtIn] are notes just made here from the backup, so already as
+  /// it has them.
+  Future<_Edits> _pullEdits(
+    _Manifest remote, {
+    required VoidCallback check,
+    ValueChanged<CloudProgress>? onProgress,
+    Set<String> broughtIn = const <String>{},
+  }) async {
+    final _Edits edits = _Edits(await _versions());
+    final List<Folder> folders = await repository.allFolders();
+    final List<NoteEntry> notes = await _allNotes(folders);
+    for (final NoteEntry here in notes) {
+      final _NoteRecord? there = remote.notes[here.id];
+      if (there == null) continue;
+      final String therePath = _pathOf(there.entry.folderId, remote.folders);
+      _Version thereVersion(DateTime modified) => _Version(
+        hash: there.contentHash,
+        title: there.entry.title,
+        path: therePath,
+        modified: modified,
+      );
+      if (broughtIn.contains(here.id)) {
+        edits.versions[here.id] = thereVersion(here.modified);
+        continue;
+      }
+      final _Version? was = edits.versions[here.id];
+      // A note never synced is taken from whichever side changed it last.
+      final bool changedThere = was == null
+          ? there.entry.modified.isAfter(here.modified)
+          : was.hash != there.contentHash ||
+                was.title != there.entry.title ||
+                was.path != therePath;
+      if (!changedThere) continue;
+      final bool changedHere =
+          was != null && here.modified.isAfter(was.modified);
+      if (isNoteOpen?.call(here.id) ?? false) {
+        edits.leftOpen = true;
+        continue;
+      }
+      check();
+      onProgress?.call(
+        CloudProgress(
+          phase: 'Updating from Google Drive',
+          completedItems: 0,
+          totalItems: 0,
+          currentName: there.entry.title,
+        ),
+      );
+      try {
+        final _DownloadedNote note = await _downloadNote(there);
+        if (changedHere) {
+          await _createNote(
+            note,
+            folderId: here.folderId,
+            title: '${there.entry.title} (from another device)',
+          );
+          edits.keptBoth++;
+          // This version stays changed since the sync, to be sent.
+          edits.versions[here.id] = thereVersion(was.modified);
+        } else {
+          await _replaceContent(here.id, note);
+          if (there.entry.title != here.title) {
+            await repository.renameNote(here.id, there.entry.title);
+          }
+          final String? folderId = await _folderAt(therePath);
+          if (folderId != here.folderId) {
+            await repository.moveNote(here.id, folderId);
+          }
+          edits.updated++;
+          edits.versions[here.id] = thereVersion(
+            (await _entry(here.id))?.modified ?? here.modified,
+          );
+        }
+        edits.changedHere = true;
+      } on GoogleDriveBackupException {
+        // Missing or damaged in Drive: tried again at the next sync.
+      }
+    }
+    final Set<String> live = <String>{
+      for (final NoteEntry note in await _allNotes(
+        await repository.allFolders(),
+      ))
+        note.id,
+    };
+    edits.versions.removeWhere((String id, _) => !live.contains(id));
+    return edits;
+  }
+
+  /// Puts [note]'s pages in place of those of the note [id] here, with its
+  /// assets; assets already here, byte for byte, are kept rather than
+  /// stored again.
+  Future<void> _replaceContent(String id, _DownloadedNote note) async {
+    final Map<String, String> here = <String, String>{};
+    for (final NoteAsset asset in await repository.listAssets(id)) {
+      final NoteAssetData data = await repository.readAsset(id, asset.id);
+      here[sha256.convert(data.bytes).toString()] = asset.id;
+    }
+    final Map<String, String> ids = <String, String>{};
+    for (final _AssetRecord asset in note.record.assets.values) {
+      ids[asset.id] =
+          here[asset.hash] ??
+          await repository.storeAsset(
+            id,
+            note.assets[asset.id]!,
+            kind: asset.kind,
+            extension: asset.extension,
+            fileName: asset.fileName,
+          );
+    }
+    await repository.saveNote(
+      id,
+      NoteContent.fromJson(remapAssetIds(note.content, ids)),
+    );
+    await repository.cleanupAssets(id, ids.values.toSet());
+  }
+
+  /// The note [id] here, outside Recently Deleted.
+  Future<NoteEntry?> _entry(String id) async {
+    for (final NoteEntry note in await _allNotes(
+      await repository.allFolders(),
+    )) {
+      if (note.id == id) return note;
+    }
+    return null;
+  }
+
+  /// The names of the folders down to [folderId] in [folders], so the same
+  /// place can be found on another device, whose folders have other ids.
+  static String _pathOf(String? folderId, List<Folder> folders) {
+    final Map<String, Folder> byId = <String, Folder>{
+      for (final Folder folder in folders) folder.id: folder,
+    };
+    final List<String> names = <String>[];
+    for (
+      String? at = folderId;
+      at != null && byId.containsKey(at) && names.length <= folders.length;
+      at = byId[at]!.parentId
+    ) {
+      names.insert(0, byId[at]!.name);
+    }
+    return jsonEncode(names);
+  }
+
+  /// The folder here at [path], as [_pathOf] gives it, made as needed.
+  Future<String?> _folderAt(String path) async {
+    String? parentId;
+    for (final Object? name in jsonDecode(path) as List<Object?>) {
+      Folder? match;
+      for (final Folder folder in await repository.allFolders()) {
+        if (folder.name == name && folder.parentId == parentId) match = folder;
+      }
+      match ??= await repository.createFolder(
+        name! as String,
+        parentId: parentId,
+      );
+      parentId = match.id;
+    }
+    return parentId;
+  }
+
+  /// This installation's id, made on first use.
+  Future<String> _deviceId() async {
+    final Object? existing = (await state.read())[_deviceKey];
+    if (existing is String && existing.isNotEmpty) return existing;
+    final Random random = Random.secure();
+    final String id = List<String>.generate(
+      16,
+      (_) => random.nextInt(256).toRadixString(16).padLeft(2, '0'),
+    ).join();
+    await state.update((Map<String, Object?> values) {
+      values[_deviceKey] = id;
+    });
+    return id;
+  }
+
+  Future<Map<String, _Version>> _versions() async {
+    final Object? saved = (await state.read())[_versionsKey];
+    return <String, _Version>{
+      if (saved is Map)
+        for (final MapEntry<Object?, Object?> entry in saved.entries)
+          if (entry.key case final String id)
+            if (entry.value case final Map<String, Object?> json)
+              if (_Version.tryParse(json) case final _Version version)
+                id: version,
+    };
+  }
+
+  Future<void> _saveVersions(Map<String, _Version> versions) {
+    return state.update((Map<String, Object?> values) {
+      values[_versionsKey] = <String, Object?>{
+        for (final MapEntry<String, _Version> entry in versions.entries)
+          entry.key: entry.value.toJson(),
+      };
+    });
   }
 
   /// Deletes the note [id] for good, wherever it is.
@@ -1143,6 +1503,7 @@ class _Manifest {
   _Manifest({
     required this.fileId,
     required this.exportedAt,
+    required this.deviceId,
     required this.folders,
     required this.notes,
     required this.trash,
@@ -1167,6 +1528,8 @@ class _Manifest {
     return _Manifest(
       fileId: fileId,
       exportedAt: exportedAt,
+      // Older backups do not say which device made them.
+      deviceId: json['deviceId'] as String?,
       folders: <Folder>[
         for (final Object? folder in (json['folders'] as List?) ?? <Object?>[])
           Folder.fromJson(folder! as Map<String, Object?>),
@@ -1199,6 +1562,9 @@ class _Manifest {
 
   final String fileId;
   final DateTime exportedAt;
+
+  /// The installation that made the backup.
+  final String? deviceId;
   final List<Folder> folders;
   final Map<String, _NoteRecord> notes;
 
@@ -1266,10 +1632,74 @@ class _Reconciled {
   final List<_NoteRecord> keptNotes = <_NoteRecord>[];
   final List<_NoteRecord> keptTrash = <_NoteRecord>[];
 
+  /// Notes made here from the backup, as it has them.
+  final Set<String> broughtIn = <String>{};
+
   bool changedHere = false;
   int addedHere = 0;
   int movedToDeleted = 0;
   int deletedForGood = 0;
+}
+
+/// A note's version in the backup when this device last synced with it,
+/// and the note's modified time here then: a later one means it has
+/// changed here since.
+class _Version {
+  _Version({
+    required this.hash,
+    required this.title,
+    required this.path,
+    required this.modified,
+  });
+
+  static _Version? tryParse(Map<String, Object?> json) {
+    final Object? hash = json['hash'];
+    final Object? title = json['title'];
+    final Object? path = json['path'];
+    final Object? modified = json['modified'];
+    if (hash is! String ||
+        title is! String ||
+        path is! String ||
+        modified is! int) {
+      return null;
+    }
+    return _Version(
+      hash: hash,
+      title: title,
+      path: path,
+      modified: DateTime.fromMillisecondsSinceEpoch(modified),
+    );
+  }
+
+  final String hash;
+  final String title;
+
+  /// The folder names down to it, as [GoogleDriveBackupService._pathOf]
+  /// gives them.
+  final String path;
+  final DateTime modified;
+
+  Map<String, Object?> toJson() => <String, Object?>{
+    'hash': hash,
+    'title': title,
+    'path': path,
+    'modified': modified.millisecondsSinceEpoch,
+  };
+}
+
+/// What bringing edits from elsewhere came to.
+class _Edits {
+  _Edits([Map<String, _Version>? versions])
+    : versions = versions ?? <String, _Version>{};
+
+  /// Each note's version once synced, to remember.
+  final Map<String, _Version> versions;
+  bool changedHere = false;
+
+  /// A note changed elsewhere was open here, so was left as it is.
+  bool leftOpen = false;
+  int updated = 0;
+  int keptBoth = 0;
 }
 
 class _NoteRecord {

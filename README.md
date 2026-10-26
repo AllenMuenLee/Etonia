@@ -403,7 +403,8 @@ library, and its title renames the note.
 - Thumbnails are painted from each note's content and cached for the session
   only.
 - There is no live sync: Google Drive backups run on a schedule or when
-  asked (see below).
+  asked, and another device's backup is brought in when the app opens (see
+  below).
 
 ## Google Drive
 
@@ -432,6 +433,17 @@ sheet's *Back up automatically* menu picks 5 or 30 minutes, 1 or 4 hours, a
 day, or off. It runs only when the library has changed, restores the Google
 session silently or skips the turn, and takes turns with backups and
 restores started from the sheet.
+
+**Catching up with other devices.** Each backup records the installation
+that made it (`deviceId` in the manifest). When the app opens or comes back
+to the foreground, `pullIfChangedElsewhere` reads the manifest and, if
+another device made it and it has not been brought here yet, brings its
+changes in without sending anything: notes made, edited, renamed, moved,
+deleted or deleted for good there. Every backup does the same before it
+uploads, so an older copy on one device never replaces newer work in Drive.
+A note changed on both devices since they last synced keeps this device's
+version, and the other comes in beside it as "… (from another device)". A
+note open in the editor is left alone and brought on the next launch.
 
 **Goodnotes import** (`GoodnotesDriveReplicator`) looks for non-trashed
 folders named GoodNotes in any case, asks which one to use when there are

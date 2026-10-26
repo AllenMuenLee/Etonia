@@ -448,6 +448,8 @@ class _LibraryScreenState extends State<LibraryScreen> {
     client: _drive,
     repository: _repository,
     state: _cloudState,
+    isNoteOpen: (String id) =>
+        _openNotes.notes.any((NoteEntry note) => note.id == id),
     clock: widget.clock,
   );
 
@@ -503,6 +505,9 @@ class _LibraryScreenState extends State<LibraryScreen> {
       onShow: () {
         if (_tabsShowing) _thumbnails.pause();
       },
+      onResume: () {
+        if (widget.onboard) _pullFromDrive();
+      },
     );
     _repository.addListener(_onRepositoryChanged);
     _search.addListener(_scheduleSearchReload);
@@ -540,9 +545,44 @@ class _LibraryScreenState extends State<LibraryScreen> {
       await _backup.setLinked(true);
       await _autoBackup.reschedule();
     }
+    unawaited(_pullFromDrive());
     final HandwritingCalibrationState? state = await _handwritingProfileStore
         .read();
     if (state == null && mounted) await _calibrateHandwriting();
+  }
+
+  bool _pulling = false;
+
+  /// Brings the library up to date with a Google Drive backup that another
+  /// device has made since, on opening the app and on coming back to it.
+  /// Quiet when there is nothing new, or Drive cannot be reached.
+  Future<void> _pullFromDrive() async {
+    if (_pulling) return;
+    _pulling = true;
+    try {
+      if (!await _backup.isLinked()) return;
+      final GoogleDriveAccount? account =
+          _drive.currentAccount ?? await _drive.restoreSession();
+      if (account == null) return;
+      final SyncSummary? summary = await _backup.pullIfChangedElsewhere();
+      if (!mounted || summary == null || summary.changedNotes == 0) return;
+      final int count = summary.changedNotes;
+      final String notes = count == 1 ? '1 note' : '$count notes';
+      ScaffoldMessenger.maybeOf(context)?.showSnackBar(
+        SnackBar(
+          content: Text(
+            summary.keptBoth > 0
+                ? 'Updated $notes from Google Drive. A note changed on two '
+                      'devices was kept in both versions.'
+                : 'Updated $notes from Google Drive',
+          ),
+        ),
+      );
+    } on Object {
+      // Offline or signed out: tried again when the app next opens.
+    } finally {
+      _pulling = false;
+    }
   }
 
   @override

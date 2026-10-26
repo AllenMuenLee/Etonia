@@ -509,6 +509,158 @@ void main() {
       });
     });
 
+    group('opening the app on another device', () {
+      late InMemoryNoteRepository first;
+      late InMemoryNoteRepository second;
+      late GoogleDriveBackupService firstSync;
+      late GoogleDriveBackupService secondSync;
+      late String groceries;
+      String? openThere;
+
+      /// A device whose clock moves on a second at every reading, so each
+      /// change is later than the one before.
+      (InMemoryNoteRepository, GoogleDriveBackupService) device({
+        bool Function(String id)? isNoteOpen,
+      }) {
+        DateTime now = DateTime(2026, 10, 1);
+        DateTime tick() => now = now.add(const Duration(seconds: 1));
+        final InMemoryNoteRepository repository = InMemoryNoteRepository(
+          clock: tick,
+        );
+        addTearDown(repository.dispose);
+        return (
+          repository,
+          GoogleDriveBackupService(
+            client: drive,
+            repository: repository,
+            state: InMemoryCloudStateStore(),
+            isNoteOpen: isNoteOpen,
+            clock: tick,
+          ),
+        );
+      }
+
+      /// Replaces the note's pages with one holding a stroke at [y].
+      Future<NoteContent> scribble(
+        NoteRepository repository,
+        String id,
+        double y,
+      ) async {
+        final NoteContent content = NoteContent(<StoredPage>[
+          StoredPage(setup: const PageSetup(), strokes: <Stroke>[_stroke(y)]),
+        ]);
+        await repository.saveNote(id, content);
+        return content;
+      }
+
+      setUp(() async {
+        openThere = null;
+        (first, firstSync) = device();
+        (second, secondSync) = device(
+          isNoteOpen: (String id) => id == openThere,
+        );
+        await _seed(first);
+        groceries = (await first.search('Groceries')).notes.single.id;
+        await firstSync.backUp();
+      });
+
+      test('brings what was made, changed, renamed and moved there', () async {
+        final SyncSummary? brought = await secondSync.pullIfChangedElsewhere();
+        expect(brought!.added, 2);
+        expect(
+          (await _describe(second))['notes'],
+          (await _describe(first))['notes'],
+        );
+
+        final Folder school = (await first.allFolders()).firstWhere(
+          (Folder folder) => folder.name == 'School',
+        );
+        await scribble(first, groceries, 300);
+        await first.renameNote(groceries, 'Shopping');
+        await first.moveNote(groceries, school.id);
+        await firstSync.backUp();
+        drive.uploads.clear();
+
+        final SyncSummary? updated = await secondSync.pullIfChangedElsewhere();
+
+        expect(updated!.updated, 1);
+        expect(updated.added, 0);
+        expect(updated.keptBoth, 0);
+        expect(
+          (await _describe(second))['notes'],
+          (await _describe(first))['notes'],
+        );
+        // Bringing a backup only reads it.
+        expect(drive.uploads, isEmpty);
+      });
+
+      test('a backup made here, or one already brought, is not brought '
+          'again', () async {
+        expect(await firstSync.pullIfChangedElsewhere(), isNull);
+        expect(await secondSync.pullIfChangedElsewhere(), isNotNull);
+        expect(await secondSync.pullIfChangedElsewhere(), isNull);
+      });
+
+      test('a note changed on both devices keeps both versions', () async {
+        await secondSync.pullIfChangedElsewhere();
+        final NoteContent theirs = await scribble(first, groceries, 300);
+        await firstSync.backUp();
+        final NoteContent mine = await scribble(second, groceries, 500);
+
+        final SyncSummary? summary = await secondSync.pullIfChangedElsewhere();
+
+        expect(summary!.keptBoth, 1);
+        expect(summary.updated, 0);
+        expect((await second.loadNote(groceries)).toJson(), mine.toJson());
+        final NoteEntry copy = (await second.list(null)).notes.singleWhere(
+          (NoteEntry note) => note.title == 'Groceries (from another device)',
+        );
+        expect((await second.loadNote(copy.id)).toJson(), theirs.toJson());
+
+        // Backed up from here, both are in Drive, and this version stays.
+        await secondSync.backUp();
+        expect(
+          titlesIn('notes'),
+          containsAll(<String>['Groceries', 'Groceries (from another device)']),
+        );
+        await firstSync.pullIfChangedElsewhere();
+        expect((await first.loadNote(groceries)).toJson(), mine.toJson());
+      });
+
+      test('a backup here brings edits made there before sending, so an '
+          'older copy does not replace them', () async {
+        await secondSync.pullIfChangedElsewhere();
+        final NoteContent theirs = await scribble(first, groceries, 300);
+        await firstSync.backUp();
+
+        final BackupSummary summary = await secondSync.backUp();
+
+        expect(summary.updatedHere, 1);
+        expect((await second.loadNote(groceries)).toJson(), theirs.toJson());
+        final SyncSummary? back = await firstSync.pullIfChangedElsewhere();
+        expect(back?.updated ?? 0, 0);
+        expect((await first.loadNote(groceries)).toJson(), theirs.toJson());
+      });
+
+      test('a note open in the editor is left for the next launch', () async {
+        await secondSync.pullIfChangedElsewhere();
+        final NoteContent before = await second.loadNote(groceries);
+        final NoteContent theirs = await scribble(first, groceries, 300);
+        await firstSync.backUp();
+
+        openThere = groceries;
+        final SyncSummary? whileOpen = await secondSync
+            .pullIfChangedElsewhere();
+        expect(whileOpen!.updated, 0);
+        expect((await second.loadNote(groceries)).toJson(), before.toJson());
+
+        openThere = null;
+        final SyncSummary? later = await secondSync.pullIfChangedElsewhere();
+        expect(later!.updated, 1);
+        expect((await second.loadNote(groceries)).toJson(), theirs.toJson());
+      });
+    });
+
     test('cancelling leaves no manifest pointing at half a backup', () async {
       final InMemoryNoteRepository repository = _repository();
       await _seed(repository);

@@ -17,6 +17,7 @@ import 'package:greatnote/features/editor/page/note_document.dart';
 import 'package:greatnote/features/editor/page/page_setup.dart';
 import 'package:greatnote/features/editor/widgets/page_controls.dart';
 import 'package:greatnote/features/editor/document_io/document_platform.dart';
+import 'package:greatnote/features/library/cloud/google_drive_backup_service.dart';
 import 'package:greatnote/features/library/library_models.dart';
 import 'package:greatnote/features/library/library_screen.dart';
 import 'package:greatnote/features/library/note_content.dart';
@@ -1312,6 +1313,45 @@ void main() {
 
     expect(find.text('Sign in to Etonia'), findsNothing);
     expect(find.text("Choose the AI's handwriting"), findsOneWidget);
+  });
+
+  testWidgets('opening brings what another device backed up to Drive', (
+    WidgetTester tester,
+  ) async {
+    final FakeGoogleDriveClient drive = FakeGoogleDriveClient(signedIn: true);
+    final InMemoryNoteRepository elsewhere = InMemoryNoteRepository();
+    addTearDown(elsewhere.dispose);
+    await elsewhere.createNote(title: 'Written on the iPad');
+    await GoogleDriveBackupService(
+      client: drive,
+      repository: elsewhere,
+    ).backUp();
+
+    setViewportSize(tester, TestViewport.tabletLandscape.size);
+    final InMemoryNoteRepository here = _repository();
+    await tester.pumpWidget(
+      GreatnoteApp(
+        home: LibraryScreen(
+          repository: here,
+          clock: () => _now,
+          googleDriveClient: drive,
+          onboard: true,
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.text('Updated 1 note from Google Drive'), findsOneWidget);
+    expect(
+      (await here.list(null)).notes.map((NoteEntry note) => note.title),
+      <String>['Written on the iPad'],
+    );
+    // In the library, behind the handwriting choice that opens on first
+    // launch.
+    expect(
+      find.text('Written on the iPad', skipOffstage: false),
+      findsOneWidget,
+    );
   });
 
   testWidgets('opening signed in goes straight on', (
