@@ -148,7 +148,9 @@ class _AccountPageState extends State<AccountPage> {
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.stretch,
                   children: <Widget>[
-                    CreditMeter(controller: controller, showRestore: false),
+                    // Restore Purchases stays in reach: App Review
+                    // requires it beside subscriptions.
+                    CreditMeter(controller: controller),
                     if (backend?.userId != null)
                       GiftCodeCard(controller: controller),
                   ],

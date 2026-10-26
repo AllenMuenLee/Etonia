@@ -1426,13 +1426,15 @@ class _LibraryScreenState extends State<LibraryScreen> {
   }
 
   Widget _buildLibrary(BuildContext context) {
-    final WindowSizeClass sizeClass = WindowSizeClass.fromWidth(
-      MediaQuery.sizeOf(context).width,
-    );
+    final Size screen = MediaQuery.sizeOf(context);
+    final WindowSizeClass sizeClass = WindowSizeClass.fromWidth(screen.width);
     final bool compact = sizeClass == WindowSizeClass.compact;
     // Short of the widest layout, the folders slide in from the edge, so
-    // the notes have the whole width; a tablet held upright included.
-    final bool drawer = sizeClass != WindowSizeClass.expanded;
+    // the notes have the whole width; a tablet held upright included, and
+    // a phone on its side, which is wide but too short for a sidebar.
+    final bool drawer =
+        sizeClass != WindowSizeClass.expanded ||
+        screen.height < Breakpoints.medium;
     final Widget sidebar = _FolderSidebar(
       folders: _folders,
       counts: _counts,
@@ -1714,16 +1716,28 @@ class _LibraryScreenState extends State<LibraryScreen> {
         key: const ValueKey<String>('library-items'),
         constraints: const BoxConstraints(maxWidth: AppSizes.maxContentWidth),
         child: _grid
-            ? GridView.builder(
-                padding: padding,
-                gridDelegate: SliverGridDelegateWithMaxCrossAxisExtent(
-                  maxCrossAxisExtent: (compact ? 180 : 200) * textScale,
-                  mainAxisSpacing: AppSpacing.lg,
-                  crossAxisSpacing: compact ? AppSpacing.md : AppSpacing.lg,
-                  childAspectRatio: 0.72,
-                ),
-                itemCount: itemCount,
-                itemBuilder: buildItem,
+            ? LayoutBuilder(
+                builder: (BuildContext context, BoxConstraints constraints) {
+                  const double aspect = 0.72;
+                  // On a short screen, such as a phone on its side, a card
+                  // stays shorter than the view, so its title is in sight.
+                  final double fitsHeight =
+                      (constraints.maxHeight - padding.top) * 0.8 * aspect;
+                  return GridView.builder(
+                    padding: padding,
+                    gridDelegate: SliverGridDelegateWithMaxCrossAxisExtent(
+                      maxCrossAxisExtent: math.min(
+                        (compact ? 180 : 200) * textScale,
+                        math.max(120, fitsHeight),
+                      ),
+                      mainAxisSpacing: AppSpacing.lg,
+                      crossAxisSpacing: compact ? AppSpacing.md : AppSpacing.lg,
+                      childAspectRatio: aspect,
+                    ),
+                    itemCount: itemCount,
+                    itemBuilder: buildItem,
+                  );
+                },
               )
             : ListView.builder(
                 padding: padding,
@@ -2744,8 +2758,10 @@ class _EmptyState extends StatelessWidget {
     final AppColors colors = AppColors.of(context);
     final TextTheme text = Theme.of(context).textTheme;
     final bool searching = query.isNotEmpty;
+    // Scrolls when a keyboard leaves too little room, as on a small phone
+    // while a dialog over the library is being typed in.
     return Center(
-      child: Padding(
+      child: SingleChildScrollView(
         padding: const EdgeInsets.all(AppSpacing.xl),
         child: Column(
           mainAxisSize: MainAxisSize.min,
@@ -2898,7 +2914,8 @@ class _LibraryItem extends StatefulWidget {
 }
 
 class _LibraryItemState extends State<_LibraryItem> {
-  /// The height of a row in the list.
+  /// The height of a row in the list at the standard text size. Rows grow
+  /// with larger text, so the date under the title is never cut off.
   static const double _rowHeight = 64;
 
   /// Around a grid item, so its selection fill and press highlight have
@@ -2915,6 +2932,10 @@ class _LibraryItemState extends State<_LibraryItem> {
     final AppColors colors = AppColors.of(context);
     final TextTheme text = Theme.of(context).textTheme;
     final bool grid = widget.grid;
+    final double rowHeight = math.max(
+      _rowHeight,
+      MediaQuery.textScalerOf(context).scale(_rowHeight),
+    );
     final Widget menu = PopupMenuButton<_ItemAction>(
       popUpAnimationStyle: AppMotion.popupStyle,
       key: _menu,
@@ -2982,7 +3003,7 @@ class _LibraryItemState extends State<_LibraryItem> {
             ),
           )
         : SizedBox(
-            height: _rowHeight,
+            height: rowHeight,
             child: Padding(
               padding: const EdgeInsetsDirectional.fromSTEB(
                 AppSpacing.sm,
@@ -3086,7 +3107,7 @@ class _LibraryItemState extends State<_LibraryItem> {
                 child: IgnorePointer(
                   child: SizedBox(
                     width: AppSizes.minTouchTarget,
-                    height: grid ? AppSizes.minTouchTarget : _rowHeight,
+                    height: grid ? AppSizes.minTouchTarget : rowHeight,
                     child: Center(child: check),
                   ),
                 ),
@@ -3099,12 +3120,11 @@ class _LibraryItemState extends State<_LibraryItem> {
                 child: grid
                     ? menu
                     : SizedBox(
-                        height: _rowHeight,
+                        height: rowHeight,
                         child: Center(child: menu),
                       ),
               ),
-            if (!grid)
-              const SizedBox(height: _rowHeight, width: double.infinity),
+            if (!grid) SizedBox(height: rowHeight, width: double.infinity),
           ],
         ),
       ),

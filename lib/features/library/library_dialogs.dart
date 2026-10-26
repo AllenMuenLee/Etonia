@@ -356,6 +356,8 @@ class _FolderDialogState extends State<_FolderDialog> {
   Widget build(BuildContext context) {
     return AlertDialog(
       title: Text(widget.title),
+      // With the keyboard up on a small phone, the colors scroll.
+      scrollable: true,
       content: Column(
         mainAxisSize: MainAxisSize.min,
         crossAxisAlignment: CrossAxisAlignment.stretch,

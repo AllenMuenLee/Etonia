@@ -357,6 +357,9 @@ void main() {
           await tester.ensureVisible(card);
           expect(card, findsOneWidget);
         }
+        // App Review requires a way to restore purchases beside the plans.
+        await tester.ensureVisible(find.text('Restore Purchases'));
+        expect(find.text('Restore Purchases'), findsOneWidget);
 
         await tester.tap(
           find.byKey(const ValueKey<String>('account-tab-backup')),

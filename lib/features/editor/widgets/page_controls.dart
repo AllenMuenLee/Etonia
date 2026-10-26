@@ -721,11 +721,19 @@ class _PageOverviewAnchorState extends State<PageOverviewAnchor>
                       child: ScaleTransition(
                         scale: _scale,
                         alignment: Alignment.topLeft,
-                        child: PageOverviewPanel(
-                          document: widget.document,
-                          writingArea: widget.writingArea,
-                          config: widget.config,
-                          onSelected: _close,
+                        // The panel's tooltips get an overlay of their own,
+                        // inside the follower: Flutter cannot place one
+                        // across a CompositedTransformFollower, so hovering
+                        // an arrow with a mouse or a pencil threw.
+                        child: Overlay.wrap(
+                          alwaysSizeToContent: true,
+                          clipBehavior: Clip.none,
+                          child: PageOverviewPanel(
+                            document: widget.document,
+                            writingArea: widget.writingArea,
+                            config: widget.config,
+                            onSelected: _close,
+                          ),
                         ),
                       ),
                     ),
