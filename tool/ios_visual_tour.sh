@@ -14,8 +14,11 @@ OUT="$(mkdir -p "${OUT:-build/visual_tour/ios}" && cd "${OUT:-build/visual_tour/
 WANTED="${1:-}"
 
 # The newest available iOS runtime, then for each device family the newest
-# device type that runtime supports: "key|runtime id|device type id|name".
-devices=$(xcrun simctl list runtimes --json | WANTED="$WANTED" python3 -c '
+# device type that runtime supports, newest meaning the one that needs the
+# latest iOS: "key|runtime id|device type id|name".
+types_json=$(mktemp)
+xcrun simctl list devicetypes --json > "$types_json"
+devices=$(xcrun simctl list runtimes --json | WANTED="$WANTED" TYPES="$types_json" python3 -c '
 import json, os, re, sys
 
 families = [
@@ -37,14 +40,23 @@ if not runtimes:
     sys.exit("No available iOS simulator runtime")
 runtime = max(runtimes, key=lambda r: [int(p) for p in r["version"].split(".")])
 types = runtime.get("supportedDeviceTypes", [])
+min_runtime = {
+    t["identifier"]: t.get("minRuntimeVersion", 0)
+    for t in json.load(open(os.environ["TYPES"]))["devicetypes"]
+}
 for key, pattern in families:
     if wanted and key not in wanted:
         continue
-    matches = [t for t in types if re.search(pattern, t["name"])]
+    matches = [
+        (min_runtime.get(t["identifier"], 0), i, t)
+        for i, t in enumerate(types)
+        if re.search(pattern, t["name"])
+    ]
     if matches:
-        t = matches[-1]
+        t = max(matches, key=lambda m: m[:2])[2]
         print("|".join([key, runtime["identifier"], t["identifier"], t["name"]]))
 ')
+rm -f "$types_json"
 if [ -z "$devices" ]; then
   echo "No matching simulators" >&2
   exit 1
@@ -52,8 +64,8 @@ fi
 
 summary="$OUT/summary.md"
 {
-  echo "| Device | Result | Steps failed | Detail |"
-  echo "| --- | --- | --- | --- |"
+  echo "| Device | Result | Steps failed | Turned to landscape | Failures |"
+  echo "| --- | --- | --- | --- | --- |"
 } > "$summary"
 failed=0
 
@@ -67,28 +79,58 @@ while IFS='|' read -r key runtime type name; do
   xcrun simctl status_bar "$udid" override --time 9:41 \
     --batteryState charged --batteryLevel 100 --wifiBars 3 --cellularBars 4 || true
 
+  # Simulator.app shows the device so it can be turned: iPads ignore the
+  # app's own orientation requests.
+  open -a Simulator --args -CurrentDeviceUDID "$udid" || true
+  sleep 5
+
   xcrun simctl io "$udid" recordVideo --codec=h264 --force "$dir/raw.mp4" \
     > /dev/null 2>&1 &
   recorder=$!
   sleep 2
 
+  : > "$dir/drive.log"
   TOUR_OUT="$dir" flutter drive \
     --driver=test_driver/visual_tour_driver.dart \
     --target=integration_test/visual_tour_test.dart \
-    -d "$udid" > "$dir/drive.log" 2>&1
+    -d "$udid" > "$dir/drive.log" 2>&1 &
+  drive=$!
+
+  # The test prints TOUR_TURN when it wants the device turned; Cmd-Left
+  # and Cmd-Right turn the simulator. Needs accessibility access for
+  # System Events, which GitHub's macOS runners grant.
+  tail -n +1 -f "$dir/drive.log" | while IFS= read -r line; do
+    case "$line" in
+      *"TOUR_TURN landscape"*) arrow=123 ;;
+      *"TOUR_TURN portrait"*) arrow=124 ;;
+      *) continue ;;
+    esac
+    osascript -e 'tell application "Simulator" to activate' \
+      -e "tell application \"System Events\" to key code $arrow using command down" \
+      >> "$dir/turn.log" 2>&1 || echo "turn failed" >> "$dir/turn.log"
+  done &
+  watcher=$!
+
+  wait "$drive"
   status=$?
+  kill "$watcher" 2> /dev/null
+  pkill -f "tail -n +1 -f $dir/drive.log" 2> /dev/null || true
 
   kill -INT "$recorder" 2> /dev/null
   wait "$recorder" 2> /dev/null
+  osascript -e 'quit app "Simulator"' 2> /dev/null || true
   xcrun simctl shutdown "$udid" || true
   xcrun simctl delete "$udid" || true
 
-  # Keep the artifact small: a half-size recording, JPEG screenshots.
+  # Keep the artifact small: a 720p recording, JPEG screenshots. avconvert
+  # ships with macOS; ffmpeg may not be installed.
   if [ -s "$dir/raw.mp4" ]; then
-    ffmpeg -loglevel error -y -i "$dir/raw.mp4" \
-      -vf "scale=trunc(iw/4)*2:trunc(ih/4)*2" \
-      -c:v libx264 -crf 28 -preset veryfast -pix_fmt yuv420p -an \
-      "$dir/recording.mp4" && rm "$dir/raw.mp4"
+    if avconvert --source "$dir/raw.mp4" --preset Preset1280x720 \
+      --output "$dir/recording.mp4" --replace > /dev/null 2>&1; then
+      rm "$dir/raw.mp4"
+    else
+      mv "$dir/raw.mp4" "$dir/recording.mp4"
+    fi
   fi
   for png in "$dir"/*.png; do
     [ -e "$png" ] || continue
@@ -96,22 +138,29 @@ while IFS='|' read -r key runtime type name; do
       --out "${png%.png}.jpg" > /dev/null && rm "$png"
   done
 
-  steps_failed=$(python3 -c '
+  # "failed count<TAB>turned to landscape<TAB>first failures"
+  IFS=$'\t' read -r steps_failed turned detail < <(python3 -c '
 import json, sys
 try:
-    print(len(json.load(open(sys.argv[1]))["failures"]))
+    report = json.load(open(sys.argv[1]))
 except Exception:
-    print("?")
+    print("?\t?\t")
+    sys.exit()
+failures = report["failures"]
+turned = report.get("turned", {}).get("landscape")
+print(len(failures), "yes" if turned else "no",
+      "; ".join(failures)[:300].replace("|", "/"), sep="\t")
 ' "$dir/report.json")
   if [ "$status" -eq 0 ] && [ "$steps_failed" = "0" ]; then
     result="passed"
-    detail=""
   else
     result="FAILED"
-    detail=$(grep -m1 -E "Error|Exception|FAILED|failed" "$dir/drive.log" | cut -c1-160 | tr '|' '/')
+    if [ -z "$detail" ]; then
+      detail=$(grep -m1 -E "Error|Exception|FAILED|failed" "$dir/drive.log" | cut -c1-160 | tr '|' '/')
+    fi
     failed=1
   fi
-  echo "| $name | $result | $steps_failed | $detail |" >> "$summary"
+  echo "| $name | $result | $steps_failed | $turned | $detail |" >> "$summary"
   echo "$name: $result (drive exit $status, steps failed $steps_failed)"
   echo "::endgroup::"
 done <<< "$devices"

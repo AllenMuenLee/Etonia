@@ -27,6 +27,15 @@ TOUR_OUT="$dir" "$FLUTTER" drive \
   -d "$SERIAL" > "$dir/drive.log" 2>&1 &
 drive=$!
 
+# A tablet keeps its orientation whatever the app asks; the test prints
+# TOUR_TURN when it wants the emulator turned.
+tail -n +1 -f "$dir/drive.log" 2> /dev/null | while IFS= read -r line; do
+  case "$line" in
+    *"TOUR_TURN "*) adb -s "$SERIAL" emu rotate > /dev/null 2>&1 ;;
+  esac
+done &
+watcher=$!
+
 # screenrecord stops itself after 180 s, so record in pieces until the
 # test is over.
 until grep -q "+0: visual tour" "$dir/drive.log" 2> /dev/null; do
@@ -47,6 +56,8 @@ while kill -0 "$drive" 2> /dev/null; do
 done
 wait "$drive"
 status=$?
+kill "$watcher" 2> /dev/null
+pkill -f "tail -n +1 -f $dir/drive.log" 2> /dev/null || true
 sleep 1
 for i in $(seq 1 "$part"); do
   adb -s "$SERIAL" pull "/sdcard/tour_$i.mp4" "$dir/recording_$i.mp4" > /dev/null &&

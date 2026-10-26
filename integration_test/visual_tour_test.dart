@@ -171,13 +171,10 @@ void main() {
       await tour.settle(const Duration(seconds: 4));
     });
 
-    // Landscape, where the device lets the app turn it.
+    // Landscape. Whether the device turned is in the report.
     await tour.step('landscape_library', () async {
       await tour.closeStorePages();
-      await SystemChrome.setPreferredOrientations(<DeviceOrientation>[
-        DeviceOrientation.landscapeLeft,
-      ]);
-      await tour.settle(const Duration(seconds: 3));
+      await tour.turn(landscape: true);
     });
     await tour.step('landscape_editor', () async {
       await tour.tap(find.text('Untitled note').first);
@@ -185,11 +182,7 @@ void main() {
       await tour.expectVisible(find.byType(InkCanvas));
     });
     await tour.step('portrait_restored', () async {
-      await SystemChrome.setPreferredOrientations(<DeviceOrientation>[]);
-      await SystemChrome.setPreferredOrientations(<DeviceOrientation>[
-        DeviceOrientation.portraitUp,
-      ]);
-      await tour.settle(const Duration(seconds: 3));
+      await tour.turn(landscape: false);
       await tour.tap(find.byTooltip('Back to library'));
       await SystemChrome.setPreferredOrientations(<DeviceOrientation>[]);
     });
@@ -326,6 +319,7 @@ class _Tour {
       'physicalWidth': size.width.round(),
       'physicalHeight': size.height.round(),
       'devicePixelRatio': tester.view.devicePixelRatio,
+      'turned': _turned,
       'steps': _steps,
       'failures': <String>[
         for (final Map<String, Object?> step in _steps)
@@ -350,6 +344,35 @@ class _Tour {
 
   Future<void> wait(Duration duration) => tester.pump(duration);
 
+  bool get _isLandscape => tester.view.physicalSize.aspectRatio > 1;
+
+  /// Asks for [landscape] or portrait, and waits for the device to turn.
+  /// An iPad, or an Android tablet, keeps its orientation whatever the app
+  /// asks, so the line printed here lets the host turn the simulator
+  /// itself (see tool/ios_visual_tour.sh). A device that does not turn
+  /// within the wait is recorded as such, not failed.
+  Future<void> turn({required bool landscape}) async {
+    await SystemChrome.setPreferredOrientations(<DeviceOrientation>[
+      if (landscape) DeviceOrientation.landscapeLeft,
+      if (!landscape) DeviceOrientation.portraitUp,
+    ]);
+    // A phone turns by itself; give it the chance before asking the host.
+    for (int i = 0; i < 12 && _isLandscape != landscape; i++) {
+      await tester.pump(const Duration(milliseconds: 250));
+    }
+    if (_isLandscape != landscape) {
+      // ignore: avoid_print
+      print('TOUR_TURN ${landscape ? 'landscape' : 'portrait'}');
+      for (int i = 0; i < 40 && _isLandscape != landscape; i++) {
+        await tester.pump(const Duration(milliseconds: 250));
+      }
+    }
+    await settle(const Duration(seconds: 3));
+    _turned[landscape ? 'landscape' : 'portrait'] = _isLandscape == landscape;
+  }
+
+  final Map<String, bool> _turned = <String, bool>{};
+
   Future<void> expectVisible(Finder finder) async {
     for (int i = 0; i < 50 && finder.evaluate().isEmpty; i++) {
       await tester.pump(const Duration(milliseconds: 100));
@@ -361,6 +384,13 @@ class _Tour {
 
   Future<void> tap(Finder finder) async {
     await expectVisible(finder);
+    try {
+      // On a small screen it can be below the fold.
+      await tester.ensureVisible(finder.first);
+      await settle(const Duration(milliseconds: 600));
+    } on Object {
+      // Not in a scrollable; tap it where it is.
+    }
     await tester.tap(finder.first, warnIfMissed: false);
     await settle();
   }
