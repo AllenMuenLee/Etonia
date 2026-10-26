@@ -7,70 +7,12 @@ import 'package:greatnote/features/editor/ai/ai_client.dart';
 import 'package:greatnote/features/editor/ai/ai_usage_gate.dart';
 import 'package:greatnote/features/payment/account_page.dart';
 import 'package:greatnote/features/payment/account_panel.dart';
-import 'package:greatnote/features/payment/billing_backend.dart';
-import 'package:greatnote/features/payment/in_app_purchase_gateway.dart';
 import 'package:greatnote/features/payment/payment_models.dart';
 import 'package:greatnote/features/payment/plans_button.dart';
 import 'package:greatnote/features/payment/subscription_controller.dart';
 
 import '../../helpers/payment_fakes.dart';
 import '../../helpers/pump_app.dart';
-
-class TestBillingBackend extends BillingBackend {
-  @override
-  bool isConfigured = true;
-  @override
-  String? userId = 'user-1';
-  @override
-  String? get email => 'person@example.com';
-  SubscriptionState result = SubscriptionState(
-    activePlan: SubscriptionPlan.pro1499,
-    remainingCreditsMicroUsd: 123456,
-    expiresAt: DateTime.now().add(const Duration(days: 1)),
-  );
-  bool fail = false;
-  Completer<SubscriptionState>? verification;
-  @override
-  Future<SubscriptionState> fetchSubscription() async {
-    if (fail) throw StateError('unavailable');
-    return userId == null ? const SubscriptionState() : result;
-  }
-
-  @override
-  Future<SubscriptionState> verifyPurchase(StorePurchaseUpdate purchase) async {
-    if (fail) throw StateError('unverified');
-    return verification?.future ?? result;
-  }
-
-  Object? redeemError;
-  String? redeemed;
-
-  @override
-  Future<SubscriptionState> redeemGiftCode(String code) async {
-    if (redeemError != null) throw redeemError!;
-    redeemed = code;
-    return result = SubscriptionState(
-      remainingCreditsMicroUsd: 3500000,
-      freeCreditMicroUsd: 3500000,
-      freeCreditExpiresAt: DateTime.now().add(const Duration(days: 30)),
-    );
-  }
-
-  int googleSignIns = 0;
-
-  @override
-  Future<void> signInWithGoogle() async {
-    googleSignIns++;
-    userId = 'user-google';
-    notifyListeners();
-  }
-
-  @override
-  Future<void> signOut() async {
-    userId = null;
-    notifyListeners();
-  }
-}
 
 void main() {
   test('local balance and debug grants cannot override server state', () async {
@@ -282,7 +224,8 @@ void main() {
   });
 
   testWidgets(
-    'AccountPanel signs in directly with Google without email or Apple options',
+    'AccountPanel signs in directly with Google, with no email option and no '
+    'Apple option off Apple devices',
     (WidgetTester tester) async {
       final backend = TestBillingBackend()..userId = null;
       final controller = SubscriptionController(
@@ -312,6 +255,97 @@ void main() {
       controller.dispose();
     },
   );
+
+  testWidgets('on Apple devices, Sign in with Apple is offered beside Google', (
+    WidgetTester tester,
+  ) async {
+    final backend = TestBillingBackend()
+      ..userId = null
+      ..canSignInWithApple = true;
+    final controller = SubscriptionController(
+      store: InMemorySubscriptionStore(),
+      backend: backend,
+    );
+    await controller.load();
+    await pumpApp(
+      tester,
+      home: Scaffold(
+        body: AccountPanel(backend: backend, controller: controller),
+      ),
+    );
+    expect(find.text('Continue with Google'), findsOneWidget);
+    final Finder apple = find.byKey(const ValueKey<String>('sign-in-apple'));
+    expect(apple, findsOneWidget);
+    // At least as prominent as Google's, as Apple's guidelines require.
+    expect(
+      tester.getSize(apple).height,
+      greaterThanOrEqualTo(
+        tester
+            .getSize(find.byKey(const ValueKey<String>('sign-in-google')))
+            .height,
+      ),
+    );
+
+    await tester.tap(apple);
+    await tester.pumpAndSettle();
+    expect(backend.appleSignIns, 1);
+    expect(find.text('Signed in with Apple'), findsOneWidget);
+    controller.dispose();
+  });
+
+  testWidgets('deleting the account asks first, then deletes it', (
+    WidgetTester tester,
+  ) async {
+    final backend = TestBillingBackend();
+    final controller = SubscriptionController(
+      store: InMemorySubscriptionStore(),
+      backend: backend,
+    );
+    await controller.load();
+    await pumpApp(
+      tester,
+      home: Scaffold(
+        body: AccountPanel(backend: backend, controller: controller),
+      ),
+    );
+    final Finder delete = find.byKey(const ValueKey<String>('delete-account'));
+
+    // Cancelling keeps the account.
+    await tester.tap(delete);
+    await tester.pumpAndSettle();
+    expect(find.text('Delete your account?'), findsOneWidget);
+    expect(
+      find.textContaining('Notes on this device are kept'),
+      findsOneWidget,
+    );
+    await tester.tap(find.text('Cancel'));
+    await tester.pumpAndSettle();
+    expect(backend.deletions, 0);
+    expect(backend.userId, isNotNull);
+
+    // A failure says so and leaves the account signed in.
+    backend.deleteError = StateError('offline');
+    await tester.tap(delete);
+    await tester.pumpAndSettle();
+    await tester.tap(find.widgetWithText(FilledButton, 'Delete account'));
+    await tester.pumpAndSettle();
+    expect(
+      find.text('Could not delete your account. Please try again.'),
+      findsOneWidget,
+    );
+    expect(backend.userId, isNotNull);
+
+    backend.deleteError = null;
+    await tester.tap(delete);
+    await tester.pumpAndSettle();
+    await tester.tap(find.widgetWithText(FilledButton, 'Delete account'));
+    await tester.pumpAndSettle();
+    expect(backend.deletions, 1);
+    expect(backend.userId, isNull);
+    expect(find.text('Your account was deleted'), findsOneWidget);
+    expect(find.text('Continue with Google'), findsOneWidget);
+    controller.dispose();
+  });
 
   for (final TestViewport viewport in <TestViewport>[
     TestViewport.compact,
@@ -357,6 +391,9 @@ void main() {
           await tester.ensureVisible(card);
           expect(card, findsOneWidget);
         }
+        // App Review requires a way to restore purchases beside the plans.
+        await tester.ensureVisible(find.text('Restore Purchases'));
+        expect(find.text('Restore Purchases'), findsOneWidget);
 
         await tester.tap(
           find.byKey(const ValueKey<String>('account-tab-backup')),

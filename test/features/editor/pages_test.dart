@@ -410,6 +410,42 @@ void main() {
     expect(tester.getSize(find.byType(InkCanvas)), const Size(1123, 794));
   });
 
+  testWidgets('hovering an overview arrow shows its tooltip', (
+    WidgetTester tester,
+  ) async {
+    final NoteDocument document = await _pumpDocument(tester);
+    document.addPage();
+    await tester.pumpAndSettle();
+    await tester.tap(find.byTooltip('Page overview'));
+    await tester.pumpAndSettle();
+
+    // The panel hangs from a CompositedTransformFollower; a tooltip placed
+    // across one used to throw as soon as a mouse or pencil hovered it.
+    final TestGesture mouse = await tester.createGesture(
+      kind: PointerDeviceKind.mouse,
+    );
+    await mouse.addPointer(location: Offset.zero);
+    addTearDown(mouse.removePointer);
+    await mouse.moveTo(tester.getCenter(find.byTooltip('Previous page')));
+    await tester.pumpAndSettle(const Duration(seconds: 1));
+
+    expect(tester.takeException(), isNull);
+    final Finder panel = find.byType(PageOverviewPanel);
+    final Finder tip = find.text('Previous page');
+    expect(tip, findsOneWidget);
+    // Shown beside the arrow, not somewhere else on the screen.
+    expect(
+      (tester.getCenter(tip) -
+              tester.getCenter(find.byTooltip('Previous page')))
+          .distance,
+      lessThan(80),
+    );
+    expect(
+      tester.getRect(panel).inflate(40).contains(tester.getCenter(tip)),
+      isTrue,
+    );
+  });
+
   testWidgets('the top-left overview switches pages from a preview grid', (
     WidgetTester tester,
   ) async {

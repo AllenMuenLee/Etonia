@@ -17,15 +17,19 @@ import 'package:greatnote/features/editor/page/note_document.dart';
 import 'package:greatnote/features/editor/page/page_setup.dart';
 import 'package:greatnote/features/editor/widgets/page_controls.dart';
 import 'package:greatnote/features/editor/document_io/document_platform.dart';
+import 'package:greatnote/features/library/cloud/google_drive_backup_service.dart';
 import 'package:greatnote/features/library/library_models.dart';
 import 'package:greatnote/features/library/library_screen.dart';
 import 'package:greatnote/features/library/note_content.dart';
 import 'package:greatnote/features/library/note_repository.dart';
+import 'package:greatnote/features/payment/billing_backend.dart';
+import 'package:greatnote/features/payment/subscription_controller.dart';
 import 'package:leak_tracker_flutter_testing/leak_tracker_flutter_testing.dart';
 
 import '../../helpers/ai_fakes.dart';
 import '../../helpers/document_io_fakes.dart';
 import '../../helpers/google_drive_fakes.dart';
+import '../../helpers/payment_fakes.dart';
 import '../../helpers/pump_app.dart';
 
 final DateTime _now = DateTime(2026, 10, 14, 15, 30);
@@ -1247,6 +1251,107 @@ void main() {
     expect(drive.currentAccount, isNotNull);
     expect(find.text('Sign in to Etonia'), findsNothing);
     expect(find.text("Choose the AI's handwriting"), findsOneWidget);
+  });
+
+  testWidgets('on Apple devices the first sign-in also offers Apple', (
+    WidgetTester tester,
+  ) async {
+    final TestBillingBackend backend = TestBillingBackend()
+      ..userId = null
+      ..canSignInWithApple = true;
+    final SubscriptionController subscription = SubscriptionController(
+      store: InMemorySubscriptionStore(),
+      backend: backend,
+    );
+    setViewportSize(tester, TestViewport.tabletLandscape.size);
+    await tester.pumpWidget(
+      GreatnoteApp(
+        home: LibraryScreen(
+          repository: _repository(),
+          clock: () => _now,
+          googleDriveClient: FakeGoogleDriveClient(),
+          subscription: subscription,
+          onboard: true,
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.byKey(const ValueKey<String>('apple-sign-in')));
+    await tester.pumpAndSettle();
+    expect(backend.appleSignIns, 1);
+    expect(find.text('Sign in to Etonia'), findsNothing);
+    expect(find.text("Choose the AI's handwriting"), findsOneWidget);
+    // Signing in scheduled the plan's expiry refresh; stop it with the test.
+    subscription.dispose();
+  });
+
+  testWidgets('opening signed in with Apple is not asked to sign in again', (
+    WidgetTester tester,
+  ) async {
+    final TestBillingBackend backend = TestBillingBackend()
+      ..canSignInWithApple = true
+      ..signInMethod = SignInMethod.apple;
+    final SubscriptionController subscription = SubscriptionController(
+      store: InMemorySubscriptionStore(),
+      backend: backend,
+    );
+    addTearDown(subscription.dispose);
+    setViewportSize(tester, TestViewport.tabletLandscape.size);
+    await tester.pumpWidget(
+      GreatnoteApp(
+        home: LibraryScreen(
+          repository: _repository(),
+          clock: () => _now,
+          googleDriveClient: FakeGoogleDriveClient(),
+          subscription: subscription,
+          onboard: true,
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.text('Sign in to Etonia'), findsNothing);
+    expect(find.text("Choose the AI's handwriting"), findsOneWidget);
+  });
+
+  testWidgets('opening brings what another device backed up to Drive', (
+    WidgetTester tester,
+  ) async {
+    final FakeGoogleDriveClient drive = FakeGoogleDriveClient(signedIn: true);
+    final InMemoryNoteRepository elsewhere = InMemoryNoteRepository();
+    addTearDown(elsewhere.dispose);
+    await elsewhere.createNote(title: 'Written on the iPad');
+    await GoogleDriveBackupService(
+      client: drive,
+      repository: elsewhere,
+    ).backUp();
+
+    setViewportSize(tester, TestViewport.tabletLandscape.size);
+    final InMemoryNoteRepository here = _repository();
+    await tester.pumpWidget(
+      GreatnoteApp(
+        home: LibraryScreen(
+          repository: here,
+          clock: () => _now,
+          googleDriveClient: drive,
+          onboard: true,
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.text('Updated 1 note from Google Drive'), findsOneWidget);
+    expect(
+      (await here.list(null)).notes.map((NoteEntry note) => note.title),
+      <String>['Written on the iPad'],
+    );
+    // In the library, behind the handwriting choice that opens on first
+    // launch.
+    expect(
+      find.text('Written on the iPad', skipOffstage: false),
+      findsOneWidget,
+    );
   });
 
   testWidgets('opening signed in goes straight on', (

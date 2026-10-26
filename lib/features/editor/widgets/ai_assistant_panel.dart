@@ -358,31 +358,6 @@ class _AiAssistantPanelState extends State<AiAssistantPanel> {
                     ],
                   ),
                 ),
-                if (widget.showHandwritingCalibrationNotice)
-                  Padding(
-                    key: const ValueKey<String>(
-                      'handwriting-calibration-notice',
-                    ),
-                    padding: const EdgeInsets.fromLTRB(
-                      AppSpacing.md,
-                      AppSpacing.xs,
-                      AppSpacing.md,
-                      0,
-                    ),
-                    child: _Notice(
-                      message: AiAssistantPanel.handwritingCalibrationNotice,
-                      actionLabel: 'Choose',
-                      onAction: widget.onCalibrateHandwriting,
-                      extraActions: <(String, VoidCallback)>[
-                        if (widget.onDismissHandwritingCalibrationNotice !=
-                            null)
-                          (
-                            "Don't show again",
-                            widget.onDismissHandwritingCalibrationNotice!,
-                          ),
-                      ],
-                    ),
-                  ),
                 _Composer(
                   fieldKey: widget.composerKey,
                   text: _text,
@@ -445,6 +420,7 @@ class _AiAssistantPanelState extends State<AiAssistantPanel> {
         (hasPartial ? 1 : 0) +
         (controller.requestState == AiRequestState.sending ? 1 : 0) +
         (controller.failure == null ? 0 : 1) +
+        (widget.showHandwritingCalibrationNotice ? 1 : 0) +
         (controller.selectionChanged ? 1 : 0);
   }
 
@@ -563,6 +539,26 @@ class _AiAssistantPanelState extends State<AiAssistantPanel> {
           extraActions: _accessActions(controller, failure),
         );
       }
+    }
+    // Last in the transcript, so it sits just above the composer, and on a
+    // short screen scrolls instead of pushing the composer off the panel.
+    if (widget.showHandwritingCalibrationNotice && index == cursor++) {
+      return Padding(
+        key: const ValueKey<String>('handwriting-calibration-notice'),
+        padding: const EdgeInsets.only(bottom: AppSpacing.sm),
+        child: _Notice(
+          message: AiAssistantPanel.handwritingCalibrationNotice,
+          actionLabel: 'Choose',
+          onAction: widget.onCalibrateHandwriting,
+          extraActions: <(String, VoidCallback)>[
+            if (widget.onDismissHandwritingCalibrationNotice != null)
+              (
+                "Don't show again",
+                widget.onDismissHandwritingCalibrationNotice!,
+              ),
+          ],
+        ),
+      );
     }
     if (controller.selectionChanged && index == cursor) {
       // Room to scroll the last message out from under the selection choice.

@@ -1,12 +1,15 @@
-﻿import 'package:flutter/material.dart';
+import 'package:flutter/material.dart';
+import 'package:sign_in_with_apple/sign_in_with_apple.dart';
 
 import '../../app/theme/app_icons.dart';
 import '../../app/theme/app_tokens.dart';
 import '../../shared/widgets/processing.dart';
+import '../library/library_dialogs.dart';
 import 'billing_backend.dart';
 import 'subscription_controller.dart';
 
-/// Who is signed in, or the way to sign in with Google.
+/// Who is signed in, or the ways to sign in: Google, and Apple on Apple
+/// devices.
 class AccountPanel extends StatefulWidget {
   const AccountPanel({
     super.key,
@@ -23,7 +26,10 @@ class _AccountPanelState extends State<AccountPanel> {
   bool _busy = false;
   String? _message;
 
-  Future<void> _run(Future<void> Function() operation) async {
+  Future<void> _run(
+    Future<void> Function() operation, {
+    String failure = 'Could not complete sign-in. Please try again.',
+  }) async {
     setState(() {
       _busy = true;
       _message = null;
@@ -31,14 +37,45 @@ class _AccountPanelState extends State<AccountPanel> {
     try {
       await operation();
     } on Object {
-      if (mounted) {
-        setState(
-          () => _message = 'Could not complete sign-in. Please try again.',
-        );
-      }
+      if (mounted) setState(() => _message = failure);
     } finally {
       if (mounted) setState(() => _busy = false);
     }
+  }
+
+  Future<void> _deleteAccount() async {
+    final bool confirmed = await confirmAction(
+      context,
+      title: 'Delete your account?',
+      message:
+          'Your account, plan record and AI credits are deleted from Etonia '
+          'for good. Notes on this device are kept.\n\n'
+          'An App Store subscription is not cancelled by this: cancel it in '
+          'Settings, under your name, then Subscriptions.',
+      action: 'Delete account',
+    );
+    if (!confirmed || !mounted) return;
+    await _run(
+      widget.backend.deleteAccount,
+      failure: 'Could not delete your account. Please try again.',
+    );
+    if (mounted && _message == null) {
+      ScaffoldMessenger.maybeOf(context)?.showSnackBar(
+        const SnackBar(content: Text('Your account was deleted')),
+      );
+    }
+  }
+
+  Widget? _messageText(TextTheme text, AppColors colors) {
+    final String? message = _message;
+    if (message == null) return null;
+    return Padding(
+      padding: const EdgeInsets.only(top: AppSpacing.sm),
+      child: Text(
+        message,
+        style: text.bodyMedium?.copyWith(color: colors.danger),
+      ),
+    );
   }
 
   @override
@@ -109,7 +146,9 @@ class _AccountPanelState extends State<AccountPanel> {
                             ),
                           ),
                           Text(
-                            'Signed in with Google',
+                            widget.backend.signInMethod == SignInMethod.apple
+                                ? 'Signed in with Apple'
+                                : 'Signed in with Google',
                             style: text.bodySmall?.copyWith(
                               color: colors.textSecondary,
                             ),
@@ -152,8 +191,21 @@ class _AccountPanelState extends State<AccountPanel> {
                       ),
                       child: const Text('Sign out'),
                     ),
+                    TextButton(
+                      key: const ValueKey<String>('delete-account'),
+                      onPressed: _busy ? null : _deleteAccount,
+                      style: TextButton.styleFrom(
+                        foregroundColor: colors.danger,
+                        minimumSize: const Size(
+                          AppSizes.minTouchTarget,
+                          AppSizes.minTouchTarget,
+                        ),
+                      ),
+                      child: const Text('Delete account'),
+                    ),
                   ],
                 ),
+                ?_messageText(text, colors),
               ],
             ),
           );
@@ -173,7 +225,10 @@ class _AccountPanelState extends State<AccountPanel> {
             crossAxisAlignment: CrossAxisAlignment.start,
             children: <Widget>[
               Text(
-                'Sign in with Google to manage your subscription, AI credits, and Drive backup.',
+                widget.backend.canSignInWithApple
+                    ? 'Sign in to manage your subscription and AI credits. '
+                          'Google also backs up your notes to Google Drive.'
+                    : 'Sign in with Google to manage your subscription, AI credits, and Drive backup.',
                 style: text.titleMedium?.copyWith(color: colors.textPrimary),
               ),
               const SizedBox(height: AppSpacing.xxs),
@@ -181,14 +236,28 @@ class _AccountPanelState extends State<AccountPanel> {
                 'Your notes and PDFs stay on your device. AI conversation text is sent only when you ask the assistant.',
                 style: text.bodySmall?.copyWith(color: colors.textSecondary),
               ),
-              if (_message != null) ...<Widget>[
-                const SizedBox(height: AppSpacing.sm),
-                Text(
-                  _message!,
-                  style: text.bodyMedium?.copyWith(color: colors.danger),
-                ),
-              ],
+              ?_messageText(text, colors),
               const SizedBox(height: AppSpacing.sm),
+              if (widget.backend.canSignInWithApple) ...<Widget>[
+                // Apple's own button, as its guidelines ask, in the theme's
+                // ink.
+                SizedBox(
+                  height: AppSizes.minTouchTarget,
+                  child: SignInWithAppleButton(
+                    key: const ValueKey<String>('sign-in-apple'),
+                    onPressed: () {
+                      if (!_busy) _run(widget.backend.signInWithApple);
+                    },
+                    style: Theme.of(context).brightness == Brightness.dark
+                        ? SignInWithAppleButtonStyle.white
+                        : SignInWithAppleButtonStyle.black,
+                    borderRadius: const BorderRadius.all(
+                      Radius.circular(AppSizes.minTouchTarget / 2),
+                    ),
+                  ),
+                ),
+                const SizedBox(height: AppSpacing.xs),
+              ],
               FilledButton.icon(
                 key: const ValueKey<String>('sign-in-google'),
                 onPressed: _busy

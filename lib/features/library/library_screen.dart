@@ -52,6 +52,7 @@ import '../../shared/widgets/scene_transitions.dart';
 import '../../shared/widgets/processing.dart';
 import '../../shared/widgets/pressable.dart';
 import '../payment/account_page.dart';
+import '../payment/billing_backend.dart';
 import '../payment/in_app_purchase_gateway.dart';
 import '../payment/payment_models.dart';
 import '../payment/subscription_controller.dart';
@@ -447,6 +448,8 @@ class _LibraryScreenState extends State<LibraryScreen> {
     client: _drive,
     repository: _repository,
     state: _cloudState,
+    isNoteOpen: (String id) =>
+        _openNotes.notes.any((NoteEntry note) => note.id == id),
     clock: widget.clock,
   );
 
@@ -502,6 +505,9 @@ class _LibraryScreenState extends State<LibraryScreen> {
       onShow: () {
         if (_tabsShowing) _thumbnails.pause();
       },
+      onResume: () {
+        if (widget.onboard) _pullFromDrive();
+      },
     );
     _repository.addListener(_onRepositoryChanged);
     _search.addListener(_scheduleSearchReload);
@@ -516,21 +522,67 @@ class _LibraryScreenState extends State<LibraryScreen> {
     });
   }
 
-  /// Google sign-in first, then handwriting calibration once.
+  /// Sign-in first, then handwriting calibration once. Someone already
+  /// signed in, with Google or with Apple, is not asked again.
   Future<void> _onboard() async {
     GoogleDriveAccount? account = _drive.currentAccount;
     account ??= await _drive.restoreSession();
-    if (account == null && mounted) {
-      account = await showGoogleSignIn(context, client: _drive);
+    final BillingBackend? backend = _subscription.backend;
+    if (account == null && backend?.userId == null && mounted) {
+      account = await showGoogleSignIn(
+        context,
+        client: _drive,
+        signInWithApple: backend != null && backend.canSignInWithApple
+            ? () async {
+                await backend.signInWithApple();
+                return backend.userId != null;
+              }
+            : null,
+      );
     }
     if (account != null) {
       // As connecting from the Drive sheet does, so backups may run.
       await _backup.setLinked(true);
       await _autoBackup.reschedule();
     }
+    unawaited(_pullFromDrive());
     final HandwritingCalibrationState? state = await _handwritingProfileStore
         .read();
     if (state == null && mounted) await _calibrateHandwriting();
+  }
+
+  bool _pulling = false;
+
+  /// Brings the library up to date with a Google Drive backup that another
+  /// device has made since, on opening the app and on coming back to it.
+  /// Quiet when there is nothing new, or Drive cannot be reached.
+  Future<void> _pullFromDrive() async {
+    if (_pulling) return;
+    _pulling = true;
+    try {
+      if (!await _backup.isLinked()) return;
+      final GoogleDriveAccount? account =
+          _drive.currentAccount ?? await _drive.restoreSession();
+      if (account == null) return;
+      final SyncSummary? summary = await _backup.pullIfChangedElsewhere();
+      if (!mounted || summary == null || summary.changedNotes == 0) return;
+      final int count = summary.changedNotes;
+      final String notes = count == 1 ? '1 note' : '$count notes';
+      ScaffoldMessenger.maybeOf(context)?.showSnackBar(
+        SnackBar(
+          content: Text(
+            summary.keptBoth > 0
+                ? 'Updated $notes from Google Drive. A note changed on two '
+                      'devices was kept in both versions.'
+                : 'Updated $notes from Google Drive',
+          ),
+        ),
+      );
+    } on Object {
+      // Offline or signed out: tried again when the app next opens.
+    } finally {
+      _pulling = false;
+    }
   }
 
   @override
@@ -1426,13 +1478,15 @@ class _LibraryScreenState extends State<LibraryScreen> {
   }
 
   Widget _buildLibrary(BuildContext context) {
-    final WindowSizeClass sizeClass = WindowSizeClass.fromWidth(
-      MediaQuery.sizeOf(context).width,
-    );
+    final Size screen = MediaQuery.sizeOf(context);
+    final WindowSizeClass sizeClass = WindowSizeClass.fromWidth(screen.width);
     final bool compact = sizeClass == WindowSizeClass.compact;
     // Short of the widest layout, the folders slide in from the edge, so
-    // the notes have the whole width; a tablet held upright included.
-    final bool drawer = sizeClass != WindowSizeClass.expanded;
+    // the notes have the whole width; a tablet held upright included, and
+    // a phone on its side, which is wide but too short for a sidebar.
+    final bool drawer =
+        sizeClass != WindowSizeClass.expanded ||
+        screen.height < Breakpoints.medium;
     final Widget sidebar = _FolderSidebar(
       folders: _folders,
       counts: _counts,
@@ -1714,16 +1768,28 @@ class _LibraryScreenState extends State<LibraryScreen> {
         key: const ValueKey<String>('library-items'),
         constraints: const BoxConstraints(maxWidth: AppSizes.maxContentWidth),
         child: _grid
-            ? GridView.builder(
-                padding: padding,
-                gridDelegate: SliverGridDelegateWithMaxCrossAxisExtent(
-                  maxCrossAxisExtent: (compact ? 180 : 200) * textScale,
-                  mainAxisSpacing: AppSpacing.lg,
-                  crossAxisSpacing: compact ? AppSpacing.md : AppSpacing.lg,
-                  childAspectRatio: 0.72,
-                ),
-                itemCount: itemCount,
-                itemBuilder: buildItem,
+            ? LayoutBuilder(
+                builder: (BuildContext context, BoxConstraints constraints) {
+                  const double aspect = 0.72;
+                  // On a short screen, such as a phone on its side, a card
+                  // stays shorter than the view, so its title is in sight.
+                  final double fitsHeight =
+                      (constraints.maxHeight - padding.top) * 0.8 * aspect;
+                  return GridView.builder(
+                    padding: padding,
+                    gridDelegate: SliverGridDelegateWithMaxCrossAxisExtent(
+                      maxCrossAxisExtent: math.min(
+                        (compact ? 180 : 200) * textScale,
+                        math.max(120, fitsHeight),
+                      ),
+                      mainAxisSpacing: AppSpacing.lg,
+                      crossAxisSpacing: compact ? AppSpacing.md : AppSpacing.lg,
+                      childAspectRatio: aspect,
+                    ),
+                    itemCount: itemCount,
+                    itemBuilder: buildItem,
+                  );
+                },
               )
             : ListView.builder(
                 padding: padding,
@@ -2744,8 +2810,10 @@ class _EmptyState extends StatelessWidget {
     final AppColors colors = AppColors.of(context);
     final TextTheme text = Theme.of(context).textTheme;
     final bool searching = query.isNotEmpty;
+    // Scrolls when a keyboard leaves too little room, as on a small phone
+    // while a dialog over the library is being typed in.
     return Center(
-      child: Padding(
+      child: SingleChildScrollView(
         padding: const EdgeInsets.all(AppSpacing.xl),
         child: Column(
           mainAxisSize: MainAxisSize.min,
@@ -2898,7 +2966,8 @@ class _LibraryItem extends StatefulWidget {
 }
 
 class _LibraryItemState extends State<_LibraryItem> {
-  /// The height of a row in the list.
+  /// The height of a row in the list at the standard text size. Rows grow
+  /// with larger text, so the date under the title is never cut off.
   static const double _rowHeight = 64;
 
   /// Around a grid item, so its selection fill and press highlight have
@@ -2915,6 +2984,10 @@ class _LibraryItemState extends State<_LibraryItem> {
     final AppColors colors = AppColors.of(context);
     final TextTheme text = Theme.of(context).textTheme;
     final bool grid = widget.grid;
+    final double rowHeight = math.max(
+      _rowHeight,
+      MediaQuery.textScalerOf(context).scale(_rowHeight),
+    );
     final Widget menu = PopupMenuButton<_ItemAction>(
       popUpAnimationStyle: AppMotion.popupStyle,
       key: _menu,
@@ -2982,7 +3055,7 @@ class _LibraryItemState extends State<_LibraryItem> {
             ),
           )
         : SizedBox(
-            height: _rowHeight,
+            height: rowHeight,
             child: Padding(
               padding: const EdgeInsetsDirectional.fromSTEB(
                 AppSpacing.sm,
@@ -3086,7 +3159,7 @@ class _LibraryItemState extends State<_LibraryItem> {
                 child: IgnorePointer(
                   child: SizedBox(
                     width: AppSizes.minTouchTarget,
-                    height: grid ? AppSizes.minTouchTarget : _rowHeight,
+                    height: grid ? AppSizes.minTouchTarget : rowHeight,
                     child: Center(child: check),
                   ),
                 ),
@@ -3099,12 +3172,11 @@ class _LibraryItemState extends State<_LibraryItem> {
                 child: grid
                     ? menu
                     : SizedBox(
-                        height: _rowHeight,
+                        height: rowHeight,
                         child: Center(child: menu),
                       ),
               ),
-            if (!grid)
-              const SizedBox(height: _rowHeight, width: double.infinity),
+            if (!grid) SizedBox(height: rowHeight, width: double.infinity),
           ],
         ),
       ),
