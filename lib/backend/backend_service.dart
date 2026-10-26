@@ -2,10 +2,12 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:math';
 
+import 'package:crypto/crypto.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/widgets.dart';
 import 'package:google_sign_in/google_sign_in.dart';
+import 'package:sign_in_with_apple/sign_in_with_apple.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 
 import '../features/library/cloud/google_drive_client.dart';
@@ -431,6 +433,110 @@ class BackendService extends BillingBackend with WidgetsBindingObserver {
     final account = await HttpGoogleDriveClient.authenticateShared();
     if (account == null) return;
     await signInWithGoogleAccount(account);
+  }
+
+  @override
+  bool get canSignInWithApple =>
+      _client != null &&
+      !kIsWeb &&
+      (defaultTargetPlatform == TargetPlatform.iOS ||
+          defaultTargetPlatform == TargetPlatform.macOS);
+
+  @override
+  SignInMethod? get signInMethod {
+    final User? user = _client?.auth.currentUser;
+    if (user == null || user.isAnonymous) return null;
+    final Object? providers = user.appMetadata['providers'];
+    return providers is List && providers.contains('apple')
+        ? SignInMethod.apple
+        : SignInMethod.google;
+  }
+
+  /// Asks Apple for a sign-in: a fresh identity token, bound to a nonce so
+  /// the token cannot be replayed. Null when the person cancelled.
+  static Future<(AuthorizationCredentialAppleID, String)?>
+  _appleCredential() async {
+    final Random random = Random.secure();
+    const String charset =
+        '0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz-._';
+    final String rawNonce = List<String>.generate(
+      32,
+      (_) => charset[random.nextInt(charset.length)],
+    ).join();
+    try {
+      final AuthorizationCredentialAppleID credential =
+          await SignInWithApple.getAppleIDCredential(
+            scopes: const <AppleIDAuthorizationScopes>[
+              AppleIDAuthorizationScopes.email,
+            ],
+            nonce: sha256.convert(utf8.encode(rawNonce)).toString(),
+          );
+      return (credential, rawNonce);
+    } on SignInWithAppleAuthorizationException catch (error) {
+      if (error.code == AuthorizationErrorCode.canceled) return null;
+      rethrow;
+    }
+  }
+
+  @override
+  Future<void> signInWithApple() async {
+    final client = _client;
+    if (client == null) throw const BackendFailure('not_configured');
+    final (AuthorizationCredentialAppleID, String)? apple =
+        await _appleCredential();
+    if (apple == null) return;
+    final (AuthorizationCredentialAppleID credential, String nonce) = apple;
+    final String? idToken = credential.identityToken;
+    if (idToken == null || idToken.isEmpty) {
+      throw const BackendFailure('unauthorized');
+    }
+    if (_isAnonymous) {
+      // As with Google: upgrade this device's free account in place, or sign
+      // into the account this Apple ID already has.
+      try {
+        await client.auth.linkIdentityWithIdToken(
+          provider: OAuthProvider.apple,
+          idToken: idToken,
+          nonce: nonce,
+        );
+        _analyticsSessionId = _randomUuid();
+        unawaited(trackProductEvent('sign_in'));
+        return;
+      } on AuthException {
+        // Fall through to a normal sign-in.
+      }
+    }
+    await client.auth.signInWithIdToken(
+      provider: OAuthProvider.apple,
+      idToken: idToken,
+      nonce: nonce,
+    );
+    _analyticsSessionId = _randomUuid();
+    unawaited(trackProductEvent('sign_in'));
+  }
+
+  @override
+  Future<void> deleteAccount() async {
+    if (_client == null) throw const BackendFailure('not_configured');
+    if (userId == null) throw const BackendFailure('unauthorized');
+    // Apple asks apps to revoke its tokens when an account is deleted; the
+    // server needs a fresh authorization code from Apple to do so.
+    String? appleCode;
+    if (signInMethod == SignInMethod.apple && canSignInWithApple) {
+      final (AuthorizationCredentialAppleID, String)? apple =
+          await _appleCredential();
+      if (apple == null) throw const BackendFailure('rejected');
+      appleCode = apple.$1.authorizationCode;
+    }
+    await invoke('billing', <String, Object?>{
+      'action': 'delete_account',
+      'appleAuthorizationCode': ?appleCode,
+    });
+    try {
+      await signOut();
+    } on Object {
+      // The account is gone on the server; the local session dies with it.
+    }
   }
 
   @override

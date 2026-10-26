@@ -52,6 +52,7 @@ import '../../shared/widgets/scene_transitions.dart';
 import '../../shared/widgets/processing.dart';
 import '../../shared/widgets/pressable.dart';
 import '../payment/account_page.dart';
+import '../payment/billing_backend.dart';
 import '../payment/in_app_purchase_gateway.dart';
 import '../payment/payment_models.dart';
 import '../payment/subscription_controller.dart';
@@ -516,12 +517,23 @@ class _LibraryScreenState extends State<LibraryScreen> {
     });
   }
 
-  /// Google sign-in first, then handwriting calibration once.
+  /// Sign-in first, then handwriting calibration once. Someone already
+  /// signed in, with Google or with Apple, is not asked again.
   Future<void> _onboard() async {
     GoogleDriveAccount? account = _drive.currentAccount;
     account ??= await _drive.restoreSession();
-    if (account == null && mounted) {
-      account = await showGoogleSignIn(context, client: _drive);
+    final BillingBackend? backend = _subscription.backend;
+    if (account == null && backend?.userId == null && mounted) {
+      account = await showGoogleSignIn(
+        context,
+        client: _drive,
+        signInWithApple: backend != null && backend.canSignInWithApple
+            ? () async {
+                await backend.signInWithApple();
+                return backend.userId != null;
+              }
+            : null,
+      );
     }
     if (account != null) {
       // As connecting from the Drive sheet does, so backups may run.

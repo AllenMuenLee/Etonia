@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:sign_in_with_apple/sign_in_with_apple.dart';
 
 import '../../../app/theme/app_icons.dart';
 import '../../../app/theme/app_tokens.dart';
@@ -6,25 +7,37 @@ import '../../../shared/widgets/processing.dart';
 import 'google_drive_client.dart';
 
 /// Shows the Google sign-in screen and returns the account signed in, or
-/// null when the user went on without one.
+/// null when the user went on without one, or signed in with Apple.
 Future<GoogleDriveAccount?> showGoogleSignIn(
   BuildContext context, {
   required GoogleDriveClient client,
+  Future<bool> Function()? signInWithApple,
 }) {
   return Navigator.of(context).push<GoogleDriveAccount?>(
     MaterialPageRoute<GoogleDriveAccount?>(
       fullscreenDialog: true,
-      builder: (BuildContext context) => GoogleSignInScreen(client: client),
+      builder: (BuildContext context) =>
+          GoogleSignInScreen(client: client, signInWithApple: signInWithApple),
     ),
   );
 }
 
 /// The first thing shown to someone not signed in: one sign-in that is
 /// both their Google account and Google Drive, for backing up their notes.
+/// On Apple devices, Sign in with Apple is offered too; it signs into
+/// Etonia without Drive.
 class GoogleSignInScreen extends StatefulWidget {
-  const GoogleSignInScreen({super.key, required this.client});
+  const GoogleSignInScreen({
+    super.key,
+    required this.client,
+    this.signInWithApple,
+  });
 
   final GoogleDriveClient client;
+
+  /// Signs in with Apple, true when an account is then signed in. Null
+  /// where Sign in with Apple is not offered.
+  final Future<bool> Function()? signInWithApple;
 
   @override
   State<GoogleSignInScreen> createState() => _GoogleSignInScreenState();
@@ -51,6 +64,22 @@ class _GoogleSignInScreenState extends State<GoogleSignInScreen> {
       if (mounted) setState(() => _problem = error.message);
     } on Object {
       if (mounted) setState(() => _problem = "Couldn't sign in to Google");
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+  }
+
+  Future<void> _signInWithApple() async {
+    if (_busy) return;
+    setState(() {
+      _busy = true;
+      _problem = null;
+    });
+    try {
+      final bool signedIn = await widget.signInWithApple!();
+      if (signedIn && mounted) Navigator.of(context).pop();
+    } on Object {
+      if (mounted) setState(() => _problem = "Couldn't sign in with Apple");
     } finally {
       if (mounted) setState(() => _busy = false);
     }
@@ -84,15 +113,34 @@ class _GoogleSignInScreenState extends State<GoogleSignInScreen> {
                   ),
                   const SizedBox(height: AppSpacing.xs),
                   Text(
-                    'Sign in with your Google account and connect Google '
-                    'Drive, so your notes are backed up and your plan '
-                    'follows you.',
+                    widget.signInWithApple != null
+                        ? 'Sign in so your plan follows you. With Google, '
+                              'your notes are also backed up to Google Drive.'
+                        : 'Sign in with your Google account and connect Google '
+                              'Drive, so your notes are backed up and your plan '
+                              'follows you.',
                     textAlign: TextAlign.center,
                     style: text.bodyMedium!.copyWith(
                       color: colors.textSecondary,
                     ),
                   ),
                   const SizedBox(height: AppSpacing.lg),
+                  if (widget.signInWithApple != null) ...<Widget>[
+                    SizedBox(
+                      height: AppSizes.minTouchTarget,
+                      child: SignInWithAppleButton(
+                        key: const ValueKey<String>('apple-sign-in'),
+                        onPressed: _signInWithApple,
+                        style: Theme.of(context).brightness == Brightness.dark
+                            ? SignInWithAppleButtonStyle.white
+                            : SignInWithAppleButtonStyle.black,
+                        borderRadius: const BorderRadius.all(
+                          Radius.circular(AppSizes.minTouchTarget / 2),
+                        ),
+                      ),
+                    ),
+                    const SizedBox(height: AppSpacing.xs),
+                  ],
                   FilledButton(
                     key: const ValueKey<String>('google-sign-in'),
                     onPressed: _busy ? null : _signIn,

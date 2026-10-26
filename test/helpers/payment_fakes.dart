@@ -1,5 +1,6 @@
 import 'dart:async';
 
+import 'package:greatnote/features/payment/billing_backend.dart';
 import 'package:greatnote/features/payment/in_app_purchase_gateway.dart';
 import 'package:greatnote/features/payment/payment_models.dart';
 import 'package:greatnote/features/payment/subscription_controller.dart';
@@ -141,4 +142,86 @@ Future<SubscriptionController> loadedSubscription({
     controller.activate(plan);
   }
   return controller;
+}
+
+/// A billing server that answers from memory.
+class TestBillingBackend extends BillingBackend {
+  @override
+  bool isConfigured = true;
+  @override
+  String? userId = 'user-1';
+  @override
+  String? get email => 'person@example.com';
+  SubscriptionState result = SubscriptionState(
+    activePlan: SubscriptionPlan.pro1499,
+    remainingCreditsMicroUsd: 123456,
+    expiresAt: DateTime.now().add(const Duration(days: 1)),
+  );
+  bool fail = false;
+  Completer<SubscriptionState>? verification;
+  @override
+  Future<SubscriptionState> fetchSubscription() async {
+    if (fail) throw StateError('unavailable');
+    return userId == null ? const SubscriptionState() : result;
+  }
+
+  @override
+  Future<SubscriptionState> verifyPurchase(StorePurchaseUpdate purchase) async {
+    if (fail) throw StateError('unverified');
+    return verification?.future ?? result;
+  }
+
+  Object? redeemError;
+  String? redeemed;
+
+  @override
+  Future<SubscriptionState> redeemGiftCode(String code) async {
+    if (redeemError != null) throw redeemError!;
+    redeemed = code;
+    return result = SubscriptionState(
+      remainingCreditsMicroUsd: 3500000,
+      freeCreditMicroUsd: 3500000,
+      freeCreditExpiresAt: DateTime.now().add(const Duration(days: 30)),
+    );
+  }
+
+  int googleSignIns = 0;
+
+  @override
+  Future<void> signInWithGoogle() async {
+    googleSignIns++;
+    userId = 'user-google';
+    notifyListeners();
+  }
+
+  @override
+  bool canSignInWithApple = false;
+  @override
+  SignInMethod? signInMethod = SignInMethod.google;
+  int appleSignIns = 0;
+
+  @override
+  Future<void> signInWithApple() async {
+    appleSignIns++;
+    userId = 'user-apple';
+    signInMethod = SignInMethod.apple;
+    notifyListeners();
+  }
+
+  @override
+  Future<void> signOut() async {
+    userId = null;
+    notifyListeners();
+  }
+
+  int deletions = 0;
+  Object? deleteError;
+
+  @override
+  Future<void> deleteAccount() async {
+    if (deleteError != null) throw deleteError!;
+    deletions++;
+    userId = null;
+    notifyListeners();
+  }
 }

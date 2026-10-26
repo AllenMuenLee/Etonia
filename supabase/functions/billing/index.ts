@@ -1,5 +1,6 @@
 import { accountFor, admin, deviceIdOf, endpoint, Failure, json, readBody, rpc } from "../_shared/common.ts";
 import { applySnapshots, reconcile, verifyStore } from "../_shared/stores.ts";
+import { canRevokeAppleSignIn, revokeAppleSignIn } from "../_shared/apple_sign_in.ts";
 
 Deno.serve(endpoint(async (req) => {
   const db = admin();
@@ -7,6 +8,24 @@ Deno.serve(endpoint(async (req) => {
   const user = account.id;
   await rpc(db, "billing_rate_limit", { p_user: user });
   const body = await readBody(req);
+  if (body.action === "delete_account") {
+    // Deleting the auth user cascades to every billing and analytics row of
+    // the account; App Store subscriptions are cancelled by the user with
+    // Apple. Anonymous device accounts have nothing to delete.
+    if (account.anonymous) throw new Failure("unauthorized", 401);
+    const code = body.appleAuthorizationCode;
+    if (typeof code === "string" && code.length <= 1024 && canRevokeAppleSignIn()) {
+      // Best effort: the account is deleted even if Apple is unreachable.
+      try {
+        await revokeAppleSignIn(code);
+      } catch (_) {
+        // Nothing is logged; see the privacy boundary in supabase/README.md.
+      }
+    }
+    const { error } = await db.auth.admin.deleteUser(user);
+    if (error) throw new Failure("server", 500);
+    return json({ deleted: true });
+  }
   await rpc(db, "billing_touch", {
     p_user: user,
     p_anonymous: account.anonymous,

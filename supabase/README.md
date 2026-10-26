@@ -32,7 +32,10 @@ by the provider account's own settings and terms, not by this Supabase code.
    the exposed API schemas. Do not create document Storage buckets for this feature.
 2. Enable the **Google** authentication provider in Supabase Auth (configure the
    OAuth client IDs matching `dart_defines.json` and the client secret in
-   `supabase/.env.local`). Email OTP and Apple sign-in are not used.
+   `supabase/.env.local`). Enable **Apple** too, with `com.etonia.app` as its
+   client ID and no secret: the iOS app offers Sign in with Apple beside Google,
+   as App Review requires. Email OTP is not used. Account deletion revokes a
+   deleted account's Apple tokens when the `APPLE_SIGN_IN_*` secrets are set.
    Also enable **Anonymous sign-ins** and **Manual linking** (Auth > Sign In /
    Providers; `config.toml` sets both for local runs). A device that has not
    signed in with Google gets an anonymous account on the free plan, and the

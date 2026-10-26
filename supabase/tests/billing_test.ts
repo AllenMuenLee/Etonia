@@ -321,3 +321,45 @@ Deno.test("gift codes: $3 of free credit per account, all free credit lasts a mo
     await db.close();
   }
 });
+
+Deno.test("deleting an account erases its records but not the device's free-credit claim", async () => {
+  const db = await migrated();
+  try {
+    const phone = "dddddddd-dddd-4ddd-8ddd-dddddddddddd";
+    const again = "33333333-3333-4333-8333-333333333333";
+    await db.exec("set role service_role");
+    const touch = (id: string, device: string) =>
+      db.query("select public.billing_touch($1, false, $2)", [id, device]);
+    const state = async (id: string) =>
+      (await db.query<{ s: any }>("select public.billing_state($1) s", [id])).rows[0].s;
+
+    await touch(user, phone);
+    await db.query("select public.billing_rate_limit($1)", [user]);
+    await db.query("select public.ai_reserve($1,$2,'haiku')", [user, req1]);
+    await db.query("select public.ai_settle($1,$2,1000,10,10,false)", [user, req1]);
+    assert.equal((await state(user)).remainingCreditsMicroUsd, 499000);
+
+    // What the app's Delete account does on the server: delete the auth user.
+    await db.exec(`reset role; delete from auth.users where id = '${user}'`);
+    for (const table of ["accounts", "grants", "requests", "rate_buckets", "subscriptions"]) {
+      const left = await db.query<{ n: number }>(
+        `select count(*)::int n from billing_private.${table} where user_id = $1`,
+        [user],
+      );
+      assert.equal(left.rows[0].n, 0, `${table} still holds the deleted account`);
+    }
+    const device = await db.query<{ user_id: string | null; claimed: boolean }>(
+      `select user_id, free_credit_claimed_at is not null claimed
+         from billing_private.devices where device_id = $1`,
+      [phone],
+    );
+    assert.deepEqual(device.rows[0], { user_id: null, claimed: true });
+
+    // Signing up again on the same device does not bring the free credit back.
+    await db.exec(`insert into auth.users values ('${again}'); set role service_role`);
+    await touch(again, phone);
+    assert.equal((await state(again)).remainingCreditsMicroUsd, 0);
+  } finally {
+    await db.close();
+  }
+});
