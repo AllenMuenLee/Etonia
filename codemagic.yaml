@@ -1,0 +1,52 @@
+# Codemagic builds: a signed App Store IPA uploaded to TestFlight, built on
+# Codemagic's Macs rather than GitHub's. Start it by hand from the
+# Codemagic dashboard; it never submits for App Review.
+#
+# Set up once in Codemagic (Team or personal settings):
+#   Integrations > Developer Portal: the App Store Connect API key, named
+#     "Etonia App Store Connect".
+#   Code signing identities: the Apple Distribution .p12 (with its password)
+#     and the App Store provisioning profile for com.etonia.app.
+#   App > Environment variables: group "etonia_dart_defines" holding
+#     DART_DEFINES_B64, the base64 of dart_defines.json (mark it secret).
+workflows:
+  ios-testflight:
+    name: iOS TestFlight
+    instance_type: mac_mini_m2
+    max_build_duration: 60
+    integrations:
+      app_store_connect: Etonia App Store Connect
+    environment:
+      flutter: 3.44.2
+      xcode: latest
+      ios_signing:
+        distribution_type: app_store
+        bundle_identifier: com.etonia.app
+      groups:
+        - etonia_dart_defines
+      vars:
+        APP_STORE_APPLE_ID: 6824712823
+    scripts:
+      - name: Write dart defines
+        script: echo "$DART_DEFINES_B64" | base64 --decode > dart_defines.json
+      - name: Get packages
+        script: flutter pub get
+      - name: Use the App Store profile
+        script: xcode-project use-profiles
+      - name: Build IPA
+        script: |
+          LATEST=$(app-store-connect get-latest-testflight-build-number \
+            "$APP_STORE_APPLE_ID" 2> /dev/null || echo 0)
+          flutter build ipa --release \
+            --build-number=$((LATEST + 1)) \
+            --dart-define-from-file=dart_defines.json \
+            --export-options-plist=/Users/builder/export_options.plist
+    artifacts:
+      - build/ios/ipa/*.ipa
+      - /tmp/xcodebuild_logs/*.log
+    publishing:
+      app_store_connect:
+        auth: integration
+        submit_to_testflight: true
+        beta_groups:
+          - Etonia Internal
