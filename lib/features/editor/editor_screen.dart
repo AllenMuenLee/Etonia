@@ -15,6 +15,7 @@ import '../library/note_content.dart';
 import '../library/note_repository.dart';
 import '../library/note_recording_track.dart';
 import 'audio/note_audio.dart';
+import 'audio/recording_transcriber.dart';
 import 'audio/stroke_replay_controller.dart';
 import 'ai/ai_assistant_controller.dart';
 import 'ai/ai_canvas_input.dart';
@@ -82,6 +83,7 @@ import 'widgets/document_io_progress_dialog.dart';
 import 'widgets/page_controls.dart';
 import 'widgets/selection_action_bar.dart';
 import 'widgets/recording_options.dart';
+import 'widgets/recording_transcript_sheet.dart';
 import 'widgets/tool_palette.dart';
 import 'widgets/writing_surface_frame.dart';
 import '../payment/payment_page.dart';
@@ -90,6 +92,13 @@ import '../payment/subscription_controller.dart';
 /// The editor shell: app bar, page, floating tool palette, and the AI
 /// assistant panel.
 ///
+/// The pages and their layout the PDF paper was last focused with.
+typedef _PdfFocusInputs = ({
+  List<NotePage> pages,
+  List<PageGeometry> geometries,
+  double pixelRatio,
+});
+
 /// The selected tool, the pen and eraser settings, the note's pages, each
 /// with its ink, and the AI assistant, with its side, conversation, and
 /// draft, live in this widget's state, so they survive rotation and
@@ -138,6 +147,7 @@ class EditorScreen extends StatefulWidget {
     this.handwritingProfileStore,
     this.audioRecorder,
     this.audioPlayer,
+    this.recordingTranscriber,
   });
 
   /// The user's plan and AI credits: which models the assistant may use,
@@ -151,6 +161,10 @@ class EditorScreen extends StatefulWidget {
   final HandwritingProfileStore? handwritingProfileStore;
   final NoteAudioRecorder? audioRecorder;
   final NoteAudioPlayer? audioPlayer;
+
+  /// Turns a saved recording into text when the user asks; the platform's
+  /// on-device recognizer when null.
+  final RecordingTranscriber? recordingTranscriber;
 
   /// How writing on the page in AI mode is told apart and read.
   final AiCanvasConfig aiCanvasConfig;
@@ -518,6 +532,11 @@ class EditorScreenState extends State<EditorScreen>
   late final bool _ownsAudioPlayer = widget.audioPlayer == null;
   late final NoteAudioPlayer _audioPlayer =
       widget.audioPlayer ?? PlatformNoteAudioPlayer();
+  late final RecordingTranscriptionController _transcription =
+      RecordingTranscriptionController(
+        transcriber:
+            widget.recordingTranscriber ?? PlatformRecordingTranscriber(),
+      );
   final StrokeReplayController _strokeReplay = StrokeReplayController();
   Future<void>? _stoppingRecording;
 
@@ -607,19 +626,30 @@ class EditorScreenState extends State<EditorScreen>
           ));
   }
 
-  /// Has the PDF paper of the current page and the pages around it rendered
-  /// nearest first: the current page and those next to it sharp, further
-  /// ones in preview, so paging through a PDF does not wait on each page.
+  /// What the PDF paper was last focused with, to focus it again on another
+  /// page as a scroll passes it, without building.
+  _PdfFocusInputs? _pdfFocusInputs;
+
+  /// Has the PDF paper of [current], by default the current page, and the
+  /// pages around it rendered nearest first: [current] and those next to it
+  /// sharp, further ones in preview, so paging through a PDF does not wait
+  /// on each page.
   void _focusPdfPages(
     List<NotePage> pages,
     List<PageGeometry> geometries,
-    double devicePixelRatio,
-  ) {
+    double devicePixelRatio, {
+    int? current,
+  }) {
     final PdfPageRenderCache? cache = _pageRenderCache;
     if (cache == null) {
       return;
     }
-    final int current = _document.currentIndex;
+    _pdfFocusInputs = (
+      pages: pages,
+      geometries: geometries,
+      pixelRatio: devicePixelRatio,
+    );
+    current ??= _scrolledTo ?? _document.currentIndex;
     final DocumentIoConfig config = widget.documentIoConfig;
     final List<PdfFocusPage> focus = <PdfFocusPage>[];
     int sharpPages = 0;
@@ -728,16 +758,74 @@ class EditorScreenState extends State<EditorScreen>
     }
   }
 
+  Future<Uint8List> _readRecording(NoteRecordingTrack track) async {
+    final NoteRepository? repository = widget.repository;
+    final String? noteId = widget.noteId;
+    if (repository != null && noteId != null) {
+      return (await repository.readAsset(noteId, track.assetPath)).bytes;
+    }
+    return File(track.assetPath).readAsBytes();
+  }
+
+  /// Transcribes [track] on the device. Only ever started by the user, and
+  /// never while a recording is being made.
+  Future<void> _transcribeRecording(NoteRecordingTrack track) async {
+    if (_audioRecorder.state != NoteAudioRecorderState.idle) return;
+    try {
+      final RecordingTranscript transcript = await _transcription.transcribe(
+        track,
+        readAudio: () => _readRecording(track),
+      );
+      if (!mounted) return;
+      if (!_document.setRecordingTranscript(track.id, transcript)) return;
+      _rebuildChrome();
+      final NoteRecordingTrack transcribed = _document.recordings.firstWhere(
+        (NoteRecordingTrack item) => item.id == track.id,
+      );
+      ScaffoldMessenger.maybeOf(context)?.showSnackBar(
+        SnackBar(
+          content: Text('${track.title} is transcribed.'),
+          action: SnackBarAction(
+            label: 'Show',
+            onPressed: () => _showTranscript(transcribed),
+          ),
+        ),
+      );
+    } on TranscriptionFailure catch (failure) {
+      if (!mounted || failure.kind == TranscriptionFailureKind.cancelled) {
+        return;
+      }
+      ScaffoldMessenger.maybeOf(
+        context,
+      )?.showSnackBar(SnackBar(content: Text(failure.message)));
+    }
+  }
+
+  void _showTranscript(NoteRecordingTrack track) {
+    if (!mounted) return;
+    unawaited(
+      showRecordingTranscript(
+        context,
+        track: track,
+        onSeek: (Duration position) => unawaited(_playFrom(track, position)),
+      ),
+    );
+  }
+
+  /// Replays [track] from [position], opening it first if it is not open.
+  Future<void> _playFrom(NoteRecordingTrack track, Duration position) async {
+    if (_audioRecorder.state != NoteAudioRecorderState.idle) return;
+    if (_strokeReplay.track?.id != track.id) {
+      await _openReplay(track);
+      if (_strokeReplay.track?.id != track.id) return;
+    }
+    await _audioPlayer.seek(position);
+    await _audioPlayer.play();
+  }
+
   Future<void> _openReplay(NoteRecordingTrack track) async {
     try {
-      final Uint8List bytes;
-      final NoteRepository? repository = widget.repository;
-      final String? noteId = widget.noteId;
-      if (repository != null && noteId != null) {
-        bytes = (await repository.readAsset(noteId, track.assetPath)).bytes;
-      } else {
-        bytes = await File(track.assetPath).readAsBytes();
-      }
+      final Uint8List bytes = await _readRecording(track);
       await _audioPlayer.loadBytes(track.id, bytes);
       _selectionCarry.clearSelection();
       _strokeReplay.open(track);
@@ -1063,6 +1151,39 @@ class EditorScreenState extends State<EditorScreen>
       }
     }
     _document.goTo(index);
+  }
+
+  /// The page scrolled to the middle of the area, made current once the
+  /// scroll settles: making a page current rebuilds the whole editor, which
+  /// a fling past a page every few frames could not afford. Meanwhile only
+  /// the PDF paper follows, rendered around the page in view.
+  int? _scrolledTo;
+  Timer? _scrollSettle;
+
+  void _onScrolledToPage(int index) {
+    _scrolledTo = index;
+    final _PdfFocusInputs? inputs = _pdfFocusInputs;
+    if (inputs != null && index < inputs.pages.length) {
+      _focusPdfPages(
+        inputs.pages,
+        inputs.geometries,
+        inputs.pixelRatio,
+        current: index,
+      );
+    }
+    _scrollSettle?.cancel();
+    _scrollSettle = Timer(const Duration(milliseconds: 150), () {
+      final int? settled = _scrolledTo;
+      _scrolledTo = null;
+      if (mounted && settled != null) _showPage(settled);
+    });
+  }
+
+  /// A page touched becomes current at once, ahead of any scroll settling.
+  void _onPageTouched(int index) {
+    _scrollSettle?.cancel();
+    _scrolledTo = null;
+    _showPage(index);
   }
 
   void _onScrollEnd() {
@@ -2361,6 +2482,7 @@ class EditorScreenState extends State<EditorScreen>
 
   @override
   void dispose() {
+    _scrollSettle?.cancel();
     WidgetsBinding.instance.removeObserver(this);
     _audioPlayer.removeListener(_onAudioPlayerChanged);
     _strokeReplay.dispose();
@@ -2373,6 +2495,7 @@ class EditorScreenState extends State<EditorScreen>
       }
     }
     if (_ownsAudioPlayer) _audioPlayer.dispose();
+    _transcription.dispose();
     _findEntry?.remove();
     _findEntry = null;
     _findDrag.dispose();
@@ -2815,9 +2938,9 @@ class EditorScreenState extends State<EditorScreen>
                         initialZoom: infiniteCanvas
                             ? 1
                             : EditorScreen.openingZoom,
-                        onPageTouched: _showPage,
+                        onPageTouched: _onPageTouched,
                         onDeskTap: _selectionCarry.clearSelection,
-                        onVisiblePageChanged: _showPage,
+                        onVisiblePageChanged: _onScrolledToPage,
                         onScrollStart: _onScrollStart,
                         onScrollEnd: _onScrollEnd,
                         fingersNavigate: _stylusOnly,
@@ -3084,6 +3207,10 @@ class EditorScreenState extends State<EditorScreen>
                       onStop: () => unawaited(finalizeRecording()),
                       onOpen: (NoteRecordingTrack track) =>
                           unawaited(_openReplay(track)),
+                      transcription: _transcription,
+                      onTranscribe: (NoteRecordingTrack track) =>
+                          unawaited(_transcribeRecording(track)),
+                      onShowTranscript: _showTranscript,
                     ),
                     textSettings: _textSettings,
                     onTextSettingsChanged: _onTextSettingsChanged,

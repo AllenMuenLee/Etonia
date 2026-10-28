@@ -9,12 +9,17 @@ class MainActivity : FlutterActivity() {
     private var handwritingRecognizer: HandwritingRecognizerChannel? = null
     private var nativeInk: NativeInkChannel? = null
     private var sharedDocuments: SharedDocumentChannel? = null
+    private var recordingTranscriber: RecordingTranscriberChannel? = null
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
         handwritingRecognizer =
             HandwritingRecognizerChannel(flutterEngine.dartExecutor.binaryMessenger)
         nativeInk = NativeInkChannel(flutterEngine.dartExecutor.binaryMessenger, this)
+        recordingTranscriber = RecordingTranscriberChannel(
+            flutterEngine.dartExecutor.binaryMessenger,
+            applicationContext,
+        )
         sharedDocuments = SharedDocumentChannel(
             flutterEngine.dartExecutor.binaryMessenger,
             applicationContext,
@@ -41,6 +46,8 @@ class MainActivity : FlutterActivity() {
         nativeInk = null
         sharedDocuments?.dispose()
         sharedDocuments = null
+        recordingTranscriber?.dispose()
+        recordingTranscriber = null
         super.cleanUpFlutterEngine(flutterEngine)
     }
 }

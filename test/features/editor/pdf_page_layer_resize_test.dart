@@ -247,6 +247,7 @@ void main() {
       rasterizer: rasterizer,
       config: const DocumentIoConfig(
         pdfSettleDelay: Duration(milliseconds: 10),
+        pdfScrollSettleDelay: Duration(milliseconds: 10),
       ),
     );
     addTearDown(cache.clear);

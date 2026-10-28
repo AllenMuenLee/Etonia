@@ -117,11 +117,16 @@ void main() {
         rasterizer: rasterizer,
         config: const DocumentIoConfig(
           pdfSettleDelay: Duration(milliseconds: 300),
+          pdfScrollSettleDelay: Duration(milliseconds: 300),
         ),
       );
       cache.focus([_focus(2), _focus(3), _focus(1)], 1, sharpPages: 3);
       await _until(() => rasterizer.log.length >= 3);
-      await Future<void>.delayed(const Duration(milliseconds: 50));
+      await Future<void>.delayed(const Duration(milliseconds: 250));
+      cache.viewMoved();
+      // The original settle deadline passes, but movement postponed sharp
+      // rendering until the view has stayed still for a full delay again.
+      await Future<void>.delayed(const Duration(milliseconds: 100));
       expect(rasterizer.log, ['2:457', '3:457', '1:457']);
       await _until(() => rasterizer.log.length >= 6);
       expect(rasterizer.log.sublist(3), ['2:1000', '3:1000', '1:1000']);

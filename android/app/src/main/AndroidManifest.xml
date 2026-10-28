@@ -10,6 +10,11 @@
         android:name="${applicationName}"
         android:allowBackup="false"
         android:icon="@mipmap/ic_launcher">
+        <!-- Impeller/Vulkan leaks full-screen buffers on affected Xiaomi
+             Android 16 devices, causing compositor errors and scroll jank. -->
+        <meta-data
+            android:name="io.flutter.embedding.android.EnableImpeller"
+            android:value="false" />
         <activity
             android:name=".MainActivity"
             android:exported="true"

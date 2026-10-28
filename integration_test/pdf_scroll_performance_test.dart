@@ -40,12 +40,11 @@ import 'package:pdf/widgets.dart' as pw;
 
 const int _pages = 24;
 
-/// The notes to copy for the user-note scenarios, in the app's library:
-/// `--dart-define=USER_NOTES=<id>,<id>` picks others.
+/// Optional notes to copy for real-note scenarios from the app's library:
+/// `--dart-define=USER_NOTES=<id>,<id>` opts into them.
 const String _userLibrary = '/data/data/com.etonia.app/app_flutter/greatnote';
 final List<String> _userNotes = const String.fromEnvironment(
   'USER_NOTES',
-  defaultValue: 'hng7fg8pv312ssspu',
 ).split(',');
 
 /// The real rasterizer, timing each page it renders.
@@ -668,13 +667,15 @@ void main() {
     // rendered past the first pages; back up; then down again once the
     // previews have had time to be made.
     await tester.pump(const Duration(seconds: 1));
-    await fling('fling_down_cold', count: 10, distance: 700);
-    await fling('fling_up', count: 10, distance: -700);
+    // Six flicks cover about two thirds of the 24-page note, short of its
+    // end, where pulling further would add a page.
+    await fling('fling_down_cold', count: 6, distance: 700);
+    await fling('fling_up', count: 6, distance: -700);
     await tester.pump(const Duration(seconds: 6));
-    await fling('fling_down_warm', count: 10, distance: 700);
+    await fling('fling_down_warm', count: 6, distance: 700);
     await fling(
       'fling_frantic_up',
-      count: 8,
+      count: 6,
       distance: -800,
       flick: const Duration(milliseconds: 70),
       gap: const Duration(milliseconds: 120),
@@ -687,7 +688,9 @@ void main() {
     await directory.delete(recursive: true);
   }
 
-  for (final String userNote in _userNotes) {
+  for (final String userNote in _userNotes.where(
+    (String note) => note.isNotEmpty,
+  )) {
     testWidgets('scrolling note $userNote from the app library', (
       tester,
     ) async {

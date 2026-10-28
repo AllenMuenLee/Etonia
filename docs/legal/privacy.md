@@ -68,11 +68,12 @@ brokers, and we do not sell your data.
 ## Microphone, camera and photos
 
 Etonia asks for the microphone to record audio with your notes and for voice
-input, for speech recognition to turn spoken questions into text, and for the
-camera and photo library to place pictures in a note. Recordings and pictures
-stay in your notes on your device. Speech recognition is done by your device's
-speech service (Apple's on iPhone and iPad), which may process the audio on
-its own servers under its own privacy policy.
+input, for speech recognition to turn spoken questions, and recordings you
+choose to transcribe, into text, and for the camera and photo library to place
+pictures in a note. Recordings, transcripts and pictures stay in your notes on
+your device. Speech recognition is done by your device's speech service
+(Apple's on iPhone and iPad), on the device where it can; otherwise that
+service may process the audio on its own servers under its own privacy policy.
 
 ## Keeping and deleting data
 

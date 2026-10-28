@@ -411,6 +411,22 @@ class PdfPageRenderCache {
     opening.then<void>((_) {}, onError: (Object _) {});
   }
 
+  /// The viewport moved. Keep expensive sharp renders out of scrolling;
+  /// previews may continue rendering, then sharp work resumes once the view
+  /// has stayed still for [DocumentIoConfig.pdfScrollSettleDelay].
+  void viewMoved() {
+    _settleAfter(config.pdfScrollSettleDelay);
+  }
+
+  void _settleAfter(Duration delay) {
+    _settled = false;
+    _settle?.cancel();
+    _settle = Timer(delay, () {
+      _settled = true;
+      _pump();
+    });
+  }
+
   /// Ranks [pages], the PDF pages around the one in view, nearest first,
   /// so that they render in that order, and has each one rendered ahead of
   /// being shown: in preview, and the first [sharpPages] also sharp.
@@ -432,12 +448,7 @@ class PdfPageRenderCache {
     final String? focused = pages.isEmpty ? null : _pageKey(pages.first.source);
     if (focused != _focused) {
       _focused = focused;
-      _settled = false;
-      _settle?.cancel();
-      _settle = Timer(config.pdfSettleDelay, () {
-        _settled = true;
-        _pump();
-      });
+      _settleAfter(config.pdfSettleDelay);
     }
     int budget = 0;
     for (int i = 0; i < pages.length; i++) {
@@ -1016,7 +1027,7 @@ class _PdfPageLayerState extends State<PdfPageLayer> {
     if (_pixelRatio != ratio) {
       _pixelRatio = ratio;
       _load(keepShown: true);
-      _moved();
+      _moved(viewportMoved: false);
     }
   }
 
@@ -1043,8 +1054,9 @@ class _PdfPageLayerState extends State<PdfPageLayer> {
 
   /// The page moved on screen, or was zoomed: once it stays put, see how
   /// big it is seen.
-  void _moved() {
+  void _moved({bool viewportMoved = true}) {
     if (widget.visible == null) return;
+    if (viewportMoved) widget.cache.viewMoved();
     _settle?.cancel();
     _settle = Timer(widget.cache.config.pdfSettleDelay, _settled);
   }
@@ -1183,7 +1195,7 @@ class _PdfPageLayerState extends State<PdfPageLayer> {
         previous?.dispose();
         widget.onShown?.call();
         // Sharp paper may now be enough, or the part on screen sharper.
-        if (sharp) _moved();
+        if (sharp) _moved(viewportMoved: false);
       },
       onError: (Object error) {
         if (mounted && identical(_ticket, ticket)) {

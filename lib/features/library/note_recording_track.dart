@@ -114,8 +114,9 @@ class RecordingTranscript {
   /// The language it was heard in, such as `en-US`.
   final String? locale;
 
-  String get text =>
-      segments.map((TranscriptSegment segment) => segment.text.trim()).join(' ');
+  String get text => segments
+      .map((TranscriptSegment segment) => segment.text.trim())
+      .join(' ');
 
   bool get isEmpty => segments.isEmpty;
 

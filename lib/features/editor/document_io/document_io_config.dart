@@ -15,6 +15,7 @@ class DocumentIoConfig {
     this.pdfPreviewDimension = 640,
     this.pdfPreviewCacheBytes = 32 * 1024 * 1024,
     this.pdfSettleDelay = const Duration(milliseconds: 120),
+    this.pdfScrollSettleDelay = const Duration(milliseconds: 360),
     this.exportPdfRasterDpi = 200,
     this.maxPdfPagePoints = 14400,
   }) : assert(maxStoredImageDimension > 0),
@@ -57,8 +58,13 @@ class DocumentIoConfig {
   final int pdfPreviewCacheBytes;
 
   /// How long the page in view must stay the same before the view counts as
-  /// settled and sharp renders start; until then only previews render.
+  /// focused and sharp renders may start.
   final Duration pdfSettleDelay;
+
+  /// How long the viewport must stay still before sharp renders start;
+  /// until then only quick previews render. Longer than [pdfSettleDelay] so
+  /// repeated flicks do not start expensive work in the pauses between them.
+  final Duration pdfScrollSettleDelay;
   final double exportPdfRasterDpi;
   final double maxPdfPagePoints;
 }

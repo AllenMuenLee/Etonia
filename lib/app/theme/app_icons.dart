@@ -92,6 +92,8 @@ abstract final class AppIcons {
   static const IconData play = CupertinoIcons.play_fill;
   static const IconData pause = CupertinoIcons.pause_fill;
   static const IconData stop = CupertinoIcons.stop_fill;
+  static const IconData transcribe = CupertinoIcons.captions_bubble;
+  static const IconData transcript = CupertinoIcons.captions_bubble_fill;
   static const IconData backward15 = CupertinoIcons.gobackward_15;
   static const IconData forward15 = CupertinoIcons.goforward_15;
   static const IconData up = CupertinoIcons.arrow_up;

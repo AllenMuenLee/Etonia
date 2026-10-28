@@ -5,6 +5,7 @@ import '../../../app/theme/app_tokens.dart';
 import '../../../shared/widgets/app_controls.dart';
 import '../../library/note_recording_track.dart';
 import '../audio/note_audio.dart';
+import '../audio/recording_transcriber.dart';
 import '../audio/stroke_replay_controller.dart';
 import '../page/note_document.dart';
 
@@ -20,6 +21,9 @@ class RecordingToolData {
     required this.onResume,
     required this.onStop,
     required this.onOpen,
+    this.transcription,
+    this.onTranscribe,
+    this.onShowTranscript,
   });
 
   final NoteAudioRecorder recorder;
@@ -35,8 +39,20 @@ class RecordingToolData {
   /// Opens a recording for replay.
   final ValueChanged<NoteRecordingTrack> onOpen;
 
-  Listenable get listenable =>
-      Listenable.merge(<Listenable>[recorder, document, replay]);
+  /// Which recording is being transcribed. Without it there is no
+  /// transcription.
+  final RecordingTranscriptionController? transcription;
+
+  /// Transcribes a recording, at the user's request only.
+  final ValueChanged<NoteRecordingTrack>? onTranscribe;
+  final ValueChanged<NoteRecordingTrack>? onShowTranscript;
+
+  Listenable get listenable => Listenable.merge(<Listenable?>[
+    recorder,
+    document,
+    replay,
+    transcription,
+  ]);
 }
 
 /// The Record button's panel: start, pause, and stop a recording, and pick
@@ -168,10 +184,62 @@ class RecordingOptions extends StatelessWidget {
       subtitle: Text(
         formatRecordingDuration(Duration(milliseconds: track.durationMs)),
       ),
+      trailing: _transcriptControl(track, recording: recording),
       onTap: () {
         data.onOpen(track);
         onChosen?.call();
       },
+    );
+  }
+
+  /// Transcribe, its progress while it runs, or the transcript once made.
+  Widget? _transcriptControl(
+    NoteRecordingTrack track, {
+    required bool recording,
+  }) {
+    final RecordingTranscriptionController? transcription = data.transcription;
+    final ValueChanged<NoteRecordingTrack>? onTranscribe = data.onTranscribe;
+    if (transcription == null || onTranscribe == null) return null;
+    if (transcription.activeId == track.id) {
+      return Row(
+        mainAxisSize: MainAxisSize.min,
+        children: <Widget>[
+          SizedBox.square(
+            dimension: 18,
+            child: CircularProgressIndicator(
+              key: ValueKey<String>('transcribing-${track.id}'),
+              strokeWidth: 2,
+              value: transcription.progress,
+            ),
+          ),
+          IconButton(
+            key: ValueKey<String>('stop-transcribing-${track.id}'),
+            tooltip: 'Stop transcribing',
+            onPressed: transcription.cancel,
+            icon: const Icon(AppIcons.stop),
+          ),
+        ],
+      );
+    }
+    if (track.transcript != null && data.onShowTranscript != null) {
+      return IconButton(
+        key: ValueKey<String>('show-transcript-${track.id}'),
+        tooltip: 'Show transcript',
+        onPressed: () {
+          data.onShowTranscript!(track);
+          onChosen?.call();
+        },
+        icon: const Icon(AppIcons.transcript),
+      );
+    }
+    return IconButton(
+      key: ValueKey<String>('transcribe-${track.id}'),
+      tooltip: 'Transcribe',
+      // Never while recording: the recognizer would compete with the ink.
+      onPressed: recording || transcription.isBusy
+          ? null
+          : () => onTranscribe(track),
+      icon: const Icon(AppIcons.transcribe),
     );
   }
 }

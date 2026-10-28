@@ -184,10 +184,15 @@ class PlatformRecordingTranscriber implements RecordingTranscriber {
 /// result. One at a time: a recognizer reading a long lecture is work
 /// enough for a tablet.
 class RecordingTranscriptionController extends ChangeNotifier {
-  RecordingTranscriptionController({required RecordingTranscriber transcriber})
-    : _transcriber = transcriber;
+  RecordingTranscriptionController({
+    required this._transcriber,
+    Future<Directory> Function()? temporaryDirectory,
+  }) : _temporaryDirectory = temporaryDirectory ?? getTemporaryDirectory;
 
   final RecordingTranscriber _transcriber;
+
+  /// Where the audio is copied for the recognizer to read.
+  final Future<Directory> Function() _temporaryDirectory;
   String? _activeId;
   double? _progress;
   bool _disposed = false;
@@ -216,7 +221,7 @@ class RecordingTranscriptionController extends ChangeNotifier {
     try {
       final Uint8List bytes = await readAudio();
       final Directory root = Directory(
-        '${(await getTemporaryDirectory()).path}/greatnote-transcription',
+        '${(await _temporaryDirectory()).path}/greatnote-transcription',
       );
       await root.create(recursive: true);
       file = File('${root.path}/${track.id}.m4a');
