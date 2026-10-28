@@ -64,6 +64,7 @@ import 'document_io/document_importer.dart';
 import 'document_io/document_models.dart';
 import 'document_io/document_platform.dart';
 import 'document_io/pdf_page_layer.dart';
+import 'document_io/pdf_preview_store.dart';
 import 'document_io/page_image_cache.dart';
 import 'document_io/pdf_selection_image.dart';
 import 'document_io/pdf_exporter.dart';
@@ -116,6 +117,7 @@ class EditorScreen extends StatefulWidget {
     this.assetReader,
     this.onPageShown,
     this.pdfRasterizer = const PdfrxRasterizer(),
+    this.pdfPreviewStore,
     this.documentIoConfig = const DocumentIoConfig(),
     this.repository,
     this.noteId,
@@ -218,6 +220,10 @@ class EditorScreen extends StatefulWidget {
   /// sits narrower than the writing area, centered in it.
   static const double openingZoom = 0.7;
   final PdfRasterizer pdfRasterizer;
+
+  /// Keeps PDF pages' previews between visits; without it they are
+  /// rendered each time.
+  final PdfPreviewStore? pdfPreviewStore;
   final DocumentIoConfig documentIoConfig;
   final NoteRepository? repository;
   final String? noteId;
@@ -597,6 +603,7 @@ class EditorScreenState extends State<EditorScreen>
             readAsset: reader,
             rasterizer: widget.pdfRasterizer,
             config: widget.documentIoConfig,
+            previewStore: widget.pdfPreviewStore,
           ));
   }
 
@@ -626,6 +633,17 @@ class EditorScreenState extends State<EditorScreen>
       }
     }
     cache.focus(focus, devicePixelRatio, sharpPages: sharpPages);
+    // The rest of the note's previews are made ahead, nearest first, for
+    // scrolling there later.
+    final List<PdfPageSource> rest = <PdfPageSource>[];
+    for (int step = 0; step < pages.length; step++) {
+      for (final int index in <int>{current + step, current - step}) {
+        if (index < 0 || index >= pages.length) continue;
+        final PdfPageSource? pdf = pages[index].pdfSource;
+        if (pdf != null) rest.add(pdf);
+      }
+    }
+    cache.keepPreviews(rest);
   }
 
   /// The shown page's ink.
@@ -2828,6 +2846,7 @@ class EditorScreenState extends State<EditorScreen>
                                       displayedSize:
                                           geometries[index].displaySize,
                                       cache: _pageRenderCache!,
+                                      visible: visible,
                                       onShown: index == _document.currentIndex
                                           ? _pageShown
                                           : null,

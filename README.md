@@ -929,6 +929,40 @@ keys from build defines. Direct provider clients remain available for isolated
 tests and explicit dependency injection; the editor uses the backend by default.
 Without configured account services, local editing works and paid AI fails closed.
 
+### PostZen publishing
+
+The repository includes a developer CLI for publishing project updates through
+[PostZen](https://docs.postzen.dev/). It uses PostZen's REST API because there is
+no Dart SDK, and it reads the live credential only from `POSTZEN_API_KEY`. Never
+put that key in `dart_defines.json`, Flutter source, or a mobile build.
+
+In PowerShell, set the key for the current shell and verify the connection with
+the read-only account command:
+
+```powershell
+$env:POSTZEN_API_KEY = 'pzn_live_...'
+dart run greatnote:postzen accounts
+```
+
+Account output contains the `accountId` needed for publishing. Start safely with
+a draft; `--request-id` makes retries idempotent:
+
+```powershell
+dart run greatnote:postzen create --content 'Release notes' --draft --request-id release-42
+```
+
+Schedule in UTC (at least 60 seconds ahead) or publish immediately by providing
+one or more `platform:accountId` targets:
+
+```powershell
+dart run greatnote:postzen create --content 'New release' --scheduled-for 2026-11-01T15:00:00Z --target twitter:ACCOUNT_ID --request-id release-43
+dart run greatnote:postzen create --content 'Now available' --publish-now --target linkedin:ACCOUNT_ID --request-id release-44
+```
+
+Add `--json` to either command for machine-readable output. The project already
+ignores `.env` and `.env.*`; the CLI intentionally does not read Flutter build
+defines so the PostZen key cannot accidentally ship with the app.
+
 ### Models and privacy
 
 The picker offers Haiku, Luna, Sonnet, Sol, Opus, Argon, and Astra for the

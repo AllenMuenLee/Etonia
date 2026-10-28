@@ -33,7 +33,7 @@
 	<key>NSMicrophoneUsageDescription</key>
 	<string>Record audio with your handwritten notes or dictate a prompt.</string>
 	<key>NSSpeechRecognitionUsageDescription</key>
-	<string>Convert a spoken AI prompt into text.</string>
+	<string>Convert a spoken AI prompt, or a recording you choose to transcribe, into text.</string>
 	<key>ITSAppUsesNonExemptEncryption</key>
 	<false/>
 	<key>UIApplicationSceneManifest</key>

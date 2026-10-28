@@ -15,13 +15,16 @@ import 'dart:math' as math;
 import 'dart:typed_data';
 import 'dart:ui' as ui;
 
+import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/scheduler.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:greatnote/app/greatnote_app.dart';
 import 'package:greatnote/features/editor/document_io/document_models.dart';
 import 'package:greatnote/features/editor/document_io/document_platform.dart';
+import 'package:greatnote/features/editor/document_io/pdf_page_layer.dart';
 import 'package:greatnote/features/editor/document_io/pdf_paper.dart';
+import 'package:greatnote/features/editor/document_io/pdf_preview_store.dart';
 import 'package:greatnote/features/editor/page/page_setup.dart';
 import 'package:greatnote/features/editor/page/page_viewport.dart';
 import 'package:greatnote/features/library/file_note_repository.dart';
@@ -37,9 +40,13 @@ import 'package:pdf/widgets.dart' as pw;
 
 const int _pages = 24;
 
-/// The note to copy for the user-note scenario, in the app's library.
+/// The notes to copy for the user-note scenarios, in the app's library:
+/// `--dart-define=USER_NOTES=<id>,<id>` picks others.
 const String _userLibrary = '/data/data/com.etonia.app/app_flutter/greatnote';
-const String _userNote = 'hng7fg8pv312ssspu';
+final List<String> _userNotes = const String.fromEnvironment(
+  'USER_NOTES',
+  defaultValue: 'hng7fg8pv312ssspu',
+).split(',');
 
 /// The real rasterizer, timing each page it renders.
 class _TimedRasterizer
@@ -89,11 +96,34 @@ class _TimedRasterizer
   );
 }
 
-class _TimedOpenPdf implements OpenPdf, PdfBandRenderer {
+class _TimedOpenPdf implements OpenPdf, PdfBandRenderer, PdfRegionRenderer {
   _TimedOpenPdf(this._owner, this._inner);
 
   final _TimedRasterizer _owner;
   final OpenPdf _inner;
+
+  @override
+  Future<PdfPaper> renderRegion(
+    int pageIndex, {
+    required int fullWidth,
+    required int fullHeight,
+    required PdfPixelRegion region,
+  }) async {
+    final clock = Stopwatch()..start();
+    final paper = await (_inner as PdfRegionRenderer).renderRegion(
+      pageIndex,
+      fullWidth: fullWidth,
+      fullHeight: fullHeight,
+      region: region,
+    );
+    _owner.renderMs.add(clock.elapsedMicroseconds / 1000);
+    _owner.renderPixels.add(region.width * region.height);
+    debugPrint(
+      'PDF_RENDER region $pageIndex ${region.width}x${region.height} '
+      'of ${fullWidth}x$fullHeight ${clock.elapsedMilliseconds}ms',
+    );
+    return paper;
+  }
 
   @override
   Future<PdfPaper> renderPaper(
@@ -109,6 +139,10 @@ class _TimedOpenPdf implements OpenPdf, PdfBandRenderer {
     );
     _owner.renderMs.add(clock.elapsedMicroseconds / 1000);
     _owner.renderPixels.add(pixelWidth * pixelHeight);
+    debugPrint(
+      'PDF_RENDER page $pageIndex ${pixelWidth}x$pixelHeight '
+      '${clock.elapsedMilliseconds}ms',
+    );
     return paper;
   }
 
@@ -306,28 +340,30 @@ void main() {
     return note;
   }
 
-  /// A copy of a note from the app's own library: the note file and its
-  /// assets, copied so the original is only ever read.
+  /// A copy of a note from the app's own library, the one [label] names
+  /// after `user:`: the note file and its assets, copied so the original is
+  /// only ever read.
   Future<NoteEntry> copiedNote(
     FileNoteRepository repository,
     Directory directory,
     String label,
     Future<Uint8List> Function() unused,
   ) async {
+    final String userNote = label.substring('user:'.length);
     final source = Directory(_userLibrary);
     final index = File('${source.path}/library.json');
     await File(
       '${directory.path}/library.json',
     ).writeAsBytes(await index.readAsBytes());
-    for (final name in ['$_userNote.json']) {
+    for (final name in ['$userNote.json']) {
       await File(
         '${directory.path}/notes/$name',
       ).writeAsBytes(await File('${source.path}/notes/$name').readAsBytes());
     }
-    final assets = Directory('${directory.path}/notes/$_userNote.assets');
+    final assets = Directory('${directory.path}/notes/$userNote.assets');
     await assets.create(recursive: true);
     await for (final entity in Directory(
-      '${source.path}/notes/$_userNote.assets',
+      '${source.path}/notes/$userNote.assets',
     ).list()) {
       if (entity is File) {
         await File(
@@ -337,7 +373,7 @@ void main() {
     }
     final reopened = await FileNoteRepository.open(directory);
     final notes = await reopened.allNotes();
-    return notes.firstWhere((note) => note.id == _userNote);
+    return notes.firstWhere((note) => note.id == userNote);
   }
 
   Future<void> scenario(
@@ -359,7 +395,7 @@ void main() {
 
     final FileNoteRepository repository;
     final NoteEntry note;
-    if (label == 'user_note') {
+    if (label.startsWith('user:')) {
       await Directory('${directory.path}/notes').create(recursive: true);
       note = await prepare(
         await FileNoteRepository.open(directory),
@@ -385,6 +421,10 @@ void main() {
             onBack: back,
             onRenamed: rename,
             pdfRasterizer: rasterizer,
+            // Empty at first, as on a note's first visit.
+            pdfPreviewStore: FilePdfPreviewStore(
+              Future<Directory>.value(Directory('${directory.path}/previews')),
+            ),
           ),
         ),
       ),
@@ -398,38 +438,67 @@ void main() {
     final viewport = tester.state<PageViewportState>(find.byType(PageViewport));
     final budgetMs = 1000 / tester.view.display.refreshRate;
 
-    Future<void> scroll(
-      String name, {
-      required double pxPerSecond,
-      required double seconds,
-      double pauseEverySeconds = 0,
-      double pauseSeconds = 0,
-    }) async {
+    final Size screen =
+        tester.view.physicalSize / tester.view.devicePixelRatio;
+
+    /// PDF pages on screen showing no paper yet, as in a fling outrunning
+    /// the renderer.
+    int blankPages() {
+      var blank = 0;
+      for (final Element layer in find.byType(PdfPageLayer).evaluate()) {
+        final RenderObject? box = layer.renderObject;
+        if (box is! RenderBox || !box.attached || !box.hasSize) continue;
+        final Rect onScreen = MatrixUtils.transformRect(
+          box.getTransformTo(null),
+          Offset.zero & box.size,
+        );
+        if (!onScreen.overlaps(Offset.zero & screen)) continue;
+        var paper = false;
+        void visit(Element element) {
+          final Widget widget = element.widget;
+          if (widget is RawImage ||
+              (widget is CustomPaint && widget.painter is PdfPaperPainter)) {
+            paper = true;
+          }
+          if (!paper) element.visitChildren(visit);
+        }
+
+        layer.visitChildren(visit);
+        if (!paper) blank++;
+      }
+      return blank;
+    }
+
+    /// Runs [drive], which pumps frames and calls `sample` after each, and
+    /// reports how the frames went.
+    Future<void> measure(
+      String name,
+      Future<void> Function(void Function() sample) drive,
+    ) async {
       final frames = <FrameTiming>[];
       void record(List<FrameTiming> batch) => frames.addAll(batch);
       SchedulerBinding.instance.addTimingsCallback(record);
       rasterizer.reset();
       monitor.start();
-      final clock = Stopwatch()..start();
-      var last = clock.elapsedMicroseconds;
-      var sincePause = 0.0;
       final startOffset = viewport.scrollOffset.dy;
-      while (clock.elapsedMicroseconds < seconds * 1e6) {
-        await tester.pump();
-        final now = clock.elapsedMicroseconds;
-        final dt = (now - last) / 1e6;
-        last = now;
-        viewport.scrollBy(Offset(0, pxPerSecond * dt));
-        sincePause += dt;
-        if (pauseEverySeconds > 0 && sincePause >= pauseEverySeconds) {
-          sincePause = 0;
-          final until = clock.elapsedMicroseconds + pauseSeconds * 1e6;
-          while (clock.elapsedMicroseconds < until) {
-            await tester.pump(const Duration(milliseconds: 8));
-          }
-          last = clock.elapsedMicroseconds;
+      var samples = 0;
+      var blankSamples = 0;
+      var blankStreak = 0;
+      var longestBlank = 0;
+      void sample() {
+        samples++;
+        if (blankPages() > 0) {
+          blankSamples++;
+          blankStreak++;
+          longestBlank = math.max(longestBlank, blankStreak);
+        } else {
+          blankStreak = 0;
         }
       }
+
+      final clock = Stopwatch()..start();
+      await drive(sample);
+      final drivenMs = clock.elapsedMilliseconds;
       await tester.pump(const Duration(milliseconds: 800));
       monitor.stop();
       SchedulerBinding.instance.removeTimingsCallback(record);
@@ -444,7 +513,12 @@ void main() {
         'pdf': label,
         'name': name,
         'scrolled_px': (viewport.scrollOffset.dy - startOffset).round(),
+        'driven_ms': drivenMs,
         'frames': frames.length,
+        // Frames, of those sampled, with a PDF page on screen and blank.
+        'blank_frames': blankSamples,
+        'sampled_frames': samples,
+        'longest_blank_frames': longestBlank,
         'budget_ms': budgetMs.toStringAsFixed(1),
         'build_p95': _pct(build, .95),
         'build_max': _pct(build, 1),
@@ -457,6 +531,15 @@ void main() {
               (f) =>
                   f.buildDuration.inMicroseconds / 1000 > budgetMs ||
                   f.rasterDuration.inMicroseconds / 1000 > budgetMs,
+            )
+            .length,
+        // Against 120 Hz whatever the display reports, which varies from
+        // run to run on adaptive displays, so runs compare.
+        'over_8ms': frames
+            .where(
+              (f) =>
+                  f.buildDuration.inMicroseconds > 8333 ||
+                  f.rasterDuration.inMicroseconds > 8333,
             )
             .length,
         'jank_over_2x': frames
@@ -484,21 +567,118 @@ void main() {
       debugPrint('PDF_SCROLL_RESULT ${jsonEncode(result)}');
     }
 
-    // From the first page on screen, while the rest is still loading.
-    await scroll('cold_drag_down', pxPerSecond: 900, seconds: 5);
-    await tester.pump(const Duration(seconds: 3));
-    await scroll('back_to_top', pxPerSecond: -3000, seconds: 4);
-    await tester.pump(const Duration(seconds: 2));
-    await scroll('drag_down', pxPerSecond: 900, seconds: 6);
-    await scroll('flick_down', pxPerSecond: 3200, seconds: 3);
-    await scroll(
-      'read_with_pauses',
-      pxPerSecond: 500,
-      seconds: 6,
-      pauseEverySeconds: 1.5,
-      pauseSeconds: 0.5,
+    /// Scrolls the column directly, at a steady [pxPerSecond].
+    Future<void> scroll(
+      String name, {
+      required double pxPerSecond,
+      required double seconds,
+      double pauseEverySeconds = 0,
+      double pauseSeconds = 0,
+    }) => measure(name, (sample) async {
+      final clock = Stopwatch()..start();
+      var last = clock.elapsedMicroseconds;
+      var sincePause = 0.0;
+      while (clock.elapsedMicroseconds < seconds * 1e6) {
+        await tester.pump();
+        sample();
+        final now = clock.elapsedMicroseconds;
+        final dt = (now - last) / 1e6;
+        last = now;
+        viewport.scrollBy(Offset(0, pxPerSecond * dt));
+        sincePause += dt;
+        if (pauseEverySeconds > 0 && sincePause >= pauseEverySeconds) {
+          sincePause = 0;
+          final until = clock.elapsedMicroseconds + pauseSeconds * 1e6;
+          while (clock.elapsedMicroseconds < until) {
+            await tester.pump(const Duration(milliseconds: 8));
+            sample();
+          }
+          last = clock.elapsedMicroseconds;
+        }
+      }
+    });
+
+    /// Flicks a finger [count] times, as a reader racing through a note:
+    /// each moves [distance] logical pixels (down the note when positive)
+    /// in [flick], is let go to coast, and the next follows [gap] later.
+    Future<void> fling(
+      String name, {
+      required int count,
+      required double distance,
+      Duration flick = const Duration(milliseconds: 90),
+      Duration gap = const Duration(milliseconds: 300),
+    }) => measure(name, (sample) async {
+      final clock = Stopwatch()..start();
+      final Offset middle = screen.center(Offset.zero);
+      for (var i = 0; i < count; i++) {
+        final Offset from = middle + Offset(0, distance / 2);
+        final gesture = await tester.createGesture(
+          kind: PointerDeviceKind.touch,
+        );
+        await gesture.down(from, timeStamp: clock.elapsed);
+        final start = clock.elapsedMicroseconds;
+        while (clock.elapsedMicroseconds - start < flick.inMicroseconds) {
+          await tester.pump();
+          sample();
+          final t = math.min(
+            1.0,
+            (clock.elapsedMicroseconds - start) / flick.inMicroseconds,
+          );
+          await gesture.moveTo(
+            from - Offset(0, distance * t),
+            timeStamp: clock.elapsed,
+          );
+        }
+        await gesture.up(timeStamp: clock.elapsed);
+        final until = clock.elapsedMicroseconds + gap.inMicroseconds;
+        while (clock.elapsedMicroseconds < until) {
+          await tester.pump();
+          sample();
+        }
+      }
+      // The last coast runs out.
+      final until = clock.elapsedMicroseconds + 700000;
+      while (clock.elapsedMicroseconds < until) {
+        await tester.pump();
+        sample();
+      }
+    });
+
+    const String only = String.fromEnvironment('SCENARIOS');
+    if (only != 'fling') {
+      // From the first page on screen, while the rest is still loading.
+      await scroll('cold_drag_down', pxPerSecond: 900, seconds: 5);
+      await tester.pump(const Duration(seconds: 3));
+      await scroll('back_to_top', pxPerSecond: -3000, seconds: 4);
+      await tester.pump(const Duration(seconds: 2));
+      await scroll('drag_down', pxPerSecond: 900, seconds: 6);
+      await scroll('flick_down', pxPerSecond: 3200, seconds: 3);
+      await scroll(
+        'read_with_pauses',
+        pxPerSecond: 500,
+        seconds: 6,
+        pauseEverySeconds: 1.5,
+        pauseSeconds: 0.5,
+      );
+      await scroll('drag_up', pxPerSecond: -1200, seconds: 8);
+      viewport.scrollBy(Offset(0, -viewport.scrollOffset.dy));
+      await tester.pump(const Duration(seconds: 2));
+    }
+    // As a reader races through: right after opening, while nothing is
+    // rendered past the first pages; back up; then down again once the
+    // previews have had time to be made.
+    await tester.pump(const Duration(seconds: 1));
+    await fling('fling_down_cold', count: 10, distance: 700);
+    await fling('fling_up', count: 10, distance: -700);
+    await tester.pump(const Duration(seconds: 6));
+    await fling('fling_down_warm', count: 10, distance: 700);
+    await fling(
+      'fling_frantic_up',
+      count: 8,
+      distance: -800,
+      flick: const Duration(milliseconds: 70),
+      gap: const Duration(milliseconds: 120),
     );
-    await scroll('drag_up', pxPerSecond: -1200, seconds: 8);
 
     await tester.pumpWidget(const SizedBox());
     await Future<void>.delayed(const Duration(milliseconds: 300));
@@ -507,11 +687,13 @@ void main() {
     await directory.delete(recursive: true);
   }
 
-  testWidgets('scrolling the 24 page note from the app library', (
-    tester,
-  ) async {
-    await scenario(tester, 'user_note', copiedNote);
-  });
+  for (final String userNote in _userNotes) {
+    testWidgets('scrolling note $userNote from the app library', (
+      tester,
+    ) async {
+      await scenario(tester, 'user:$userNote', copiedNote);
+    });
+  }
   if (!const bool.fromEnvironment('USER_NOTE_ONLY')) {
     testWidgets('scrolling a $_pages page textbook PDF', (tester) async {
       await scenario(tester, 'textbook', generatedNote, _textbookPdf);

@@ -150,6 +150,21 @@ abstract interface class PdfBandRenderer {
   });
 }
 
+/// An [OpenPdf] that can render part of a page: [region], in the pixels of
+/// the page rendered whole at [fullWidth] by [fullHeight]. A page zoomed in
+/// is sharpened where it is seen, without rendering all of it that big.
+abstract interface class PdfRegionRenderer {
+  Future<PdfPaper> renderRegion(
+    int pageIndex, {
+    required int fullWidth,
+    required int fullHeight,
+    required PdfPixelRegion region,
+  });
+}
+
+/// A rectangle of whole pixels.
+typedef PdfPixelRegion = ({int x, int y, int width, int height});
+
 /// PDFium-backed implementation. Every one-off operation owns and closes
 /// its PDF; [open] hands the PDF to its caller.
 class PdfrxRasterizer
@@ -274,7 +289,7 @@ class PdfrxRasterizer
   }
 }
 
-class _PdfrxOpenPdf implements OpenPdf, PdfBandRenderer {
+class _PdfrxOpenPdf implements OpenPdf, PdfBandRenderer, PdfRegionRenderer {
   _PdfrxOpenPdf(this._document);
 
   final pdfrx.PdfDocument _document;
@@ -294,6 +309,20 @@ class _PdfrxOpenPdf implements OpenPdf, PdfBandRenderer {
   }) => _renderPdfrxPaper(_document, pageIndex, pixelWidth, pixelHeight);
 
   @override
+  Future<PdfPaper> renderRegion(
+    int pageIndex, {
+    required int fullWidth,
+    required int fullHeight,
+    required PdfPixelRegion region,
+  }) => _renderPdfrxPaper(
+    _document,
+    pageIndex,
+    fullWidth,
+    fullHeight,
+    region: region,
+  );
+
+  @override
   Future<void> dispose() => _document.dispose();
 }
 
@@ -301,16 +330,19 @@ Future<pdfrx.PdfImage> _renderPdfrxBitmap(
   pdfrx.PdfDocument document,
   int pageIndex,
   int pixelWidth,
-  int pixelHeight,
-) async {
+  int pixelHeight, {
+  PdfPixelRegion? region,
+}) async {
   if (pageIndex < 0 || pageIndex >= document.pages.length) {
     throw RangeError.index(pageIndex, document.pages, 'pageIndex');
   }
   final pdfrx.PdfImage? rendered = await document.pages[pageIndex].render(
+    x: region?.x ?? 0,
+    y: region?.y ?? 0,
     fullWidth: pixelWidth.toDouble(),
     fullHeight: pixelHeight.toDouble(),
-    width: pixelWidth,
-    height: pixelHeight,
+    width: region?.width ?? pixelWidth,
+    height: region?.height ?? pixelHeight,
     annotationRenderingMode: pdfrx.PdfAnnotationRenderingMode.none,
   );
   if (rendered == null) {
@@ -347,13 +379,15 @@ Future<PdfPaper> _renderPdfrxPaper(
   pdfrx.PdfDocument document,
   int pageIndex,
   int pixelWidth,
-  int pixelHeight,
-) async {
+  int pixelHeight, {
+  PdfPixelRegion? region,
+}) async {
   final pdfrx.PdfImage rendered = await _renderPdfrxBitmap(
     document,
     pageIndex,
     pixelWidth,
     pixelHeight,
+    region: region,
   );
   try {
     final int width = rendered.width;

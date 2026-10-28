@@ -17,6 +17,7 @@ import '../editor/widgets/tool_palette.dart';
 import '../editor/document_io/document_io_config.dart';
 import '../editor/document_io/document_models.dart';
 import '../editor/document_io/document_platform.dart';
+import '../editor/document_io/pdf_preview_store.dart';
 import '../editor/page/note_document.dart';
 import '../editor/widgets/editor_app_bar.dart';
 import '../editor/widgets/writing_surface_frame.dart';
@@ -48,6 +49,7 @@ class NoteEditorPage extends StatefulWidget {
     this.handwritingProfileStore,
     this.documentPicker = const SystemDocumentPicker(),
     this.pdfRasterizer = const PdfrxRasterizer(),
+    this.pdfPreviewStore,
     this.exportSink = const SystemExportSink(),
     this.documentIoConfig = const DocumentIoConfig(),
     this.sharedClipboard,
@@ -99,6 +101,9 @@ class NoteEditorPage extends StatefulWidget {
   final HandwritingProfileStore? handwritingProfileStore;
   final DocumentPicker documentPicker;
   final PdfRasterizer pdfRasterizer;
+
+  /// Passed to the editor, to keep PDF pages' previews between visits.
+  final PdfPreviewStore? pdfPreviewStore;
   final ExportSink exportSink;
   final DocumentIoConfig documentIoConfig;
   final SharedNoteClipboard? sharedClipboard;
@@ -416,6 +421,7 @@ class _NoteEditorPageState extends State<NoteEditorPage> {
         noteId: widget.note.id,
         documentPicker: widget.documentPicker,
         pdfRasterizer: widget.pdfRasterizer,
+        pdfPreviewStore: widget.pdfPreviewStore,
         exportSink: widget.exportSink,
         documentIoConfig: widget.documentIoConfig,
         stylusOnly: widget.stylusOnly,

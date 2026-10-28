@@ -1,9 +1,9 @@
 import 'dart:async';
 import 'dart:collection';
 import 'dart:math' as math;
-import 'dart:typed_data';
 import 'dart:ui' as ui;
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 
 import '../../../shared/widgets/processing.dart';
@@ -13,6 +13,7 @@ import 'document_platform.dart';
 import 'image_layer.dart';
 import 'asset_byte_cache.dart';
 import 'pdf_paper.dart';
+import 'pdf_preview_store.dart';
 
 /// A page the editor is about to show, for [PdfPageRenderCache.focus].
 typedef PdfFocusPage = ({PdfPageSource source, Size displayedSize});
@@ -24,16 +25,36 @@ typedef PdfFocusPage = ({PdfPageSource source, Size displayedSize});
 /// small render, then sharp. While the page in view keeps changing, as in a
 /// scroll, only those quick renders run; once it settles, that page and the
 /// pages next to it are rendered sharp ahead of everything else.
+///
+/// Pages are rendered sharp at the size they are seen: smaller while the
+/// column is zoomed out, see [showAtZoom]. Zoomed in past that, the part of
+/// a page on screen is rendered again on its own, see [showDetail].
+///
+/// With a [previewStore], each quick render is kept between visits, and
+/// while nothing else is rendering those of the rest of the note are made
+/// ahead, see [keepPreviews]: a page scrolled to is shown at once.
 class PdfPageRenderCache {
   PdfPageRenderCache({
     required this.readAsset,
     required this.rasterizer,
     this.config = const DocumentIoConfig(),
+    this.previewStore,
   });
 
   final NoteAssetReader readAsset;
   final PdfRasterizer rasterizer;
   final DocumentIoConfig config;
+  final PdfPreviewStore? previewStore;
+
+  /// How big pages are rendered sharp, against their displayed size.
+  final ValueNotifier<double> _renderScale = ValueNotifier<double>(1);
+
+  /// The arguments of the last [focus], to focus again at another
+  /// [renderScale].
+  (List<PdfFocusPage>, double, int)? _lastFocus;
+
+  /// The previews to make ahead, nearest the page in view first.
+  List<PdfPageSource> _toKeep = const <PdfPageSource>[];
 
   /// Sharp renders, at the size each page is shown.
   final LinkedHashMap<String, _PdfRenderEntry> _entries =
@@ -84,23 +105,43 @@ class PdfPageRenderCache {
 
   int _rankOf(PdfPageSource source) => _ranks[_pageKey(source)] ?? _unfocused;
 
+  /// How big pages are rendered sharp, against the size they are displayed
+  /// at a zoom of one: never more than one, see [showAtZoom].
+  ValueListenable<double> get renderScale => _renderScale;
+
+  /// The column is zoomed to [zoom], against each page's displayed size:
+  /// pages are rendered sharp no bigger than they are seen, which at the
+  /// zoom a note opens at is half the pixels, to render, to hand to the
+  /// engine and to keep. The scale only goes up in tenths, so a pinch does
+  /// not have every page rendered again for each small step.
+  void showAtZoom(double zoom) {
+    if (!zoom.isFinite || zoom <= 0) return;
+    final double scale = ((zoom * 10 - 1e-6).ceil() / 10).clamp(0.5, 1.0);
+    if (scale == _renderScale.value) return;
+    _renderScale.value = scale;
+    final (List<PdfFocusPage>, double, int)? last = _lastFocus;
+    if (last != null) focus(last.$1, last.$2, sharpPages: last.$3);
+  }
+
   /// Whether anyone still needs [entry]: someone waiting on it, or the
   /// pages around the one in view.
   bool _wanted(_PdfRenderEntry entry) {
     if (entry.urgent || entry.waiters > 0) return true;
+    if (entry.detail != null) return false;
     final int rank = _rankOf(entry.source);
     return entry.preview ? rank < _ranks.length : rank < _sharpRanks;
   }
 
   /// Lower runs sooner; null waits. Each page's preview comes just before
-  /// its sharp render, and nearer pages before further ones.
+  /// its sharp render, then the part of it zoomed in on, and nearer pages
+  /// before further ones.
   int? _priority(_PdfRenderEntry entry) {
     if (entry.urgent) return -1;
     final int rank = _rankOf(entry.source);
-    if (entry.preview) return 2 * rank;
+    if (entry.preview) return 3 * rank;
     // A sharp render takes long enough to hold up the previews behind it.
     if (!_settled) return null;
-    return 2 * rank + 1;
+    return 3 * rank + (entry.detail != null ? 2 : 1);
   }
 
   void _trimAll() {
@@ -177,7 +218,11 @@ class PdfPageRenderCache {
     final entry = _PdfRenderEntry(source, width, height, preview: preview);
     tier[key] = entry;
     _pending[key] = entry;
-    _queue.add(entry);
+    if (preview && previewStore != null) {
+      unawaited(_previewFromStore(entry));
+    } else {
+      _queue.add(entry);
+    }
     entry.image.then<void>(
       (_) {
         if (generation != _generation) return;
@@ -194,6 +239,117 @@ class PdfPageRenderCache {
     return entry;
   }
 
+  /// Where [source]'s preview is kept in [previewStore]. A preview is shown
+  /// stretched whatever its size, so the size is not part of it; the
+  /// preview size is, so that another one is not taken for it.
+  String _storeKey(PdfPageSource source) =>
+      '${source.assetId}-${source.pageIndex}-${config.pdfPreviewDimension}';
+
+  /// Shows [entry], a preview, from [previewStore], or else has it rendered
+  /// in its turn and kept there.
+  Future<void> _previewFromStore(_PdfRenderEntry entry) async {
+    final int generation = _generation;
+    final Uint8List? stored = await previewStore!.read(
+      _storeKey(entry.source),
+    );
+    if (stored != null) {
+      try {
+        // Only the encoded bytes are copied here; the engine decodes them
+        // elsewhere.
+        final ui.Codec codec = await ui.instantiateImageCodec(stored);
+        try {
+          final ui.Image image = (await codec.getNextFrame()).image;
+          await entry.start(Future<PdfPaper>.value(PdfPaper.single(image)));
+          return;
+        } finally {
+          codec.dispose();
+        }
+      } on Object {
+        // Rendered again, and kept anew.
+      }
+    }
+    if (generation != _generation || !_wanted(entry)) {
+      entry.cancel();
+      return;
+    }
+    _queue.add(entry);
+    _pump();
+  }
+
+  /// Keeps [entry]'s preview in [previewStore] once it is rendered.
+  Future<void> _keepPreview(_PdfRenderEntry entry) async {
+    final PdfPreviewStore? store = previewStore;
+    if (store == null) return;
+    try {
+      final ui.Image image = await entry.borrowImage();
+      try {
+        await _store(store, entry.source, image);
+      } finally {
+        image.dispose();
+      }
+    } on Object {
+      // Not kept: rendered again next time.
+    }
+  }
+
+  Future<void> _store(
+    PdfPreviewStore store,
+    PdfPageSource source,
+    ui.Image image,
+  ) async {
+    final ByteData? png = await image.toByteData(
+      format: ui.ImageByteFormat.png,
+    );
+    if (png == null) return;
+    await store.write(
+      _storeKey(source),
+      png.buffer.asUint8List(png.offsetInBytes, png.lengthInBytes),
+    );
+  }
+
+  /// Has the previews of [sources] made and kept in [previewStore], nearest
+  /// first, while nothing else is rendering, so that the rest of the note
+  /// is shown at once when scrolled to, even on a later visit. Replaces the
+  /// ones asked for before.
+  void keepPreviews(List<PdfPageSource> sources) {
+    if (previewStore == null) return;
+    _toKeep = sources;
+    _pump();
+  }
+
+  /// Makes and keeps the next of [_toKeep] not kept already.
+  Future<void> _keepNextPreview() async {
+    final PdfPreviewStore store = previewStore!;
+    final int generation = _generation;
+    while (_toKeep.isNotEmpty && generation == _generation) {
+      final PdfPageSource source = _toKeep.first;
+      _toKeep = _toKeep.sublist(1);
+      // Kept once rendered, or read from the store.
+      if (_previews.containsKey('preview:${_pageKey(source)}')) continue;
+      if (await store.contains(_storeKey(source))) continue;
+      final Size page = source.pageSize;
+      final double longest = math.max(page.width, page.height);
+      if (longest <= 0) continue;
+      final double scale = config.pdfPreviewDimension / longest;
+      final PdfPaper paper = await _loadPaper(
+        source,
+        math.max(1, (page.width * scale).round()),
+        math.max(1, (page.height * scale).round()),
+      );
+      try {
+        final ui.Image image = await paper.toImage();
+        try {
+          await _store(store, source, image);
+        } finally {
+          image.dispose();
+        }
+      } finally {
+        paper.dispose();
+      }
+      return;
+    }
+  }
+
   /// Starts the next render, if none is running.
   void _pump() {
     if (_rendering) return;
@@ -206,21 +362,40 @@ class PdfPageRenderCache {
         next = entry;
       }
     }
-    if (next == null) return;
+    if (next == null) {
+      // Only once the view has settled: a scroll needs the renderer free.
+      if (_settled && _toKeep.isNotEmpty && previewStore != null) {
+        _rendering = true;
+        _keepNextPreview()
+            .catchError((Object _) {})
+            .whenComplete(_renderDone);
+      }
+      return;
+    }
     final _PdfRenderEntry entry = next;
     _queue.remove(entry);
     _rendering = true;
     entry
-        .start(_loadPaper(entry.source, entry.width, entry.height))
-        .whenComplete(() {
-          _rendering = false;
-          _documentInUse = null;
-          for (final Future<OpenPdf> document in _closeAfterRender) {
-            _close(document);
-          }
-          _closeAfterRender.clear();
-          _pump();
-        });
+        .start(
+          _loadPaper(
+            entry.source,
+            entry.width,
+            entry.height,
+            detail: entry.detail,
+          ),
+        )
+        .whenComplete(_renderDone);
+    if (entry.preview) unawaited(_keepPreview(entry));
+  }
+
+  void _renderDone() {
+    _rendering = false;
+    _documentInUse = null;
+    for (final Future<OpenPdf> document in _closeAfterRender) {
+      _close(document);
+    }
+    _closeAfterRender.clear();
+    _pump();
   }
 
   /// Starts reading and parsing the PDF of [source], so that its first render
@@ -247,6 +422,7 @@ class PdfPageRenderCache {
     double devicePixelRatio, {
     required int sharpPages,
   }) {
+    _lastFocus = (pages, devicePixelRatio, sharpPages);
     final Map<String, int> ranks = <String, int>{};
     for (final PdfFocusPage page in pages) {
       ranks.putIfAbsent(_pageKey(page.source), () => ranks.length);
@@ -267,7 +443,7 @@ class PdfPageRenderCache {
     for (int i = 0; i < pages.length; i++) {
       final PdfPageSource source = pages[i].source;
       final (int width, int height) = _pixels(
-        pages[i].displayedSize,
+        pages[i].displayedSize * _renderScale.value,
         devicePixelRatio,
       );
       final String sharpKey = _keyOf(source, width, height, preview: false);
@@ -288,10 +464,10 @@ class PdfPageRenderCache {
     _pump();
   }
 
-  /// Shows [source] at [displayedSize]: [onImage] gets a quick preview
-  /// first, unless the sharp render is ready, then the sharp one. Each
-  /// paper is the caller's to dispose. Cancel the ticket once the page no
-  /// longer needs its paper.
+  /// Shows [source] at [displayedSize], rendered at [renderScale]: [onImage]
+  /// gets a quick preview first, unless the sharp render is ready, then the
+  /// sharp one. Each paper is the caller's to dispose. Cancel the ticket
+  /// once the page no longer needs its paper.
   PdfPageTicket show(
     PdfPageSource source,
     Size displayedSize,
@@ -299,7 +475,10 @@ class PdfPageRenderCache {
     required void Function(PdfPaper paper, bool sharp) onImage,
     required void Function(Object error) onError,
   }) {
-    final (int width, int height) = _pixels(displayedSize, devicePixelRatio);
+    final (int width, int height) = _pixels(
+      displayedSize * _renderScale.value,
+      devicePixelRatio,
+    );
     final PdfPageTicket ticket = PdfPageTicket._(this);
     final _PdfRenderEntry sharp = _entry(source, width, height);
     final (int, int)? small = _previewPixels(width, height);
@@ -337,6 +516,41 @@ class PdfPageRenderCache {
         if (!ticket._cancelled) onError(error);
       },
     );
+    return ticket;
+  }
+
+  /// Renders [region] of [source], in the pixels of the page rendered whole
+  /// at [fullWidth] by [fullHeight], for a page zoomed in past its sharp
+  /// paper; after the sharp renders of the pages nearer to view, and only
+  /// once the view settles. [onImage] gets the paper, which is the caller's
+  /// to dispose; nothing is kept. Cancel the ticket once it is not wanted.
+  PdfPageTicket showDetail(
+    PdfPageSource source, {
+    required int fullWidth,
+    required int fullHeight,
+    required PdfPixelRegion region,
+    required void Function(PdfPaper paper) onImage,
+  }) {
+    final PdfPageTicket ticket = PdfPageTicket._(this);
+    final _PdfRenderEntry entry = _PdfRenderEntry(
+      source,
+      fullWidth,
+      fullHeight,
+      preview: false,
+      detail: region,
+    );
+    entry.waiters++;
+    ticket._held.add(entry);
+    _queue.add(entry);
+    entry.image.then<void>((PdfPaper paper) {
+      if (ticket._cancelled) {
+        paper.dispose();
+        return;
+      }
+      _release(ticket);
+      onImage(paper);
+    }, onError: (Object _) {});
+    _pump();
     return ticket;
   }
 
@@ -405,11 +619,14 @@ class PdfPageRenderCache {
     return requested * (config.maxPdfRenderDimension / longest);
   }
 
+  /// Renders [source] whole at [width] by [height], or only its [detail]
+  /// region of it.
   Future<PdfPaper> _loadPaper(
     PdfPageSource source,
     int width,
-    int height,
-  ) async {
+    int height, {
+    PdfPixelRegion? detail,
+  }) async {
     final PdfRasterizer rasterizer = this.rasterizer;
     if (rasterizer is PdfDocumentRasterizer) {
       final Future<OpenPdf> opening = _open(
@@ -418,6 +635,17 @@ class PdfPageRenderCache {
       );
       _documentInUse = opening;
       final OpenPdf open = await opening;
+      if (detail != null) {
+        if (open is! PdfRegionRenderer) {
+          throw UnsupportedError('Parts of PDF pages cannot be rendered.');
+        }
+        return (open as PdfRegionRenderer).renderRegion(
+          source.pageIndex,
+          fullWidth: width,
+          fullHeight: height,
+          region: detail,
+        );
+      }
       if (open is PdfBandRenderer) {
         return (open as PdfBandRenderer).renderPaper(
           source.pageIndex,
@@ -432,6 +660,9 @@ class PdfPageRenderCache {
           pixelHeight: height,
         ),
       );
+    }
+    if (detail != null) {
+      throw UnsupportedError('Parts of PDF pages cannot be rendered.');
     }
     final Uint8List? bytes = await _sources.load(source.assetId);
     if (bytes == null) {
@@ -535,6 +766,8 @@ class PdfPageRenderCache {
     _settled = true;
     _ranks = const <String, int>{};
     _sharpRanks = 0;
+    _lastFocus = null;
+    _toKeep = const <PdfPageSource>[];
     for (final _PdfRenderEntry entry in _queue) {
       if (!entry.urgent) entry.cancel();
     }
@@ -579,8 +812,15 @@ class _PdfRenderCancelled implements Exception {
 }
 
 class _PdfRenderEntry {
-  _PdfRenderEntry(this.source, this.width, this.height, {required this.preview})
-    : cost = width * height * 4 {
+  _PdfRenderEntry(
+    this.source,
+    this.width,
+    this.height, {
+    required this.preview,
+    this.detail,
+  }) : cost = detail == null
+           ? width * height * 4
+           : detail.width * detail.height * 4 {
     image = _done.future.then((PdfPaper resolved) {
       _resolved = resolved;
       cost = resolved.width * resolved.height * 4;
@@ -591,9 +831,15 @@ class _PdfRenderEntry {
   }
 
   final PdfPageSource source;
+
+  /// The size of the page rendered whole, or of the page [detail] is part
+  /// of.
   final int width;
   final int height;
   final bool preview;
+
+  /// The only part of the page rendered, for a page zoomed in on.
+  final PdfPixelRegion? detail;
   final Completer<PdfPaper> _done = Completer<PdfPaper>();
 
   /// Pages being shown that wait on this render.
@@ -708,12 +954,22 @@ class PdfPageLayer extends StatefulWidget {
     required this.source,
     required this.displayedSize,
     required this.cache,
+    this.visible,
     this.onShown,
   });
 
   final PdfPageSource source;
+
+  /// The page's size on screen at a zoom of one.
   final Size displayedSize;
   final PdfPageRenderCache cache;
+
+  /// The part of the page on screen, in this layer's coordinates. Once it
+  /// stops changing, the page tells [cache] how far it is zoomed, and, if
+  /// zoomed in past its sharp paper, has the part on screen rendered as
+  /// sharp as it is seen. Without it, the page is rendered at its displayed
+  /// size.
+  final ValueListenable<Rect>? visible;
 
   /// Called once the page first shows its paper, or that it has none.
   final VoidCallback? onShown;
@@ -729,6 +985,30 @@ class _PdfPageLayerState extends State<PdfPageLayer> {
   double? _pixelRatio;
   PdfPageTicket? _ticket;
 
+  /// The part on screen of a page zoomed in past its sharp paper, rendered
+  /// on its own: where it lies on the page, and how many of its pixels
+  /// there are to a unit of the page.
+  PdfPaper? _detail;
+  Rect _detailRect = Rect.zero;
+  double _detailDensity = 0;
+  PdfPageTicket? _detailTicket;
+  Timer? _settle;
+
+  /// Zoomed in this much past the sharp paper, the part on screen is
+  /// rendered on its own.
+  static const double _detailThreshold = 1.15;
+
+  /// The most pixels rendered for the part on screen: a little more than a
+  /// tablet's screen.
+  static const int _maxDetailPixels = 10 * 1024 * 1024;
+
+  @override
+  void initState() {
+    super.initState();
+    widget.cache.renderScale.addListener(_rescaled);
+    widget.visible?.addListener(_moved);
+  }
+
   @override
   void didChangeDependencies() {
     super.didChangeDependencies();
@@ -736,17 +1016,136 @@ class _PdfPageLayerState extends State<PdfPageLayer> {
     if (_pixelRatio != ratio) {
       _pixelRatio = ratio;
       _load(keepShown: true);
+      _moved();
     }
   }
 
   @override
   void didUpdateWidget(PdfPageLayer oldWidget) {
     super.didUpdateWidget(oldWidget);
+    if (oldWidget.cache != widget.cache) {
+      oldWidget.cache.renderScale.removeListener(_rescaled);
+      widget.cache.renderScale.addListener(_rescaled);
+    }
+    if (oldWidget.visible != widget.visible) {
+      oldWidget.visible?.removeListener(_moved);
+      widget.visible?.addListener(_moved);
+    }
     if (oldWidget.source != widget.source || oldWidget.cache != widget.cache) {
       _load();
     } else if (oldWidget.displayedSize != widget.displayedSize) {
       _load(keepShown: true);
+      _moved();
     }
+  }
+
+  void _rescaled() => _load(keepShown: true);
+
+  /// The page moved on screen, or was zoomed: once it stays put, see how
+  /// big it is seen.
+  void _moved() {
+    if (widget.visible == null) return;
+    _settle?.cancel();
+    _settle = Timer(widget.cache.config.pdfSettleDelay, _settled);
+  }
+
+  void _settled() {
+    if (!mounted) return;
+    final RenderObject? box = context.findRenderObject();
+    if (box is! RenderBox || !box.attached || !box.hasSize) return;
+    final Size size = box.size;
+    if (size.isEmpty || widget.displayedSize.isEmpty) return;
+    // Logical pixels on screen to a unit of this page, across: the scales
+    // are flat, so the depth axis, left at one, says nothing.
+    final Float64List transform = box.getTransformTo(null).storage;
+    final double onScreen = math.sqrt(
+      transform[0] * transform[0] + transform[1] * transform[1],
+    );
+    widget.cache.showAtZoom(
+      onScreen * size.width / widget.displayedSize.width,
+    );
+    _sharpen(size, onScreen * (_pixelRatio ?? 1));
+  }
+
+  /// Has the part of the page on screen rendered on its own, if the page
+  /// is seen at [needed] device pixels to a unit of the page, well past
+  /// its sharp paper; and lets go of that part once it is not.
+  void _sharpen(Size size, double needed) {
+    final PdfPaper? paper = _paper;
+    // The sharp paper comes first; sharpening is tried again once it does.
+    if (paper == null || !_sharp) return;
+    if (needed <= paper.width / size.width * _detailThreshold) {
+      _dropDetail();
+      return;
+    }
+    final Rect page = Offset.zero & size;
+    final Rect seen = widget.visible!.value.intersect(page);
+    if (seen.width <= 0 || seen.height <= 0) return;
+    // A margin, so a little panning does not uncover the blurrier paper.
+    final Rect region = seen.inflate(seen.shortestSide / 16).intersect(page);
+    double density = needed;
+    final double pixels = region.width * region.height * density * density;
+    if (pixels > _maxDetailPixels) {
+      density *= math.sqrt(_maxDetailPixels / pixels);
+    }
+    if (_detail != null &&
+        _detailDensity >= density * 0.95 &&
+        _detailDensity <= density * 1.5 &&
+        _detailRect.contains(seen.topLeft) &&
+        _detailRect.contains(seen.bottomRight - const Offset(1e-6, 1e-6))) {
+      return;
+    }
+    final int fullWidth = math.max(1, (size.width * density).round());
+    final int fullHeight = math.max(1, (size.height * density).round());
+    final int left = (region.left * density).floor().clamp(0, fullWidth - 1);
+    final int top = (region.top * density).floor().clamp(0, fullHeight - 1);
+    final int right = (region.right * density).ceil().clamp(
+      left + 1,
+      fullWidth,
+    );
+    final int bottom = (region.bottom * density).ceil().clamp(
+      top + 1,
+      fullHeight,
+    );
+    // Exactly where the pixels lie on the page.
+    final double unitsPerPixel = size.width / fullWidth;
+    final Rect rect = Rect.fromLTRB(
+      left * unitsPerPixel,
+      top * size.height / fullHeight,
+      right * unitsPerPixel,
+      bottom * size.height / fullHeight,
+    );
+    _detailTicket?.cancel();
+    late final PdfPageTicket ticket;
+    ticket = widget.cache.showDetail(
+      widget.source,
+      fullWidth: fullWidth,
+      fullHeight: fullHeight,
+      region: (x: left, y: top, width: right - left, height: bottom - top),
+      onImage: (PdfPaper detail) {
+        if (!mounted || !identical(_detailTicket, ticket)) {
+          detail.dispose();
+          return;
+        }
+        final PdfPaper? previous = _detail;
+        setState(() {
+          _detail = detail;
+          _detailRect = rect;
+          _detailDensity = fullWidth / size.width;
+        });
+        previous?.dispose();
+      },
+    );
+    _detailTicket = ticket;
+  }
+
+  void _dropDetail() {
+    _detailTicket?.cancel();
+    _detailTicket = null;
+    final PdfPaper? detail = _detail;
+    if (detail == null) return;
+    setState(() => _detail = null);
+    detail.dispose();
   }
 
   /// Renders the page for its present size: blurry at first, then sharp. A
@@ -760,6 +1159,10 @@ class _PdfPageLayerState extends State<PdfPageLayer> {
       _paper?.dispose();
       _paper = null;
       _sharp = false;
+      _detailTicket?.cancel();
+      _detailTicket = null;
+      _detail?.dispose();
+      _detail = null;
     }
     late final PdfPageTicket ticket;
     ticket = widget.cache.show(
@@ -779,6 +1182,8 @@ class _PdfPageLayerState extends State<PdfPageLayer> {
         });
         previous?.dispose();
         widget.onShown?.call();
+        // Sharp paper may now be enough, or the part on screen sharper.
+        if (sharp) _moved();
       },
       onError: (Object error) {
         if (mounted && identical(_ticket, ticket)) {
@@ -792,9 +1197,14 @@ class _PdfPageLayerState extends State<PdfPageLayer> {
 
   @override
   void dispose() {
+    widget.cache.renderScale.removeListener(_rescaled);
+    widget.visible?.removeListener(_moved);
+    _settle?.cancel();
     _ticket?.cancel();
     _ticket = null;
     _paper?.dispose();
+    _detailTicket?.cancel();
+    _detail?.dispose();
     super.dispose();
   }
 
@@ -809,14 +1219,28 @@ class _PdfPageLayerState extends State<PdfPageLayer> {
         timing: LoadTimings.pdfPage,
         semanticsLabel: 'Loading PDF page',
         child: _paper != null
-            ? SizedBox.expand(
-                child: _paper!.isSingle
-                    ? RawImage(
-                        image: _paper!.bands.single,
-                        fit: BoxFit.fill,
-                        filterQuality: FilterQuality.medium,
-                      )
-                    : CustomPaint(painter: PdfPaperPainter(_paper!)),
+            ? Stack(
+                fit: StackFit.expand,
+                children: <Widget>[
+                  _paper!.isSingle
+                      ? RawImage(
+                          image: _paper!.bands.single,
+                          fit: BoxFit.fill,
+                          filterQuality: FilterQuality.medium,
+                        )
+                      : CustomPaint(painter: PdfPaperPainter(_paper!)),
+                  if (_detail != null)
+                    Positioned.fromRect(
+                      rect: _detailRect,
+                      // Drawn at about its own size.
+                      child: CustomPaint(
+                        painter: PdfPaperPainter(
+                          _detail!,
+                          filterQuality: FilterQuality.low,
+                        ),
+                      ),
+                    ),
+                ],
               )
             : _error != null
             ? const Center(child: Text('PDF page unavailable'))

@@ -112,6 +112,17 @@ class NoteDocument extends ChangeNotifier {
     _changed();
   }
 
+  /// Gives the recording [id] its [transcript]. False when it is gone.
+  bool setRecordingTranscript(String id, RecordingTranscript? transcript) {
+    final int index = _recordings.indexWhere(
+      (NoteRecordingTrack item) => item.id == id,
+    );
+    if (index < 0) return false;
+    _recordings[index] = _recordings[index].withTranscript(transcript);
+    _changed();
+    return true;
+  }
+
   NoteRecordingTrack? removeRecording(String id) {
     final int index = _recordings.indexWhere(
       (NoteRecordingTrack item) => item.id == id,

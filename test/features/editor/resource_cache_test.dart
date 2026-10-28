@@ -10,6 +10,7 @@ import 'package:greatnote/features/editor/document_io/document_platform.dart';
 import 'package:greatnote/features/editor/document_io/page_image_cache.dart';
 import 'package:greatnote/features/editor/document_io/pdf_page_layer.dart';
 import 'package:greatnote/features/editor/document_io/pdf_paper.dart';
+import 'package:greatnote/features/editor/document_io/pdf_preview_store.dart';
 
 class _Rasterizer implements PdfRasterizer, PdfImageRasterizer {
   int renders = 0;
@@ -423,4 +424,183 @@ void main() {
       cache.clear();
     });
   });
+
+  testWidgets('zoomed out, PDF pages render sharp only as big as they are '
+      'seen, in tenths', (tester) async {
+    await tester.runAsync(() async {
+      final rasterizer = _Rasterizer();
+      final cache = PdfPageRenderCache(
+        readAsset: (_) async => Uint8List(1),
+        rasterizer: rasterizer,
+        config: const DocumentIoConfig(pdfSettleDelay: Duration.zero),
+      );
+      cache.showAtZoom(0.7);
+      expect(cache.renderScale.value, 0.7);
+      cache.focus([_focus(0)], 1, sharpPages: 1);
+      await _until(() => rasterizer.log.length >= 2);
+      expect(rasterizer.log, ['0:457', '0:700']);
+      // A pinch to a little more than that renders at the next tenth...
+      cache.showAtZoom(0.73);
+      await _until(() => rasterizer.log.length >= 3);
+      expect(rasterizer.log.last, '0:800');
+      // ...and zoomed in, at the displayed size.
+      cache.showAtZoom(2.5);
+      await _until(() => rasterizer.log.length >= 4);
+      expect(rasterizer.log.last, '0:1000');
+      cache.clear();
+    });
+  });
+
+  testWidgets('kept previews are shown without rendering, rendered ones are '
+      'kept, and the rest of the note is kept ahead once the view settles', (
+    tester,
+  ) async {
+    await tester.runAsync(() async {
+      final store = _PreviewStore();
+      final rasterizer = _Rasterizer();
+      final cache = PdfPageRenderCache(
+        readAsset: (_) async => Uint8List(1),
+        rasterizer: rasterizer,
+        config: const DocumentIoConfig(pdfSettleDelay: Duration.zero),
+        previewStore: store,
+      );
+      // Page 1's preview is kept already, from an earlier visit.
+      final kept = await rasterizer.renderImage(
+        Uint8List(0),
+        1,
+        pixelWidth: 457,
+        pixelHeight: 640,
+      );
+      store.kept['pdf-1-640'] = (await kept.toByteData(
+        format: ui.ImageByteFormat.png,
+      ))!.buffer.asUint8List();
+      kept.dispose();
+      rasterizer.log.clear();
+      // The sharp render takes its time.
+      rasterizer.gate = Completer<void>();
+
+      final shown = <String>[];
+      final images = <PdfPaper>[];
+      final ticket = cache.show(
+        _source(1),
+        _page,
+        1,
+        onImage: (image, sharp) {
+          shown.add('${image.width}:$sharp');
+          images.add(image);
+        },
+        onError: (_) {},
+      );
+      await _until(() => shown.isNotEmpty);
+      rasterizer.gate!.complete();
+      await _until(() => shown.length >= 2);
+      expect(shown, ['457:false', '1000:true']);
+      // Only the sharp paper was rendered.
+      expect(rasterizer.log, ['1:1000']);
+      ticket.cancel();
+
+      cache.focus([_focus(0)], 1, sharpPages: 0);
+      await _until(() => store.kept.containsKey('pdf-0-640'));
+      expect(rasterizer.log.last, '0:457');
+
+      cache.keepPreviews([_source(0), _source(1), _source(2), _source(3)]);
+      await _until(() => store.kept.length >= 4);
+      expect(store.kept.keys, containsAll(['pdf-2-640', 'pdf-3-640']));
+      // Pages 0 and 1 were kept already: not rendered again.
+      expect(rasterizer.log.sublist(rasterizer.log.length - 2), [
+        '2:640',
+        '3:640',
+      ]);
+      for (final image in images) {
+        image.dispose();
+      }
+      cache.clear();
+    });
+  });
+
+  testWidgets('the part of a page zoomed in on renders on its own, and a '
+      'part no longer wanted does not', (tester) async {
+    await tester.runAsync(() async {
+      final rasterizer = _RegionRasterizer();
+      final cache = PdfPageRenderCache(
+        readAsset: (_) async => Uint8List(1),
+        rasterizer: rasterizer,
+        config: const DocumentIoConfig(pdfSettleDelay: Duration.zero),
+      );
+      final details = <PdfPaper>[];
+      // Another page's preview holds the renderer meanwhile.
+      rasterizer.gate = Completer<void>();
+      cache.focus([_focus(1)], 1, sharpPages: 0);
+      cache
+          .showDetail(
+            _source(0),
+            fullWidth: 4000,
+            fullHeight: 5600,
+            region: (x: 0, y: 0, width: 10, height: 10),
+            onImage: details.add,
+          )
+          .cancel();
+      cache.showDetail(
+        _source(0),
+        fullWidth: 4000,
+        fullHeight: 5600,
+        region: (x: 1000, y: 2000, width: 300, height: 200),
+        onImage: details.add,
+      );
+      rasterizer.gate!.complete();
+      await _until(() => details.isNotEmpty);
+      expect(rasterizer.regions, ['0:1000,2000 300x200 of 4000']);
+      expect(details.single.width, 300);
+      expect(details.single.height, 200);
+      details.single.dispose();
+      cache.clear();
+    });
+  });
+}
+
+class _PreviewStore implements PdfPreviewStore {
+  final Map<String, Uint8List> kept = {};
+
+  @override
+  Future<Uint8List?> read(String key) async => kept[key];
+
+  @override
+  Future<bool> contains(String key) async => kept.containsKey(key);
+
+  @override
+  Future<void> write(String key, Uint8List encoded) async =>
+      kept[key] = encoded;
+}
+
+/// Renders parts of pages, as the real rasterizer does.
+class _RegionRasterizer extends _DocumentRasterizer {
+  final List<String> regions = [];
+
+  @override
+  Future<OpenPdf> open(Uint8List bytes) async => _RegionOpenPdf(this);
+}
+
+class _RegionOpenPdf extends _OpenPdf implements PdfRegionRenderer {
+  _RegionOpenPdf(_RegionRasterizer super.pages);
+
+  @override
+  Future<PdfPaper> renderRegion(
+    int pageIndex, {
+    required int fullWidth,
+    required int fullHeight,
+    required PdfPixelRegion region,
+  }) async {
+    (pages as _RegionRasterizer).regions.add(
+      '$pageIndex:${region.x},${region.y} '
+      '${region.width}x${region.height} of $fullWidth',
+    );
+    return PdfPaper.single(
+      await pages.renderImage(
+        Uint8List(0),
+        pageIndex,
+        pixelWidth: region.width,
+        pixelHeight: region.height,
+      ),
+    );
+  }
 }

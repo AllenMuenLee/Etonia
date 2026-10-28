@@ -22,6 +22,7 @@ import '../editor/page/page_setup.dart';
 import '../editor/document_io/document_importer.dart';
 import '../editor/document_io/document_io_config.dart';
 import '../editor/document_io/document_platform.dart';
+import '../editor/document_io/pdf_preview_store.dart';
 import '../editor/document_io/goodnotes_archive_extractor.dart';
 import '../editor/document_io/pdf_exporter.dart';
 import '../editor/widgets/export_options_sheet.dart';
@@ -104,6 +105,9 @@ class _LibraryHomeState extends State<LibraryHome> {
     )..load().then((void _) => _subscription?.connectStore());
   }
 
+  /// PDF pages' previews, in the device's cache, for the device's library.
+  PdfPreviewStore? _pdfPreviews;
+
   bool _handwritingChecked = false;
 
   /// Loads the writer's handwriting profile for every note. The library
@@ -149,6 +153,9 @@ class _LibraryHomeState extends State<LibraryHome> {
                   subscription:
                       widget.subscription ?? _subscriptionFor(repository),
                   onboard: _onDevice(repository),
+                  pdfPreviewStore: _onDevice(repository)
+                      ? _pdfPreviews ??= FilePdfPreviewStore.appCache()
+                      : null,
                 )
               : snapshot.hasError
               ? Scaffold(
@@ -319,6 +326,7 @@ class LibraryScreen extends StatefulWidget {
     this.documentPicker = const SystemDocumentPicker(),
     this.sharedDocuments = const SystemSharedDocumentSource(),
     this.pdfRasterizer = const PdfrxRasterizer(),
+    this.pdfPreviewStore,
     this.exportSink = const SystemExportSink(),
     this.documentIoConfig = const DocumentIoConfig(),
     this.initialNotationEnabled = true,
@@ -341,6 +349,9 @@ class LibraryScreen extends StatefulWidget {
   final DocumentPicker documentPicker;
   final SharedDocumentSource sharedDocuments;
   final PdfRasterizer pdfRasterizer;
+
+  /// Passed to the editor, to keep PDF pages' previews between visits.
+  final PdfPreviewStore? pdfPreviewStore;
   final ExportSink exportSink;
   final DocumentIoConfig documentIoConfig;
 
@@ -851,6 +862,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
       handwritingProfileStore: _handwritingProfileStore,
       documentPicker: widget.documentPicker,
       pdfRasterizer: widget.pdfRasterizer,
+      pdfPreviewStore: widget.pdfPreviewStore,
       exportSink: widget.exportSink,
       documentIoConfig: widget.documentIoConfig,
       sharedClipboard: _sharedClipboard,
