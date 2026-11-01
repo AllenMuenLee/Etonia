@@ -45,6 +45,7 @@ abstract final class AppIcons {
   static const IconData deselectAll = CupertinoIcons.square;
   static const IconData note = CupertinoIcons.doc_text;
   static const IconData newNote = CupertinoIcons.square_pencil;
+  static const IconData template = CupertinoIcons.rectangle_stack;
   static const IconData pdf = CupertinoIcons.doc;
   static const IconData goodnotes = CupertinoIcons.pencil_outline;
   static const IconData emptyLibrary = CupertinoIcons.square_pencil;

@@ -61,6 +61,21 @@ abstract final class AppSizes {
   static const double maxContentWidth = 1280;
 }
 
+/// How fast a transition plays, from whether what it shows has been shown
+/// before. See `MotionMemory`.
+enum MotionPace {
+  /// Shown for the first time, or since its cache was let go: it is still
+  /// being read, so it arrives slowly and smoothly.
+  first,
+
+  /// Shown before and still in memory: it arrives with a slight fade
+  /// ([AppMotion.glance]) in place of its movement. Never abrupt.
+  revisit,
+
+  /// Not tracked: the token's own timing.
+  standard,
+}
+
 /// The shared motion vocabulary. Movement uses a spring; durations and curves
 /// are reserved for opacity and colour.
 abstract final class AppMotion {
@@ -118,6 +133,50 @@ abstract final class AppMotion {
   static const double cardPressedScale = 0.98;
   static const double pressedScale = buttonPressedScale;
 
+  /// How much longer than its token something runs the first time it is
+  /// shown, while it is still being loaded and read: slow and smooth.
+  static const double firstLookScale = 1.5;
+
+  /// What something shown again from memory does in place of its movement:
+  /// a slight, short fade in where it is. Not a sped-up zoom or slide, which
+  /// would read as sudden.
+  static const Duration glance = Duration(milliseconds: 180);
+  static const Curve glanceCurve = Curves.easeOut;
+
+  /// Whether a transition at [pace] moves (zoom, slide, scale) or only
+  /// fades in where it is.
+  static bool travels(MotionPace pace) => pace != MotionPace.revisit;
+
+  /// How long an entrance with token [duration] lasts at [pace]. Before
+  /// playing, ask `MotionMemory` for the pace of what is about to be shown;
+  /// [MotionPace.standard] keeps the token. A revisit is a [glance], which
+  /// also drops any movement (see [travels]).
+  static Duration paced(Duration duration, MotionPace pace) => switch (pace) {
+    MotionPace.standard => duration,
+    MotionPace.first => duration * firstLookScale,
+    MotionPace.revisit => glance,
+  };
+
+  /// [token] for a first look, slower with the same bounce. A revisit does
+  /// not spring at all: it is a [glance] fade, so [token] is kept for the
+  /// movement that cannot be swapped for one.
+  static SpringDescription pacedSpring(
+    SpringDescription token,
+    MotionPace pace,
+  ) => pace != MotionPace.first
+      ? token
+      : SpringDescription.withDurationAndBounce(
+          duration: paced(token.duration, pace),
+          bounce: token.bounce,
+        );
+
+  /// [duration] at [pace], or the reduced cross-fade when motion is reduced.
+  static Duration resolvePaced(
+    BuildContext context,
+    Duration duration,
+    MotionPace pace,
+  ) => resolve(context, paced(duration, pace));
+
   static SpringDescription spring(
     BuildContext context,
     SpringDescription token,
@@ -144,6 +203,32 @@ abstract final class AppMotion {
     curve: fadeInCurve,
     reverseCurve: fadeOutCurve,
   );
+
+  /// [popupStyle] for a popover shown at [pace]: slower the first time.
+  /// A menu unfolds rather than fades, so a revisit keeps the standard
+  /// timing rather than being rushed.
+  static AnimationStyle pacedPopupStyle(MotionPace pace) =>
+      pace != MotionPace.first
+      ? popupStyle
+      : AnimationStyle(
+          duration: paced(snappy.duration, pace),
+          reverseDuration: fadeOut,
+          curve: fadeInCurve,
+          reverseCurve: fadeOutCurve,
+        );
+
+  /// [sheetStyle] for a sheet shown at [pace]: slower the first time. A
+  /// sheet must rise, so a revisit keeps the standard timing rather than
+  /// being rushed.
+  static AnimationStyle pacedSheetStyle(MotionPace pace) =>
+      pace != MotionPace.first
+      ? sheetStyle
+      : AnimationStyle(
+          duration: paced(sheet.duration, pace),
+          reverseDuration: smooth.duration,
+          curve: fadeInCurve,
+          reverseCurve: fadeOutCurve,
+        );
 }
 
 /// Semantic colors. Feature widgets read these instead of color literals.

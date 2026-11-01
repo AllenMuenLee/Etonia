@@ -2,6 +2,7 @@ package com.etonia.app
 
 import android.content.Intent
 import android.view.MotionEvent
+import android.view.View
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
 
@@ -37,6 +38,31 @@ class MainActivity : FlutterActivity() {
         // non-writing UI gestures.
         nativeInk?.observe(event)
         return super.dispatchTouchEvent(event)
+    }
+
+    override fun dispatchGenericMotionEvent(event: MotionEvent): Boolean {
+        if (event.actionMasked == MotionEvent.ACTION_HOVER_EXIT && isPen(event)) {
+            parkPenHover(event)
+        }
+        return super.dispatchGenericMotionEvent(event)
+    }
+
+    // Flutter's embedding drops ACTION_HOVER_EXIT, so a pen lifted out of
+    // range straight up from a button stays "hovering" it, and its tooltip
+    // and hover highlight never go away. Move the hover far off the view
+    // instead: Flutter then sends the exits it would have sent.
+    private fun parkPenHover(event: MotionEvent) {
+        val flutterView = findViewById<View>(FLUTTER_VIEW_ID) ?: return
+        val parked = MotionEvent.obtain(event)
+        parked.action = MotionEvent.ACTION_HOVER_MOVE
+        parked.setLocation(-100_000f, -100_000f)
+        flutterView.onGenericMotionEvent(parked)
+        parked.recycle()
+    }
+
+    private fun isPen(event: MotionEvent): Boolean {
+        val tool = event.getToolType(event.actionIndex)
+        return tool == MotionEvent.TOOL_TYPE_STYLUS || tool == MotionEvent.TOOL_TYPE_ERASER
     }
 
     override fun cleanUpFlutterEngine(flutterEngine: FlutterEngine) {

@@ -1,29 +1,28 @@
 import { strict as assert } from "node:assert";
 import {
+  answerReserve,
   billingModel,
   combineSteps,
   configuredDrawingModel,
-  drawingRequest,
   costOf,
+  drawingRequest,
+  meterPass,
   modelConfig,
   outputBudget,
   providerAnswer,
   providerRequest,
-  answerReserve,
   reservationCap,
   stepMessage,
   twoStep,
   validateInput,
 } from "../functions/_shared/ai_policy.ts";
-import {
-  decryptLocator,
-  encryptLocator,
-  endpoint,
-  Failure,
-} from "../functions/_shared/common.ts";
+import { decryptLocator, encryptLocator, endpoint, Failure } from "../functions/_shared/common.ts";
 
 const png =
   "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jRZkAAAAASUVORK5CYII=";
+const selectedSvg = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 1100" ' +
+  'data-etonia-coordinate-space="note" data-etonia-selection-bounds="80 220 240 330">' +
+  '<path data-etonia-kind="existing-ink" d="M80 220 L320 550"/></svg>';
 const input = {
   requestId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
   model: "sol",
@@ -82,18 +81,44 @@ Deno.test("AI accepts complete conversation history and rejects documents and UR
     }],
   };
   assert.throws(() => validateInput(longHistory));
-  assert.throws(() =>
-    validateInput({ ...input, selectedImage: btoa("%PDF-secret") })
+  assert.throws(() => validateInput({ ...input, selectedImage: btoa("%PDF-secret") }));
+  assert.throws(() => validateInput({ ...input, selectedImage: "https://example.com/image" }));
+  assert.deepEqual(
+    validateInput({
+      ...input,
+      selectedSvg,
+      notationContext: {
+        width: 800,
+        height: 1100,
+        left: 0.1,
+        top: 0.2,
+        right: 0.4,
+        bottom: 0.5,
+      },
+    }),
+    {
+      ...input,
+      selectedSvg,
+      notationContext: {
+        width: 800,
+        height: 1100,
+        left: 0.1,
+        top: 0.2,
+        right: 0.4,
+        bottom: 0.5,
+      },
+    },
   );
-  assert.throws(() =>
-    validateInput({ ...input, selectedImage: "https://example.com/image" })
-  );
-  assert.throws(() =>
-    validateInput({ ...input, notationContext: { text: "private note" } })
-  );
-  assert.throws(() =>
-    validateInput({ ...input, model: "client-selected-model" })
-  );
+  for (
+    const invalidSvg of [
+      "https://example.com/note.svg",
+      '<svg viewBox="0 0 1 1"><script>alert(1)</script></svg>',
+      '<svg viewBox="0 0 1 1" data-etonia-coordinate-space="note" ' +
+      'data-etonia-selection-bounds="0 0 1 1"><image href="https://example.com/x.png"/></svg>',
+    ]
+  ) assert.throws(() => validateInput({ ...input, selectedSvg: invalidSvg }));
+  assert.throws(() => validateInput({ ...input, notationContext: { text: "private note" } }));
+  assert.throws(() => validateInput({ ...input, model: "client-selected-model" }));
 });
 Deno.test("providers receive conversation history and use server model and limits", () => {
   const withHistory = {
@@ -121,23 +146,17 @@ Deno.test("providers receive conversation history and use server model and limit
     if (provider === "openai") {
       assert.equal(request.body.store, false);
       assert.deepEqual(
-        (request.body.messages as { role: string }[]).map((message) =>
-          message.role
-        ),
+        (request.body.messages as { role: string }[]).map((message) => message.role),
         ["system", "user", "assistant", "user"],
       );
     } else if (provider === "claude") {
       assert.deepEqual(
-        (request.body.messages as { role: string }[]).map((message) =>
-          message.role
-        ),
+        (request.body.messages as { role: string }[]).map((message) => message.role),
         ["user", "assistant", "user"],
       );
     } else {
       assert.deepEqual(
-        (request.body.contents as { role: string }[]).map((message) =>
-          message.role
-        ),
+        (request.body.contents as { role: string }[]).map((message) => message.role),
         ["user", "model", "user"],
       );
     }
@@ -165,9 +184,7 @@ Deno.test("providers request SVG text without a JSON response schema", () => {
   const withSchema = { ...input, responseSchema };
   assert.deepEqual(validateInput(withSchema), withSchema);
   assert.throws(() => validateInput({ ...input, responseSchema: "object" }));
-  assert.throws(() =>
-    validateInput({ ...input, responseSchema: { type: "array" } })
-  );
+  assert.throws(() => validateInput({ ...input, responseSchema: { type: "array" } }));
   const largeSchema = {
     ...input,
     responseSchema: { type: "object", pad: "x".repeat(70000) },
@@ -225,7 +242,7 @@ Deno.test("with Notation on, the chosen model writes the words and a second mode
   const notationOptions = {
     notationInstruction: "Notation is on. Return the drawing SVG.",
     animationAllowed: true,
-    notationImage: png,
+    selectedSvg,
   };
   assert(twoStep(claude, { ...input, ...notationOptions, notationContext }));
   assert(!twoStep(claude, input));
@@ -267,6 +284,8 @@ Deno.test("with Notation on, the chosen model writes the words and a second mode
     assert(firstBody.includes("Return SVG"));
     assert(!firstBody.includes("Notation is on"));
     assert(!firstBody.includes("EXPENSIVE_NOTE_METADATA"));
+    assert(firstBody.includes(png));
+    assert(!firstBody.includes("existing-ink"));
 
     const drawingBody = JSON.stringify(
       providerRequest(
@@ -279,7 +298,36 @@ Deno.test("with Notation on, the chosen model writes the words and a second mode
     );
     assert(drawingBody.includes("Notation is on"));
     assert(drawingBody.includes("EXPENSIVE_NOTE_METADATA"));
+    assert(drawingBody.includes("existing-ink"));
+    assert(drawingBody.includes("ANNOTATION INPUT"));
+    assert(drawingBody.includes('QUESTION: \\"Current question\\"'));
+    assert(drawingBody.includes('ANSWER: \\"Answer.\\"'));
+    // Handwriting cannot be read from paths: the crop comes with the SVG,
+    // the question, and the answer, all in one turn.
+    assert(drawingBody.includes(png));
+    assert(drawingBody.includes("Read what is written"));
+    assert(
+      drawingBody.indexOf(png) < drawingBody.indexOf("existing-ink") &&
+        drawingBody.indexOf("existing-ink") < drawingBody.indexOf("ANNOTATION INPUT"),
+    );
   }
+
+  // An SVG with the crop embedded is not sent the picture twice.
+  const rasterSvg = selectedSvg.replace(
+    "<path",
+    `<image href="data:image/png;base64,${png}" x="0" y="0" width="1" height="1"/><path`,
+  );
+  const rasterDrawing = JSON.stringify(
+    providerRequest(
+      claude,
+      { ...input, ...notationOptions, selectedSvg: rasterSvg, notationContext },
+      1234,
+      "k",
+      { step: "notation", message: "Answer." },
+    ).body,
+  );
+  assert.equal(rasterDrawing.split(png).length, 2);
+  assert(rasterDrawing.includes('href=\\"attached:selected-image\\"'));
 
   const text = providerRequest(
     claude,
@@ -311,8 +359,11 @@ Deno.test("with Notation on, the chosen model writes the words and a second mode
   // Only the drawing pass asks for high effort.
   assert.deepEqual(notation.body.output_config, { effort: "high" });
   const turns = notation.body.messages as { role: string; content: unknown }[];
-  assert.deepEqual(turns.map((t) => t.role), ["user", "assistant", "user"]);
-  assert.equal(turns[1].content, "The hypotenuse is 5.");
+  assert.deepEqual(turns.map((t) => t.role), ["user"]);
+  const notationPayload = JSON.stringify(turns[0].content);
+  assert(notationPayload.includes("existing-ink"));
+  assert(notationPayload.includes('QUESTION: \\"Current question\\"'));
+  assert(notationPayload.includes('ANSWER: \\"The hypotenuse is 5.\\"'));
 
   // The drawing step is told what the user asked, on every provider, and
   // a follow-up keeps the requests that came before it.
@@ -334,7 +385,9 @@ Deno.test("with Notation on, the chosen model writes the words and a second mode
           message: "Answer.",
         }).body,
       );
-      assert(body.includes('The user asked: \\"complete the inverted op amp\\"'));
+      assert(body.includes('QUESTION: \\"complete the inverted op amp\\"'));
+      assert(body.includes('ANSWER: \\"Answer.\\"'));
+      assert(body.includes("existing-ink"));
       assert(body.includes('\\"what is this?\\"'));
       assert(!body.includes("A triangle."));
       assert(body.includes("actively look for a useful note-grounded visual"));
@@ -350,9 +403,9 @@ Deno.test("with Notation on, the chosen model writes the words and a second mode
     assert(staticText.includes("connect the annotation to the user's actual notes"));
     assert(!staticText.includes("animate"));
     // An overlong question is clipped, so the drawing prompt stays bounded:
-    // 2738 characters here with the current instructions.
+    // Under 3000 characters here with the current instructions.
     assert(
-      drawingRequest({ ...asked, prompt: "x".repeat(5000) }).length < 2750,
+      drawingRequest({ ...asked, prompt: "x".repeat(5000) }).length < 3000,
     );
   }
 
@@ -362,10 +415,14 @@ Deno.test("with Notation on, the chosen model writes the words and a second mode
     stepMessage(answerSvg),
     "The hypotenuse is 5.",
   );
-  assert.throws(() => stepMessage('<svg viewBox="0 0 1 1"><desc data-etonia-role="message"></desc></svg>'));
+  assert.throws(() =>
+    stepMessage('<svg viewBox="0 0 1 1"><desc data-etonia-role="message"></desc></svg>')
+  );
   assert.throws(() => stepMessage("not svg"));
   assert.equal(
-    stepMessage('```svg\n<svg viewBox="0 0 1 1"><desc data-etonia-role="message">Flow.</desc></svg>\n```'),
+    stepMessage(
+      '```svg\n<svg viewBox="0 0 1 1"><desc data-etonia-role="message">Flow.</desc></svg>\n```',
+    ),
     "Flow.",
   );
 
@@ -400,12 +457,12 @@ Deno.test("the fixed instructions are a cacheable prefix, billed at the cached r
     noteMetadata: "Metadata: {}",
     notationInstruction: "Notation is on.",
     animationAllowed: true,
-    notationImage: png,
+    selectedSvg,
   };
   assert.deepEqual(validateInput(withNote), withNote);
   assert.throws(() => validateInput({ ...input, noteMetadata: 7 }));
 
-  // OpenAI: the fixed part first, then this request's; image read in full.
+  // OpenAI: the fixed part first, then this request's crop and SVG context.
   const openai = providerRequest(config, withNote, 1234, "k", {
     step: "notation",
     message: "Answer.",
@@ -414,7 +471,8 @@ Deno.test("the fixed instructions are a cacheable prefix, billed at the cached r
   const system = (openai.body.messages as { content: string }[])[0].content;
   assert(system.startsWith("Notation is on."));
   assert(system.indexOf("Notation is on.") < system.indexOf("Metadata: {}"));
-  assert(JSON.stringify(openai.body).includes('"detail":"high"'));
+  assert(JSON.stringify(openai.body).includes("existing-ink"));
+  assert(JSON.stringify(openai.body).includes('"image_url"'));
   assert.equal(openai.body.reasoning_effort, "high");
   // A stale AI_MODEL_CONFIG may still carry the removed reasoningEffort
   // field; answers keep the provider default regardless.
@@ -548,9 +606,24 @@ Deno.test("credit budget and usage include image allowance and reasoning tokens"
   const left = answerReserve(both, drawer, noted);
   assert.equal(outputBudget(config, noted, left, false, true), 8192);
   assert.equal(outputBudget(config, noted, 0, true, true), 8192);
-  assert.throws(() =>
-    outputBudget(config, noted, answerReserve(0, drawer, noted), false, true)
-  );
+  assert.throws(() => outputBudget(config, noted, answerReserve(0, drawer, noted), false, true));
+  // A sixth of the $0.50 free credit still pays for a Sonnet-priced
+  // notation request with a realistic note: the crop's allowance must not
+  // swallow the whole balance before any output is afforded.
+  const sonnet = {
+    ...config,
+    inputMicroPerKilo: 2000,
+    outputMicroPerKilo: 10000,
+    maxOutputTokens: 16384,
+  };
+  const everyday = {
+    ...noted,
+    notationInstruction: "N".repeat(6000),
+    noteMetadata: "M".repeat(8000),
+    responseSchema: undefined,
+  };
+  const low = Math.min(80000, reservationCap(sonnet, everyday, drawer));
+  assert(outputBudget(sonnet, everyday, answerReserve(low, drawer, everyday), false, true) >= 1024);
   assert.equal(costOf(config, 1000, 100), 3000);
   assert.throws(() => costOf(config, undefined as unknown as number, 10));
   assert.throws(() => modelConfig({}, "sol"));
@@ -568,6 +641,32 @@ Deno.test("credit budget and usage include image allowance and reasoning tokens"
   });
   assert.equal(result.output, 50);
   assert.equal(result.answer, "answer");
+});
+Deno.test("answer and notation passes are each charged at their own model rates", () => {
+  const answer = {
+    ...config,
+    inputMicroPerKilo: 2000,
+    outputMicroPerKilo: 10000,
+  };
+  const notation = {
+    ...config,
+    inputMicroPerKilo: 100,
+    outputMicroPerKilo: 500,
+  };
+  const answerUsage = { input: 100, output: 20, cached: 0, cacheWrites: 0 };
+  const notationUsage = { input: 300, output: 40, cached: 0, cacheWrites: 0 };
+
+  const first = meterPass(undefined, answer, answerUsage);
+  const both = meterPass(first, notation, notationUsage);
+
+  assert.deepEqual(both, { cost: 450, inputTokens: 400, outputTokens: 60 });
+  assert.equal(
+    both.cost,
+    costOf(answer, 100, 20) + costOf(notation, 300, 40),
+  );
+  // Combining the tokens and applying either model's rate would be wrong.
+  assert.notEqual(both.cost, costOf(answer, 400, 60));
+  assert.notEqual(both.cost, costOf(notation, 400, 60));
 });
 Deno.test("purchase locators encrypt with unique nonces and reject tampering", async () => {
   Deno.env.set("PURCHASE_TOKEN_ENCRYPTION_KEY", btoa("x".repeat(32)));

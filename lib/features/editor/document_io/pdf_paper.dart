@@ -61,10 +61,10 @@ class PdfPaper {
     for (int i = 0; i < bands.length; i++) {
       final ui.Image band = bands[i];
       final double y = rect.top + top * scale;
-      double bottom = rect.top + (top + band.height) * scale;
-      // Each band runs a pixel under the next, which is drawn over it, so no
-      // seam of the background shows where fractional edges meet.
-      if (i < bands.length - 1) bottom += 1;
+      final double bottom = rect.top + (top + band.height) * scale;
+      // Keep every band at exactly the same scale. Extending one band under
+      // the next stretches it and then clips its final source row, which can
+      // cut through text that happens to cross a band boundary.
       canvas.drawImageRect(
         band,
         Rect.fromLTWH(0, 0, band.width.toDouble(), band.height.toDouble()),

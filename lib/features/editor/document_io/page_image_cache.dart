@@ -8,11 +8,14 @@ import 'asset_byte_cache.dart';
 class PageImageCache {
   PageImageCache({
     required Future<Uint8List?> Function(String) readAsset,
-    this.maxBytes = 32 * 1024 * 1024,
-    int sourceMaxBytes = 8 * 1024 * 1024,
+    this.maxBytes,
+    int? sourceMaxBytes,
   }) : _sources = AssetByteCache(read: readAsset, maxBytes: sourceMaxBytes);
 
-  final int maxBytes;
+  /// How many bytes of decoded pictures are kept, if limited. By default
+  /// every picture decoded is kept, to be shown at once when it is needed
+  /// again, until the system runs low on memory ([releaseMemory]).
+  final int? maxBytes;
   final AssetByteCache _sources;
   final Map<String, _ImageEntry> _entries = {};
   final Map<String, _ImageEntry> _pending = {};
@@ -74,7 +77,9 @@ class PageImageCache {
   }
 
   void _trim() {
-    while (retainedBytes > maxBytes) {
+    final int? maxBytes = this.maxBytes;
+    if (maxBytes == null) return;
+    while (_entries.isNotEmpty && retainedBytes > maxBytes) {
       _entries.remove(_entries.keys.first)!.evict();
     }
   }

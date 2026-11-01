@@ -166,6 +166,108 @@ void main() {
     expect(rig.assistant.requestState, AiRequestState.idle);
   });
 
+  test('a question with nothing selected is sent as about the page', () async {
+    rig.assistant.show();
+
+    expect(rig.assistant.context, isNull);
+    expect(rig.assistant.canSend, isTrue);
+    expect(rig.assistant.hasSelection, isFalse);
+    // A quick action is about chosen ink, so there is nothing to act on.
+    expect(rig.assistant.sendQuickAction(AiQuickAction.explain), isFalse);
+    expect(rig.client.requests, isEmpty);
+
+    expect(rig.assistant.send('What is a derivative?'), isTrue);
+
+    final AiSelectionContext context = rig.assistant.context!;
+    expect(context.isPage, isTrue);
+    expect(context.groups, isEmpty);
+    // Its notes go wherever the shown page is blank.
+    expect(context.logicalBounds, isNull);
+    expect(rig.assistant.hasSelection, isFalse);
+    // No ink was drawn: blank paper stands in for it.
+    expect(rig.renderer.snapshots, isEmpty);
+    await pumpEventQueue();
+    final AiRequest request = rig.client.requests.single;
+    expect(request.imagePng, isNotEmpty);
+    expect(request.selectionSvg, isNull);
+    expect(request.systemInstruction, endsWith(AiPrompts.noSelection));
+    expect(_texts(rig.assistant), <String>['user: What is a derivative?']);
+
+    rig.client.answer('The rate of change.');
+    await pumpEventQueue();
+    expect(rig.assistant.send('An example?'), isTrue);
+    await pumpEventQueue();
+    expect(rig.client.requests, hasLength(2));
+    expect(rig.assistant.context, same(context));
+  });
+
+  test('a page chat drawing on the note keeps no focus, and is found by '
+      'selecting its notes', () async {
+    final InkController ink = InkController(
+      strokes: <Stroke>[_line(100), _line(300), _line(500)],
+    );
+    final FakeAiClient client = FakeAiClient();
+    final AiAssistantController assistant = AiAssistantController(
+      client: client,
+      renderer: FakeSelectionImageRenderer(),
+      animationEnabled: false,
+      captureNote: () async =>
+          NoteImage(logicalSize: const Size(10, 10), revision: 0),
+      applyNotation: (AiNotation _, NoteImage _) => AiNotationApplication(
+        AiNotationStatus.applied,
+        strokes: <Stroke>[ink.strokes[2]],
+      ),
+    );
+    addTearDown(ink.dispose);
+    addTearDown(assistant.dispose);
+
+    assistant
+      ..setNotationEnabled(true)
+      ..send('Draw a parabola');
+    await pumpEventQueue();
+    final AiRequest request = client.requests.single;
+    expect(request.selectionSvg, isNull);
+    expect(request.notationInstruction, endsWith(AiPrompts.noSelection));
+    client.answerResponse(
+      AiAssistantResponse(
+        message: 'Here.',
+        notation: AiNotation(
+          label: 'Parabola',
+          items: <AiNotationItem>[
+            AiNotationStroke(
+              ink: 'green',
+              width: 3,
+              points: const <AiNotationPoint>[
+                AiNotationPoint(0.2, 0.2),
+                AiNotationPoint(0.3, 0.3),
+              ],
+            ),
+          ],
+        ),
+      ),
+    );
+    await pumpEventQueue();
+
+    final AiSelectionContext page = assistant.context!;
+    expect(page.logicalBounds, isNull);
+    expect(assistant.notationStrokesIn(ink.strokes), <Stroke>[ink.strokes[2]]);
+
+    // Another chat, then its notes selected again, resumes it.
+    assistant.open(
+      _selectionOf(ink, <int>[0]),
+      brightness: Brightness.light,
+      background: Colors.white,
+    );
+    await pumpEventQueue();
+    expect(assistant.context!.isPage, isFalse);
+    assistant.useSelection(
+      _selectionOf(ink, <int>[2]),
+      brightness: Brightness.light,
+      background: Colors.white,
+    );
+    expect(assistant.context, same(page));
+  });
+
   for (final AiQuickAction action in AiQuickAction.values) {
     test('${action.label} sends its exact prompt with the image', () async {
       await rig.open();
@@ -216,12 +318,17 @@ void main() {
 
     final String drawing = AiPrompts.systemFor(notationEnabled: true);
     // Finishing the user's drawing adds to it; it never copies it.
-    expect(drawing, contains('Build on selected_ink coordinates'));
+    expect(drawing, contains('existing-ink paths in the selected SVG'));
     expect(drawing, contains('add only what is missing'));
     expect(drawing, contains('never a second copy of a shape'));
     expect(drawing, contains("Do not redraw the user's note"));
     // Words become the user's own handwriting, kept as SVG paths.
     expect(drawing, contains('user-configured handwriting'));
+    // Line art is drawn as a pen draws it, not cleaned up for the app.
+    expect(drawing, contains('sketching quickly with a pen on paper'));
+    expect(drawing, contains('no jitter or wiggles'));
+    expect(drawing, contains('the pen lifting at each corner'));
+    expect(drawing, isNot(contains('clean and simple')));
     expect(drawing, isNot(contains('is ambiguous')));
     expect(drawing, isNot(contains('op amp')));
   });
@@ -622,6 +729,11 @@ void main() {
     );
     await pumpEventQueue();
 
+    // The conversation preview/range now includes all returned notation,
+    // while its matching identity still comes only from the original ink.
+    expect(renderer.snapshots.last.strokes, hasLength(3));
+    expect(assistant.context!.snapshot.sourceStrokeCount, 1);
+
     // Only the drawing is selected: still the same chat, not a new one.
     assistant.updateCurrentSelection(_selectionOf(ink, <int>[2, 3]));
     expect(assistant.selectionChanged, isFalse);
@@ -953,7 +1065,12 @@ void main() {
         client.requests.single.imagePng,
         same(assistant.context!.image!.png),
       );
-      expect(client.requests.single.notationImagePng, isNotNull);
+      expect(client.requests.single.selectionSvg, startsWith('<svg'));
+      expect(client.requests.single.selectionSvg, contains('<path'));
+      expect(
+        client.requests.single.selectionSvg,
+        contains('viewBox="0 0 100 50"'),
+      );
       expect(client.requests.single.systemInstruction, AiPrompts.textSystem);
       expect(
         client.requests.single.systemInstruction,

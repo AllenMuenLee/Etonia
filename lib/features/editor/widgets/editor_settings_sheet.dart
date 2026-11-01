@@ -2,6 +2,7 @@
 import 'package:flutter/material.dart';
 
 import '../../../app/theme/app_tokens.dart';
+import '../../../shared/motion/motion_memory.dart';
 import '../../../app/theme/app_icons.dart';
 import '../../../shared/widgets/app_controls.dart';
 import '../ai/ai_assistant_controller.dart';
@@ -19,7 +20,11 @@ Future<void> showEditorSettings(
     barrierDismissible: true,
     barrierLabel: 'Close settings',
     barrierColor: AppColors.of(context).shadow.withValues(alpha: 0.12),
-    transitionDuration: AppMotion.resolve(context, AppMotion.snappy.duration),
+    transitionDuration: AppMotion.resolvePaced(
+      context,
+      AppMotion.snappy.duration,
+      MotionMemory.instance.recall(('popover', 'editor-settings')),
+    ),
     pageBuilder:
         (
           BuildContext context,

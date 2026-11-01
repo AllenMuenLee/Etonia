@@ -10,6 +10,7 @@ import 'package:speech_to_text/speech_to_text.dart';
 import '../../../shared/widgets/processing.dart';
 import '../../../shared/widgets/etonia_mark.dart';
 import '../../../app/theme/app_tokens.dart';
+import '../../../shared/motion/motion_memory.dart';
 import '../../../app/theme/app_icons.dart';
 import '../../../shared/widgets/app_controls.dart';
 import '../ai/ai_assistant_controller.dart';
@@ -43,15 +44,15 @@ class AiAssistantPanel extends StatefulWidget {
   static const String title = 'AI assistant';
   static const String emptyState =
       'Choose a quick action or ask a question about the selected ink.';
-  static const String composerHint = 'Ask about the selected ink';
+  static const String composerHint = 'Ask a question';
   static const String handwritingCalibrationNotice =
       'Choose a handwriting for AI notes, or make your own.';
 
   /// Shown in place of the selection when AI mode is on with nothing chosen
   /// yet.
   static const String noContextPrompt =
-      'Circle a spot on the note to ask about it, or write your question '
-      'on the page.';
+      'Ask anything, and notes go in blank space on this page. Or circle a '
+      'spot on the note to ask about it.';
   static const String notConfigured =
       'AI is not set up for this model. Add its key to dart_defines.json '
       '(${AiApiConfig.environmentKey}, ${AiApiConfig.claudeEnvironmentKey}, '
@@ -350,7 +351,8 @@ class _AiAssistantPanelState extends State<AiAssistantPanel> {
                               horizontal: AppSpacing.md - 2,
                             ),
                           ),
-                          onPressed: canSend
+                          // Each acts on chosen ink.
+                          onPressed: canSend && controller.hasSelection
                               ? () => controller.sendQuickAction(action)
                               : null,
                           child: Text(action.label),
@@ -782,21 +784,8 @@ class AiModelSelector extends StatelessWidget {
   static bool _alwaysUnlimited(AiModelId model) =>
       model == AiModelId.haiku || model == AiModelId.luna;
 
-  /// What the plan gives of [model], in a word or two; null when there is
-  /// nothing to say.
-  static String? badgeFor(AiModelId model, AiModelAccess? access) {
-    if (_alwaysUnlimited(model)) {
-      return 'Unlimited';
-    }
-    return switch (access) {
-      null => null,
-      AiModelAccess.unlimited => 'Unlimited',
-      AiModelAccess.metered => 'Credits',
-      AiModelAccess.outOfCredits => 'No credits',
-      AiModelAccess.locked => 'Pro',
-      AiModelAccess.noPlan => 'Plan',
-    };
-  }
+  /// Relative token-credit consumption shown beside [model].
+  static String badgeFor(AiModelId model) => 'x${model.tokenMultiplier}';
 
   /// Whether [model] shows a lock: the plan does not include it.
   static bool isLocked(AiModelId model, AiModelAccess? access) {
@@ -821,7 +810,10 @@ class AiModelSelector extends StatelessWidget {
     final AiModelId? selected = controller.selectedModel;
     final String label = selected?.label ?? controller.modelLabel;
     return PopupMenuButton<AiModelId>(
-      popUpAnimationStyle: AppMotion.popupStyle,
+      popUpAnimationStyle: AppMotion.pacedPopupStyle(
+        MotionMemory.instance.peek(('popup', 'ai-model')),
+      ),
+      onOpened: () => MotionMemory.instance.remember(('popup', 'ai-model')),
       key: const ValueKey<String>('ai-model-selector'),
       tooltip: 'Choose model',
       initialValue: selected,
@@ -913,7 +905,7 @@ class _ModelOption extends StatelessWidget {
   Widget build(BuildContext context) {
     final AppColors colors = AppColors.of(context);
     final TextTheme text = Theme.of(context).textTheme;
-    final String? badge = AiModelSelector.badgeFor(model, access);
+    final String badge = AiModelSelector.badgeFor(model);
     final bool locked = AiModelSelector.isLocked(model, access);
     return Row(
       children: <Widget>[
@@ -944,38 +936,37 @@ class _ModelOption extends StatelessWidget {
             ],
           ),
         ),
-        if (badge != null)
-          DecoratedBox(
-            decoration: ShapeDecoration(
-              shape: const StadiumBorder(),
-              color: colors.selected,
+        DecoratedBox(
+          decoration: ShapeDecoration(
+            shape: const StadiumBorder(),
+            color: colors.selected,
+          ),
+          child: Padding(
+            padding: const EdgeInsets.symmetric(
+              horizontal: AppSpacing.xs,
+              vertical: 2,
             ),
-            child: Padding(
-              padding: const EdgeInsets.symmetric(
-                horizontal: AppSpacing.xs,
-                vertical: 2,
-              ),
-              child: Row(
-                mainAxisSize: MainAxisSize.min,
-                children: <Widget>[
-                  if (locked) ...<Widget>[
-                    Icon(
-                      AppIcons.lock,
-                      key: ValueKey<String>('ai-model-lock-${model.name}'),
-                      size: 12,
-                      color: colors.textPrimary,
-                      semanticLabel: 'Locked',
-                    ),
-                    const SizedBox(width: 2),
-                  ],
-                  Text(
-                    badge,
-                    style: text.labelSmall?.copyWith(color: colors.textPrimary),
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: <Widget>[
+                if (locked) ...<Widget>[
+                  Icon(
+                    AppIcons.lock,
+                    key: ValueKey<String>('ai-model-lock-${model.name}'),
+                    size: 12,
+                    color: colors.textPrimary,
+                    semanticLabel: 'Locked',
                   ),
+                  const SizedBox(width: 2),
                 ],
-              ),
+                Text(
+                  badge,
+                  style: text.labelSmall?.copyWith(color: colors.textPrimary),
+                ),
+              ],
             ),
           ),
+        ),
       ],
     );
   }

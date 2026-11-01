@@ -18,6 +18,7 @@ import 'package:greatnote/features/editor/page/page_setup.dart';
 import 'package:greatnote/features/editor/widgets/page_controls.dart';
 import 'package:greatnote/features/editor/document_io/document_platform.dart';
 import 'package:greatnote/features/library/cloud/google_drive_backup_service.dart';
+import 'package:greatnote/features/library/library_dialogs.dart';
 import 'package:greatnote/features/library/library_models.dart';
 import 'package:greatnote/features/library/library_screen.dart';
 import 'package:greatnote/features/library/note_content.dart';
@@ -63,6 +64,24 @@ class _RefreshProbeRepository extends InMemoryNoteRepository {
   @override
   Future<Map<String, int>> itemCounts() =>
       _probe<Map<String, int>>('counts', super.itemCounts);
+}
+
+/// Holds every folder read back while [held] is not completed.
+class _HeldReadsRepository extends InMemoryNoteRepository {
+  _HeldReadsRepository() : super(newId: _ids());
+
+  static String Function() _ids() {
+    int ids = 0;
+    return () => 'held${ids++}';
+  }
+
+  Completer<void>? held;
+
+  @override
+  Future<FolderListing> list(String? folderId) async {
+    await held?.future;
+    return super.list(folderId);
+  }
 }
 
 class _SearchProbeRepository extends InMemoryNoteRepository {
@@ -198,53 +217,49 @@ void main() {
     expect(tester.getSize(card).width, greaterThan(width * 1.3));
   });
 
-  testWidgets(
-    'library refresh starts independent reads together',
-    (WidgetTester tester) async {
-      final _RefreshProbeRepository repository = _RefreshProbeRepository();
-      addTearDown(() {
-        if (!repository.gate.isCompleted) repository.gate.complete();
-        repository.dispose();
-      });
+  testWidgets('library refresh starts independent reads together', (
+    WidgetTester tester,
+  ) async {
+    final _RefreshProbeRepository repository = _RefreshProbeRepository();
+    addTearDown(() {
+      if (!repository.gate.isCompleted) repository.gate.complete();
+      repository.dispose();
+    });
 
-      await tester.pumpWidget(
-        GreatnoteApp(
-          home: LibraryScreen(repository: repository, clock: () => _now),
-        ),
-      );
-      await tester.pump();
+    await tester.pumpWidget(
+      GreatnoteApp(
+        home: LibraryScreen(repository: repository, clock: () => _now),
+      ),
+    );
+    await tester.pump();
 
-      expect(
-        repository.started,
-        containsAll(<String>{'trash', 'list', 'path', 'folders', 'counts'}),
-      );
-      repository.gate.complete();
-      await tester.pumpAndSettle();
-    },
-    experimentalLeakTesting: LeakTesting.settings.withTrackedAll(),
-  );
+    expect(
+      repository.started,
+      containsAll(<String>{'trash', 'list', 'path', 'folders', 'counts'}),
+    );
+    repository.gate.complete();
+    await tester.pumpAndSettle();
+  }, experimentalLeakTesting: LeakTesting.settings.withTrackedAll());
 
-  testWidgets(
-    'library search coalesces rapid typing',
-    (WidgetTester tester) async {
-      final _SearchProbeRepository repository = _SearchProbeRepository();
-      addTearDown(repository.dispose);
-      await _pumpLibrary(tester, repository);
+  testWidgets('library search coalesces rapid typing', (
+    WidgetTester tester,
+  ) async {
+    final _SearchProbeRepository repository = _SearchProbeRepository();
+    addTearDown(repository.dispose);
+    await _pumpLibrary(tester, repository);
 
-      final Finder search = find.byType(TextField);
-      await tester.enterText(search, 'a');
-      await tester.enterText(search, 'ab');
-      await tester.enterText(search, 'abc');
-      expect(repository.searches, 0);
+    final Finder search = find.byType(TextField);
+    await tester.enterText(search, 'a');
+    await tester.enterText(search, 'ab');
+    await tester.enterText(search, 'abc');
+    expect(repository.searches, 0);
 
-      await tester.pump(const Duration(milliseconds: 119));
-      expect(repository.searches, 0);
-      await tester.pump(const Duration(milliseconds: 1));
-      expect(repository.searches, 1);
-      await tester.pumpAndSettle();
-    },
-    experimentalLeakTesting: LeakTesting.settings.withTrackedAll(),
-  );
+    await tester.pump(const Duration(milliseconds: 119));
+    expect(repository.searches, 0);
+    await tester.pump(const Duration(milliseconds: 1));
+    expect(repository.searches, 1);
+    await tester.pumpAndSettle();
+  }, experimentalLeakTesting: LeakTesting.settings.withTrackedAll());
 
   testWidgets('notes open side by side in tabs', (WidgetTester tester) async {
     final InMemoryNoteRepository repository = _repository();
@@ -356,7 +371,7 @@ void main() {
 
     await tester.tap(find.byTooltip('New note'));
     await tester.pumpAndSettle();
-    await tester.tap(find.text('Blank note'));
+    await tester.tap(find.text('Template…'));
     await tester.pumpAndSettle();
     // Name and paper are configured together before the editor opens.
     expect(find.text('File name'), findsOneWidget);
@@ -402,7 +417,7 @@ void main() {
 
     await tester.tap(find.byTooltip('New note'));
     await tester.pumpAndSettle();
-    await tester.tap(find.text('Blank note'));
+    await tester.tap(find.text('Template…'));
     await tester.pumpAndSettle();
     await tester.tap(find.byKey(const ValueKey<String>('template-paper-grid')));
     await tester.tap(
@@ -426,7 +441,7 @@ void main() {
     await tester.pumpAndSettle();
     await tester.tap(find.byTooltip('New note'));
     await tester.pumpAndSettle();
-    await tester.tap(find.text('Blank note'));
+    await tester.tap(find.text('Template…'));
     await tester.pumpAndSettle();
     expect(
       tester.getSemantics(
@@ -444,7 +459,7 @@ void main() {
 
     await tester.tap(find.byTooltip('New note'));
     await tester.pumpAndSettle();
-    await tester.tap(find.text('Blank note'));
+    await tester.tap(find.text('Template…'));
     await tester.pumpAndSettle();
     await tester.tap(find.text('Cancel'));
     await tester.pumpAndSettle();
@@ -621,7 +636,7 @@ void main() {
     expect((await repository.list(null)).notes.single.title, 'Final essay');
   });
 
-  testWidgets('New note offers a blank note and a PDF import', (
+  testWidgets('New note offers a PDF import, a template, and quick start', (
     WidgetTester tester,
   ) async {
     await _pumpLibrary(tester, _repository());
@@ -631,16 +646,100 @@ void main() {
 
     await tester.tap(find.byTooltip('New note'));
     await tester.pumpAndSettle();
-    expect(find.text('Blank note'), findsOneWidget);
-    expect(find.text('Import PDF'), findsOneWidget);
     expect(find.text('Import editable PDF'), findsNothing);
+    // Top to bottom, with the quickest last, nearest the button.
+    final List<double> rows = <String>['Import PDF', 'Template…', 'Quick start']
+        .map(
+          (String label) =>
+              tester.getCenter(find.widgetWithText(MenuItemButton, label)).dy,
+        )
+        .toList();
+    expect(rows[0], lessThan(rows[1]));
+    expect(rows[1], lessThan(rows[2]));
     final Finder menu = find
         .ancestor(
-          of: find.widgetWithText(MenuItemButton, 'Blank note'),
+          of: find.widgetWithText(MenuItemButton, 'Quick start'),
           matching: find.byType(Material),
         )
         .first;
     expect(tester.getRect(menu).right, moreOrLessEquals(button.right));
+  });
+
+  testWidgets('the template dialog moves with the keyboard, frame by frame', (
+    WidgetTester tester,
+  ) async {
+    addTearDown(tester.view.resetViewInsets);
+    await _pumpLibrary(tester, _repository());
+    await tester.tap(find.byTooltip('New note'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Template…'));
+    await tester.pumpAndSettle();
+    final Finder dialog = find.byType(AlertDialog);
+    final double resting = tester.getRect(dialog).bottom;
+    // Beneath the dialog, it would rise with the library were it resized.
+    final Rect button = tester.getRect(find.byTooltip('New note'));
+
+    // A keyboard partway up its slide: the dialog keeps clear of it on the
+    // same frame, not easing after it, and the library beneath ignores it.
+    final double keyboard = 120 * tester.view.devicePixelRatio;
+    tester.view.viewInsets = FakeViewPadding(bottom: keyboard);
+    await tester.pump();
+    final double raised = tester.getRect(dialog).bottom;
+    expect(raised, lessThan(resting));
+    await tester.pumpAndSettle();
+    expect(tester.getRect(dialog).bottom, raised);
+    expect(tester.getRect(find.byTooltip('New note')), button);
+  });
+
+  testWidgets('quick start makes a blank A4 note, then the last template', (
+    WidgetTester tester,
+  ) async {
+    final InMemoryNoteRepository repository = _repository();
+    await _pumpLibrary(tester, repository);
+
+    final Set<String> seen = <String>{};
+    Future<PageSetup> quickStart() async {
+      await tester.tap(find.byTooltip('New note'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Quick start'));
+      await tester.pumpAndSettle();
+      // Straight into the editor, with nothing asked.
+      expect(find.text('File name'), findsNothing);
+      expect(find.byType(EditorScreen), findsOneWidget);
+      await tester.tap(find.byTooltip('Back to library'));
+      await tester.pumpAndSettle();
+      final NoteEntry newest = (await repository.list(
+        null,
+      )).notes.singleWhere((NoteEntry note) => !seen.contains(note.id));
+      seen.addAll((await repository.list(null)).notes.map((n) => n.id));
+      expect(newest.title, startsWith(untitledNoteName));
+      return (await repository.loadNote(newest.id)).pages.single.setup;
+    }
+
+    expect(await quickStart(), const PageSetup());
+
+    await tester.tap(find.byTooltip('New note'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Template…'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const ValueKey<String>('template-paper-grid')));
+    await tester.tap(
+      find.byKey(const ValueKey<String>('template-size-letterLandscape')),
+    );
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Create'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byTooltip('Back to library'));
+    await tester.pumpAndSettle();
+    seen.addAll((await repository.list(null)).notes.map((n) => n.id));
+
+    expect(
+      await quickStart(),
+      const PageSetup(
+        size: PageSize.letterLandscape,
+        background: PageBackground.grid,
+      ),
+    );
   });
 
   group('dragging', () {
@@ -955,6 +1054,39 @@ void main() {
     await tester.pumpAndSettle();
     expect(_items(find.text('Physics')), findsOneWidget);
     expect(find.byTooltip('Up one folder'), findsNothing);
+  });
+
+  testWidgets('leaving a note goes back to the folder it was opened from', (
+    WidgetTester tester,
+  ) async {
+    final InMemoryNoteRepository repository = _repository();
+    final Folder outer = await repository.createFolder('Physics');
+    final Folder lab = await repository.createFolder('Lab', parentId: outer.id);
+    await repository.createNote(title: 'Optics', folderId: lab.id);
+    await _pumpLibrary(tester, repository);
+
+    await tester.tap(_items(find.text('Physics')));
+    await tester.pumpAndSettle();
+    await tester.tap(_items(find.text('Lab')));
+    await tester.pumpAndSettle();
+    await tester.tap(_items(find.text('Optics')));
+    await tester.pumpAndSettle();
+    expect(find.byType(EditorScreen), findsOneWidget);
+
+    await tester.tap(find.byTooltip('Back to library'));
+    await tester.pumpAndSettle();
+    expect(find.byType(EditorScreen), findsNothing);
+    expect(_items(find.text('Optics')), findsOneWidget);
+    expect(find.widgetWithText(TextButton, 'Physics'), findsOneWidget);
+
+    // The system back gesture leaves the same way.
+    await tester.tap(_items(find.text('Optics')));
+    await tester.pumpAndSettle();
+    await tester.binding.handlePopRoute();
+    await tester.pumpAndSettle();
+    expect(find.byType(EditorScreen), findsNothing);
+    expect(_items(find.text('Optics')), findsOneWidget);
+    expect(find.widgetWithText(TextButton, 'Physics'), findsOneWidget);
   });
 
   testWidgets('new folder asks for a name and a color', (
@@ -1372,5 +1504,60 @@ void main() {
 
     expect(find.text('Sign in to Etonia'), findsNothing);
     expect(find.text("Choose the AI's handwriting"), findsOneWidget);
+  });
+  group('folders visited before', () {
+    testWidgets('come back at once from what they held', (
+      WidgetTester tester,
+    ) async {
+      final _HeldReadsRepository repository = _HeldReadsRepository();
+      addTearDown(repository.dispose);
+      final Folder archive = await repository.createFolder('Archive');
+      await repository.createNote(title: 'Old', folderId: archive.id);
+      await _pumpLibrary(tester, repository);
+
+      // The first visit waits for the folder to be read.
+      repository.held = Completer<void>();
+      await tester.tap(_items(find.text('Archive')));
+      await tester.pumpAndSettle();
+      expect(_items(find.text('Old')), findsNothing);
+      repository.held!.complete();
+      await tester.pumpAndSettle();
+      expect(_items(find.text('Old')), findsOneWidget);
+      repository.held = null;
+      await tester.tap(find.byKey(const ValueKey<String>('sidebar-library')));
+      await tester.pumpAndSettle();
+
+      // The second does not: it is shown from what it held.
+      repository.held = Completer<void>();
+      await tester.tap(_items(find.text('Archive')));
+      await tester.pumpAndSettle();
+      expect(_items(find.text('Old')), findsOneWidget);
+      repository.held!.complete();
+      await tester.pumpAndSettle();
+      expect(_items(find.text('Old')), findsOneWidget);
+    });
+
+    testWidgets('show what changed in them since', (WidgetTester tester) async {
+      final _HeldReadsRepository repository = _HeldReadsRepository();
+      addTearDown(repository.dispose);
+      final Folder archive = await repository.createFolder('Archive');
+      await repository.createNote(title: 'Old', folderId: archive.id);
+      final NoteEntry fresh = await repository.createNote(title: 'Fresh');
+      await _pumpLibrary(tester, repository);
+      await tester.tap(_items(find.text('Archive')));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const ValueKey<String>('sidebar-library')));
+      await tester.pumpAndSettle();
+
+      await repository.moveNote(fresh.id, archive.id);
+      await tester.pumpAndSettle();
+      repository.held = Completer<void>();
+      await tester.tap(_items(find.text('Archive')));
+      await tester.pumpAndSettle();
+      expect(_items(find.text('Fresh')), findsOneWidget);
+      expect(_items(find.text('Old')), findsOneWidget);
+      repository.held!.complete();
+      await tester.pumpAndSettle();
+    });
   });
 }

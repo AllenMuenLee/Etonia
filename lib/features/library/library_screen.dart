@@ -12,6 +12,7 @@ import '../../app/theme/app_tokens.dart';
 import '../../app/theme/app_icons.dart';
 import '../../shared/layout/breakpoints.dart';
 import '../../shared/memory/memory_pressure.dart';
+import '../../shared/motion/motion_memory.dart';
 import '../editor/ai/ai_client.dart';
 import '../editor/ai/ai_config.dart';
 import '../editor/handwriting/handwriting_calibration.dart';
@@ -393,6 +394,31 @@ class _LibraryScreenState extends State<LibraryScreen> {
   /// is a new scene, carried in as the last one goes out.
   int _scene = 0;
   int _sceneDirection = 0;
+
+  /// Whether the scene shown was already in [_listings] as it was opened:
+  /// a folder visited before arrives quickly, a new one slowly and smoothly.
+  MotionPace _scenePace = MotionPace.standard;
+
+  /// What each folder visited held, as last read, by [_listingKey], so a
+  /// folder opened again is shown at once. There is no limit to how many
+  /// are kept: they are let go only when the system runs low on memory.
+  /// Search results are not kept.
+  final Map<Object?, FolderListing> _listings = <Object?, FolderListing>{};
+
+  /// Recently Deleted's key in [_listings]; a folder's is its id, and the
+  /// library's null.
+  static const Object _trashListing = #recentlyDeleted;
+  static Object? _listingKey(String? folderId, {required bool trash}) =>
+      trash ? _trashListing : folderId;
+
+  /// Moves on with each change to the library, so an older re-read of the
+  /// folders kept does not overwrite a newer one.
+  int _listingsEpoch = 0;
+
+  /// How fast the note opening now zooms in, by whether it has been opened
+  /// before; its editor holds its heavy content back as long.
+  final Map<String, MotionPace> _notePaces = <String, MotionPace>{};
+  MotionPace _zoomPace = MotionPace.standard;
   StreamSubscription<PickedDocument>? _sharedDocumentsSubscription;
   final List<PickedDocument> _pendingSharedImports = <PickedDocument>[];
   bool _importingShared = false;
@@ -407,6 +433,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
   static const Duration _searchDelay = Duration(milliseconds: 120);
 
   final TextEditingController _search = TextEditingController();
+  final FocusNode _searchFocus = FocusNode(debugLabel: 'Library search');
   Timer? _searchDebounce;
 
   /// Each note's first page, drawn once.
@@ -434,7 +461,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
   final Set<String> _expanded = <String>{};
 
   /// The template the last new note was made with, offered first next
-  /// time.
+  /// time and used as is by Quick start. Blank A4 until one is chosen.
   PageSetup _template = const PageSetup();
 
   final GlobalKey<ScaffoldState> _scaffold = GlobalKey<ScaffoldState>();
@@ -500,7 +527,18 @@ class _LibraryScreenState extends State<LibraryScreen> {
 
   /// The system is low on memory: only the thumbnails likely on screen
   /// are kept.
-  void _releaseMemory() => _thumbnails.releaseMemory();
+  void _releaseMemory() {
+    _thumbnails.releaseMemory();
+    // Read again when next opened, at a first visit's pace.
+    final Object? shownKey = _shownListingKey;
+    final FolderListing? shown = _listings[shownKey];
+    _listings.clear();
+    if (shown != null) _listings[shownKey] = shown;
+  }
+
+  /// The key in [_listings] of what the library shows now, if it is kept.
+  Object? get _shownListingKey =>
+      _listingKey(_folderId, trash: _inTrash && _query.isEmpty);
 
   /// While the app is out of sight, the pictures of the notes just saved
   /// are drawn and stored even with a note in front: no one is watching,
@@ -609,6 +647,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
       );
       _handwritingProfileStore = handwritingProfileStoreFor(widget.repository);
       _folderId = null;
+      _listings.clear();
       _reload();
     }
     if (oldWidget.sharedDocuments != widget.sharedDocuments) {
@@ -628,6 +667,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
     _repository.removeListener(_onRepositoryChanged);
     _hiddenReload?.cancel();
     _search.dispose();
+    _searchFocus.dispose();
     _thumbnails.dispose();
     _stylusOnly.dispose();
     _penSettings.dispose();
@@ -645,6 +685,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
   Timer? _hiddenReload;
 
   void _onRepositoryChanged() {
+    unawaited(_refreshListings());
     if (!_tabsShowing) {
       _reload();
       return;
@@ -701,15 +742,12 @@ class _LibraryScreenState extends State<LibraryScreen> {
     if (!mounted || load != _loads) {
       return;
     }
+    if (query.isEmpty) {
+      _listings[_listingKey(_folderId, trash: inTrash)] = listing;
+    }
     setState(() {
       _trashCount = trash.length;
-      _listing = FolderListing(
-        folders: List<Folder>.of(listing.folders)..sort(_sort.compareFolders),
-        // The most recently deleted first, as they were.
-        notes: inTrash
-            ? listing.notes
-            : (List<NoteEntry>.of(listing.notes)..sort(_sort.compareNotes)),
-      );
+      _listing = _sorted(listing, trash: inTrash);
       _path = path;
       _folders = <String, Folder>{
         for (final Folder folder in folders) folder.id: folder,
@@ -739,6 +777,67 @@ class _LibraryScreenState extends State<LibraryScreen> {
     }
   }
 
+  /// [listing] in the order chosen; Recently Deleted keeps the most
+  /// recently deleted first, as they were.
+  FolderListing _sorted(FolderListing listing, {required bool trash}) =>
+      FolderListing(
+        folders: List<Folder>.of(listing.folders)..sort(_sort.compareFolders),
+        notes: trash
+            ? listing.notes
+            : (List<NoteEntry>.of(listing.notes)..sort(_sort.compareNotes)),
+      );
+
+  /// The folders from the library down to [id], from what is already known.
+  List<Folder> _knownPathTo(String? id) {
+    final List<Folder> path = <Folder>[];
+    for (
+      Folder? at = id == null ? null : _folders[id];
+      at != null && path.length <= _folders.length;
+      at = at.parentId == null ? null : _folders[at.parentId]
+    ) {
+      path.insert(0, at);
+    }
+    return path;
+  }
+
+  /// The library changed: every folder kept is read again, so the next
+  /// visit to one shows it as it is now. The one shown is read by
+  /// [_reload]. A folder that no longer exists is let go.
+  Future<void> _refreshListings() async {
+    final int epoch = ++_listingsEpoch;
+    final Object? shown = _shownListingKey;
+    final List<Object?> keys = <Object?>[
+      for (final Object? key in _listings.keys)
+        if (key != shown) key,
+    ];
+    if (keys.isEmpty) return;
+    final (List<Folder> folders, List<FolderListing> listings) = await (
+      _repository.allFolders(),
+      Future.wait(<Future<FolderListing>>[
+        for (final Object? key in keys)
+          key == _trashListing
+              ? _repository.trash().then(
+                  (List<NoteEntry> trash) =>
+                      FolderListing(folders: const <Folder>[], notes: trash),
+                )
+              : _repository.list(key as String?),
+      ]),
+    ).wait;
+    if (!mounted || epoch != _listingsEpoch) return;
+    final Set<String> ids = <String>{
+      for (final Folder folder in folders) folder.id,
+    };
+    for (int i = 0; i < keys.length; i++) {
+      final Object? key = keys[i];
+      if (!_listings.containsKey(key)) continue;
+      if (key is String && !ids.contains(key)) {
+        _listings.remove(key);
+      } else {
+        _listings[key] = listings[i];
+      }
+    }
+  }
+
   void _scheduleSearchReload() {
     _searchDebounce?.cancel();
     _searchDebounce = Timer(_searchDelay, _reload);
@@ -751,19 +850,27 @@ class _LibraryScreenState extends State<LibraryScreen> {
     // The pictures still on their way for the folder left are let go.
     _thumbnails.cancelPending();
     final int direction = _directionTo(id);
+    // A folder visited before is shown at once from what it held, quickly,
+    // and read again behind it; a new one slowly, as it is read.
+    final FolderListing? kept = _listings[_listingKey(id, trash: false)];
     setState(() {
       _scene++;
       _sceneDirection = direction;
+      _scenePace = kept == null ? MotionPace.first : MotionPace.revisit;
       _inTrash = false;
       _clearSelection();
       _folderId = id;
-      _listing = null;
+      _listing = kept == null ? null : _sorted(kept, trash: false);
+      if (kept != null) _path = _knownPathTo(id);
       // What was open on the way stays open in the sidebar.
       for (String? at = id; at != null; at = _folders[at]?.parentId) {
         _expanded.add(at);
       }
     });
     _search.clear();
+    if (kept != null && !_tabsShowing) {
+      _thumbnails.prefetch(_listing!.notes, _NoteThumbnail.styleOf(context));
+    }
     _reload();
   }
 
@@ -796,6 +903,11 @@ class _LibraryScreenState extends State<LibraryScreen> {
   Future<void> _openNote(NoteEntry note) async {
     // The note zooms out of its card, starting on this frame.
     _zoomRect = _artRect(note.id);
+    // A note opened before zooms in quickly, a new one slowly and smoothly.
+    _zoomPace = _notePaces[note.id] = MotionMemory.instance.recall((
+      'note',
+      note.id,
+    ));
     // Nothing the library was still drawing holds up the note.
     _thumbnails.pause();
     _openNotes.open(note);
@@ -856,6 +968,10 @@ class _LibraryScreenState extends State<LibraryScreen> {
     return NoteEditorPage(
       repository: _repository,
       note: note,
+      entrance: AppMotion.paced(
+        noteEntrance(),
+        _notePaces.remove(note.id) ?? MotionPace.standard,
+      ),
       preview: _thumbnails.peek(note, Theme.of(context).brightness),
       aiClient: widget.aiClient,
       subscription: _subscription,
@@ -887,11 +1003,18 @@ class _LibraryScreenState extends State<LibraryScreen> {
       return;
     }
     _template = draft.setup;
+    await _startNote(draft.name, draft.setup);
+  }
+
+  /// A new note on the last template, with no questions asked.
+  Future<void> _quickNote() => _startNote(untitledNoteName, _template);
+
+  Future<void> _startNote(String title, PageSetup setup) async {
     // The note opens on this frame; the disk catches up behind the zoom.
     final (:NoteEntry note, :Future<void> saved) = _repository.startNote(
-      title: draft.name,
+      title: title,
       folderId: _folderId,
-      setup: draft.setup,
+      setup: setup,
     );
     unawaited(_openNote(note));
     try {
@@ -1171,12 +1294,14 @@ class _LibraryScreenState extends State<LibraryScreen> {
   }
 
   void _openTrash() {
+    final FolderListing? kept = _listings[_trashListing];
     setState(() {
       _scene++;
       _sceneDirection = 1;
+      _scenePace = kept == null ? MotionPace.first : MotionPace.revisit;
       _clearSelection();
       _inTrash = true;
-      _listing = null;
+      _listing = kept == null ? null : _sorted(kept, trash: true);
     });
     _search.clear();
     _reload();
@@ -1469,15 +1594,29 @@ class _LibraryScreenState extends State<LibraryScreen> {
         : _libraryInFront = _buildLibrary(context);
     // Keep the bounded tab host mounted when browsing the library. Popping
     // its route used to destroy every editor before opening a second note.
+    // One scope for both: with two, one back press both left the note and,
+    // the library then in front, went up out of its folder.
     return PopScope(
-      canPop: !_tabsShowing,
+      canPop: !_tabsShowing && _folderId == null && !_selecting && !_inTrash,
       onPopInvokedWithResult: (bool didPop, Object? _) {
-        if (!didPop && _tabsShowing) _showLibrary();
+        if (didPop) {
+          return;
+        }
+        if (_tabsShowing) {
+          _showLibrary();
+        } else if (_selecting) {
+          _stopSelecting();
+        } else if (_inTrash) {
+          _openFolder(null);
+        } else {
+          _openFolder(_path.length > 1 ? _path[_path.length - 2].id : null);
+        }
       },
       child: _LibraryEditorTransition(
         key: _transition,
         showEditor: _tabsShowing,
         origin: _zoomRect,
+        pace: _zoomPace,
         onLibraryShown: _onLibraryShown,
         library: library,
         editor: NoteTabsPage(
@@ -1548,6 +1687,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
           : null,
       onOpenSidebar: drawer ? () => _scaffold.currentState?.openDrawer() : null,
       search: _search,
+      searchFocus: _searchFocus,
       sort: _sort,
       grid: _grid,
       onOpenFolder: _openFolder,
@@ -1571,20 +1711,14 @@ class _LibraryScreenState extends State<LibraryScreen> {
       onMoveSelected: _moveSelected,
       onDeleteSelected: _deleteSelected,
     );
-    return PopScope(
-      canPop: _tabsShowing || (_folderId == null && !_selecting && !_inTrash),
-      onPopInvokedWithResult: (bool didPop, Object? _) {
-        if (didPop || _tabsShowing) {
-          return;
-        }
-        if (_selecting) {
-          _stopSelecting();
-        } else if (_inTrash) {
-          _openFolder(null);
-        } else {
-          _openFolder(_path.length > 1 ? _path[_path.length - 2].id : null);
-        }
-      },
+    // Back is handled in [build], for the note and the library alike.
+    // Only search here wants the keyboard. Raised for anything else, such
+    // as a dialog's field, the library would be laid out again on every
+    // frame of its slide, under the dialog, and the slide would stutter.
+    return ListenableBuilder(
+      listenable: _searchFocus,
+      builder: (BuildContext context, Widget? scaffold) =>
+          IgnoreKeyboard(ignoring: !_searchFocus.hasFocus, child: scaffold!),
       child: Scaffold(
         key: _scaffold,
         backgroundColor: Colors.transparent,
@@ -1604,7 +1738,11 @@ class _LibraryScreenState extends State<LibraryScreen> {
         appBar: drawer ? bar : null,
         floatingActionButton: _selecting || _showingTrash
             ? null
-            : _NewNoteButton(onNewNote: _newNote, onImportPdf: _importPdf),
+            : _NewNoteButton(
+                onQuickNote: _quickNote,
+                onNewNote: _newNote,
+                onImportPdf: _importPdf,
+              ),
         body: drawer
             ? SafeArea(top: false, child: _buildBody(context, compact))
             // Tab goes through the bar first, then the folders, then the
@@ -1668,9 +1806,11 @@ class _LibraryScreenState extends State<LibraryScreen> {
     return SceneCrossfade(
       scope: _scene,
       direction: _sceneDirection,
+      pace: _scenePace,
       child: LoadingReveal(
         timing: LoadTimings.library,
         semanticsLabel: 'Loading',
+        memoryKey: ('folder', _shownListingKey),
         child: _listing == null
             ? null
             : _buildItems(context, compact, _listing!),
@@ -1845,9 +1985,16 @@ class _LibraryEditorTransition extends StatefulWidget {
     required this.library,
     required this.editor,
     this.onLibraryShown,
+    this.pace = MotionPace.standard,
   });
 
   final bool showEditor;
+
+  /// How the note comes in: a new one zooms out of its card slowly and
+  /// smoothly; one opened before only fades in slightly over the library
+  /// ([AppMotion.glance]). Going back, the library is already there, so
+  /// the note fades away the same way.
+  final MotionPace pace;
 
   /// Called once the library is back at rest, the note gone from over it.
   final VoidCallback? onLibraryShown;
@@ -1874,6 +2021,10 @@ class _LibraryEditorTransitionState extends State<_LibraryEditorTransition>
       AnimationController(vsync: this, value: widget.showEditor ? 1 : 0)
         ..addStatusListener(_settled)
         ..addListener(_syncSnapshots);
+
+  /// Whether the note only fades in or out where it is, with no zoom: it
+  /// was opened before, or the library it goes back to is already there.
+  bool _glance = false;
 
   /// How far the note must have come for it to be drawn live again. It builds
   /// its editor about now, and a picture of that, redrawn at full size on
@@ -1933,13 +2084,24 @@ class _LibraryEditorTransitionState extends State<_LibraryEditorTransition>
           ? _local(widget.origin)
           : _local(widget.origin) ?? _origin;
       final double target = widget.showEditor ? 1 : 0;
+      _glance = !AppMotion.travels(
+        widget.showEditor ? widget.pace : MotionPace.revisit,
+      );
       if (MediaQuery.disableAnimationsOf(context)) {
         _progress.animateTo(target, duration: AppMotion.reduced);
+      } else if (_glance) {
+        _progress.animateTo(
+          target,
+          duration: widget.showEditor ? AppMotion.glance : AppMotion.fadeOut,
+          curve: widget.showEditor
+              ? AppMotion.glanceCurve
+              : AppMotion.fadeOutCurve,
+        );
       } else {
         // Seeded with the velocity it had, so reversing mid-flight is smooth.
         _progress.animateWith(
           SpringSimulation(
-            AppMotion.smooth,
+            AppMotion.pacedSpring(AppMotion.smooth, widget.pace),
             _progress.value,
             target,
             _progress.velocity,
@@ -2005,7 +2167,7 @@ class _LibraryEditorTransitionState extends State<_LibraryEditorTransition>
               child: ExcludeFocus(
                 excluding: showEditor,
                 child: ScaleTransition(
-                  scale: reduced
+                  scale: reduced || _glance
                       ? const AlwaysStoppedAnimation<double>(1)
                       : _libraryScale,
                   child: TickerMode(
@@ -2056,7 +2218,11 @@ class _LibraryEditorTransitionState extends State<_LibraryEditorTransition>
                             child: child,
                           );
                         }
-                        final Rect start = _start(size);
+                        // A glance keeps the zoom's widgets, at rest, so
+                        // the editor below is never built anew.
+                        final Rect start = _glance
+                            ? Offset.zero & size
+                            : _start(size);
                         final double scale = ui.lerpDouble(
                           (start.width / size.width).clamp(0.05, 1.0),
                           1,
@@ -2068,7 +2234,7 @@ class _LibraryEditorTransitionState extends State<_LibraryEditorTransition>
                           t,
                         )!;
                         return FadeTransition(
-                          opacity: _editorOpacity,
+                          opacity: _glance ? _progress : _editorOpacity,
                           child: Transform(
                             transform: Matrix4.identity()
                               ..translateByDouble(center.dx, center.dy, 0, 1)
@@ -2086,7 +2252,10 @@ class _LibraryEditorTransitionState extends State<_LibraryEditorTransition>
                               // Concentric with the card at the start, square
                               // at the screen's edge.
                               borderRadius: BorderRadius.circular(
-                                ui.lerpDouble(AppRadii.large, 0, t)! / scale,
+                                _glance
+                                    ? 0
+                                    : ui.lerpDouble(AppRadii.large, 0, t)! /
+                                          scale,
                               ),
                               child: child,
                             ),
@@ -2118,6 +2287,7 @@ class _LibraryBar extends StatelessWidget implements PreferredSizeWidget {
     required this.path,
     required this.compact,
     required this.search,
+    required this.searchFocus,
     required this.sort,
     required this.grid,
     required this.onOpenFolder,
@@ -2171,6 +2341,7 @@ class _LibraryBar extends StatelessWidget implements PreferredSizeWidget {
   /// Opens the folder sidebar, where it is a drawer.
   final VoidCallback? onOpenSidebar;
   final TextEditingController search;
+  final FocusNode searchFocus;
   final LibrarySort sort;
   final bool grid;
   final ValueChanged<String?> onOpenFolder;
@@ -2248,7 +2419,10 @@ class _LibraryBar extends StatelessWidget implements PreferredSizeWidget {
   @override
   Widget build(BuildContext context) {
     final AppColors colors = AppColors.of(context);
-    final Widget field = _SearchField(controller: search);
+    final Widget field = _SearchField(
+      controller: search,
+      focusNode: searchFocus,
+    );
     return GlassMaterial(
       color: AppGlass.surface(colors),
       child: SafeArea(
@@ -2346,7 +2520,13 @@ class _LibraryBar extends StatelessWidget implements PreferredSizeWidget {
                               // On compact widths, where the bar is full,
                               // the view toggle is in this menu too.
                               PopupMenuButton<Object>(
-                                popUpAnimationStyle: AppMotion.popupStyle,
+                                popUpAnimationStyle: AppMotion.pacedPopupStyle(
+                                  MotionMemory.instance.peek(('popup', 'sort')),
+                                ),
+                                onOpened: () => MotionMemory.instance.remember((
+                                  'popup',
+                                  'sort',
+                                )),
                                 tooltip: 'Sort',
                                 icon: const Icon(AppIcons.sort),
                                 onSelected: (Object choice) {
@@ -2445,9 +2625,10 @@ class _LibraryBar extends StatelessWidget implements PreferredSizeWidget {
 }
 
 class _SearchField extends StatelessWidget {
-  const _SearchField({required this.controller});
+  const _SearchField({required this.controller, required this.focusNode});
 
   final TextEditingController controller;
+  final FocusNode focusNode;
 
   @override
   Widget build(BuildContext context) {
@@ -2459,6 +2640,7 @@ class _SearchField extends StatelessWidget {
         builder: (BuildContext context, TextEditingValue value, Widget? _) {
           return TextField(
             controller: controller,
+            focusNode: focusNode,
             textInputAction: TextInputAction.search,
             style: Theme.of(context).textTheme.bodyMedium,
             textAlignVertical: TextAlignVertical.center,
@@ -2596,11 +2778,17 @@ class _Breadcrumbs extends StatelessWidget {
 }
 
 /// The primary action, floating at the bottom: the accent color and the
-/// floating shadow, like the editor's palette. Its menu makes a blank note
-/// from a template, or imports a PDF as one.
+/// floating shadow, like the editor's palette. Its menu imports a PDF as a
+/// note, asks for a template, or starts a note straight away on the last
+/// one; the quickest choice sits nearest the button.
 class _NewNoteButton extends StatelessWidget {
-  const _NewNoteButton({required this.onNewNote, required this.onImportPdf});
+  const _NewNoteButton({
+    required this.onQuickNote,
+    required this.onNewNote,
+    required this.onImportPdf,
+  });
 
+  final VoidCallback onQuickNote;
   final VoidCallback onNewNote;
   final VoidCallback onImportPdf;
 
@@ -2629,16 +2817,23 @@ class _NewNoteButton extends StatelessWidget {
         menuChildren: <Widget>[
           reads(
             MenuItemButton(
-              leadingIcon: const Icon(AppIcons.newNote),
-              onPressed: onNewNote,
-              child: const Text('Blank note'),
+              leadingIcon: const Icon(AppIcons.pdf),
+              onPressed: onImportPdf,
+              child: const Text('Import PDF'),
             ),
           ),
           reads(
             MenuItemButton(
-              leadingIcon: const Icon(AppIcons.pdf),
-              onPressed: onImportPdf,
-              child: const Text('Import PDF'),
+              leadingIcon: const Icon(AppIcons.template),
+              onPressed: onNewNote,
+              child: const Text('Template…'),
+            ),
+          ),
+          reads(
+            MenuItemButton(
+              leadingIcon: const Icon(AppIcons.newNote),
+              onPressed: onQuickNote,
+              child: const Text('Quick start'),
             ),
           ),
         ],
@@ -3001,7 +3196,10 @@ class _LibraryItemState extends State<_LibraryItem> {
       MediaQuery.textScalerOf(context).scale(_rowHeight),
     );
     final Widget menu = PopupMenuButton<_ItemAction>(
-      popUpAnimationStyle: AppMotion.popupStyle,
+      popUpAnimationStyle: AppMotion.pacedPopupStyle(
+        MotionMemory.instance.peek(('popup', 'item-actions')),
+      ),
+      onOpened: () => MotionMemory.instance.remember(('popup', 'item-actions')),
       key: _menu,
       tooltip: 'More actions for ${widget.title}',
       icon: Icon(AppIcons.more, size: 20, color: colors.textSecondary),
@@ -3414,6 +3612,7 @@ class _NoteThumbnail extends StatelessWidget {
               child: LoadingReveal(
                 effect: RevealEffect.fade,
                 timing: LoadTimings.thumbnail,
+                memoryKey: ('thumbnail', note.id),
                 child: image == null
                     ? null
                     : SizedBox.expand(
@@ -3911,7 +4110,11 @@ class _SidebarRowState extends State<_SidebarRow> {
             ),
             if (hasMenu)
               PopupMenuButton<_ItemAction>(
-                popUpAnimationStyle: AppMotion.popupStyle,
+                popUpAnimationStyle: AppMotion.pacedPopupStyle(
+                  MotionMemory.instance.peek(('popup', 'folder-actions')),
+                ),
+                onOpened: () =>
+                    MotionMemory.instance.remember(('popup', 'folder-actions')),
                 key: _menu,
                 tooltip: 'More actions for ${widget.label}',
                 icon: Icon(

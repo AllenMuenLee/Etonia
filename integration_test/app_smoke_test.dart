@@ -198,6 +198,7 @@ void main() {
     expect(notationRequest.notationEnabled, isTrue);
     expect(notationRequest.animationEnabled, isTrue);
     expect(notationRequest.noteImage, isNotNull);
+    expect(notationRequest.selectionSvg, startsWith('<svg'));
     // The note is measured, not pictured.
     expect(notationRequest.noteImage!.space, isNotNull);
     expect(

@@ -441,6 +441,12 @@ void main() {
           ],
         ),
         notationEnabled: true,
+        selectionSvg:
+            '<svg viewBox="0 0 300 200" '
+            'data-etonia-coordinate-space="note" '
+            'data-etonia-selection-bounds="30 40 90 80">'
+            '<path data-etonia-kind="existing-ink" '
+            'd="M36 50 L36 110 L93.6 80 L36 50"/></svg>',
         messages: const <AiMessage>[
           AiMessage.user('First'),
           AiMessage.model('Answer'),
@@ -454,7 +460,13 @@ void main() {
     final List<Object?> latestParts =
         (contents[2]! as Map<String, Object?>)['parts']! as List<Object?>;
 
-    expect(firstParts, hasLength(3));
+    // The picture to read, then the same selection as SVG, then the words.
+    expect(firstParts, hasLength(4));
+    expect(firstParts[1], contains('inline_data'));
+    expect(
+      (firstParts[2]! as Map<String, Object?>)['text'],
+      allOf(contains('Read what is written'), contains('<path')),
+    );
     // The metadata, then the words: no picture of the note.
     expect(latestParts, hasLength(2));
     expect(jsonEncode(latestParts), isNot(contains('inline_data')));
@@ -467,23 +479,10 @@ void main() {
         contains('"note_logical_width":300.0'),
       ),
     );
-    // The selected ink, exactly, to attach new lines to.
     expect(
       (latestParts[0]! as Map<String, Object?>)['text'],
       allOf(
-        contains('take the touching point from selected_ink'),
-        contains(
-          '"selected_ink":[[[0.12,0.25],[0.12,0.55],[0.312,0.4],'
-          '[0.12,0.25]]]',
-        ),
-      ),
-    );
-    expect(
-      (latestParts[0]! as Map<String, Object?>)['text'],
-      allOf(
-        // Where the selected-ink image lies on the note, and how to map
-        // from one to the other.
-        contains('The selected-ink image shows x 0.1 to 0.4, y 0.2 to 0.6.'),
+        contains('The selected SVG covers x 0.1 to 0.4, y 0.2 to 0.6.'),
         // It may draw outside that region, but not off the paper.
         contains('inside or outside the selected region'),
         contains('every point must keep 0 < x < 1 and 0 < y < 1'),

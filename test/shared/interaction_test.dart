@@ -122,29 +122,27 @@ void main() {
       }
     });
 
-    testWidgets(
-      'settles if reduced motion changes during a press',
-      (WidgetTester tester) async {
-        const Widget pressable = Pressable(
-          child: ColoredBox(
-            color: Color(0xFF6164F1),
-            child: SizedBox.square(dimension: 48),
-          ),
-        );
-        await tester.pumpWidget(_themed(pressable));
-        final TestGesture gesture = await tester.startGesture(
-          tester.getCenter(find.byType(Pressable)),
-        );
-        await tester.pumpAndSettle();
-        expect(_scaleOf(tester), moreOrLessEquals(AppMotion.pressedScale));
+    testWidgets('settles if reduced motion changes during a press', (
+      WidgetTester tester,
+    ) async {
+      const Widget pressable = Pressable(
+        child: ColoredBox(
+          color: Color(0xFF6164F1),
+          child: SizedBox.square(dimension: 48),
+        ),
+      );
+      await tester.pumpWidget(_themed(pressable));
+      final TestGesture gesture = await tester.startGesture(
+        tester.getCenter(find.byType(Pressable)),
+      );
+      await tester.pumpAndSettle();
+      expect(_scaleOf(tester), moreOrLessEquals(AppMotion.pressedScale));
 
-        await tester.pumpWidget(_themed(pressable, reduceMotion: true));
-        await tester.pumpAndSettle();
-        expect(_scaleOf(tester), 1);
-        await gesture.up();
-      },
-      experimentalLeakTesting: LeakTesting.settings.withTrackedAll(),
-    );
+      await tester.pumpWidget(_themed(pressable, reduceMotion: true));
+      await tester.pumpAndSettle();
+      expect(_scaleOf(tester), 1);
+      await gesture.up();
+    }, experimentalLeakTesting: LeakTesting.settings.withTrackedAll());
   });
 
   group('processing', () {
@@ -211,25 +209,23 @@ void main() {
       await tester.pumpAndSettle();
     });
 
-    testWidgets(
-      'indicators stop while their subtree is offstage',
-      (WidgetTester tester) async {
-        Widget pending(bool enabled) => _themed(
-          TickerMode(
-            enabled: enabled,
-            child: const SizedBox(width: 200, child: PendingLines()),
-          ),
-        );
-        await tester.pumpWidget(pending(true));
-        await tester.pump(AppMotion.shimmer);
-        expect(tester.hasRunningAnimations, isTrue);
+    testWidgets('indicators stop while their subtree is offstage', (
+      WidgetTester tester,
+    ) async {
+      Widget pending(bool enabled) => _themed(
+        TickerMode(
+          enabled: enabled,
+          child: const SizedBox(width: 200, child: PendingLines()),
+        ),
+      );
+      await tester.pumpWidget(pending(true));
+      await tester.pump(AppMotion.shimmer);
+      expect(tester.hasRunningAnimations, isTrue);
 
-        await tester.pumpWidget(pending(false));
-        await tester.pumpAndSettle();
-        expect(tester.hasRunningAnimations, isFalse);
-      },
-      experimentalLeakTesting: LeakTesting.settings.withTrackedAll(),
-    );
+      await tester.pumpWidget(pending(false));
+      await tester.pumpAndSettle();
+      expect(tester.hasRunningAnimations, isFalse);
+    }, experimentalLeakTesting: LeakTesting.settings.withTrackedAll());
 
     testWidgets('the glow keeps its child when it turns off', (
       WidgetTester tester,

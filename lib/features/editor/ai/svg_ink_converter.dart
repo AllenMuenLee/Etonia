@@ -9,6 +9,7 @@ import '../ink/ink_notation.dart';
 import '../ink/ink_palette.dart';
 import '../ink/ink_sample.dart';
 import '../ink/stroke.dart';
+import 'ai_config.dart';
 
 /// Native ink produced from a model-authored SVG.
 class SvgInkConversion {
@@ -24,12 +25,22 @@ class SvgInkConversion {
 /// targets the small, handwritten line-art SVG vocabulary in the AI prompt;
 /// paint-server effects are reduced to their semantic ink color rather than
 /// retained as a single unerasable picture.
+///
+/// With [sketch], line art is drawn the way a hand draws it rather than with
+/// a ruler and compass: straight stretches bow and sway a little, keeping
+/// their ends where the model put them, and circles and ellipses are one
+/// loop that runs on past its start. Handwritten text is left as written.
+/// A line or path marked `data-etonia-arrow` (`end`, `start`, or `both`), or
+/// given an SVG marker, gets an open arrowhead the app draws, following the
+/// direction the line ends in.
 abstract final class SvgInkConverter {
   static SvgInkConversion convert(
     EditableSvg vector, {
     required InkColor defaultInk,
     required double defaultWidth,
     bool animate = true,
+    bool sketch = true,
+    AiNotationConfig config = const AiNotationConfig(),
   }) {
     final XmlElement root = XmlDocument.parse(vector.source).rootElement;
     final _Collector collector = _Collector(
@@ -38,11 +49,14 @@ abstract final class SvgInkConverter {
       defaultWidth: defaultWidth,
       stepCount: animate ? vector.stepCount : 0,
       duration: vector.duration,
+      sketch: sketch,
+      config: config,
     );
     collector.visit(
       root,
       const _Affine.identity(),
       _Presentation.root(defaultInk, defaultWidth),
+      handwritten: false,
     );
     if (collector.traces.isEmpty) {
       throw const FormatException('SVG has no editable strokes');
@@ -61,6 +75,8 @@ class _Collector {
     required this.defaultWidth,
     required this.stepCount,
     required this.duration,
+    required this.sketch,
+    required this.config,
   });
 
   final Rect page;
@@ -68,6 +84,8 @@ class _Collector {
   final double defaultWidth;
   final int stepCount;
   final Duration duration;
+  final bool sketch;
+  final AiNotationConfig config;
   final List<GeneratedInkTrace> traces = <GeneratedInkTrace>[];
 
   /// Curves are first sampled below a logical pixel, then simplified only
@@ -95,8 +113,9 @@ class _Collector {
   void visit(
     XmlElement element,
     _Affine parentTransform,
-    _Presentation parentPaint,
-  ) {
+    _Presentation parentPaint, {
+    required bool handwritten,
+  }) {
     final String name = element.name.local.toLowerCase();
     if (_nonDrawingTrees.contains(name)) return;
     final _Presentation paint = parentPaint.under(element);
@@ -104,42 +123,83 @@ class _Collector {
     final _Affine transform = parentTransform.multiplied(
       _Affine.parse(element.getAttribute('transform')),
     );
-    final Path? path = _geometry(element, name);
+    // The root carries the mark too, for the whole notation; only a group
+    // below it holds writing.
+    final bool writing =
+        handwritten ||
+        (element.parent is XmlElement &&
+            element.getAttribute('data-etonia-handwriting') == '1');
+    final _Hand hand = _Hand(
+      sketch && !writing ? math.Random(_seed(element)) : null,
+      config,
+    );
+    final Path? path = _geometry(element, name, hand);
     if (path != null) {
-      _addPath(path, transform, paint, name);
+      _addPath(path, transform, paint, name, _arrow(element), hand.random);
       return;
     }
     for (final XmlElement child in element.childElements) {
-      visit(child, transform, paint);
+      visit(child, transform, paint, handwritten: writing);
     }
   }
 
-  Path? _geometry(XmlElement element, String name) {
+  /// The same element always gets the same hand, so converting a notation
+  /// again draws it the same way.
+  static int _seed(XmlElement element) {
+    int hash = 0x811c9dc5;
+    for (final int unit in element.toXmlString().codeUnits) {
+      hash = ((hash ^ unit) * 0x01000193) & 0x7fffffff;
+    }
+    return hash;
+  }
+
+  /// The ends of [element] that take an arrowhead: those its
+  /// `data-etonia-arrow` names, or that carry an SVG marker, which is not
+  /// drawn itself.
+  static ({bool start, bool end}) _arrow(XmlElement element) {
+    final String arrow = (element.getAttribute('data-etonia-arrow') ?? '')
+        .trim()
+        .toLowerCase();
+    final Map<String, String> style = _Presentation._style(
+      element.getAttribute('style'),
+    );
+    bool marked(String name) {
+      final String value = (style[name] ?? element.getAttribute(name) ?? '')
+          .trim()
+          .toLowerCase();
+      return value.isNotEmpty && value != 'none';
+    }
+
+    return (
+      start: arrow == 'start' || arrow == 'both' || marked('marker-start'),
+      end: arrow == 'end' || arrow == 'both' || marked('marker-end'),
+    );
+  }
+
+  Path? _geometry(XmlElement element, String name, _Hand hand) {
     switch (name) {
       case 'path':
         final String? data = element.getAttribute('d');
         if (data == null || data.trim().isEmpty) return null;
-        final Path path = Path();
         try {
-          writeSvgPathDataToPath(data, _FlutterPathProxy(path));
+          writeSvgPathDataToPath(data, _FlutterPathProxy(hand));
         } on Object {
           throw const FormatException('Invalid SVG path');
         }
-        return path;
+        return hand.path;
       case 'line':
-        return Path()
-          ..moveTo(_number(element, 'x1'), _number(element, 'y1'))
-          ..lineTo(_number(element, 'x2'), _number(element, 'y2'));
+        return (hand
+              ..moveTo(Offset(_number(element, 'x1'), _number(element, 'y1')))
+              ..lineTo(Offset(_number(element, 'x2'), _number(element, 'y2'))))
+            .path;
       case 'polyline':
       case 'polygon':
         final List<Offset> points = _points(element.getAttribute('points'));
         if (points.isEmpty) return null;
-        final Path path = Path()..moveTo(points.first.dx, points.first.dy);
-        for (final Offset point in points.skip(1)) {
-          path.lineTo(point.dx, point.dy);
-        }
-        if (name == 'polygon') path.close();
-        return path;
+        hand.moveTo(points.first);
+        points.skip(1).forEach(hand.lineTo);
+        if (name == 'polygon') hand.close();
+        return hand.path;
       case 'rect':
         final double x = _number(element, 'x');
         final double y = _number(element, 'y');
@@ -150,29 +210,32 @@ class _Collector {
         final double? rawRy = _optionalNumber(element, 'ry');
         final double rx = math.max(0, rawRx ?? rawRy ?? 0);
         final double ry = math.max(0, rawRy ?? rawRx ?? 0);
-        return Path()..addRRect(
-          RRect.fromRectXY(Rect.fromLTWH(x, y, width, height), rx, ry),
-        );
+        return (hand..roundedRect(
+              RRect.fromRectXY(Rect.fromLTWH(x, y, width, height), rx, ry),
+            ))
+            .path;
       case 'circle':
         final double radius = _number(element, 'r');
         if (radius <= 0) return null;
-        return Path()..addOval(
-          Rect.fromCircle(
-            center: Offset(_number(element, 'cx'), _number(element, 'cy')),
-            radius: radius,
-          ),
-        );
+        return (hand..oval(
+              Rect.fromCircle(
+                center: Offset(_number(element, 'cx'), _number(element, 'cy')),
+                radius: radius,
+              ),
+            ))
+            .path;
       case 'ellipse':
         final double rx = _number(element, 'rx');
         final double ry = _number(element, 'ry');
         if (rx <= 0 || ry <= 0) return null;
-        return Path()..addOval(
-          Rect.fromCenter(
-            center: Offset(_number(element, 'cx'), _number(element, 'cy')),
-            width: rx * 2,
-            height: ry * 2,
-          ),
-        );
+        return (hand..oval(
+              Rect.fromCenter(
+                center: Offset(_number(element, 'cx'), _number(element, 'cy')),
+                width: rx * 2,
+                height: ry * 2,
+              ),
+            ))
+            .path;
       default:
         return null;
     }
@@ -183,6 +246,8 @@ class _Collector {
     _Affine transform,
     _Presentation paint,
     String elementName,
+    ({bool start, bool end}) arrow,
+    math.Random? random,
   ) {
     final bool canFill = <String>{
       'path',
@@ -215,6 +280,10 @@ class _Collector {
       width: width,
       opacity: opacity,
     );
+    // The first and last open contours, as sampled, with their times: the
+    // ends an arrowhead goes on.
+    (List<InkVector>, List<double>?)? first;
+    (List<InkVector>, List<double>?)? last;
     for (final PathMetric metric in path.computeMetrics()) {
       if (metric.length <= 0 || !metric.length.isFinite) continue;
       final int segments = (metric.length * geometryScale / _sampleSpacing)
@@ -246,14 +315,95 @@ class _Collector {
       }
       if (points.isEmpty) continue;
       final List<InkVector> smooth = _simplify(points, _curveTolerance);
+      final List<double>? times = _times(smooth.length, paint.step);
+      traces.add(
+        GeneratedInkTrace(style: style, points: smooth, timesMs: times),
+      );
+      if (!metric.isClosed && points.length > 1) {
+        first ??= (points, times);
+        last = (points, times);
+      }
+    }
+    // A head is a separate stroke, as a hand lifts the pen to draw it, and
+    // appears as the end it sits on is reached.
+    void head(List<InkVector> line, double? at) {
+      final List<InkVector> points = <InkVector>[
+        for (final InkVector point in _arrowhead(line, width, random))
+          InkVector(
+            point.x.clamp(page.left + width / 2, page.right - width / 2),
+            point.y.clamp(page.top + width / 2, page.bottom - width / 2),
+          ),
+      ];
       traces.add(
         GeneratedInkTrace(
           style: style,
-          points: smooth,
-          timesMs: _times(smooth.length, paint.step),
+          points: points,
+          timesMs: at == null ? null : List<double>.filled(points.length, at),
         ),
       );
     }
+
+    if (arrow.end && last != null) head(last.$1, last.$2?.last);
+    if (arrow.start && first != null) {
+      head(first.$1.reversed.toList(), first.$2?.first);
+    }
+  }
+
+  /// An open arrowhead at the end of [line], pointing the way the line's
+  /// last stretch runs, so a curve's head follows the curve. Its two wings
+  /// are one stroke through the tip, sized to the pen [width] and to the
+  /// line; with [random] they differ a little, and bend, as drawn ones do.
+  static List<InkVector> _arrowhead(
+    List<InkVector> line,
+    double width,
+    math.Random? random,
+  ) {
+    double total = 0;
+    for (int i = 1; i < line.length; i++) {
+      total += (line[i] - line[i - 1]).length;
+    }
+    double vary(double amount) =>
+        random == null ? 1 : 1 + amount * (random.nextDouble() * 2 - 1);
+    final double size = math.min(math.max(10, width * 4), total * 0.4);
+    final InkVector tip = line.last;
+    // The point [size] back along the line.
+    InkVector back = line.first;
+    double walked = 0;
+    for (int i = line.length - 1; i > 0; i--) {
+      final double step = (line[i] - line[i - 1]).length;
+      if (walked + step >= size) {
+        final double t = step == 0 ? 0 : (size - walked) / step;
+        back = line[i] + (line[i - 1] - line[i]) * t;
+        break;
+      }
+      walked += step;
+    }
+    InkVector direction = tip - back;
+    if (direction.length < 1e-9) direction = const InkVector(1, 0);
+    direction = direction * (1 / direction.length);
+    List<InkVector> wing(double turn) {
+      final double length = size * vary(0.12);
+      final double c = math.cos(turn), s = math.sin(turn);
+      final InkVector along = InkVector(
+        direction.x * c - direction.y * s,
+        direction.x * s + direction.y * c,
+      );
+      final InkVector end = tip - along * length;
+      // Bowed a touch toward the shaft, as a quick flick of the pen is.
+      final InkVector side = InkVector(-along.y, along.x) * (turn.sign * -1);
+      final double bow = random == null ? 0 : length * 0.08 * vary(0.5);
+      return <InkVector>[
+        for (int i = 0; i <= 8; i++)
+          end +
+              (tip - end) * (i / 8) +
+              side * (bow * 4 * (i / 8) * (1 - i / 8)),
+      ];
+    }
+
+    const double spread = 0.45; // radians, about 26 degrees
+    final List<InkVector> left = wing(spread * vary(0.12));
+    final List<InkVector> right = wing(-spread * vary(0.12));
+    return <InkVector>[...left, ...right.reversed.skip(1)];
   }
 
   static List<InkVector> _simplify(List<InkVector> points, double tolerance) {
@@ -351,15 +501,15 @@ class _Collector {
 }
 
 class _FlutterPathProxy implements PathProxy {
-  _FlutterPathProxy(this.path);
+  _FlutterPathProxy(this.hand);
 
-  final Path path;
-
-  @override
-  void moveTo(double x, double y) => path.moveTo(x, y);
+  final _Hand hand;
 
   @override
-  void lineTo(double x, double y) => path.lineTo(x, y);
+  void moveTo(double x, double y) => hand.moveTo(Offset(x, y));
+
+  @override
+  void lineTo(double x, double y) => hand.lineTo(Offset(x, y));
 
   @override
   void cubicTo(
@@ -369,10 +519,140 @@ class _FlutterPathProxy implements PathProxy {
     double y2,
     double x3,
     double y3,
-  ) => path.cubicTo(x1, y1, x2, y2, x3, y3);
+  ) => hand.cubicTo(Offset(x1, y1), Offset(x2, y2), Offset(x3, y3));
 
   @override
-  void close() => path.close();
+  void close() => hand.close();
+}
+
+/// Builds the [path] of an SVG shape, drawn as a hand draws it when given a
+/// [random] to vary each stroke by, or exactly as written without one.
+///
+/// A straight stretch bows to one side and sways a little, by
+/// [AiNotationConfig.sketchBow] of its length, but starts and ends where it
+/// was written, so a corner, or an end joined to the user's ink, stays put.
+/// An oval is one loop that starts somewhere on it, swells slightly as it
+/// goes round, never inside the oval written, and runs on past its start.
+class _Hand {
+  _Hand(this.random, this.config);
+
+  final math.Random? random;
+  final AiNotationConfig config;
+  final Path path = Path();
+  Offset _start = Offset.zero;
+  Offset _at = Offset.zero;
+
+  void moveTo(Offset point) {
+    path.moveTo(point.dx, point.dy);
+    _start = _at = point;
+  }
+
+  void cubicTo(Offset a, Offset b, Offset to) {
+    path.cubicTo(a.dx, a.dy, b.dx, b.dy, to.dx, to.dy);
+    _at = to;
+  }
+
+  void lineTo(Offset to) {
+    final Offset span = to - _at;
+    final double length = span.distance;
+    final math.Random? random = this.random;
+    if (random == null || length < 1) {
+      path.lineTo(to.dx, to.dy);
+      _at = to;
+      return;
+    }
+    final Offset side = Offset(-span.dy, span.dx) / length;
+    final double reach = math.min(
+      length * config.sketchBow,
+      config.maxSketchBow,
+    );
+    // Its middle stands [bow] off the straight line; the sway, an S, moves
+    // its quarters in turn either way by up to [sway].
+    final double bow = reach * (0.5 + 0.5 * random.nextDouble()) * _sign();
+    final double sway = reach * 0.4 * (random.nextDouble() * 2 - 1);
+    final double near = bow * 4 / 3 + sway / 0.289;
+    final double far = bow * 4 / 3 - sway / 0.289;
+    cubicTo(_at + span / 3 + side * near, _at + span * 2 / 3 + side * far, to);
+  }
+
+  void close() {
+    if ((_at - _start).distance > 1e-6) lineTo(_start);
+    path.close();
+    _at = _start;
+  }
+
+  void roundedRect(RRect box) {
+    if (random == null) {
+      path.addRRect(box);
+      return;
+    }
+    // Round each corner with the quarter ellipse a cubic draws.
+    const double k = 0.5523;
+    final double rx = math.min(box.tlRadiusX, box.width / 2);
+    final double ry = math.min(box.tlRadiusY, box.height / 2);
+    final Rect r = box.outerRect;
+    void corner(Offset from, Offset to, Offset at) {
+      cubicTo(from + (at - from) * k, to + (at - to) * k, to);
+    }
+
+    moveTo(Offset(r.left + rx, r.top));
+    lineTo(Offset(r.right - rx, r.top));
+    if (rx > 0 && ry > 0) {
+      corner(_at, Offset(r.right, r.top + ry), r.topRight);
+    }
+    lineTo(Offset(r.right, r.bottom - ry));
+    if (rx > 0 && ry > 0) {
+      corner(_at, Offset(r.right - rx, r.bottom), r.bottomRight);
+    }
+    lineTo(Offset(r.left + rx, r.bottom));
+    if (rx > 0 && ry > 0) {
+      corner(_at, Offset(r.left, r.bottom - ry), r.bottomLeft);
+    }
+    lineTo(Offset(r.left, r.top + ry));
+    if (rx > 0 && ry > 0) {
+      corner(_at, Offset(r.left + rx, r.top), r.topLeft);
+    }
+    close();
+  }
+
+  void oval(Rect box) {
+    final math.Random? random = this.random;
+    if (random == null) {
+      path.addOval(box);
+      return;
+    }
+    final double start = random.nextDouble() * 2 * math.pi;
+    final double sweep = 2 * math.pi * (1 + config.sketchOvershoot);
+    // Most of the swell comes late, so the run past the start sits clear
+    // of it rather than on top of it.
+    final double swell = 0.08 + 0.05 * random.nextDouble();
+    final double wobble = 2 * math.pi * random.nextDouble();
+    final double rx = box.width / 2, ry = box.height / 2;
+    final int count = math.max(
+      16,
+      (math.pi * (rx + ry) * (1 + config.sketchOvershoot) / 12).ceil(),
+    );
+    Offset at(int i) {
+      final double t = (i / count).clamp(0.0, 1.0);
+      final double angle = start + sweep * i / count;
+      final double grow =
+          1 + swell * t * t + 0.012 * (1 + math.sin(3 * angle + wobble));
+      return box.center +
+          Offset(rx * grow * math.cos(angle), ry * grow * math.sin(angle));
+    }
+
+    // A smooth curve through points along the loop.
+    moveTo(at(0));
+    for (int i = 0; i < count; i++) {
+      cubicTo(
+        at(i) + (at(i + 1) - at(i - 1)) / 6,
+        at(i + 1) - (at(i + 2) - at(i)) / 6,
+        at(i + 1),
+      );
+    }
+  }
+
+  double _sign() => random!.nextBool() ? 1 : -1;
 }
 
 class _Presentation {

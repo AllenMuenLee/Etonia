@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 
 import '../../app/theme/app_tokens.dart';
+import '../motion/motion_memory.dart';
 import 'app_dialogs.dart';
 
 /// Selects the closest sheet detent after projecting signed release velocity.
@@ -20,15 +21,20 @@ double projectSheetDetent({
 
 /// Adaptive Etonia sheet: two draggable phone detents and a centered iPad
 /// form sheet. Flutter owns drag/scroll gesture hand-off and interruption.
+///
+/// [motionKey] names the sheet for [MotionMemory]: shown for the first time
+/// it rises slowly and smoothly, shown again quickly.
 Future<T?> showAppSheet<T>({
   required BuildContext context,
   required WidgetBuilder builder,
+  Object? motionKey,
 }) {
   final Size size = MediaQuery.sizeOf(context);
   final AppColors colors = AppColors.of(context);
   if (size.width >= 600) {
     return showAppDialog<T>(
       context: context,
+      motionKey: motionKey == null ? null : ('sheet', motionKey),
       barrierColor: colors.shadow.withValues(alpha: 0.35),
       builder: (BuildContext context) => Dialog(
         child: ConstrainedBox(
@@ -51,7 +57,11 @@ Future<T?> showAppSheet<T>({
     useSafeArea: true,
     showDragHandle: true,
     barrierColor: colors.shadow.withValues(alpha: 0.35),
-    sheetAnimationStyle: AppMotion.sheetStyle,
+    sheetAnimationStyle: AppMotion.pacedSheetStyle(
+      motionKey == null
+          ? MotionPace.standard
+          : MotionMemory.instance.recall(('sheet', motionKey)),
+    ),
     builder: (BuildContext context) => DraggableScrollableSheet(
       expand: false,
       initialChildSize: 0.5,

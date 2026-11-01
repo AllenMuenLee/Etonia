@@ -47,15 +47,16 @@ class ClaudeAiClient extends SseAiClient {
   Map<String, Object?> body(AiRequest request) =>
       buildBody(request, model: model, notationConfig: notationConfig);
 
-  /// The JSON body for [request]. The selected ink rides in the first user
-  /// turn, and the whole note with its metadata in the last, on every call.
+  /// The JSON body for [request]. The first user turn carries the clean PNG
+  /// crop and, with Notation on, the same selection as SVG beside it.
   static Map<String, Object?> buildBody(
     AiRequest request, {
     required String model,
     AiNotationConfig notationConfig = const AiNotationConfig(),
   }) {
     final int lastUser = aiLastUserIndex(request);
-    bool imagePending = true;
+    bool selectionPending = true;
+    final String? selectionSvg = request.modelSelectionSvg;
     Map<String, Object?> image(List<int> png) => <String, Object?>{
       'type': 'image',
       'source': <String, Object?>{
@@ -78,14 +79,15 @@ class ClaudeAiClient extends SseAiClient {
         });
         continue;
       }
-      final bool withImage = imagePending;
-      imagePending = false;
+      final bool withSelection = selectionPending;
+      selectionPending = false;
       messages.add(<String, Object?>{
         'role': 'user',
         'content': <Map<String, Object?>>[
-          if (withImage) ...<Map<String, Object?>>[
+          if (withSelection) ...<Map<String, Object?>>[
             text('Selected ink image:'),
-            image(request.providerImagePng),
+            image(request.imagePng),
+            if (selectionSvg != null) text(aiSelectionSvgText(selectionSvg)),
           ],
           if (request.noteImage case final note? when index == lastUser)
             text(aiNoteMetadata(note)),

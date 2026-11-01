@@ -20,6 +20,7 @@ class NoteInkSnapshot {
     required ui.Color background,
     this.bitmaps = const <SnapshotBitmap>[],
     this.focusBounds,
+    this.focusOnFreeSpace = false,
     List<StickyNoteElement> stickies = const <StickyNoteElement>[],
     List<SpaceStroke> aiNotes = const <SpaceStroke>[],
   }) : strokes = List<SnapshotStroke>.unmodifiable(strokes),
@@ -34,6 +35,7 @@ class NoteInkSnapshot {
     required ui.Brightness brightness,
     required ui.Color background,
     ui.Rect? focusBounds,
+    bool focusOnFreeSpace = false,
     List<SnapshotBitmap> bitmaps = const <SnapshotBitmap>[],
     Iterable<StickyNoteElement> stickies = const <StickyNoteElement>[],
     Iterable<Stroke> aiNotes = const <Stroke>[],
@@ -55,6 +57,7 @@ class NoteInkSnapshot {
       brightness: brightness,
       background: background,
       focusBounds: focusBounds,
+      focusOnFreeSpace: focusOnFreeSpace,
       bitmaps: bitmaps,
       stickies: <StickyNoteElement>[
         for (final StickyNoteElement note in stickies)
@@ -84,15 +87,19 @@ class NoteInkSnapshot {
   final ui.Brightness brightness;
   final ui.Color background;
 
-  /// The page-local logical region the selected-ink image shows: its crop,
-  /// padding included, so that image maps linearly onto the note.
+  /// The page-local logical region the selected context covers: its preview
+  /// padding included, matching the selection SVG's declared bounds.
   final ui.Rect? focusBounds;
+
+  /// Whether, nothing having been selected, the biggest blank area of the
+  /// paper stands in for [focusBounds]: where the assistant's notes go.
+  final bool focusOnFreeSpace;
 }
 
-/// What the model is told about the whole note, in place of a picture of
-/// it, and what returned notation is placed against: the paper's size,
-/// where the selection is on it, the ink there, what is nearby, and where
-/// the paper is blank. Only the selected-ink image is ever sent.
+/// What the model is told about the whole note, and what returned notation is
+/// placed against: the paper's size, where the selection is on it, what is
+/// nearby, and where the paper is blank. The notation pass receives only the
+/// selected page-coordinate SVG, never an image of the rest of the note.
 class NoteImage {
   NoteImage({
     required this.logicalSize,
@@ -100,13 +107,18 @@ class NoteImage {
     this.normalizedFocusBounds,
     this.focusInk = const <List<InkVector>>[],
     this.space,
+    this.focusIsFreeSpace = false,
   });
 
   final ui.Size logicalSize;
   final int revision;
 
-  /// [NoteInkSnapshot.focusBounds] as note_normalized coordinates. May
-  /// reach slightly past 0 or 1 where the crop's padding leaves the paper.
+  /// Whether nothing was selected, and [normalizedFocusBounds] is instead
+  /// the blank area the assistant's notes go in.
+  final bool focusIsFreeSpace;
+
+  /// [NoteInkSnapshot.focusBounds] as note_normalized coordinates. May reach
+  /// slightly past 0 or 1 where the selection padding leaves the paper.
   final ui.Rect? normalizedFocusBounds;
 
   /// The ink around the selection, as note_normalized polylines cut down
@@ -172,18 +184,27 @@ class NoteImageRenderer {
     } on Object {
       throw const NoteImageException(NoteImageFailure.encodingFailed);
     }
+    // Nothing selected: the blank area chosen stands in for the selection,
+    // and has no ink in it to attach to.
+    final bool freeFocus = snapshot.focusBounds == null && space.focus != null;
     return NoteImage(
       logicalSize: size,
       revision: snapshot.revision,
-      normalizedFocusBounds: _normalized(snapshot.focusBounds, size),
-      focusInk: _focusInk(snapshot),
+      normalizedFocusBounds: _normalized(
+        snapshot.focusBounds ?? space.focus,
+        size,
+      ),
+      focusInk: freeFocus ? const <List<InkVector>>[] : _focusInk(snapshot),
       space: space,
+      focusIsFreeSpace: freeFocus,
     );
   }
 
   /// Where the paper in [snapshot] is blank. A page-wide background, such
   /// as a PDF page, is read pixel by pixel for print; any other picture,
-  /// and every sticky note, takes its whole box.
+  /// and every sticky note, takes its whole box. With
+  /// [NoteInkSnapshot.focusOnFreeSpace] and no focus, measured around the
+  /// biggest blank area, when there is one.
   Future<NoteFreeSpace> _measureSpace(NoteInkSnapshot snapshot) async {
     final List<SpaceBackground> backgrounds = <SpaceBackground>[];
     final List<ui.Rect> blocks = <ui.Rect>[
@@ -202,25 +223,34 @@ class NoteImageRenderer {
         backgrounds.add(background);
       }
     }
-    return NoteFreeSpace.measure(
+    final List<SpaceStroke> strokes = <SpaceStroke>[
+      for (final SnapshotStroke stroke in snapshot.strokes)
+        (
+          points: stroke.points,
+          width:
+              stroke.width *
+              (stroke.widths == null
+                  ? 1
+                  : stroke.widths!.fold<double>(1, math.max)),
+        ),
+    ];
+    NoteFreeSpace measure(ui.Rect? focus) => NoteFreeSpace.measure(
       pageSize: snapshot.logicalSize,
-      strokes: <SpaceStroke>[
-        for (final SnapshotStroke stroke in snapshot.strokes)
-          (
-            points: stroke.points,
-            width:
-                stroke.width *
-                (stroke.widths == null
-                    ? 1
-                    : stroke.widths!.fold<double>(1, math.max)),
-          ),
-      ],
+      strokes: strokes,
       blocks: blocks,
       backgrounds: backgrounds,
       aiNotes: snapshot.aiNotes,
-      focus: snapshot.focusBounds,
+      focus: focus,
       config: config.space,
     );
+    final NoteFreeSpace space = measure(snapshot.focusBounds);
+    if (snapshot.focusBounds != null ||
+        !snapshot.focusOnFreeSpace ||
+        !space.hasRoom) {
+      return space;
+    }
+    // Biggest first without a focus; its box, not the arm of an L.
+    return measure(space.areas.first.parts.first);
   }
 
   Future<SpaceBackground?> _readBackground(SnapshotBitmap bitmap) async {

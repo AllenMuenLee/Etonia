@@ -12,9 +12,9 @@ typedef BackendInvoke =
 typedef BackendInvokeStream =
     Future<Stream<Map<String, dynamic>>> Function(String, Map<String, Object?>);
 
-/// The conversation text, selected crop, and drawing coordinates are forwarded
-/// transiently. Full note images and PDFs are never sent; with Notation on, the
-/// rest of the note is described only as coordinates.
+/// The conversation text, selected crop, and page-coordinate selection SVG are
+/// forwarded transiently. Full note images and PDFs are never sent; with
+/// Notation on, the rest of the note is described only as coordinates.
 class BackendAiClient implements AiModelRouter {
   BackendAiClient({BackendService? backend, this.invoke, this.invokeStream})
     : _backend = backend ?? BackendService.instance;
@@ -142,8 +142,8 @@ class BackendAiClient implements AiModelRouter {
         // paper is blank. Apart, so it does not break the cached prefix.
         if (notation) 'noteMetadata': aiNoteMetadata(note),
         'selectedImage': base64Encode(request.imagePng),
-        if (notation && request.notationImagePng != null)
-          'notationImage': base64Encode(request.notationImagePng!),
+        if (notation && request.selectionSvg != null)
+          'selectedSvg': request.selectionSvg,
         // Formatted output: the provider must answer in exactly this
         if (notation)
           'notationContext': {

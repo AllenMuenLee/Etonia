@@ -53,7 +53,8 @@ class AiLayoutConfig {
   }
 }
 
-/// How selected ink is turned into the image sent to the model.
+/// How selected ink is previewed and raster-backed selections are embedded in
+/// the SVG sent to the model.
 class AiImageConfig {
   const AiImageConfig({
     this.padding = 12,
@@ -84,9 +85,8 @@ class AiImageConfig {
   /// picture gets near it; it is then drawn smaller until it fits.
   final int maxPngBytes;
 
-  /// The ink in the selected region is also sent as coordinates, so the
-  /// model can attach to it exactly: each stroke cut down to its ends and
-  /// corners, keeping it within this fraction of the region's longer side.
+  /// Legacy simplified focus geometry retained for saved contexts. Current
+  /// notation requests carry the selected native paths directly as SVG.
   final double focusInkTolerance;
 
   /// At most this many points of that ink are sent; the longest strokes
@@ -178,6 +178,11 @@ class AiNotationConfig {
     // response from spending an entire large context window.
     this.maxOutputTokens = 16384,
     this.inkSnapDistance = 16,
+    this.inkClearance = 0.6,
+    this.minInkClearance = 8,
+    this.sketchBow = 0.03,
+    this.maxSketchBow = 5,
+    this.sketchOvershoot = 0.08,
     this.minStickyWidth = 120,
     this.minStickyHeight = 90,
     this.maxStickyWidth = 640,
@@ -198,6 +203,23 @@ class AiNotationConfig {
   /// close to existing ink, in logical pixels, is moved onto it, so a lead
   /// meant to touch a drawing does. Text is never moved. 0 turns it off.
   final double inkSnapDistance;
+
+  /// The clear space kept between what the model writes and ink already on
+  /// the paper, the user's or its own, in text sizes (capital heights), and
+  /// never less than [minInkClearance] logical units. Writing placed closer
+  /// is moved the shortest way clear; pinned labels stay where they are.
+  final double inkClearance;
+  final double minInkClearance;
+
+  /// How far a straight stretch of the model's line art bows off true when
+  /// drawn as ink, as a fraction of its length, and never more than
+  /// [maxSketchBow] logical units, so it looks drawn by hand, not ruled.
+  final double sketchBow;
+  final double maxSketchBow;
+
+  /// How far a circle or ellipse drawn as ink runs on past where it began,
+  /// as a fraction of a turn, as a loop drawn by hand does.
+  final double sketchOvershoot;
 
   /// Texts, graphs, paths, and strokes in one notation.
   final int maxItems;
@@ -587,9 +609,11 @@ class AiApiConfig {
 /// The fixed instructions sent to the model.
 abstract final class AiPrompts {
   static const String _tutor =
-      "You are Etonia's study tutor. The image is cropped from the user's "
-      'handwritten note: teach that subject, and do not describe the image, '
-      'handwriting, or layout. Never ask the user to confirm or clarify: '
+      "You are Etonia's study tutor. The selected context is an image cropped "
+      'from the user\'s handwritten note (with Notation on, also the same '
+      'crop as page-coordinate SVG): teach that '
+      'subject, and do not describe the image, SVG, handwriting, or layout. '
+      'Never ask the user to confirm or clarify: '
       'when anything is unclear, take the most likely reading, state it in '
       'one short line, and answer fully but concisely. Use the visible work and do not '
       'invent facts. Write Markdown with all LaTeX inside \$...\$ or '
@@ -618,8 +642,8 @@ abstract final class AiPrompts {
   // ignore: unused_field
   static const String _notationOn =
       ' Notation is on: you can write and draw on the note. You get the '
-      'selected-ink image and note metadata: the region it shows, its ink '
-      'as coordinates (selected_ink), boxes round nearby content, and the '
+      'selected note as page-coordinate SVG and note metadata: its region, '
+      'boxes round nearby content, and the '
       'blank free areas. Every answer must come with a notation, except a '
       'simple text answer (a word, number, yes or no, or a fact of a '
       'sentence or two). Anything more is also written on the note, doing '
@@ -638,11 +662,8 @@ abstract final class AiPrompts {
       'Coordinates are note_normalized over the paper: (0,0) top-left, '
       '(1,1) bottom-right, 3 decimals, every mark a little inside 0 and 1 '
       '(a drawing that reaches an edge is rejected whole); '
-      'sticky_normalized on a sticky note. The image has a grid: faint '
-      'blue lines at round note_normalized values, numbered in a white '
-      'margin (x top and bottom, y left and right); the margin and lines '
-      'are not on the paper. Read positions off the grid and check them '
-      'against selected_ink. '
+      'sticky_normalized on a sticky note. Read positions directly from the '
+      'selected SVG paths. '
       'To finish or add to the user\'s drawing, '
       'build on their ink: make your parts touch it where they meet. '
       'A notation is {label, coordinate_space, items}, each item with '
@@ -736,13 +757,28 @@ abstract final class AiPrompts {
       ' Notation is on: actively look for a useful editable vector '
       'annotation and add one whenever it can clarify, reinforce, or '
       'connect the answer to the user\'s notes. Omit visible notation only '
-      'when no meaningful visual would help. The root viewBox must be '
+      'when no meaningful visual would help. The selection comes twice: as '
+      'an image, to read what is written, and as page-coordinate SVG, to '
+      'take exact positions from. The root viewBox must be '
       '"0 0 W H", using the exact logical '
       'paper width W and height H from the note metadata. Use ordinary SVG '
       'groups, paths, lines, polylines, polygons, rects, circles, ellipses, '
-      'and text. Every visible contour is converted to an independent ink '
-      'stroke, so draw arrowheads explicitly as short lines and shading as '
-      'hatch strokes. Do not use markers, gradients, patterns, masks, clips, '
+      'and text. Each visible contour becomes an ink stroke: draw like '
+      'someone sketching quickly with a pen on paper, not a drawing '
+      'program, using <path>s with a few smooth curve points (C, Q, S), no '
+      'jitter or wiggles. Long lines drift in one gentle bow; polygon sides '
+      'are separate strokes, the pen lifting at each corner, slightly '
+      'overshooting or stopping short; ovals are one lopsided loop ending '
+      'past its start; ticks and hatching are a little uneven; underlines '
+      'drift upward; checks are a short stroke down, a long flick up. Keep '
+      'imperfections to 1-3% of a stroke\'s length; plots, axes, and points '
+      'touching the user\'s ink stay exact. For an arrow, '
+      'draw only its shaft, a line or a gently curved path ending exactly '
+      'where the arrow points, and set data-etonia-arrow="end" (or "start" '
+      'or "both") on it: the app draws the arrowhead along the shaft. Never '
+      'draw arrowheads yourself. Prefer a gentle curve to a straight line '
+      'for a leader. Draw shading as hatch strokes. Do not use markers, '
+      'gradients, patterns, masks, clips, '
       'filters, <use>, dash patterns, or filled background regions. Keep '
       'every visible point '
       'inside the paper. Set data-etonia-bounds="x y width height" on the '
@@ -775,12 +811,16 @@ abstract final class AiPrompts {
       'message; at most about 6 words or one formula per line and at most '
       '4 lines in all. Use readable text and few colors.Try hard to refer directly to the notes the user took: '
       'anchor the annotation to their actual ink with a leader arrow, '
-      'underline, circle, or mark, or place a short memo immediately beside '
-      'the relevant stroke. Prefer this over a detached explanation or a '
-      'separate generic diagram. Build on selected_ink coordinates where '
-      'parts should touch. To complete, finish, continue, label, or fix the user\'s '
+      'underline, circle, or mark, or place a short memo beside the relevant '
+      'stroke. Leave clear space round the user\'s writing: keep every text '
+      'line at least one text height away from their ink, never on or '
+      'touching it, and let a leader bridge the gap. '
+      'Prefer this over a detached explanation or a '
+      'separate generic diagram. Build on the existing-ink paths in the '
+      'selected SVG where parts should touch. To complete, finish, continue, '
+      'label, or fix the user\'s '
       'drawing, add only what is missing: new parts that start exactly on '
-      'their strokes, taking the touching points from selected_ink, and '
+      'their strokes, taking touching points directly from those SVG paths, and '
       'never a second copy of a shape already on the paper. For example, '
       'on a drawn box or triangle, add the leads, labels, and marks that '
       'finish it, each starting on one of its corners or sides. Draw a '
@@ -851,6 +891,14 @@ abstract final class AiPrompts {
         ' When writing SVG text, use a font-size from ${textSize.min.round()} '
         'through ${textSize.max.round()} logical units.';
   }
+
+  /// Added to the system instruction when nothing on the note was chosen.
+  static const String noSelection =
+      ' Nothing on the note was selected for this conversation: the attached '
+      'image is blank paper, not the user\'s work. Answer the question on '
+      'its own terms, and never mention the image, a selection, or missing '
+      'context. Any notation goes only in blank space on the page, never on '
+      'or pointing at the user\'s ink.';
 
   static const String explain =
       'Teach me the subject of the selected handwritten content. Start by '

@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
 import '../../../app/theme/app_tokens.dart';
+import '../../../shared/motion/motion_memory.dart';
 import '../../../app/theme/app_icons.dart';
 import '../document_io/document_models.dart';
 import '../ink/ink_painter.dart';
@@ -12,6 +13,7 @@ import '../ink/stroke.dart';
 import '../page/note_document.dart';
 import '../page/page_background.dart';
 import '../page/page_setup.dart';
+import 'page_chapters.dart';
 import '../../../shared/navigation/app_dialogs.dart';
 import '../../../shared/widgets/app_controls.dart';
 
@@ -578,6 +580,7 @@ class PageOverviewAnchor extends StatefulWidget {
     required this.document,
     required this.writingArea,
     this.config = const PageConfig(),
+    this.loadOutline,
     required this.child,
   });
 
@@ -585,6 +588,10 @@ class PageOverviewAnchor extends StatefulWidget {
   final NoteDocument document;
   final Size writingArea;
   final PageConfig config;
+
+  /// Reads the outline of a PDF in the note, to choose pages by chapter.
+  /// Without it the overview shows pages only.
+  final PdfOutlineLoader? loadOutline;
   final Widget child;
 
   @override
@@ -601,6 +608,14 @@ class _PageOverviewAnchorState extends State<PageOverviewAnchor>
   late final CurvedAnimation _curved;
   late final Animation<double> _scale;
 
+  /// Whether pages or chapters show, kept between openings.
+  final ValueNotifier<PageOverviewView> _view = ValueNotifier<PageOverviewView>(
+    PageOverviewView.pages,
+  );
+
+  /// The note's chapters, read when the overview first opens.
+  NoteChapterIndex? _chapters;
+
   @override
   void initState() {
     super.initState();
@@ -614,6 +629,7 @@ class _PageOverviewAnchorState extends State<PageOverviewAnchor>
     _scale = Tween<double>(begin: 0.94, end: 1).animate(_curved);
     widget.open.addListener(_sync);
     if (widget.open.value) {
+      _indexChapters();
       _reveal.value = 1;
       _portal.show();
     }
@@ -622,6 +638,12 @@ class _PageOverviewAnchorState extends State<PageOverviewAnchor>
   @override
   void didUpdateWidget(PageOverviewAnchor oldWidget) {
     super.didUpdateWidget(oldWidget);
+    if (oldWidget.document != widget.document ||
+        oldWidget.loadOutline != widget.loadOutline) {
+      _chapters?.dispose();
+      _chapters = null;
+      if (widget.open.value) _indexChapters();
+    }
     if (oldWidget.open != widget.open) {
       oldWidget.open.removeListener(_sync);
       widget.open.addListener(_sync);
@@ -629,8 +651,18 @@ class _PageOverviewAnchorState extends State<PageOverviewAnchor>
     }
   }
 
+  void _indexChapters() {
+    final PdfOutlineLoader? loadOutline = widget.loadOutline;
+    if (loadOutline == null || _chapters != null) return;
+    _chapters = NoteChapterIndex(
+      document: widget.document,
+      loadOutline: loadOutline,
+    );
+  }
+
   void _sync() {
     if (widget.open.value) {
+      _indexChapters();
       _reveal.duration = AppMotion.resolve(context, AppMotion.snappy.duration);
       _portal.show();
       _reveal.forward();
@@ -653,6 +685,8 @@ class _PageOverviewAnchorState extends State<PageOverviewAnchor>
   @override
   void dispose() {
     widget.open.removeListener(_sync);
+    _chapters?.dispose();
+    _view.dispose();
     _curved.dispose();
     _reveal.dispose();
     super.dispose();
@@ -732,6 +766,8 @@ class _PageOverviewAnchorState extends State<PageOverviewAnchor>
                             document: widget.document,
                             writingArea: widget.writingArea,
                             config: widget.config,
+                            chapters: _chapters,
+                            view: _view,
                             onSelected: _close,
                           ),
                         ),
@@ -757,16 +793,26 @@ class _PageOverviewAnchorState extends State<PageOverviewAnchor>
   }
 }
 
+/// What the page overview lists: every page, or the chapters of the PDFs in
+/// the note.
+enum PageOverviewView { pages, chapters }
+
 /// A grid of the note's pages under a header with the page number, which can
 /// be typed into to go to a page. Selecting a thumbnail changes the current
 /// page and calls [onSelected], so the overview can close and the page is
 /// immediately usable.
-class PageOverviewPanel extends StatelessWidget {
+///
+/// When the note has [chapters], from the outline of a PDF in it, the
+/// header offers them too, to go to a chapter rather than a page; [view]
+/// holds which shows.
+class PageOverviewPanel extends StatefulWidget {
   const PageOverviewPanel({
     super.key,
     required this.document,
     required this.writingArea,
     this.config = const PageConfig(),
+    this.chapters,
+    this.view,
     this.onSelected,
   });
 
@@ -775,13 +821,37 @@ class PageOverviewPanel extends StatelessWidget {
   final NoteDocument document;
   final Size writingArea;
   final PageConfig config;
+  final NoteChapterIndex? chapters;
+
+  /// Owned by the panel when not given.
+  final ValueNotifier<PageOverviewView>? view;
   final VoidCallback? onSelected;
+
+  @override
+  State<PageOverviewPanel> createState() => _PageOverviewPanelState();
+}
+
+class _PageOverviewPanelState extends State<PageOverviewPanel> {
+  ValueNotifier<PageOverviewView>? _ownView;
+
+  ValueNotifier<PageOverviewView> get _view =>
+      widget.view ??
+      (_ownView ??= ValueNotifier<PageOverviewView>(PageOverviewView.pages));
+
+  NoteDocument get document => widget.document;
+
+  @override
+  void dispose() {
+    _ownView?.dispose();
+    super.dispose();
+  }
 
   Size _paperFor(NotePage page) {
     final PdfPageSource? pdf = page.pdfSource;
     if (pdf != null) return pdf.pageSize;
     final PageSetup setup = page.setup;
     if (setup.size == PageSize.custom) return setup.customSize!;
+    final Size writingArea = widget.writingArea;
     return setup.size.fixedSize ??
         page.extent ??
         (writingArea.isEmpty ? const Size(4, 3) : writingArea);
@@ -789,13 +859,14 @@ class PageOverviewPanel extends StatelessWidget {
 
   void _select(int index) {
     document.goTo(index);
-    onSelected?.call();
+    widget.onSelected?.call();
   }
 
   @override
   Widget build(BuildContext context) {
     final AppColors colors = AppColors.of(context);
     final TextTheme text = Theme.of(context).textTheme;
+    final NoteChapterIndex? chapterIndex = widget.chapters;
     // Opaque: it hangs over the palette, whose buttons would otherwise show
     // through its header like controls of its own.
     return GlassSurface(
@@ -805,8 +876,17 @@ class PageOverviewPanel extends StatelessWidget {
       child: Material(
         type: MaterialType.transparency,
         child: ListenableBuilder(
-          listenable: document,
+          listenable: Listenable.merge(<Listenable?>[
+            document,
+            chapterIndex,
+            _view,
+          ]),
           builder: (BuildContext context, Widget? child) {
+            final List<NoteChapter> chapters =
+                chapterIndex?.chapters ?? const <NoteChapter>[];
+            final PageOverviewView view = chapters.isEmpty
+                ? PageOverviewView.pages
+                : _view.value;
             return Padding(
               padding: const EdgeInsets.fromLTRB(
                 AppSpacing.md,
@@ -845,94 +925,129 @@ class PageOverviewPanel extends StatelessWidget {
                       ),
                     ],
                   ),
-                  const SizedBox(height: AppSpacing.xs),
-                  Flexible(
-                    child: GridView.builder(
-                      key: const ValueKey<String>('page-overview-grid'),
-                      shrinkWrap: true,
-                      // The header's capsule reaches nearer the edge than
-                      // the thumbnails do.
+                  if (chapters.isNotEmpty) ...<Widget>[
+                    const SizedBox(height: AppSpacing.xs),
+                    Padding(
                       padding: const EdgeInsetsDirectional.only(
                         end: AppSpacing.xs,
                       ),
-                      gridDelegate:
-                          const SliverGridDelegateWithMaxCrossAxisExtent(
-                            maxCrossAxisExtent: 148,
-                            mainAxisExtent: 174,
-                            crossAxisSpacing: AppSpacing.sm,
-                            mainAxisSpacing: AppSpacing.sm,
-                          ),
-                      itemCount: document.pageCount,
-                      itemBuilder: (BuildContext context, int index) {
-                        final NotePage page = document.pages[index];
-                        final Size paper = _paperFor(page);
-                        final bool selected = index == document.currentIndex;
-                        return Semantics(
-                          button: true,
-                          selected: selected,
-                          label: PageNavigationControls.describe(
-                            index,
-                            document.pageCount,
-                          ),
-                          child: InkWell(
-                            key: ValueKey<String>('page-thumbnail-$index'),
-                            onTap: () => _select(index),
-                            borderRadius: AppBorderRadius.medium,
-                            child: AnimatedContainer(
-                              duration: AppMotion.resolve(
-                                context,
-                                AppMotion.snappy.duration,
-                              ),
-                              padding: const EdgeInsets.all(AppSpacing.xs),
-                              decoration: BoxDecoration(
-                                color: selected ? colors.selected : null,
-                                borderRadius: AppBorderRadius.medium,
-                                border: Border.all(
-                                  color: selected
-                                      ? colors.accent
-                                      : colors.divider,
-                                  width: selected ? 2 : AppSizes.hairline,
+                      child: SegmentedChoice<PageOverviewView>(
+                        options: PageOverviewView.values,
+                        selected: view,
+                        labelOf: (PageOverviewView option) => switch (option) {
+                          PageOverviewView.pages => 'Pages',
+                          PageOverviewView.chapters => 'Chapters',
+                        },
+                        iconOf: (PageOverviewView option) => switch (option) {
+                          PageOverviewView.pages => AppIcons.gridView,
+                          PageOverviewView.chapters => AppIcons.listView,
+                        },
+                        keyOf: (PageOverviewView option) =>
+                            ValueKey<String>('page-overview-${option.name}'),
+                        onSelected: (PageOverviewView option) =>
+                            _view.value = option,
+                      ),
+                    ),
+                  ],
+                  const SizedBox(height: AppSpacing.xs),
+                  Flexible(
+                    child: view == PageOverviewView.chapters
+                        ? PageChapterList(
+                            document: document,
+                            chapters: chapters,
+                            onSelected: widget.onSelected,
+                          )
+                        : GridView.builder(
+                            key: const ValueKey<String>('page-overview-grid'),
+                            shrinkWrap: true,
+                            // The header's capsule reaches nearer the edge than
+                            // the thumbnails do.
+                            padding: const EdgeInsetsDirectional.only(
+                              end: AppSpacing.xs,
+                            ),
+                            gridDelegate:
+                                const SliverGridDelegateWithMaxCrossAxisExtent(
+                                  maxCrossAxisExtent: 148,
+                                  mainAxisExtent: 174,
+                                  crossAxisSpacing: AppSpacing.sm,
+                                  mainAxisSpacing: AppSpacing.sm,
                                 ),
-                              ),
-                              child: Column(
-                                children: <Widget>[
-                                  Expanded(
-                                    child: Center(
-                                      child: PagePreview(
-                                        paper: paper,
-                                        background: page.setup.background,
-                                        config: config,
-                                        infinite:
-                                            !document.isImportedPdf &&
-                                            page.setup.size ==
-                                                PageSize.infinite,
-                                        maxSize: const Size(116, 132),
-                                        child: _PageInkPreview(
-                                          page: page,
-                                          paper: paper,
-                                        ),
+                            itemCount: document.pageCount,
+                            itemBuilder: (BuildContext context, int index) {
+                              final NotePage page = document.pages[index];
+                              final Size paper = _paperFor(page);
+                              final bool selected =
+                                  index == document.currentIndex;
+                              return Semantics(
+                                button: true,
+                                selected: selected,
+                                label: PageNavigationControls.describe(
+                                  index,
+                                  document.pageCount,
+                                ),
+                                child: InkWell(
+                                  key: ValueKey<String>(
+                                    'page-thumbnail-$index',
+                                  ),
+                                  onTap: () => _select(index),
+                                  borderRadius: AppBorderRadius.medium,
+                                  child: AnimatedContainer(
+                                    duration: AppMotion.resolve(
+                                      context,
+                                      AppMotion.snappy.duration,
+                                    ),
+                                    padding: const EdgeInsets.all(
+                                      AppSpacing.xs,
+                                    ),
+                                    decoration: BoxDecoration(
+                                      color: selected ? colors.selected : null,
+                                      borderRadius: AppBorderRadius.medium,
+                                      border: Border.all(
+                                        color: selected
+                                            ? colors.accent
+                                            : colors.divider,
+                                        width: selected ? 2 : AppSizes.hairline,
                                       ),
                                     ),
-                                  ),
-                                  const SizedBox(height: AppSpacing.xs),
-                                  Text(
-                                    '${index + 1}',
-                                    style: text.labelMedium?.copyWith(
-                                      color: selected
-                                          ? colors.accent
-                                          : colors.textPrimary,
-                                      fontFeatures: const <FontFeature>[
-                                        FontFeature.tabularFigures(),
+                                    child: Column(
+                                      children: <Widget>[
+                                        Expanded(
+                                          child: Center(
+                                            child: PagePreview(
+                                              paper: paper,
+                                              background: page.setup.background,
+                                              config: widget.config,
+                                              infinite:
+                                                  !document.isImportedPdf &&
+                                                  page.setup.size ==
+                                                      PageSize.infinite,
+                                              maxSize: const Size(116, 132),
+                                              child: _PageInkPreview(
+                                                page: page,
+                                                paper: paper,
+                                              ),
+                                            ),
+                                          ),
+                                        ),
+                                        const SizedBox(height: AppSpacing.xs),
+                                        Text(
+                                          '${index + 1}',
+                                          style: text.labelMedium?.copyWith(
+                                            color: selected
+                                                ? colors.accent
+                                                : colors.textPrimary,
+                                            fontFeatures: const <FontFeature>[
+                                              FontFeature.tabularFigures(),
+                                            ],
+                                          ),
+                                        ),
                                       ],
                                     ),
                                   ),
-                                ],
-                              ),
-                            ),
+                                ),
+                              );
+                            },
                           ),
-                        );
-                      },
-                    ),
                   ),
                 ],
               ),
@@ -957,7 +1072,11 @@ Future<void> showPagePanel(
     barrierDismissible: true,
     barrierLabel: 'Close page setup',
     barrierColor: Colors.transparent,
-    transitionDuration: AppMotion.resolve(context, AppMotion.snappy.duration),
+    transitionDuration: AppMotion.resolvePaced(
+      context,
+      AppMotion.snappy.duration,
+      MotionMemory.instance.recall(('popover', 'page-setup')),
+    ),
     pageBuilder:
         (
           BuildContext context,
@@ -1053,6 +1172,7 @@ class PagePanel extends StatelessWidget {
         page.pdfSource != null) {
       final bool? confirmed = await showAppDialog<bool>(
         context: context,
+        motionKey: 'delete-page',
         builder: (BuildContext context) {
           return AlertDialog(
             title: const Text('Delete page?'),

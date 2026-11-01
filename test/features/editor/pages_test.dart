@@ -369,6 +369,158 @@ void main() {
     expect(document.currentIndex, greaterThanOrEqualTo(0));
   });
 
+  testWidgets(
+    'a delayed frame cannot jump ballistic scrolling and the page settles '
+    'only after the longer coast',
+    (WidgetTester tester) async {
+      final NoteDocument document = await _pumpDocument(
+        tester,
+        setup: _shortPage,
+      );
+      for (int i = 0; i < 8; i++) {
+        document.appendPage();
+      }
+      await tester.pump();
+
+      final Offset middle = tester.getCenter(find.byType(PageViewport));
+      final TestGesture first = await tester.startGesture(
+        middle + const Offset(-40, 40),
+        kind: PointerDeviceKind.touch,
+      );
+      final TestGesture second = await tester.startGesture(
+        middle + const Offset(40, 40),
+        kind: PointerDeviceKind.touch,
+      );
+      const Duration step = Duration(milliseconds: 4);
+      for (int i = 1; i <= 15; i++) {
+        await first.moveBy(const Offset(0, -10), timeStamp: step * (2 * i - 1));
+        await second.moveBy(const Offset(0, -10), timeStamp: step * (2 * i));
+      }
+      await tester.pump();
+      final PageViewportState viewport = tester.state<PageViewportState>(
+        find.byType(PageViewport),
+      );
+      final double releasedAt = viewport.scrollOffset.dy;
+
+      await first.up(timeStamp: step * 31);
+      await second.up(timeStamp: step * 31);
+      await tester.pump(const Duration(milliseconds: 16));
+      final double beforeDelayedFrame = viewport.scrollOffset.dy;
+      // Simulates an image upload or other missed frame. The next frame may
+      // advance normally, but must not catch up the full pause in one jump.
+      await tester.pump(const Duration(milliseconds: 250));
+      final double afterDelayedFrame = viewport.scrollOffset.dy;
+      expect(afterDelayedFrame, greaterThan(beforeDelayedFrame));
+      expect(afterDelayedFrame - beforeDelayedFrame, lessThan(80));
+      expect(viewport.isScrolling, isTrue);
+      expect(document.currentIndex, 0);
+
+      var frames = 0;
+      while (viewport.isScrolling && frames < 240) {
+        await tester.pump(const Duration(milliseconds: 16));
+        if (viewport.isScrolling) expect(document.currentIndex, 0);
+        frames++;
+      }
+      expect(viewport.isScrolling, isFalse);
+      expect(frames, greaterThan(45));
+      expect(viewport.scrollOffset.dy, greaterThan(releasedAt + 350));
+      expect(document.currentIndex, greaterThan(0));
+    },
+  );
+
+  testWidgets('the final drag direction owns momentum after a reversal', (
+    WidgetTester tester,
+  ) async {
+    final NoteDocument document = await _pumpDocument(
+      tester,
+      setup: _shortPage,
+    );
+    for (int i = 0; i < 8; i++) {
+      document.appendPage();
+    }
+    await tester.pump();
+    final PageViewportState viewport = tester.state<PageViewportState>(
+      find.byType(PageViewport),
+    );
+    viewport.scrollBy(const Offset(0, 1000));
+    await tester.pump();
+
+    final Offset middle = tester.getCenter(find.byType(PageViewport));
+    final TestGesture first = await tester.startGesture(
+      middle + const Offset(-40, 40),
+      kind: PointerDeviceKind.touch,
+    );
+    final TestGesture second = await tester.startGesture(
+      middle + const Offset(40, 40),
+      kind: PointerDeviceKind.touch,
+    );
+    const Duration step = Duration(milliseconds: 5);
+    var sample = 0;
+    for (int i = 0; i < 5; i++) {
+      sample++;
+      await first.moveBy(const Offset(0, -12), timeStamp: step * sample);
+      sample++;
+      await second.moveBy(const Offset(0, -12), timeStamp: step * sample);
+    }
+    for (int i = 0; i < 5; i++) {
+      sample++;
+      await first.moveBy(const Offset(0, 12), timeStamp: step * sample);
+      sample++;
+      await second.moveBy(const Offset(0, 12), timeStamp: step * sample);
+    }
+    await tester.pump();
+    final double releasedAt = viewport.scrollOffset.dy;
+    await first.up(timeStamp: step * (sample + 1));
+    await second.up(timeStamp: step * (sample + 1));
+    await tester.pump(const Duration(milliseconds: 16));
+    await tester.pump(const Duration(milliseconds: 32));
+    expect(viewport.scrollOffset.dy, lessThan(releasedAt));
+  });
+
+  testWidgets('momentum waits until the final scroll finger is released', (
+    WidgetTester tester,
+  ) async {
+    final NoteDocument document = await _pumpDocument(
+      tester,
+      setup: _shortPage,
+    );
+    for (int i = 0; i < 8; i++) {
+      document.appendPage();
+    }
+    await tester.pump();
+
+    final Offset middle = tester.getCenter(find.byType(PageViewport));
+    final TestGesture first = await tester.startGesture(
+      middle + const Offset(-40, 40),
+      kind: PointerDeviceKind.touch,
+    );
+    final TestGesture second = await tester.startGesture(
+      middle + const Offset(40, 40),
+      kind: PointerDeviceKind.touch,
+    );
+    const Duration step = Duration(milliseconds: 4);
+    for (int i = 1; i <= 12; i++) {
+      await first.moveBy(const Offset(0, -10), timeStamp: step * (2 * i - 1));
+      await second.moveBy(const Offset(0, -10), timeStamp: step * (2 * i));
+    }
+    await tester.pump();
+    final PageViewportState viewport = tester.state<PageViewportState>(
+      find.byType(PageViewport),
+    );
+
+    await first.up(timeStamp: step * 25);
+    final double oneFingerOffset = viewport.scrollOffset.dy;
+    await tester.pump(const Duration(milliseconds: 32));
+    expect(viewport.scrollOffset.dy, oneFingerOffset);
+    expect(viewport.isScrolling, isFalse);
+
+    await second.up(timeStamp: step * 26);
+    await tester.pump(const Duration(milliseconds: 16));
+    await tester.pump(const Duration(milliseconds: 32));
+    expect(viewport.scrollOffset.dy, greaterThan(oneFingerOffset));
+    expect(viewport.isScrolling, isTrue);
+  });
+
   testWidgets('the page panel sets the size and background', (
     WidgetTester tester,
   ) async {
@@ -1122,6 +1274,35 @@ void main() {
     final Rect page = canvasRect(tester);
     await _drawLine(tester, page.center, page.center + const Offset(100, 0));
     expect(document.current.ink.strokes, hasLength(1));
+  });
+
+  testWidgets('pinching a centered page does not scroll it vertically', (
+    WidgetTester tester,
+  ) async {
+    await _pumpDocument(tester, setup: _shortPage);
+    await onlyStylusWrites(tester);
+    final Offset focal = canvasRect(tester).center;
+    final TestGesture a = await tester.startGesture(
+      focal - const Offset(50, 0),
+      kind: PointerDeviceKind.touch,
+    );
+    final TestGesture b = await tester.startGesture(
+      focal + const Offset(50, 0),
+      kind: PointerDeviceKind.touch,
+    );
+
+    await a.moveBy(const Offset(-50, 0));
+    await b.moveBy(const Offset(50, 0));
+    await tester.pump();
+    expect(canvasRect(tester).center.dy, closeTo(focal.dy, 0.5));
+
+    await a.moveBy(const Offset(50, 0));
+    await b.moveBy(const Offset(-50, 0));
+    await tester.pump();
+    expect(canvasRect(tester).center.dy, closeTo(focal.dy, 0.5));
+
+    await a.up();
+    await b.up();
   });
 
   testWidgets('infinite canvas stays edge to edge when pinched out', (

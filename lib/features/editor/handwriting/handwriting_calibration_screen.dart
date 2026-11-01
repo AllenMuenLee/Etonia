@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 
 import '../../../app/theme/app_icons.dart';
 import '../../../app/theme/app_tokens.dart';
+import '../../../shared/navigation/app_page_route.dart';
 import '../ai/notation_font.dart';
 import '../ink/ink_sample.dart';
 import '../widgets/eraser_options.dart';
@@ -19,8 +20,9 @@ Future<HandwritingStyle?> showHandwritingCalibration(
   required HandwritingProfileStore store,
 }) {
   return Navigator.of(context).push<HandwritingStyle?>(
-    MaterialPageRoute<HandwritingStyle?>(
+    AppPageRoute<HandwritingStyle?>(
       fullscreenDialog: true,
+      motionKey: 'handwriting-calibration',
       builder: (BuildContext context) =>
           HandwritingCalibrationScreen(store: store),
     ),

@@ -21,6 +21,23 @@ Future<ui.Image> _solid(int width, int height, ui.Color color) async {
   }
 }
 
+Future<ui.Image> _rows(int width, List<ui.Color> colors) async {
+  final recorder = ui.PictureRecorder();
+  final ui.Canvas canvas = ui.Canvas(recorder);
+  for (int y = 0; y < colors.length; y++) {
+    canvas.drawRect(
+      ui.Rect.fromLTWH(0, y.toDouble(), width.toDouble(), 1),
+      ui.Paint()..color = colors[y],
+    );
+  }
+  final picture = recorder.endRecording();
+  try {
+    return await picture.toImage(width, colors.length);
+  } finally {
+    picture.dispose();
+  }
+}
+
 Future<int> _pixel(ui.Image image, int x, int y) async {
   final data = (await image.toByteData())!;
   return data.getUint32((y * image.width + x) * 4);
@@ -119,6 +136,45 @@ void main() {
       final whole = await paper.toImage();
       expect([whole.width, whole.height], [5, 7]);
       whole.dispose();
+      paper.dispose();
+    });
+  });
+
+  testWidgets('band boundaries preserve every source row without squishing', (
+    tester,
+  ) async {
+    await tester.runAsync(() async {
+      const colors = <ui.Color>[
+        ui.Color(0xff100000),
+        ui.Color(0xff200000),
+        ui.Color(0xff300000),
+        ui.Color(0xff400000),
+        ui.Color(0xff500000),
+        ui.Color(0xff600000),
+        ui.Color(0xff700000),
+        ui.Color(0xff800000),
+      ];
+      final paper = PdfPaper(<ui.Image>[
+        await _rows(4, colors.sublist(0, 4)),
+        await _rows(4, colors.sublist(4)),
+      ]);
+      final recorder = ui.PictureRecorder();
+      paper.paint(
+        ui.Canvas(recorder),
+        const ui.Rect.fromLTWH(0, 0, 4, 8),
+        ui.Paint()
+          ..filterQuality = ui.FilterQuality.none
+          ..isAntiAlias = false,
+      );
+      final picture = recorder.endRecording();
+      final image = await picture.toImage(4, 8);
+      for (int y = 0; y < colors.length; y++) {
+        final int argb = colors[y].toARGB32();
+        final int rgba = ((argb & 0x00ffffff) << 8) | (argb >>> 24);
+        expect(await _pixel(image, 1, y), rgba, reason: 'row $y');
+      }
+      image.dispose();
+      picture.dispose();
       paper.dispose();
     });
   });

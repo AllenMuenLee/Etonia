@@ -52,8 +52,8 @@ class NoteTabsPage extends StatefulWidget {
     required this.notes,
     required this.builder,
     this.onBack,
-    this.warmCapacity = 3,
-  }) : assert(warmCapacity > 0);
+    this.warmCapacity,
+  }) : assert(warmCapacity == null || warmCapacity > 0);
 
   final OpenNotes notes;
   final NoteTabBuilder builder;
@@ -62,7 +62,9 @@ class NoteTabsPage extends StatefulWidget {
   /// Recent editors kept in memory, plus sessions that cannot safely be evicted
   /// (failed saves or non-persisted editing state).
   /// Safety pins and all visible panes take precedence over this soft budget.
-  final int warmCapacity;
+  /// By default there is none: every open note's editor stays warm, to be
+  /// shown at once, until the system runs low on memory.
+  final int? warmCapacity;
 
   @override
   State<NoteTabsPage> createState() => _NoteTabsPageState();
@@ -190,11 +192,11 @@ class _NoteTabsPageState extends State<NoteTabsPage> {
     if (_trimming) return;
     _trimming = true;
     try {
+      final int? capacity = warmCapacity ?? widget.warmCapacity;
+      // Without a budget nothing is put away until memory runs low.
+      if (capacity == null) return;
       final Set<String> visibleIds = widget.notes.visibleNoteIds.toSet();
-      final int effectiveCapacity = math.max(
-        warmCapacity ?? widget.warmCapacity,
-        visibleIds.length,
-      );
+      final int effectiveCapacity = math.max(capacity, visibleIds.length);
 
       for (final id in List<String>.of(_warm)) {
         if (_warm.length <= effectiveCapacity) break;
@@ -383,7 +385,6 @@ class _NoteTabsPageState extends State<NoteTabsPage> {
                     current: split
                         ? open.isNoteInPane(notes[i].id)
                         : i == active,
-                    direction: split ? 0 : (i < active ? -0.025 : 0.025),
                     child: _FloatingPane(
                       key: ValueKey<String>('floating-pane-${notes[i].id}'),
                       split: split && open.isNoteInPane(notes[i].id),
@@ -654,7 +655,6 @@ class _TabPage extends StatelessWidget {
   const _TabPage({
     required this.visible,
     required this.current,
-    required this.direction,
     required this.child,
   });
 
@@ -662,37 +662,31 @@ class _TabPage extends StatelessWidget {
 
   /// Whether the page is one to see and use, not one fading away.
   final bool current;
-  final double direction;
   final Widget child;
 
   @override
-  Widget build(BuildContext context) {
-    final Duration duration = AppMotion.resolve(
-      context,
-      AppMotion.smooth.duration,
-    );
-    return Offstage(
-      offstage: !visible,
-      child: IgnorePointer(
-        ignoring: !current,
-        // A keyed page keeps each editor's page, history, and assistant alive
-        // while its tab is put just out of view.
-        child: TickerMode(
-          enabled: visible,
-          child: ExcludeFocus(
+  Widget build(BuildContext context) => Offstage(
+    offstage: !visible,
+    child: IgnorePointer(
+      ignoring: !current,
+      // A keyed page keeps each editor's page, history, and assistant alive
+      // while its tab is put just out of view.
+      child: TickerMode(
+        enabled: visible,
+        child: ExcludeFocus(
+          excluding: !current,
+          child: ExcludeSemantics(
             excluding: !current,
-            child: ExcludeSemantics(
-              excluding: !current,
-              child: AnimatedSlide(
-                offset: current ? Offset.zero : Offset(direction, 0),
-                duration: duration,
-                curve: AppMotion.fadeInCurve,
-                child: IgnoreKeyboard(ignoring: !current, child: child),
-              ),
+            // Keep a warm editor as one stable layer. Sliding an entire
+            // PDF/image/ink scene rerasterizes or composites a screen-sized
+            // texture for several frames on mobile GPUs; an immediate tab
+            // hand-off is both clearer and reliably cheaper.
+            child: RepaintBoundary(
+              child: IgnoreKeyboard(ignoring: !current, child: child),
             ),
           ),
         ),
       ),
-    );
-  }
+    ),
+  );
 }

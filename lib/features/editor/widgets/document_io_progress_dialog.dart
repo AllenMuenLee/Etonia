@@ -24,6 +24,7 @@ Future<DocumentIoProgressResult> showDocumentIoProgress(
 }) async {
   return await showAppDialog<DocumentIoProgressResult>(
         context: context,
+        motionKey: 'document-io-progress',
         barrierDismissible: false,
         builder: (_) => _DocumentIoProgressDialog(
           title: title,

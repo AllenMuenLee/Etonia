@@ -1,8 +1,15 @@
 ﻿import 'package:flutter/material.dart';
 
 import '../../app/theme/app_tokens.dart';
+import '../motion/motion_memory.dart';
 
 /// An iOS-style alert: a restrained scale from 1.08 with a short fade.
+///
+/// [motionKey] names the dialog for [MotionMemory]: shown for the first
+/// time it grows in slowly and smoothly; shown again it only fades in
+/// slightly, without growing ([AppMotion.glance]). Without a key,
+/// the route's [RouteSettings.name] is used, and without either the dialog
+/// keeps the standard timing.
 class AppDialogRoute<T> extends DialogRoute<T> {
   AppDialogRoute({
     required super.context,
@@ -16,10 +23,18 @@ class AppDialogRoute<T> extends DialogRoute<T> {
     super.anchorPoint,
     super.traversalEdgeBehavior,
     super.requestFocus,
-  });
+    Object? motionKey,
+  }) : _pace = _paceOf(motionKey ?? settings?.name);
+
+  final MotionPace _pace;
+
+  static MotionPace _paceOf(Object? key) => key == null
+      ? MotionPace.standard
+      : MotionMemory.instance.recall(('dialog', key));
 
   @override
-  Duration get transitionDuration => AppMotion.snappy.duration;
+  Duration get transitionDuration =>
+      AppMotion.paced(AppMotion.snappy.duration, _pace);
 
   @override
   Duration get reverseTransitionDuration => AppMotion.fadeOut;
@@ -42,6 +57,16 @@ class AppDialogRoute<T> extends DialogRoute<T> {
     if (MediaQuery.disableAnimationsOf(context)) {
       return FadeTransition(opacity: animation, child: child);
     }
+    if (!AppMotion.travels(_pace)) {
+      return FadeTransition(
+        opacity: CurvedAnimation(
+          parent: animation,
+          curve: AppMotion.glanceCurve,
+          reverseCurve: AppMotion.fadeOutCurve,
+        ),
+        child: child,
+      );
+    }
     return FadeTransition(
       opacity: animation.drive(_fade),
       child: ScaleTransition(scale: animation.drive(_grow), child: child),
@@ -61,6 +86,7 @@ Future<T?> showAppDialog<T>({
   RouteSettings? routeSettings,
   Offset? anchorPoint,
   TraversalEdgeBehavior? traversalEdgeBehavior,
+  Object? motionKey,
 }) {
   final NavigatorState navigator = Navigator.of(
     context,
@@ -80,6 +106,7 @@ Future<T?> showAppDialog<T>({
       anchorPoint: anchorPoint,
       traversalEdgeBehavior:
           traversalEdgeBehavior ?? TraversalEdgeBehavior.closedLoop,
+      motionKey: motionKey,
     ),
   );
 }

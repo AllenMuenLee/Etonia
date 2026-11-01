@@ -6,15 +6,16 @@ import '../ink/ink_notation.dart';
 import '../ink/ink_sample.dart';
 import 'ai_config.dart';
 
-/// Keeps what an AI notation writes off the assistant's earlier notes, and
-/// off what it has already written itself: each piece of text that would
-/// land on either is moved the shortest way clear, within [reach], on the
+/// Keeps what an AI notation writes off ink already on the paper (the
+/// assistant's earlier notes, and the user's own when given), and off what
+/// it has already written itself: each piece of text that would land on, or
+/// crowd, either is moved the shortest way clear, within [reach], on the
 /// paper. Text that finds no clear place within reach stays where it was.
 /// Lines, arrows, and shapes are not moved: they are meant to touch ink.
 class NotationClearance {
   NotationClearance({
     required this.pageSize,
-    Iterable<SpaceStroke> earlierNotes = const <SpaceStroke>[],
+    Iterable<SpaceStroke> ink = const <SpaceStroke>[],
     this.gap = 6,
     this.reach = 240,
     this.step = 6,
@@ -23,7 +24,7 @@ class NotationClearance {
          math.max(1, (pageSize.width / _cell(pageSize)).ceil()),
          math.max(1, (pageSize.height / _cell(pageSize)).ceil()),
        ) {
-    for (final SpaceStroke stroke in earlierNotes) {
+    for (final SpaceStroke stroke in ink) {
       _grid.markStroke(stroke.points, stroke.width / 2);
     }
     final int width = _grid.columns + 1;
@@ -64,32 +65,7 @@ class NotationClearance {
     if (box == null) {
       return text;
     }
-    // A little inside the edge: a pen's pressure can widen it past its width.
-    final Rect paper = (Offset.zero & pageSize).deflate(2);
-    Offset shift = Offset.zero;
-    if (!_isClear(box)) {
-      // Rings of growing radius: the nearest clear place wins.
-      search:
-      for (double radius = step; radius <= reach; radius += step) {
-        final int directions = math.max(
-          8,
-          (2 * math.pi * radius / step).ceil(),
-        );
-        for (int i = 0; i < directions; i++) {
-          final double angle = 2 * math.pi * i / directions;
-          final Offset candidate = Offset(
-            radius * math.cos(angle),
-            radius * math.sin(angle),
-          );
-          final Rect moved = box.shift(candidate);
-          if (_contains(paper, moved) && _isClear(moved)) {
-            shift = candidate;
-            break search;
-          }
-        }
-      }
-    }
-    _written.add(box.shift(shift));
+    final Offset shift = clear(box);
     if (shift == Offset.zero) {
       return text;
     }
@@ -107,7 +83,47 @@ class NotationClearance {
     ];
   }
 
-  bool _isClear(Rect box) {
+  /// How far [box], one piece of writing, must move to keep [gap] (or this
+  /// clearance's own) clear of the ink and of what has been written: the
+  /// shortest move within [reach] that keeps it on the paper, or none when
+  /// it is clear already or nowhere within reach is. It counts as written
+  /// there from now on.
+  Offset clear(Rect box, {double? gap}) {
+    final double room = gap ?? this.gap;
+    // A little inside the edge: a pen's pressure can widen it past its width.
+    final Rect paper = (Offset.zero & pageSize).deflate(2);
+    Offset shift = Offset.zero;
+    if (!_isClear(box, room)) {
+      // Rings of growing radius: the nearest clear place wins.
+      search:
+      for (double radius = step; radius <= reach; radius += step) {
+        final int directions = math.max(
+          8,
+          (2 * math.pi * radius / step).ceil(),
+        );
+        for (int i = 0; i < directions; i++) {
+          final double angle = 2 * math.pi * i / directions;
+          final Offset candidate = Offset(
+            radius * math.cos(angle),
+            radius * math.sin(angle),
+          );
+          final Rect moved = box.shift(candidate);
+          if (_contains(paper, moved) && _isClear(moved, room)) {
+            shift = candidate;
+            break search;
+          }
+        }
+      }
+    }
+    _written.add(box.shift(shift));
+    return shift;
+  }
+
+  /// Counts [box] as written where it is, without moving it: a label that
+  /// must stay on the spot the model chose.
+  void reserve(Rect box) => _written.add(box);
+
+  bool _isClear(Rect box, double gap) {
     final Rect padded = box.inflate(gap);
     for (final Rect written in _written) {
       if (written.overlaps(padded)) {

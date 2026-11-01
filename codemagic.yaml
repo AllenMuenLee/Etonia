@@ -29,6 +29,8 @@ workflows:
     scripts:
       - name: Write dart defines
         script: echo "$DART_DEFINES_B64" | base64 --decode > dart_defines.json
+      - name: Check dart defines
+        script: dart run tool/check_dart_defines.dart --platform ios dart_defines.json
       - name: Get packages
         script: flutter pub get
       - name: Use the App Store profile

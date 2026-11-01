@@ -73,14 +73,14 @@ class ThumbnailCache {
     required this.repository,
     required this.rasterizer,
     this.pixelWidth = 420,
-    this.capacity = 120,
+    this.capacity,
     this.concurrency = 4,
-    this.maxBytes = 24 * 1024 * 1024,
+    this.maxBytes,
     this.prefetchLimit = 18,
   }) : assert(pixelWidth > 0),
-       assert(capacity > 0),
+       assert(capacity == null || capacity > 0),
        assert(concurrency > 0),
-       assert(maxBytes > 0),
+       assert(maxBytes == null || maxBytes > 0),
        assert(prefetchLimit >= 0);
 
   final NoteRepository repository;
@@ -90,15 +90,20 @@ class ThumbnailCache {
   final int pixelWidth;
 
   /// How many notes' pictures are kept, the least recently shown dropped
-  /// first.
-  final int capacity;
+  /// first. By default there is no limit: every picture drawn is kept, to
+  /// be shown at once when its note is shown again, until the system runs
+  /// low on memory ([releaseMemory]).
+  final int? capacity;
 
   /// How many pictures are drawn at once.
   final int concurrency;
-  final int maxBytes;
+
+  /// How many bytes of pictures are kept, if limited; like [capacity],
+  /// unlimited by default.
+  final int? maxBytes;
 
   /// How many of a folder's notes [prefetch] draws ahead: about a screen
-  /// and a half of cards, which fits in [maxBytes].
+  /// and a half of cards.
   final int prefetchLimit;
 
   int get retainedBytes => _entries.values.fold(0, (int total, _Entry entry) {
@@ -302,7 +307,12 @@ class ThumbnailCache {
   }
 
   void _evict() {
-    while (_entries.length > capacity || retainedBytes > maxBytes) {
+    final int? capacity = this.capacity;
+    final int? maxBytes = this.maxBytes;
+    if (capacity == null && maxBytes == null) return;
+    while (_entries.isNotEmpty &&
+        ((capacity != null && _entries.length > capacity) ||
+            (maxBytes != null && retainedBytes > maxBytes))) {
       final String oldest = _entries.keys.first;
       _entries.remove(oldest)!.dispose();
     }
@@ -486,6 +496,11 @@ class ThumbnailCache {
         Offset.zero & source.pageSize,
         smooth,
       );
+      // PDF paper left blank where its content was cut or moved away.
+      final Paint blank = Paint()..color = const Color(0xFFFFFFFF);
+      for (final Rect mask in page.pdfMasks) {
+        canvas.drawRect(mask, blank);
+      }
     }
     for (final (NoteImageElement element, ui.Image image) in pictures) {
       canvas

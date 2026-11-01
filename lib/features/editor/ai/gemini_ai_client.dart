@@ -46,15 +46,17 @@ class GeminiAiClient implements AiClient {
   @override
   String get modelLabel => config.modelLabel;
 
-  /// The JSON body for [request]. The image rides in the first user turn,
-  /// ahead of its text, on every call: the endpoint keeps no state.
+  /// The JSON body for [request]. The first user turn carries the clean PNG
+  /// crop and, with Notation on, the same selection as SVG beside it, on
+  /// every call: the endpoint keeps no state.
   static Map<String, Object?> buildBody(
     AiRequest request, {
     String? thinkingLevel = AiApiConfig.defaultThinkingLevel,
     int? thinkingBudget = AiApiConfig.defaultThinkingBudget,
     AiNotationConfig notationConfig = const AiNotationConfig(),
   }) {
-    bool imagePending = true;
+    bool selectionPending = true;
+    final String? selectionSvg = request.modelSelectionSvg;
     int lastUser = -1;
     for (int i = 0; i < request.messages.length; i++) {
       if (request.messages[i].role == AiRole.user) {
@@ -64,21 +66,24 @@ class GeminiAiClient implements AiClient {
     final List<Map<String, Object?>> contents = <Map<String, Object?>>[];
     for (int index = 0; index < request.messages.length; index++) {
       final AiMessage message = request.messages[index];
-      final bool withImage = imagePending && message.role == AiRole.user;
-      if (withImage) {
-        imagePending = false;
+      final bool withSelection =
+          selectionPending && message.role == AiRole.user;
+      if (withSelection) {
+        selectionPending = false;
       }
       contents.add(<String, Object?>{
         'role': message.role.name,
         'parts': <Map<String, Object?>>[
-          if (withImage) ...<Map<String, Object?>>[
+          if (withSelection) ...<Map<String, Object?>>[
             <String, Object?>{'text': 'Selected ink image:'},
             <String, Object?>{
               'inline_data': <String, Object?>{
                 'mime_type': 'image/png',
-                'data': base64Encode(request.providerImagePng),
+                'data': base64Encode(request.imagePng),
               },
             },
+            if (selectionSvg != null)
+              <String, Object?>{'text': aiSelectionSvgText(selectionSvg)},
           ],
           if (request.noteImage case final note? when index == lastUser)
             <String, Object?>{'text': aiNoteMetadata(note)},

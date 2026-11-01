@@ -12,6 +12,7 @@ Future<PdfExportOptions?> showExportOptions(
 }) {
   return showAppSheet<PdfExportOptions>(
     context: context,
+    motionKey: 'export-options',
     builder: (BuildContext context) =>
         _ExportOptionsSheet(allowCurrentPage: allowCurrentPage),
   );

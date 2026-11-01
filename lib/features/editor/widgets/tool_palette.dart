@@ -204,7 +204,7 @@ class PalettePlacement {
 /// ruler. Each tool,
 /// pressed while selected, opens its options: the pen's ink color and
 /// width (and, folded away, its advanced settings), the eraser's mode and
-/// size, Select's Paste, and the assistant's notation settings.
+/// size, Select's Select PDF switch, and the assistant's notation settings.
 ///
 /// Holding it anywhere, on its tools too, moves it: held a moment, the
 /// palette lights up in the accent color; held for [liftDelay], it lifts
@@ -224,9 +224,7 @@ class ToolPalette extends StatelessWidget {
     required this.tool,
     required this.penSettings,
     required this.eraserSettings,
-    required this.clipboardListenable,
-    required this.canPaste,
-    required this.onPaste,
+    required this.selectPdf,
     required this.aiActive,
     required this.onTurnOnAi,
     this.assistant,
@@ -303,13 +301,9 @@ class ToolPalette extends StatelessWidget {
   final ValueNotifier<PenSettings> penSettings;
   final ValueNotifier<EraserSettings> eraserSettings;
 
-  /// Fires when [canPaste] may have changed.
-  final Listenable clipboardListenable;
-
-  /// Whether there is anything to paste.
-  final ValueGetter<bool> canPaste;
-
-  final VoidCallback onPaste;
+  /// Whether a lasso takes the PDF paper inside it along with the ink: the
+  /// Select tool's one option.
+  final ValueNotifier<bool> selectPdf;
 
   /// Whether AI mode is on: the assistant's notes are shown, and writing on
   /// the page with the AI tool is for the assistant.
@@ -559,16 +553,12 @@ class ToolPalette extends StatelessWidget {
         );
       },
       panelBuilder: (BuildContext context, VoidCallback close) {
-        return ListenableBuilder(
-          listenable: clipboardListenable,
-          builder: (BuildContext context, Widget? _) {
+        return ValueListenableBuilder<bool>(
+          valueListenable: selectPdf,
+          builder: (BuildContext context, bool on, Widget? _) {
             return SelectOptions(
-              onPaste: canPaste()
-                  ? () {
-                      close();
-                      onPaste();
-                    }
-                  : null,
+              selectPdf: on,
+              onSelectPdfChanged: (bool next) => selectPdf.value = next,
             );
           },
         );

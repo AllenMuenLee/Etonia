@@ -597,7 +597,7 @@ void main() {
 
       expect(
         tester
-            .widget<AnimatedPositioned>(
+            .widget<TweenAnimationBuilder<Offset>>(
               find.byKey(const ValueKey<String>('tool-palette-position')),
             )
             .duration,
@@ -605,8 +605,11 @@ void main() {
       );
       expect(
         tester
-            .widget<AnimatedPositioned>(
-              find.byKey(const ValueKey<String>('history-position')),
+            .widget<TweenAnimationBuilder<Offset>>(
+              find.descendant(
+                of: find.byKey(const ValueKey<String>('history-position')),
+                matching: find.byType(TweenAnimationBuilder<Offset>),
+              ),
             )
             .duration,
         AppMotion.reduced,

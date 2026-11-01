@@ -86,8 +86,10 @@ void main() {
         findsOneWidget,
       );
     }
-    // Haiku and Luna are marked unlimited.
-    expect(find.text('Unlimited'), findsNWidgets(2));
+    expect(find.text('x1'), findsNWidgets(2));
+    expect(find.text('x20'), findsNWidgets(2));
+    expect(find.text('x40'), findsNWidgets(2));
+    expect(find.text('x100'), findsOneWidget);
     await tester.tap(find.byKey(const ValueKey<String>('ai-model-opus')));
     await tester.pumpAndSettle();
 

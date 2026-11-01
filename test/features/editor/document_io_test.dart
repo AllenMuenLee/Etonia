@@ -11,6 +11,7 @@ import 'package:greatnote/features/editor/document_io/document_io_config.dart';
 import 'package:greatnote/features/editor/document_io/document_models.dart';
 import 'package:greatnote/features/editor/document_io/document_platform.dart';
 import 'package:greatnote/features/editor/document_io/pdf_exporter.dart';
+import 'package:greatnote/features/editor/document_io/pdf_page_layer.dart';
 import 'package:greatnote/features/editor/document_io/pdf_selection_image.dart';
 import 'package:greatnote/features/editor/ink/ink_controller.dart';
 import 'package:greatnote/features/editor/ink/ink_palette.dart';
@@ -22,6 +23,7 @@ import 'package:greatnote/features/editor/ink/selection_transform.dart';
 import 'package:greatnote/features/editor/page/page_setup.dart';
 import 'package:greatnote/features/editor/page/note_document.dart';
 import 'package:greatnote/features/editor/ink/ink_canvas.dart';
+import 'package:greatnote/features/editor/widgets/tool_palette.dart';
 import 'package:greatnote/features/library/note_content.dart';
 import 'package:greatnote/features/library/note_repository.dart';
 import 'package:greatnote/features/library/shared_note_clipboard.dart';
@@ -183,7 +185,7 @@ void main() {
     expect(controller.images.single.center, const InkVector(200, 200));
   });
 
-  test('a lasso selects editable ink instead of PDF paper behind it', () {
+  test('without its paper, a lasso selects the editable ink alone', () {
     final Stroke stroke = Stroke.fromPoints(
       style: const StrokeStyle(ink: InkPalette.ink, width: 4),
       points: const <InkVector>[InkVector(20, 20), InkVector(40, 40)],
@@ -192,11 +194,7 @@ void main() {
     addTearDown(controller.dispose);
     controller
       ..beginLasso(pointer: 1, position: const InkVector(10, 10))
-      ..endLasso(
-        1,
-        const InkVector(50, 50),
-        const Rect.fromLTWH(0, 0, 100, 100),
-      );
+      ..endLasso(1, const InkVector(50, 50));
 
     final InkSelection selection = controller.selection!;
     expect(selection.strokes, <Stroke>[stroke]);
@@ -224,6 +222,22 @@ void main() {
     expect(selection.pixelSize, const Size(100, 40));
     expect(cropped.width, 100);
     expect(cropped.height, 40);
+  });
+
+  test('blank areas of the paper come out blank in a crop', () {
+    final image.Image page = image.Image(width: 100, height: 100)
+      ..clear(image.ColorRgb8(0, 0, 0));
+    final PdfSelectionImage selection = cropPdfSelection(
+      Uint8List.fromList(image.encodePng(page)),
+      const Size(100, 100),
+      const Rect.fromLTWH(0, 0, 50, 50),
+      blanks: const <Rect>[Rect.fromLTWH(20, 20, 50, 50)],
+    );
+    final image.Image cropped = image.decodePng(selection.png)!;
+
+    expect(cropped.getPixel(10, 10).r, 0);
+    expect(cropped.getPixel(30, 30).r, 255);
+    expect(cropped.getPixel(49, 49).r, 255);
   });
 
   testWidgets('Copy turns a selected PDF region into a pasteable image', (
@@ -279,6 +293,7 @@ void main() {
 
     await tester.tap(find.byTooltip('Select'));
     await tester.pumpAndSettle();
+    tester.widget<ToolPalette>(find.byType(ToolPalette)).selectPdf.value = true;
     final Rect canvas = tester.getRect(find.byType(InkCanvas));
     final double pageScale = canvas.width / 100;
     await tester.dragFrom(
@@ -306,6 +321,148 @@ void main() {
     expect(clipboard.images.single.size.height, closeTo(50, 1e-6));
     expect(controller.paste(at: const InkVector(80, 80)), isTrue);
     expect(controller.images.single.center, const InkVector(80, 80));
+  });
+
+  testWidgets('with Select PDF, PDF paper moves, cuts, and deletes, leaving '
+      'its place blank', (WidgetTester tester) async {
+    final InMemoryNoteRepository repository = InMemoryNoteRepository();
+    addTearDown(repository.dispose);
+    final note = await repository.createNote();
+    final String pdfAsset = await repository.storeAsset(
+      note.id,
+      Uint8List.fromList(<int>[1, 2, 3]),
+      kind: NoteAssetKind.pdf,
+      extension: 'pdf',
+    );
+    final image.Image rendered = image.Image(width: 100, height: 100);
+    final InkController controller = InkController();
+    final NoteDocument document = NoteDocument(
+      pages: <NotePage>[
+        NotePage(
+          ink: controller,
+          pdfSource: PdfPageSource(
+            assetId: pdfAsset,
+            pageIndex: 0,
+            pageSize: const Size(100, 100),
+          ),
+        ),
+      ],
+    );
+    addTearDown(document.dispose);
+    InkClipboard? copied;
+    setViewportSize(tester, TestViewport.tabletLandscape.size);
+    await tester.pumpWidget(
+      GreatnoteApp(
+        home: EditorScreen(
+          document: document,
+          repository: repository,
+          noteId: note.id,
+          pdfRasterizer: FakePdfRasterizer(
+            renderedPng: Uint8List.fromList(image.encodePng(rendered)),
+          ),
+          assetReader: (String id) async {
+            return (await repository.readAsset(note.id, id)).bytes;
+          },
+          onClipboardChanged: (InkClipboard value) => copied = value,
+        ),
+      ),
+    );
+    await tester.pump();
+    await tester.runAsync(
+      () => Future<void>.delayed(const Duration(milliseconds: 100)),
+    );
+    await tester.pumpAndSettle();
+    Future<void> settle(bool Function() done) async {
+      for (int i = 0; i < 10 && !done(); i++) {
+        await tester.runAsync(
+          () => Future<void>.delayed(const Duration(milliseconds: 300)),
+        );
+        await tester.pumpAndSettle();
+      }
+    }
+
+    await tester.tap(find.byTooltip('Select'));
+    await tester.pumpAndSettle();
+    tester.widget<ToolPalette>(find.byType(ToolPalette)).selectPdf.value = true;
+    final Rect canvas = tester.getRect(find.byType(InkCanvas));
+    final double pageScale = canvas.width / 100;
+    Future<void> select(Rect area) async {
+      await tester.dragFrom(
+        canvas.topLeft + area.topLeft * pageScale,
+        area.size.bottomRight(Offset.zero) * pageScale,
+      );
+      await tester.pumpAndSettle();
+    }
+
+    expect(find.byType(PdfMaskLayer), findsOneWidget);
+
+    // Moved: the paper is readied in the background, then lifted by a drag.
+    await select(const Rect.fromLTWH(10, 20, 50, 50));
+    await settle(() => controller.canLiftPdfSelection);
+    expect(controller.canLiftPdfSelection, isTrue);
+    await tester.dragFrom(
+      canvas.topLeft + const Offset(35, 45) * pageScale,
+      const Offset(20, 10) * pageScale,
+    );
+    await tester.pumpAndSettle();
+    expect(
+      controller.pdfMasks.single,
+      rectMoreOrLessEquals(const Rect.fromLTRB(10, 20, 60, 70)),
+    );
+    expect(controller.images.single.center.x, closeTo(55, 1e-6));
+    expect(controller.images.single.center.y, closeTo(55, 1e-6));
+    expect(controller.selection!.includesPdf, isFalse);
+    // The lift and the move are taken back together.
+    expect(controller.undo(), isTrue);
+    await tester.pumpAndSettle();
+    expect(controller.pdfMasks, isEmpty);
+    expect(controller.images, isEmpty);
+
+    // Cut: copied as an image, its place left blank.
+    const Rect cutArea = Rect.fromLTWH(60, 0, 30, 30);
+    await select(cutArea);
+    await tester.tap(find.byTooltip('Cut'));
+    await settle(() => copied != null);
+    expect(copied!.images, hasLength(1));
+    expect(controller.pdfMasks.single, rectMoreOrLessEquals(cutArea));
+    expect(controller.selection, isNull);
+
+    // Deleted: just left blank.
+    const Rect deletedArea = Rect.fromLTWH(10, 75, 20, 20);
+    await select(deletedArea);
+    await tester.tap(find.byTooltip('Delete'));
+    await tester.pumpAndSettle();
+    expect(controller.pdfMasks, hasLength(2));
+    expect(controller.pdfMasks.last, rectMoreOrLessEquals(deletedArea));
+    expect(controller.images, isEmpty);
+    expect(tester.takeException(), isNull);
+  });
+
+  test('blank PDF areas are saved with the page', () {
+    final InkController ink = InkController(
+      pdfMasks: const <Rect>[Rect.fromLTRB(10, 20, 60, 70)],
+    );
+    final NoteDocument document = NoteDocument(
+      pages: <NotePage>[
+        NotePage(
+          ink: ink,
+          pdfSource: const PdfPageSource(
+            assetId: 'pdf',
+            pageIndex: 0,
+            pageSize: Size(100, 100),
+          ),
+        ),
+      ],
+    );
+    addTearDown(document.dispose);
+    final Map<String, Object?> json =
+        jsonDecode(jsonEncode(NoteContent.fromDocument(document).toJson()))
+            as Map<String, Object?>;
+    final NoteDocument restored = NoteContent.fromJson(json).toDocument();
+    addTearDown(restored.dispose);
+    expect(restored.pages.single.ink.pdfMasks, const <Rect>[
+      Rect.fromLTRB(10, 20, 60, 70),
+    ]);
   });
 
   test('image insert, transform, cut, and paste are single mutations', () {

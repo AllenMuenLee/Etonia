@@ -15,6 +15,7 @@ Future<Color?> showColorPaletteDialog(
 }) async {
   return showAppDialog<Color>(
     context: context,
+    motionKey: 'color-palette',
     builder: (BuildContext context) =>
         ColorPaletteDialog(initialColor: initialColor, title: title),
   );

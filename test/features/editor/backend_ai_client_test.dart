@@ -227,7 +227,11 @@ void main() {
       AiRequest(
         systemInstruction: 'public instructions',
         imagePng: Uint8List.fromList([1, 2, 3]),
-        notationImagePng: Uint8List.fromList([4, 5, 6]),
+        selectionSvg:
+            '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 480 480" '
+            'data-etonia-coordinate-space="note" '
+            'data-etonia-selection-bounds="0 0 144 192">'
+            '<path d="M1 2 L3 4"/></svg>',
         notationEnabled: true,
         notationInstruction: 'drawing instructions',
         noteImage: note,
@@ -240,7 +244,7 @@ void main() {
     expect(sent!['notationInstruction'], 'drawing instructions');
     expect(sent!['animationAllowed'], isFalse);
     expect(sent!['selectedImage'], base64Encode([1, 2, 3]));
-    expect(sent!['notationImage'], base64Encode([4, 5, 6]));
+    expect(sent!['selectedSvg'], contains('<path d="M1 2 L3 4"/>'));
     expect(sent!['noteMetadata'], aiNoteMetadata(note));
     expect(sent!['noteMetadata'], contains('"free_areas"'));
     expect(sent!['notationContext'], {
@@ -281,7 +285,10 @@ void main() {
         AiRequest(
           systemInstruction: 'public instructions',
           imagePng: Uint8List.fromList([1, 2, 3]),
-          notationImagePng: Uint8List.fromList([4, 5, 6]),
+          selectionSvg:
+              '<svg xmlns="http://www.w3.org/2000/svg" '
+              'viewBox="0 0 480 480" data-etonia-coordinate-space="note" '
+              'data-etonia-selection-bounds="504 96 72 144"></svg>',
           notationEnabled: true,
           notationInstruction: 'drawing instructions',
           noteImage: note,
@@ -290,7 +297,7 @@ void main() {
       );
 
       expect(sent!['notationContext'], isNull);
-      expect(sent!['notationImage'], isNull);
+      expect(sent!['selectedSvg'], isNull);
       expect(sent!['notationInstruction'], isNull);
     },
   );

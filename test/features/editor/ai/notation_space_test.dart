@@ -149,7 +149,7 @@ void main() {
     test('text clear of earlier notes stays where it is', () {
       final NotationClearance clearance = NotationClearance(
         pageSize: const Size(600, 800),
-        earlierNotes: earlier,
+        ink: earlier,
       );
       final List<GeneratedInkTrace> text = <GeneratedInkTrace>[
         ink(const Rect.fromLTRB(200, 300, 320, 330)),
@@ -160,7 +160,7 @@ void main() {
     test('text on an earlier note is moved the shortest way clear', () {
       final NotationClearance clearance = NotationClearance(
         pageSize: const Size(600, 800),
-        earlierNotes: earlier,
+        ink: earlier,
       );
       final Rect moved = boundsOf(
         clearance.place(<GeneratedInkTrace>[
@@ -222,7 +222,7 @@ void main() {
         const Size(600, 800),
         clearance: NotationClearance(
           pageSize: const Size(600, 800),
-          earlierNotes: earlier,
+          ink: earlier,
         ),
       );
       expect(kept.length, plain.length);

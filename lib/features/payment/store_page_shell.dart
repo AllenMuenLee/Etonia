@@ -2,12 +2,18 @@ import 'package:flutter/material.dart';
 
 import '../../app/theme/app_icons.dart';
 import '../../app/theme/app_tokens.dart';
+import '../../shared/navigation/app_page_route.dart';
 
 /// Opens [page] as a full screen that rises over the current one, the way the
-/// plans and the account are shown.
+/// plans and the account are shown. Each kind of page arrives slowly the
+/// first time and quickly after.
 Future<void> showStorePage(BuildContext context, Widget page) {
   return Navigator.of(context).push<void>(
-    MaterialPageRoute<void>(fullscreenDialog: true, builder: (_) => page),
+    AppPageRoute<void>(
+      fullscreenDialog: true,
+      motionKey: ('store', page.runtimeType),
+      builder: (_) => page,
+    ),
   );
 }
 

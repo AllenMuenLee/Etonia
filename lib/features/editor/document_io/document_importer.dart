@@ -369,9 +369,11 @@ class DocumentImporter {
   }) async {
     final EditableSvg vector;
     try {
-      vector = EditableSvg.parse(
-        utf8.decode(picked.bytes, allowMalformed: false),
-      ).croppedToContent();
+      vector = await Isolate.run(
+        () => EditableSvg.parse(
+          utf8.decode(picked.bytes, allowMalformed: false),
+        ).croppedToContent(),
+      );
     } on Object {
       throw const DocumentImportException(
         'This SVG could not be opened safely',

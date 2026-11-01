@@ -1,4 +1,4 @@
-﻿import 'package:flutter/material.dart';
+import 'package:flutter/material.dart';
 
 import '../../app/theme/app_tokens.dart';
 import '../../app/theme/app_icons.dart';
@@ -22,6 +22,7 @@ Future<String?> askForName(
 }) async {
   final String? result = await showAppDialog<String>(
     context: context,
+    motionKey: 'name',
     builder: (BuildContext context) =>
         _NameDialog(title: title, action: action, initial: initial),
   );
@@ -106,6 +107,7 @@ Future<bool> confirmAction(
 }) async {
   final bool? confirmed = await showAppDialog<bool>(
     context: context,
+    motionKey: 'confirm',
     builder: (BuildContext context) {
       final AppColors colors = AppColors.of(context);
       return AlertDialog(
@@ -170,6 +172,7 @@ Future<FolderChoice?> pickFolder(
   walk(null, 0);
   return showAppDialog<FolderChoice>(
     context: context,
+    motionKey: 'pick-folder',
     builder: (BuildContext context) {
       return SimpleDialog(
         title: Text(title),
@@ -300,6 +303,7 @@ Future<FolderDraft?> askForFolder(
 }) async {
   final FolderDraft? result = await showAppDialog<FolderDraft>(
     context: context,
+    motionKey: 'folder',
     builder: (BuildContext context) => _FolderDialog(
       title: title,
       action: action,
@@ -411,6 +415,7 @@ Future<FolderColor?> pickFolderColor(
 }) {
   return showAppDialog<FolderColor>(
     context: context,
+    motionKey: 'folder-color',
     builder: (BuildContext context) {
       return AlertDialog(
         title: Text(title),
@@ -562,14 +567,18 @@ class NoteDraft {
   final PageSetup setup;
 }
 
+/// What a new note is called until it is renamed.
+const String untitledNoteName = 'Untitled note';
+
 /// Asks for a new note's name and template. Returns null when cancelled.
 Future<NoteDraft?> pickNoteTemplate(
   BuildContext context, {
   PageSetup initial = const PageSetup(),
-  String initialName = 'Untitled note',
+  String initialName = untitledNoteName,
 }) {
   return showAppDialog<NoteDraft>(
     context: context,
+    motionKey: 'note-template',
     builder: (BuildContext context) =>
         _TemplateDialog(initial: initial, initialName: initialName),
   );
@@ -614,89 +623,93 @@ class _TemplateDialogState extends State<_TemplateDialog> {
 
   @override
   Widget build(BuildContext context) {
-    return AlertDialog(
-      title: const Text('New note'),
-      scrollable: true,
-      content: SizedBox(
-        width: 4 * _TemplateTile.width + 3 * AppSpacing.sm,
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: <Widget>[
-            const SectionLabel('File name'),
-            const SizedBox(height: AppSpacing.xs),
-            TextField(
-              key: const ValueKey<String>('new-note-name'),
-              controller: _name,
-              autofocus: true,
-              maxLength: maxNameLength,
-              textInputAction: TextInputAction.done,
-              decoration: const InputDecoration(
-                hintText: 'Note name',
-                counterText: '',
+    return _RidesKeyboard(
+      child: AlertDialog(
+        title: const Text('New note'),
+        scrollable: true,
+        content: SizedBox(
+          width: 4 * _TemplateTile.width + 3 * AppSpacing.sm,
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: <Widget>[
+              const SectionLabel('File name'),
+              const SizedBox(height: AppSpacing.xs),
+              TextField(
+                key: const ValueKey<String>('new-note-name'),
+                controller: _name,
+                autofocus: true,
+                maxLength: maxNameLength,
+                textInputAction: TextInputAction.done,
+                decoration: const InputDecoration(
+                  hintText: 'Note name',
+                  counterText: '',
+                ),
+                onSubmitted: (_) => _submit(),
               ),
-              onSubmitted: (_) => _submit(),
-            ),
-            const SizedBox(height: AppSpacing.lg),
-            const SectionLabel('Paper'),
-            Wrap(
-              spacing: AppSpacing.sm,
-              runSpacing: AppSpacing.sm,
-              children: <Widget>[
-                for (final PageBackground background in PageBackground.values)
-                  _TemplateTile(
-                    key: ValueKey<String>('template-paper-${background.name}'),
-                    label: background.label,
-                    selected: background == _background,
-                    onTap: () => setState(() => _background = background),
-                    preview: _PaperPreview(
-                      background: background,
-                      aspect: 0.75,
+              const SizedBox(height: AppSpacing.lg),
+              const SectionLabel('Paper'),
+              Wrap(
+                spacing: AppSpacing.sm,
+                runSpacing: AppSpacing.sm,
+                children: <Widget>[
+                  for (final PageBackground background in PageBackground.values)
+                    _TemplateTile(
+                      key: ValueKey<String>(
+                        'template-paper-${background.name}',
+                      ),
+                      label: background.label,
+                      selected: background == _background,
+                      onTap: () => setState(() => _background = background),
+                      preview: _PaperPreview(
+                        background: background,
+                        aspect: 0.75,
+                      ),
                     ),
-                  ),
-              ],
-            ),
-            const SizedBox(height: AppSpacing.lg),
-            const SectionLabel('Page size'),
-            Wrap(
-              spacing: AppSpacing.sm,
-              runSpacing: AppSpacing.sm,
-              children: <Widget>[
-                for (final PageSize size in templateSizes)
-                  _TemplateTile(
-                    key: ValueKey<String>('template-size-${size.name}'),
-                    label: size.label,
-                    selected: size == _size,
-                    onTap: () => setState(() => _size = size),
-                    preview: _PaperPreview(
-                      background: _background,
-                      aspect: _aspectOf(size),
-                      icon: switch (size) {
-                        PageSize.infinite => AppIcons.infinite,
-                        _ => null,
-                      },
+                ],
+              ),
+              const SizedBox(height: AppSpacing.lg),
+              const SectionLabel('Page size'),
+              Wrap(
+                spacing: AppSpacing.sm,
+                runSpacing: AppSpacing.sm,
+                children: <Widget>[
+                  for (final PageSize size in templateSizes)
+                    _TemplateTile(
+                      key: ValueKey<String>('template-size-${size.name}'),
+                      label: size.label,
+                      selected: size == _size,
+                      onTap: () => setState(() => _size = size),
+                      preview: _PaperPreview(
+                        background: _background,
+                        aspect: _aspectOf(size),
+                        icon: switch (size) {
+                          PageSize.infinite => AppIcons.infinite,
+                          _ => null,
+                        },
+                      ),
                     ),
-                  ),
-              ],
-            ),
-          ],
+                ],
+              ),
+            ],
+          ),
         ),
+        actions: <Widget>[
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(),
+            child: const Text('Cancel'),
+          ),
+          ValueListenableBuilder<TextEditingValue>(
+            valueListenable: _name,
+            builder: (BuildContext context, TextEditingValue value, Widget? _) {
+              return FilledButton(
+                onPressed: cleanName(value.text) == null ? null : _submit,
+                child: const Text('Create'),
+              );
+            },
+          ),
+        ],
       ),
-      actions: <Widget>[
-        TextButton(
-          onPressed: () => Navigator.of(context).pop(),
-          child: const Text('Cancel'),
-        ),
-        ValueListenableBuilder<TextEditingValue>(
-          valueListenable: _name,
-          builder: (BuildContext context, TextEditingValue value, Widget? _) {
-            return FilledButton(
-              onPressed: cleanName(value.text) == null ? null : _submit,
-              child: const Text('Create'),
-            );
-          },
-        ),
-      ],
     );
   }
 
@@ -705,6 +718,31 @@ class _TemplateDialogState extends State<_TemplateDialog> {
   static double _aspectOf(PageSize size) {
     final Size? fixed = size.fixedSize;
     return fixed == null ? 4 / 3 : fixed.width / fixed.height;
+  }
+}
+
+/// Keeps a dialog clear of the on-screen keyboard frame by frame, moving
+/// with the keyboard's own slide.
+///
+/// A [Dialog] eases toward each new keyboard inset over 100ms; restarted on
+/// every frame of the slide, it lags behind and lurches. Here the dialog
+/// sees no keyboard, and this pads it instead. Only this and the dialog
+/// rebuild as the keyboard moves.
+class _RidesKeyboard extends StatelessWidget {
+  const _RidesKeyboard({required this.child});
+
+  final Widget child;
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: EdgeInsets.only(bottom: MediaQuery.viewInsetsOf(context).bottom),
+      child: MediaQuery.removeViewInsets(
+        context: context,
+        removeBottom: true,
+        child: child,
+      ),
+    );
   }
 }
 
@@ -763,7 +801,12 @@ class _TemplateTile extends StatelessWidget {
           child: Column(
             mainAxisSize: MainAxisSize.min,
             children: <Widget>[
-              SizedBox(height: 60, child: Center(child: preview)),
+              // Its shadow and rules are painted once, not again on every
+              // frame the dialog rides the keyboard or the caret blinks.
+              SizedBox(
+                height: 60,
+                child: Center(child: RepaintBoundary(child: preview)),
+              ),
               const SizedBox(height: AppSpacing.xs),
               SizedBox(
                 height: 30,

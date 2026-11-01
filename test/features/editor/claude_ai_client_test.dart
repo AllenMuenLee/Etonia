@@ -16,6 +16,9 @@ import 'package:http/testing.dart';
 const String _fakeKey = 'sk-ant-test-not-a-real-credential';
 
 final Uint8List _ink = Uint8List.fromList(<int>[0x89, 0x50, 1, 2, 3, 4]);
+const String _selectionSvg =
+    '<svg viewBox="0 0 100 140" data-etonia-coordinate-space="note" '
+    'data-etonia-selection-bounds="10 14 40 28"><path d="M10 14 L50 42"/></svg>';
 
 const AiApiConfig _config = AiApiConfig(
   apiKey: '',
@@ -32,6 +35,7 @@ AiRequest _request({bool withNote = false}) {
         ? NoteImage(logicalSize: const Size(100, 140), revision: 1)
         : null,
     notationEnabled: withNote,
+    selectionSvg: withNote ? _selectionSvg : null,
     messages: const <AiMessage>[
       AiMessage.user('What is this?'),
       AiMessage.model('A circuit.'),
@@ -164,7 +168,7 @@ void main() {
     expect(body['max_tokens'], 200000);
   });
 
-  test('the ink is a base64 image block in the first turn; the note is '
+  test('the ink is an image and SVG text in the first turn; the note is '
       'only its metadata, in the last', () {
     final Map<String, Object?> body = ClaudeAiClient.buildBody(
       _request(withNote: true),
@@ -174,14 +178,15 @@ void main() {
     expect(messages, hasLength(3));
     final List<Object?> first =
         (messages[0]! as Map<String, Object?>)['content']! as List<Object?>;
-    expect(first[1], <String, Object?>{
-      'type': 'image',
-      'source': <String, Object?>{
-        'type': 'base64',
-        'media_type': 'image/png',
-        'data': base64Encode(_ink),
-      },
-    });
+    // Handwriting cannot be read from paths: the picture always comes too.
+    expect(first, hasLength(4));
+    expect((first[1]! as Map<String, Object?>)['type'], 'image');
+    expect(
+      (first[2]! as Map<String, Object?>)['text'],
+      contains(_selectionSvg),
+    );
+    expect((first[3]! as Map<String, Object?>)['text'], 'What is this?');
+    expect(jsonEncode(body).split(base64Encode(_ink)).length, 2);
     expect((messages[1]! as Map<String, Object?>)['role'], 'assistant');
     final List<Object?> last =
         (messages[2]! as Map<String, Object?>)['content']! as List<Object?>;

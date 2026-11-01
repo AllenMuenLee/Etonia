@@ -477,17 +477,14 @@ class ActiveStrokePainter extends CustomPainter {
   void paint(Canvas canvas, Size size) {
     final StickyPlacementGesture? placement = controller.activePlacement;
     if (placement != null) {
-      // The note as it would land, a little see-through until it does.
-      canvas.saveLayer(
-        placement.preview('preview').bounds.inflate(16),
-        Paint()..color = const Color(0xD9000000),
-      );
+      // Paint the moving preview directly. Applying whole-note translucency
+      // through saveLayer allocates an offscreen render target for every
+      // pointer sample, which is particularly costly on tiled mobile GPUs.
       paintStickyNote(
         canvas,
         placement.preview('preview'),
         config: controller.stickyConfig,
       );
-      canvas.restore();
       return;
     }
     final Stroke? shape = controller.activeShape?.preview;

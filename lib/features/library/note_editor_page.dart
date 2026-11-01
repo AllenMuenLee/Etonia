@@ -61,7 +61,12 @@ class NoteEditorPage extends StatefulWidget {
     this.onRenamed,
     this.onBack,
     this.onSaved,
+    this.entrance,
   });
+
+  /// How long the note takes to come into view, its heavy content held
+  /// back until then; [noteEntrance] by default.
+  final Duration? entrance;
 
   /// Called after each save, the last on the way out included, with the
   /// entry as saved and what was saved, while those pages are still in
@@ -149,7 +154,10 @@ class _NoteEditorPageState extends State<NoteEditorPage> {
   void didChangeDependencies() {
     super.didChangeDependencies();
     if (!_entered && _enter == null) {
-      final Duration slide = AppMotion.resolve(context, noteEntrance());
+      final Duration slide = AppMotion.resolve(
+        context,
+        widget.entrance ?? noteEntrance(),
+      );
       if (slide == Duration.zero) {
         _entered = true;
       } else {

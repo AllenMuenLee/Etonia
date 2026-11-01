@@ -165,11 +165,67 @@ abstract interface class PdfRegionRenderer {
 /// A rectangle of whole pixels.
 typedef PdfPixelRegion = ({int x, int y, int width, int height});
 
+/// An entry of a PDF's outline, its table of contents: a chapter, or a
+/// section of one in [children].
+@pragma('vm:immutable')
+class PdfOutlineEntry {
+  const PdfOutlineEntry({
+    required this.title,
+    this.pageIndex,
+    this.children = const <PdfOutlineEntry>[],
+  });
+
+  final String title;
+
+  /// The PDF page the entry opens, from zero. Null when it points nowhere.
+  final int? pageIndex;
+
+  final List<PdfOutlineEntry> children;
+}
+
+/// Optional capability: reading a PDF's outline, to go to its chapters.
+abstract interface class PdfOutlineReader {
+  /// The outline of [bytes], empty when the PDF has none.
+  Future<List<PdfOutlineEntry>> readOutline(Uint8List bytes);
+}
+
 /// PDFium-backed implementation. Every one-off operation owns and closes
 /// its PDF; [open] hands the PDF to its caller.
 class PdfrxRasterizer
-    implements PdfRasterizer, PdfImageRasterizer, PdfDocumentRasterizer {
+    implements
+        PdfRasterizer,
+        PdfImageRasterizer,
+        PdfDocumentRasterizer,
+        PdfOutlineReader {
   const PdfrxRasterizer();
+
+  @override
+  Future<List<PdfOutlineEntry>> readOutline(Uint8List bytes) async {
+    pdfrx.PdfDocument? document;
+    try {
+      document = await _openForRendering(
+        bytes,
+        'greatnote-outline-${bytes.length}-${identityHashCode(bytes)}',
+      );
+      return _outlineEntries(await document.loadOutline());
+    } on pdfrx.PdfPasswordException {
+      return const <PdfOutlineEntry>[];
+    } finally {
+      await document?.dispose();
+    }
+  }
+
+  static List<PdfOutlineEntry> _outlineEntries(
+    List<pdfrx.PdfOutlineNode> nodes,
+  ) => <PdfOutlineEntry>[
+    for (final pdfrx.PdfOutlineNode node in nodes)
+      PdfOutlineEntry(
+        title: node.title.trim(),
+        // pdfrx counts pages from one.
+        pageIndex: node.dest == null ? null : node.dest!.pageNumber - 1,
+        children: _outlineEntries(node.children),
+      ),
+  ];
 
   @override
   Future<OpenPdf> open(Uint8List bytes) async {

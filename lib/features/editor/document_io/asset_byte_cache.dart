@@ -3,10 +3,13 @@ import 'dart:typed_data';
 /// One note's encoded assets. Borrowed bytes are immutable Dart objects;
 /// eviction releases our reference without invalidating an active reader.
 class AssetByteCache {
-  AssetByteCache({required this.read, this.maxBytes = 16 * 1024 * 1024});
+  AssetByteCache({required this.read, this.maxBytes});
 
   final Future<Uint8List?> Function(String) read;
-  final int maxBytes;
+
+  /// How many bytes are kept, if limited. By default every asset read is
+  /// kept until [clear], which the owner calls when memory runs low.
+  final int? maxBytes;
   final Map<String, Uint8List> _entries = {};
   final Map<String, Future<Uint8List?>> _pending = {};
   int _generation = 0;
@@ -22,12 +25,13 @@ class AssetByteCache {
       final generation = _generation;
       return Future<Uint8List?>.sync(() => read(id))
           .then((bytes) {
+            final int? maxBytes = this.maxBytes;
             if (generation == _generation &&
                 bytes != null &&
-                bytes.length <= maxBytes) {
+                (maxBytes == null || bytes.length <= maxBytes)) {
               _entries[id] = bytes;
               retainedBytes += bytes.length;
-              while (retainedBytes > maxBytes) {
+              while (maxBytes != null && retainedBytes > maxBytes) {
                 retainedBytes -= _entries.remove(_entries.keys.first)!.length;
               }
             }

@@ -14,8 +14,8 @@ import '../ink/selection_transform.dart';
 import '../page/page_viewport.dart';
 import 'palette_button.dart';
 
-/// Copy, Cut, Duplicate, and AI for the current selection, floating beside
-/// its frame.
+/// Copy, Cut, Duplicate, Delete, and AI for the current selection, floating
+/// beside its frame.
 ///
 /// Fills its parent, which must be the page, or the viewport showing it
 /// through [transform], and places the bar above the frame when there is
@@ -192,32 +192,29 @@ class _SelectionActionBarState extends State<SelectionActionBar> {
                     widget.onDuplicate ?? widget.controller.duplicateSelection,
                 child: const Icon(AppIcons.duplicate),
               ),
-            // A sticky note is removed as a whole only from here: the
-            // eraser never takes its paper.
-            if (selection.stickyCount > 0) ...<Widget>[
-              PaletteButton(
-                tooltip: 'Delete',
-                onPressed: () {
-                  final String description =
-                      SelectionActionBar.describeSelection(
-                        selection,
-                      ).replaceFirst(' selected', '');
-                  final bool deleted = widget.onDelete != null
-                      ? widget.onDelete!(selection)
-                      : widget.controller.deleteSelection(
-                          expectedSelection: selection,
-                        );
-                  if (deleted) {
-                    SemanticsService.sendAnnouncement(
-                      View.of(context),
-                      '$description deleted',
-                      Directionality.of(context),
-                    );
-                  }
-                },
-                child: const Icon(AppIcons.delete),
-              ),
-            ],
+            // Every selection can be deleted. A sticky note is removed as a
+            // whole only from here: the eraser never takes its paper.
+            PaletteButton(
+              tooltip: 'Delete',
+              onPressed: () {
+                final String description = SelectionActionBar.describeSelection(
+                  selection,
+                ).replaceFirst(' selected', '');
+                final bool deleted = widget.onDelete != null
+                    ? widget.onDelete!(selection)
+                    : widget.controller.deleteSelection(
+                        expectedSelection: selection,
+                      );
+                if (deleted) {
+                  SemanticsService.sendAnnouncement(
+                    View.of(context),
+                    '$description deleted',
+                    Directionality.of(context),
+                  );
+                }
+              },
+              child: const Icon(AppIcons.delete),
+            ),
             if (widget.onAiPressed != null)
               PaletteButton(
                 tooltip: 'AI assistant',

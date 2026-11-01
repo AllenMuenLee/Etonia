@@ -3,6 +3,7 @@ import 'package:sign_in_with_apple/sign_in_with_apple.dart';
 
 import '../../../app/theme/app_icons.dart';
 import '../../../app/theme/app_tokens.dart';
+import '../../../shared/navigation/app_page_route.dart';
 import '../../../shared/widgets/processing.dart';
 import 'google_drive_client.dart';
 
@@ -14,8 +15,9 @@ Future<GoogleDriveAccount?> showGoogleSignIn(
   Future<bool> Function()? signInWithApple,
 }) {
   return Navigator.of(context).push<GoogleDriveAccount?>(
-    MaterialPageRoute<GoogleDriveAccount?>(
+    AppPageRoute<GoogleDriveAccount?>(
       fullscreenDialog: true,
+      motionKey: 'google-sign-in',
       builder: (BuildContext context) =>
           GoogleSignInScreen(client: client, signInWithApple: signInWithApple),
     ),

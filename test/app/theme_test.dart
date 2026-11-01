@@ -1,3 +1,4 @@
+import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:greatnote/app/theme/app_theme.dart';
@@ -103,6 +104,43 @@ void main() {
       expect(theme.useMaterial3, isTrue);
       expect(theme.extension<AppColors>(), isNotNull);
     }
+  });
+
+  testWidgets('a tooltip goes away when the pencil stops hovering', (
+    WidgetTester tester,
+  ) async {
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: AppTheme.light(),
+        home: Scaffold(
+          body: Center(
+            child: IconButton(
+              tooltip: 'Undo',
+              onPressed: () {},
+              icon: const Icon(Icons.undo),
+            ),
+          ),
+        ),
+      ),
+    );
+
+    // iPadOS reports Pencil hover as a mouse, and removes that pointer when
+    // the pencil leaves hover range, even straight up from over a button.
+    // (Android drops that exit; MainActivity stands in for it.)
+    final TestGesture pencil = await tester.createGesture(
+      kind: PointerDeviceKind.mouse,
+    );
+    await pencil.addPointer(
+      location: tester.getCenter(find.byType(IconButton)),
+    );
+    await tester.pump();
+    await tester.pump(const Duration(seconds: 1));
+    expect(find.text('Undo'), findsOneWidget);
+
+    await pencil.removePointer();
+    await tester.pump();
+    await tester.pump(const Duration(seconds: 1));
+    expect(find.text('Undo'), findsNothing);
   });
 
   test('there are at least six inks with unique names', () {

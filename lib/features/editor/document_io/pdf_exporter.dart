@@ -326,6 +326,7 @@ class _PreparedPage {
     required this.geometry,
     this.pdfBackground,
   }) : background = page.setup.background,
+       pdfMasks = page.pdfMasks,
        images = page.images,
        stickies = <_PreparedSticky>[
          for (final StickyNoteElement note in page.stickyNotes)
@@ -339,6 +340,9 @@ class _PreparedPage {
          for (final stroke in page.strokes) _prepareStroke(stroke),
        ];
   final PageBackground background;
+
+  /// Areas of the PDF paper left blank.
+  final List<ui.Rect> pdfMasks;
   final List<NoteImageElement> images;
   final List<_PreparedSticky> stickies;
   final List<_PreparedText> texts;
@@ -640,6 +644,17 @@ Future<Uint8List> _generatePdf(_PreparedExport export) async {
             fit: pw.BoxFit.fill,
           ),
         ),
+      if (prepared.pdfBackground != null)
+        for (final ui.Rect mask in prepared.pdfMasks)
+          pw.Positioned(
+            left: mask.left * scale,
+            top: mask.top * scale,
+            child: pw.Container(
+              width: mask.width * scale,
+              height: mask.height * scale,
+              color: PdfColors.white,
+            ),
+          ),
       for (final element in prepared.images)
         if (element.vector != null || images[element.assetId] != null)
           pw.Positioned(

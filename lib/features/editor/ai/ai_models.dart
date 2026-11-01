@@ -20,6 +20,7 @@ enum AiModelId {
   haiku(
     label: 'Haiku',
     provider: AiProvider.claude,
+    tokenMultiplier: 1,
     defaultProviderModelId: 'claude-haiku-5-5',
     environmentKey: 'HAIKU_MODEL_ID',
     summary: 'Claude Haiku 5.5 · fast',
@@ -27,6 +28,7 @@ enum AiModelId {
   luna(
     label: 'Luna',
     provider: AiProvider.openai,
+    tokenMultiplier: 1,
     defaultProviderModelId: 'gpt-6-luna',
     environmentKey: 'LUNA_MODEL_ID',
     summary: 'GPT-6 Luna · fast',
@@ -34,6 +36,7 @@ enum AiModelId {
   sonnet(
     label: 'Sonnet',
     provider: AiProvider.claude,
+    tokenMultiplier: 20,
     defaultProviderModelId: 'claude-sonnet-5-5',
     environmentKey: 'SONNET_MODEL_ID',
     summary: 'Claude Sonnet 5.5 · balanced',
@@ -41,6 +44,7 @@ enum AiModelId {
   sol(
     label: 'Sol',
     provider: AiProvider.openai,
+    tokenMultiplier: 20,
     defaultProviderModelId: 'gpt-6.1-sol',
     environmentKey: 'SOL_MODEL_ID',
     summary: 'GPT-6.1 Sol · balanced',
@@ -48,6 +52,7 @@ enum AiModelId {
   opus(
     label: 'Opus',
     provider: AiProvider.claude,
+    tokenMultiplier: 40,
     defaultProviderModelId: 'claude-opus-5-5',
     environmentKey: 'OPUS_MODEL_ID',
     summary: 'Claude Opus 5.5 · frontier',
@@ -55,6 +60,7 @@ enum AiModelId {
   argon(
     label: 'Argon',
     provider: AiProvider.gemini,
+    tokenMultiplier: 40,
     defaultProviderModelId: 'gemini-4-argon',
     environmentKey: 'ARGON_MODEL_ID',
     summary: 'Gemini 4 Argon · frontier',
@@ -62,6 +68,7 @@ enum AiModelId {
   astra(
     label: 'Astra',
     provider: AiProvider.openai,
+    tokenMultiplier: 100,
     defaultProviderModelId: 'gpt-6-astra',
     environmentKey: 'ASTRA_MODEL_ID',
     summary: 'GPT-6 Astra · frontier',
@@ -70,6 +77,7 @@ enum AiModelId {
   const AiModelId({
     required this.label,
     required this.provider,
+    required this.tokenMultiplier,
     required this.defaultProviderModelId,
     required this.environmentKey,
     required this.summary,
@@ -78,6 +86,12 @@ enum AiModelId {
   /// The name the user sees.
   final String label;
   final AiProvider provider;
+
+  /// Relative token-credit consumption shown in the model picker.
+  ///
+  /// The least expensive models are the `x1` baseline; the other values
+  /// follow the same ratio as their configured input and output rates.
+  final int tokenMultiplier;
 
   /// The provider's own ID for this model, unless overridden.
   final String defaultProviderModelId;

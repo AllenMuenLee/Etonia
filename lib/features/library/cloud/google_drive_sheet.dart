@@ -27,6 +27,7 @@ Future<void> showGoogleDriveSheet(
 }) {
   return showAppSheet<void>(
     context: context,
+    motionKey: 'google-drive',
     builder: (BuildContext context) => GoogleDriveSheet(
       client: client,
       backup: backup,
@@ -214,6 +215,7 @@ class _GoogleDriveSheetState extends State<GoogleDriveSheet> {
   Future<void> _restore() async {
     final RestoreMode? mode = await showAppDialog<RestoreMode>(
       context: context,
+      motionKey: 'drive-restore',
       builder: (BuildContext context) => AlertDialog(
         title: const Text('Restore from Google Drive?'),
         content: const Text(
@@ -306,6 +308,7 @@ class _GoogleDriveSheetState extends State<GoogleDriveSheet> {
   Future<GoodnotesDriveRoot?> _pickRoot(List<GoodnotesDriveRoot> roots) {
     return showAppDialog<GoodnotesDriveRoot>(
       context: context,
+      motionKey: 'drive-root',
       builder: (BuildContext context) {
         final DateTime now = widget.clock();
         return SimpleDialog(

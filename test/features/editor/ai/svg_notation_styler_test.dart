@@ -3,6 +3,7 @@ import 'dart:ui';
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:greatnote/features/editor/ai/ink_attachment.dart';
+import 'package:greatnote/features/editor/ai/notation_space.dart';
 import 'package:greatnote/features/editor/ai/svg_ink_converter.dart';
 import 'package:greatnote/features/editor/ai/svg_notation_styler.dart';
 import 'package:greatnote/features/editor/document_io/svg_document.dart';
@@ -298,6 +299,73 @@ void main() {
       expect(styled.source, contains('x2="210.0"'));
       expect(styled.source, contains('y2="190.0"'));
       expect(styled.contentBounds.bottom, greaterThanOrEqualTo(200));
+    });
+
+    group('space round the ink', () {
+      // The user's ink: a word written across the middle of the paper.
+      final List<InkVector> word = <InkVector>[
+        for (double x = 100; x <= 260; x += 4) InkVector(x, 150),
+      ];
+      NotationClearance clearance() => NotationClearance(
+        pageSize: const Size(400, 300),
+        ink: <SpaceStroke>[(points: word, width: 3)],
+      );
+      EditableSvg style(String body) => SvgNotationStyler.apply(
+        EditableSvg.parse(
+          '<svg xmlns="http://www.w3.org/2000/svg" data-etonia-version="1" '
+          'viewBox="0 0 400 300" data-etonia-bounds="20 20 360 260">'
+          '<title>Memo</title>'
+          '<desc data-etonia-role="message">Memo.</desc>$body</svg>',
+          modelResponse: true,
+        ),
+        handwriting: HandwritingStyle.standard,
+        defaultInk: red,
+        penWidth: 2,
+        clearance: clearance(),
+      );
+      double distance(Rect box) =>
+          math.max(0, math.max(box.top - 151.5, 148.5 - box.bottom));
+
+      test('a memo written on the user\'s ink is moved clear of it', () {
+        final EditableSvg styled = style(
+          '<text x="120" y="158" font-size="20">Key step</text>',
+        );
+        final Rect memo = _inkOf(styled, 'Key step');
+        // At least the clearance (0.6 of a 20 size) from the stroke's edge.
+        expect(distance(memo), greaterThanOrEqualTo(12 - 1.5));
+        // Moved the short way, staying near where the model put it.
+        expect((memo.left - 120).abs(), lessThan(40));
+      });
+
+      test('a stack of lines moves as one, with its underline', () {
+        final EditableSvg styled = style(
+          '<text x="120" y="150" font-size="20">Area = 12</text>'
+          '<text x="120" y="190" font-size="20">so h = 4</text>'
+          '<line x1="120" y1="198" x2="220" y2="198" stroke="black"/>',
+        );
+        final Rect first = _inkOf(styled, 'Area = 12');
+        final Rect second = _inkOf(styled, 'so h = 4');
+        expect(distance(first), greaterThanOrEqualTo(12 - 1.5));
+        expect(distance(second), greaterThanOrEqualTo(12 - 1.5));
+        expect(first.left, closeTo(second.left, 0.5));
+        final XmlElement line = XmlDocument.parse(
+          styled.source,
+        ).findAllElements('line').single;
+        expect(line.getAttribute('transform'), startsWith('translate('));
+      });
+
+      test('writing already clear of the ink, or pinned, stays put', () {
+        final EditableSvg clear = style(
+          '<text x="120" y="80" font-size="20">Key step</text>',
+        );
+        expect(_inkOf(clear, 'Key step').top, closeTo(60, 3));
+        final EditableSvg pinned = style(
+          '<text x="120" y="158" font-size="20" data-etonia-fixed="1">'
+          'Key step</text>',
+        );
+        expect(_inkOf(pinned, 'Key step').bottom, greaterThan(150));
+        expect(_inkOf(pinned, 'Key step').top, lessThan(150));
+      });
     });
 
     group('line spacing', () {

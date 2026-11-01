@@ -61,7 +61,7 @@ void main() {
       await tour.tap(find.byTooltip('New note'));
     });
     await tour.step('new_note_dialog', () async {
-      await tour.tap(find.text('Blank note'));
+      await tour.tap(find.text('Template…'));
     });
     await tour.step('editor_blank', () async {
       await tour.tap(find.widgetWithText(FilledButton, 'Create'));

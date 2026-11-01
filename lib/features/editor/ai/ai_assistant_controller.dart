@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert' show base64Decode;
 import 'dart:ui' show Brightness, Color, Rect, Size;
 
 import 'package:flutter/foundation.dart';
@@ -14,12 +15,21 @@ import 'ai_config.dart';
 import 'ai_notation.dart';
 import 'ai_usage_gate.dart';
 import 'note_image_renderer.dart';
-import 'selection_grid.dart';
 import 'selection_image_renderer.dart';
+import 'selection_svg_renderer.dart';
 
 typedef AiNoteCapture = Future<NoteImage> Function();
 typedef AiNotationApply =
     AiNotationApplication Function(AiNotation notation, NoteImage context);
+
+/// The finished strokes lying mostly within [area] on a page as it is now:
+/// on [page] when it is known, else on the page holding any of [anchors].
+typedef AiAreaInk =
+    Iterable<Stroke> Function(
+      Rect area,
+      Object? page,
+      Iterable<Stroke> anchors,
+    );
 
 /// The physical screen edge the panel sits against. Not mirrored for
 /// right-to-left text.
@@ -105,23 +115,49 @@ class AiContextGroup {
 
 /// The ink one conversation is about: the snapshot taken when AI was
 /// pressed, and the image made from it. The snapshot never changes; the
-/// image arrives once, shortly after.
+/// image arrives shortly after, and is drawn again over any ink that later
+/// appears where the snapshot lies, the assistant's own notes included.
 class AiSelectionContext {
   AiSelectionContext._(
     this._snapshot, {
     this._loadBitmaps,
     this._groups = const <AiContextGroup>[],
-  });
+  }) : isPage = false;
+
+  /// A conversation about nothing on the note: a question asked with
+  /// nothing selected. The model is sent blank paper in place of ink, and
+  /// its notes go in the blank space of whichever page is shown.
+  AiSelectionContext._page(this._snapshot)
+    : isPage = true,
+      _groups = const <AiContextGroup>[],
+      _renderStarted = true,
+      _image = SelectionImage(
+        png: _blankPaperPng,
+        width: 16,
+        height: 16,
+        scale: 1,
+        logicalBounds: Rect.zero,
+      );
+
+  /// A 16 x 16 white PNG: something to attach where there is no ink, since
+  /// every request carries a picture.
+  static final Uint8List _blankPaperPng = base64Decode(
+    'iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAIAAACQkWg2AAAAFElEQVR42mP4TyJgGNUwqmH4'
+    'agAAr639H23ooMoAAAAASUVORK5CYII=',
+  );
 
   SelectionInkSnapshot _snapshot;
 
   final List<AiContextGroup> _groups;
 
+  /// Whether nothing on the note was chosen for this conversation.
+  final bool isPage;
+
   /// Each thing chosen for the conversation, as it lies on its page. One
   /// group, taken from the snapshot, for a conversation saved with the
-  /// note.
+  /// note; none for a [isPage] conversation.
   List<AiContextGroup> get groups {
-    if (_groups.isNotEmpty) return _groups;
+    if (_groups.isNotEmpty || isPage) return _groups;
     return <AiContextGroup>[
       AiContextGroup(
         strokes: _snapshot.sourceStrokes,
@@ -143,9 +179,30 @@ class AiSelectionContext {
   SelectionImage? _image;
   SelectionImageException? _imageError;
 
+  /// The page-coordinate range this conversation currently owns. This is
+  /// updated synchronously when returned notation expands the range, while
+  /// the cropped preview catches up asynchronously.
+  Rect? _logicalBounds;
+
+  /// The strokes lying where the snapshot does when it was taken, which
+  /// were left out of it on purpose. Null until first looked for.
+  Set<Stroke>? _present;
+
+  /// The ink drawn over the snapshot in [image]: what appeared where it
+  /// lies since.
+  List<Stroke> _ink = const <Stroke>[];
+
+  /// The latest redraw over new ink, which the next one waits for.
+  Future<void>? _refreshing;
+
   /// The image shown in the panel and sent to the model. Null until it has
   /// been drawn.
   SelectionImage? get image => _image;
+
+  /// Null for a [isPage] conversation: its notes go wherever the shown page
+  /// is blank.
+  Rect? get logicalBounds =>
+      _logicalBounds ?? (isPage ? null : _image?.logicalBounds);
 
   /// Why there is no image, if drawing failed.
   SelectionImageException? get imageError => _imageError;
@@ -185,6 +242,7 @@ class AiAssistantController extends ChangeNotifier {
     this.renderer = const SelectionImageRenderer(),
     this.captureNote,
     this.applyNotation,
+    this.inkInArea,
     AiPanelSide side = AiPanelSide.left,
     this._notationEnabled = false,
     this._animationEnabled = true,
@@ -261,6 +319,10 @@ class AiAssistantController extends ChangeNotifier {
   final SelectionImageRenderer renderer;
   final AiNoteCapture? captureNote;
   final AiNotationApply? applyNotation;
+
+  /// Finds the ink that has appeared where a conversation's ink lies, to
+  /// draw over its image. Without it, the image stays as first drawn.
+  final AiAreaInk? inkInArea;
   final ValueNotifier<AiPanelPlacement> _placement;
 
   final List<_AiConversation> _conversations = <_AiConversation>[];
@@ -428,11 +490,21 @@ class AiAssistantController extends ChangeNotifier {
   /// note, so nothing is added.
   void finishNotationDrawing() => _presentation?.finish();
 
-  /// Whether a message could be sent now.
+  /// Whether a message could be sent now. With no conversation open, one
+  /// is started about nothing on the note, whose notes go in the shown
+  /// page's blank space.
   bool get canSend {
+    final AiSelectionContext? context = this.context;
     return isConfigured &&
         requestState != AiRequestState.sending &&
-        context?.image != null;
+        (context == null || context.image != null);
+  }
+
+  /// Whether the conversation is about something chosen on the note, so a
+  /// quick action has something to act on.
+  bool get hasSelection {
+    final AiSelectionContext? context = this.context;
+    return context != null && !context.isPage;
   }
 
   /// Shows the panel for [selection]. A remembered conversation resumes when
@@ -624,16 +696,33 @@ class AiAssistantController extends ChangeNotifier {
     _selectionChanged = false;
     _selectionHasChat = false;
     if (merged != null) {
+      final AiSelectionContext previous = conversation.context;
       final AiSelectionContext context = AiSelectionContext._(
         merged,
-        groups: <AiContextGroup>[...conversation.context.groups, group],
+        groups: <AiContextGroup>[...previous.groups, group],
       );
+      // Ink drawn over the old image is still new to the larger one.
+      _notePresent(context, except: previous._ink);
       conversation.context = context;
       conversation.lastUsed = ++_conversationClock;
-      unawaited(_render(context));
+      unawaited(_render(context).then((void _) => _refresh(conversation)));
       _session.notify();
     }
     notifyListeners();
+  }
+
+  /// Draws the open conversation's image again over the ink that has been
+  /// added, or taken away, where its ink lies since it was last drawn. Not
+  /// while a message is being sent: sending drew it afresh itself.
+  void refreshContextImage() {
+    final _AiConversation? conversation = _conversation;
+    if (_disposed ||
+        inkInArea == null ||
+        conversation == null ||
+        conversation.requestState == AiRequestState.sending) {
+      return;
+    }
+    unawaited(_refresh(conversation));
   }
 
   /// Sends [text] as the user's next message. Returns false, and changes
@@ -641,7 +730,9 @@ class AiAssistantController extends ChangeNotifier {
   bool send(String text) => _submit(AiMessage.user(text.trim()));
 
   /// Sends [action]'s prompt, shown in the conversation under its label.
+  /// Returns false without a selection: the prompts are about chosen ink.
   bool sendQuickAction(AiQuickAction action) {
+    if (!hasSelection) return false;
     return _submit(AiMessage.user(action.prompt, label: action.label));
   }
 
@@ -659,7 +750,8 @@ class AiAssistantController extends ChangeNotifier {
     if (_disposed || message.text.isEmpty || !canSend) {
       return false;
     }
-    final _AiConversation conversation = _conversation!;
+    final _AiConversation conversation =
+        _conversation ?? _startPageConversation();
     conversation.messages = List<AiMessage>.unmodifiable(<AiMessage>[
       // A message that failed and was never answered is replaced, so that
       // turns keep alternating.
@@ -673,6 +765,29 @@ class AiAssistantController extends ChangeNotifier {
     _start(conversation);
     _session.notify();
     return true;
+  }
+
+  /// Starts, and makes current, a conversation about nothing on the note.
+  _AiConversation _startPageConversation() {
+    final _AiConversation conversation = _AiConversation(
+      AiSelectionContext._page(_emptySnapshot()),
+      ++_conversationClock,
+    );
+    _conversations.add(conversation);
+    _conversation = conversation;
+    _selectionChanged = false;
+    _selectionHasChat = false;
+    return conversation;
+  }
+
+  /// No ink. Its theme only colours the assistant's notes in a later image,
+  /// should the conversation take ink in.
+  static SelectionInkSnapshot _emptySnapshot() {
+    return SelectionInkSnapshot.restored(
+      strokes: const <SnapshotStroke>[],
+      brightness: Brightness.light,
+      background: const Color(0xFFFFFFFF),
+    );
   }
 
   /// Requests an answer to [messages] as they stand.
@@ -737,6 +852,16 @@ class AiAssistantController extends ChangeNotifier {
         return;
       }
     }
+    // The model sees the ink as it is now: its own earlier notes, and what
+    // the user has written since, where the conversation's ink lies.
+    if (inkInArea != null) {
+      final AiSelectionContext context = conversation.context;
+      await _refresh(conversation);
+      if (_disposed || token != conversation.requestToken) {
+        return;
+      }
+      image = context.image ?? image;
+    }
     NoteImage? noteImage;
     if (notationAuthorized) {
       final AiNoteCapture? capture = captureNote;
@@ -754,34 +879,51 @@ class AiAssistantController extends ChangeNotifier {
         return;
       }
     }
-    // With notation, the model is sent one picture: the selection with a
-    // coordinate grid, numbered in a margin round it.
-    final Uint8List? notationImagePng = noteImage == null
-        ? null
-        : await SelectionGridRenderer(
-            maxDimension: renderer.config.maxDimension,
-            maxPngBytes: renderer.config.maxPngBytes,
-          ).render(image, noteImage.logicalSize);
+    // Drawing also gets the selection as page-coordinate SVG, for exact
+    // positions; the clean PNG beside it is what the model reads.
+    // A conversation about nothing on the note has no selection to give.
+    final bool isPage = conversation.context.isPage;
+    String? selectionSvg;
+    if (noteImage != null && !isPage) {
+      try {
+        final AiSelectionContext context = conversation.context;
+        selectionSvg = const SelectionSvgRenderer().render(
+          snapshot: context._snapshot.withInkOver(context._ink),
+          preview: image,
+          pageSize: noteImage.logicalSize,
+        );
+      } on Object {
+        finish(
+          const AiError(AiFailure(AiFailureKind.noteUnavailable)),
+          noteImage: noteImage,
+        );
+        return;
+      }
+    }
     if (_disposed || token != conversation.requestToken) {
       return;
     }
+    final String noSelection = isPage ? AiPrompts.noSelection : '';
     final AiRequest request;
     final AiResult result;
     try {
       result = await _client.send(
         request = AiRequest(
-          systemInstruction: notationAuthorized
-              ? AiPrompts.textSystem
-              : AiPrompts.systemFor(notationEnabled: false),
+          systemInstruction:
+              (notationAuthorized
+                  ? AiPrompts.textSystem
+                  : AiPrompts.systemFor(notationEnabled: false)) +
+              noSelection,
           notationInstruction: notationAuthorized
               ? AiPrompts.systemFor(
-                  notationEnabled: true,
-                  animationEnabled: animationAuthorized,
-                  textSize: HandwritingCalibration.textSize.value,
-                )
+                      notationEnabled: true,
+                      animationEnabled: animationAuthorized,
+                      textSize: HandwritingCalibration.textSize.value,
+                    ) +
+                    noSelection
               : null,
           imagePng: image.png,
-          notationImagePng: notationImagePng,
+          selectionSvg: selectionSvg,
           messages: conversation.messages,
           noteImage: noteImage,
           notationEnabled: notationAuthorized,
@@ -890,6 +1032,11 @@ class AiAssistantController extends ChangeNotifier {
               status = application.status;
               presentation = application.presentation;
               conversation.notationStrokes.addAll(application.strokes);
+              // Asked about nothing, each answer finds blank space afresh,
+              // on whichever page is shown then.
+              if (!conversation.context.isPage) {
+                _includeNotationInContext(conversation, application.strokes);
+              }
             } on Object {
               // A failure here must not leave the request hanging; the ink
               // controller changes nothing unless it can add all of it.
@@ -966,8 +1113,11 @@ class AiAssistantController extends ChangeNotifier {
     if (remembered != null) {
       _conversation = remembered;
       remembered.lastUsed = ++_conversationClock;
-      // A conversation saved with the note is drawn when first resumed.
-      unawaited(_render(remembered.context));
+      // A conversation saved with the note is drawn when first resumed, and
+      // any is drawn again over what was written where it lies since.
+      unawaited(
+        _render(remembered.context).then((void _) => _refresh(remembered)),
+      );
       return;
     }
     final AiSelectionContext context = AiSelectionContext._(
@@ -979,6 +1129,7 @@ class AiAssistantController extends ChangeNotifier {
           ),
       groups: <AiContextGroup>[AiContextGroup.of(selection, page: page)],
     );
+    _notePresent(context);
     final _AiConversation conversation = _AiConversation(
       context,
       ++_conversationClock,
@@ -986,6 +1137,151 @@ class AiAssistantController extends ChangeNotifier {
     _conversations.add(conversation);
     _conversation = conversation;
     unawaited(_render(context));
+  }
+
+  /// The strokes lying mostly where [context]'s ink does now, as
+  /// [inkInArea] finds them, or null when they cannot be found.
+  List<Stroke>? _inkIn(
+    AiSelectionContext context, [
+    Iterable<Stroke> notation = const <Stroke>[],
+  ]) {
+    final AiAreaInk? find = inkInArea;
+    if (find == null) {
+      return null;
+    }
+    final Rect area;
+    try {
+      area = renderer
+          .layout(context._snapshot.withInkOver(context._ink))
+          .logicalBounds;
+    } on SelectionImageException {
+      return null;
+    }
+    Object? page;
+    for (final AiContextGroup group in context.groups) {
+      if (group.page != null) {
+        page = group.page;
+        break;
+      }
+    }
+    return find(area, page, <Stroke>[
+      ...context._snapshot.sourceStrokes,
+      ...notation,
+    ]).toList(growable: false);
+  }
+
+  /// Remembers what lies where [context]'s ink does as it is made, less
+  /// [except], so that only ink added there later is drawn over it.
+  void _notePresent(
+    AiSelectionContext context, {
+    Iterable<Stroke> except = const <Stroke>[],
+  }) {
+    final List<Stroke>? ink = _inkIn(context);
+    if (ink != null) {
+      context._present = Set<Stroke>.identity()
+        ..addAll(ink)
+        ..removeAll(except);
+    }
+  }
+
+  /// Draws [conversation]'s image again, after any redraw already under
+  /// way, when the ink that has appeared where it lies has changed.
+  Future<void> _refresh(_AiConversation conversation) {
+    final AiSelectionContext context = conversation.context;
+    final Future<void> next = (context._refreshing ?? Future<void>.value())
+        .then((void _) => _redraw(conversation, context));
+    context._refreshing = next;
+    return next;
+  }
+
+  Future<void> _redraw(
+    _AiConversation conversation,
+    AiSelectionContext context,
+  ) async {
+    if (_disposed || context._image == null) {
+      return;
+    }
+    final Set<Stroke> notation = conversation.notationStrokes;
+    final List<Stroke>? inArea = _inkIn(context, notation);
+    if (inArea == null) {
+      return;
+    }
+    // A conversation saved with the note cannot know what was there when it
+    // began: only its own notes, and what is written from now on, are new.
+    final Set<Stroke> present = context._present ??= (Set<Stroke>.identity()
+      ..addAll(inArea));
+    final List<Stroke> ink = <Stroke>[
+      for (final Stroke stroke in inArea)
+        if (!context._snapshot.contains(stroke) &&
+            (notation.contains(stroke) || !present.contains(stroke)))
+          stroke,
+    ];
+    final List<Stroke> drawn = context._ink;
+    if (ink.length == drawn.length &&
+        Iterable<int>.generate(
+          ink.length,
+        ).every((int i) => identical(ink[i], drawn[i]))) {
+      return;
+    }
+    final SelectionImage image;
+    try {
+      image = await renderer.render(context._snapshot.withInkOver(ink));
+    } on Object {
+      // The image as last drawn is still the conversation's ink.
+      return;
+    }
+    if (_disposed) {
+      return;
+    }
+    context._ink = ink;
+    context._image = image;
+    context._logicalBounds = image.logicalBounds;
+    if (identical(context, _conversation?.context)) {
+      notifyListeners();
+    }
+  }
+
+  /// Expands the conversation's selected region to every stroke produced by
+  /// the returned SVG, including marks drawn outside the original crop.
+  void _includeNotationInContext(
+    _AiConversation conversation,
+    Iterable<Stroke> strokes,
+  ) {
+    final AiSelectionContext context = conversation.context;
+    final Set<Stroke> included = Set<Stroke>.identity()..addAll(context._ink);
+    bool changed = false;
+    for (final Stroke stroke in strokes) {
+      changed = included.add(stroke) || changed;
+    }
+    if (!changed) return;
+    context._ink = List<Stroke>.unmodifiable(included);
+    try {
+      context._logicalBounds = renderer
+          .layout(context._snapshot.withInkOver(context._ink))
+          .logicalBounds;
+    } on SelectionImageException {
+      // The existing range remains usable while the preview redraw retries.
+    }
+    if (identical(context, _conversation?.context)) notifyListeners();
+    final Future<void> next = (context._refreshing ?? Future<void>.value())
+        .then((void _) => _renderExpandedContext(context));
+    context._refreshing = next;
+    unawaited(next);
+  }
+
+  Future<void> _renderExpandedContext(AiSelectionContext context) async {
+    try {
+      final SelectionImage image = await renderer.render(
+        context._snapshot.withInkOver(context._ink),
+      );
+      if (_disposed) return;
+      context._image = image;
+      context._logicalBounds = image.logicalBounds;
+      if (identical(context, _conversation?.context)) notifyListeners();
+    } on Object {
+      // Keep the earlier preview; the generated native ink is still on the
+      // note and will be retried by the next context refresh.
+    }
   }
 
   _AiConversation? _bestMatch(InkSelection selection) {
@@ -1074,6 +1370,7 @@ class AiAssistantController extends ChangeNotifier {
     }
     try {
       context._image = await renderer.render(context.snapshot);
+      context._logicalBounds = context._image!.logicalBounds;
     } on SelectionImageException catch (error) {
       context._imageError = error;
     } on Object {
@@ -1171,6 +1468,7 @@ class AiAssistantController extends ChangeNotifier {
 
     return <String, Object?>{
       'lastUsed': conversation.lastUsed,
+      if (conversation.context.isPage) 'page': true,
       'messages': <Object?>[
         for (final AiMessage message in conversation.messages)
           <String, Object?>{
@@ -1341,7 +1639,9 @@ class AiAssistantController extends ChangeNotifier {
           };
 
     final _AiConversation conversation = _AiConversation(
-      AiSelectionContext._(snapshot, loadBitmaps: loadBitmaps),
+      json['page'] == true
+          ? AiSelectionContext._page(snapshot)
+          : AiSelectionContext._(snapshot, loadBitmaps: loadBitmaps),
       (json['lastUsed'] as int?) ?? 0,
     )..notationStrokes.addAll(notationStrokes);
     final List<AiMessage> messages = <AiMessage>[];

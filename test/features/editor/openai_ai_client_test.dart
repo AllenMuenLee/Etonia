@@ -19,6 +19,9 @@ import '../../helpers/ai_fakes.dart';
 const String _fakeKey = 'sk-test-openai-not-a-real-credential';
 
 final Uint8List _ink = Uint8List.fromList(<int>[0x89, 0x50, 1, 2, 3, 4]);
+const String _selectionSvg =
+    '<svg viewBox="0 0 100 140" data-etonia-coordinate-space="note" '
+    'data-etonia-selection-bounds="10 14 40 28"><path d="M10 14 L50 42"/></svg>';
 
 const AiApiConfig _config = AiApiConfig(
   apiKey: '',
@@ -39,6 +42,7 @@ AiRequest _request({bool withNote = false}) {
           )
         : null,
     notationEnabled: withNote,
+    selectionSvg: withNote ? _selectionSvg : null,
     messages: const <AiMessage>[
       AiMessage.user('What is this?'),
       AiMessage.model('A circuit.'),
@@ -155,7 +159,7 @@ void main() {
     expect(body, isNot(contains('response_format')));
   });
 
-  test('the selected ink rides in the first user turn and the note, only as '
+  test('the selected SVG rides in the first user turn and the note, only as '
       'metadata, in the last', () {
     final Map<String, Object?> body = OpenAiClient.buildBody(
       _request(withNote: true),
@@ -168,13 +172,14 @@ void main() {
     });
     final List<Object?> first =
         (messages[1]! as Map<String, Object?>)['content']! as List<Object?>;
-    expect(first[1], <String, Object?>{
-      'type': 'image_url',
-      'image_url': <String, Object?>{
-        'url': 'data:image/png;base64,${base64Encode(_ink)}',
-        'detail': 'high',
-      },
-    });
+    // Handwriting cannot be read from paths: the picture always comes too.
+    expect(first, hasLength(4));
+    expect((first[1]! as Map<String, Object?>)['type'], 'image_url');
+    expect(
+      (first[2]! as Map<String, Object?>)['text'],
+      contains(_selectionSvg),
+    );
+    expect((first[3]! as Map<String, Object?>)['text'], 'What is this?');
     expect(messages[2], <String, Object?>{
       'role': 'assistant',
       'content': 'A circuit.',
@@ -191,7 +196,8 @@ void main() {
     );
     expect(last, hasLength(2));
     expect((last[1]! as Map<String, Object?>)['text'], 'Explain it.');
-    // Only one turn carries the selected ink.
+    // Only one turn carries the selection, as one picture and one SVG.
+    expect(jsonEncode(body).split('Read what is written').length, 2);
     expect(jsonEncode(body).split(base64Encode(_ink)).length, 2);
   });
 

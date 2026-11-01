@@ -1003,6 +1003,24 @@ void main() {
 
       expect(controller.images, isEmpty);
       expect(controller.strokes.length, greaterThan(before + 1));
+      final List<Stroke> generated = controller.strokes.sublist(before);
+      // Generated ink stays in the normal/playback render layers; the AI
+      // context range, not the editable lasso ownership, expands around it.
+      expect(controller.selection, isNotNull);
+      expect(controller.selection!.strokes, isNot(containsAll(generated)));
+      for (final Stroke stroke in generated) {
+        expect(controller.isStrokeHidden(stroke), isFalse);
+      }
+      final Rect contextBounds = _assistant(tester).context!.logicalBounds!;
+      for (final Stroke stroke in generated) {
+        for (final InkVector point in stroke.points) {
+          expect(
+            contextBounds.contains(Offset(point.x, point.y)),
+            isTrue,
+            reason: '$point must be inside $contextBounds',
+          );
+        }
+      }
       expect(
         _assistant(tester).messages.last.notationStatus,
         AiNotationStatus.applied,
@@ -1292,12 +1310,17 @@ void main() {
       expect(find.text('New selection'), findsNothing);
       expect(assistant.context, same(context));
       expect(find.text('Two lines.'), findsOneWidget);
-      // Follow-ups still go with the image captured at the start.
+      // Follow-ups wait for the refreshed context and, with Notation on,
+      // send its picture and SVG together.
+      assistant.setNotationEnabled(true);
+      await tester.pump();
       await tester.enterText(find.byType(TextField), 'And?');
       await tester.pump();
       await tester.tap(find.byTooltip('Send'));
-      await tester.pump();
+      await settleAi(tester);
+      expect(client.requests, hasLength(2));
       expect(client.requests[1].imagePng, same(context.image!.png));
+      expect(client.requests[1].selectionSvg, startsWith('<svg'));
       expect(client.requests[1].messages, hasLength(3));
     });
   });

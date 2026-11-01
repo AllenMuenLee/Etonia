@@ -13,7 +13,7 @@ import {
   billingModel,
   combineSteps,
   configuredDrawingModel,
-  costOf,
+  meterPass,
   modelConfig,
   outputBudget,
   providerAnswer,
@@ -90,9 +90,7 @@ Deno.serve(endpoint(async (req) => {
   // The answer model is user-selected. Notation/animation is controlled only
   // by the server environment, with Luna as the default.
   const two = twoStep(model, input);
-  const drawerAlias = two
-    ? configuredDrawingModel(Deno.env.get("AI_NOTATION_MODEL"))
-    : undefined;
+  const drawerAlias = two ? configuredDrawingModel(Deno.env.get("AI_NOTATION_MODEL")) : undefined;
   const drawer = drawerAlias ? modelConfig(catalog, drawerAlias) : undefined;
   const drawerKey = drawer ? secret(providerKeys[drawer.provider]) : "";
   // Live store verification fails closed, including renewals, refunds and expiry.
@@ -165,24 +163,17 @@ Deno.serve(endpoint(async (req) => {
       settled = true;
       throw new Failure(first.refused === 429 ? "rate_limited" : "server", 503);
     }
-    let tokensIn = first.result.input;
-    let tokensOut = first.result.output;
-    let cost = costOf(
-      model,
-      tokensIn,
-      tokensOut,
-      first.result.cached,
-      first.result.cacheWrites,
-    );
+    let usage = meterPass(undefined, model, first.result);
     let answer = first.result.answer;
     if (drawer && typeof answer === "string" && answer) {
       // The user's model has written the words from the clean crop; the
-      // drawing model reads them with the gridded crop and draws them.
+      // drawing model reads them with the same crop, plus its page-coordinate
+      // SVG for positions, and draws them.
       let message: string;
       try {
         message = stepMessage(answer);
       } catch (error) {
-        await settle(cost, tokensIn, tokensOut);
+        await settle(usage.cost, usage.inputTokens, usage.outputTokens);
         settled = true;
         throw error;
       }
@@ -205,10 +196,7 @@ Deno.serve(endpoint(async (req) => {
             Math.max(5000, 105000 - (Date.now() - started)),
           );
           if (second.result) {
-            const { input: used, output, cached, cacheWrites } = second.result;
-            cost += costOf(drawer, used, output, cached, cacheWrites);
-            tokensIn += used;
-            tokensOut += output;
+            usage = meterPass(usage, drawer, second.result);
             notationAnswer = second.result.answer;
           }
         } catch {
@@ -216,11 +204,11 @@ Deno.serve(endpoint(async (req) => {
           // any, is unknown and not billed.
         }
         answer = combineSteps(message, notationAnswer);
-        await settle(cost, tokensIn, tokensOut);
+        await settle(usage.cost, usage.inputTokens, usage.outputTokens);
         settled = true;
         return {
           answer,
-          usage: { inputTokens: tokensIn, outputTokens: tokensOut },
+          usage: { inputTokens: usage.inputTokens, outputTokens: usage.outputTokens },
         };
       };
       if (req.headers.get("accept")?.includes("text/event-stream")) {
@@ -229,13 +217,13 @@ Deno.serve(endpoint(async (req) => {
       await finishNotation();
     }
     if (!settled) {
-      await settle(cost, tokensIn, tokensOut);
+      await settle(usage.cost, usage.inputTokens, usage.outputTokens);
       settled = true;
     }
     if (typeof answer !== "string" || !answer) throw new Failure("server", 503);
     return json({
       answer,
-      usage: { inputTokens: tokensIn, outputTokens: tokensOut },
+      usage: { inputTokens: usage.inputTokens, outputTokens: usage.outputTokens },
     });
   } catch (error) {
     if (!sent && !settled) await settle(0, 0, 0, true);

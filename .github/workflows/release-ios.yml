@@ -103,6 +103,9 @@ jobs:
           DART_DEFINES_B64: ${{ secrets.DART_DEFINES_B64 }}
         run: echo "$DART_DEFINES_B64" | base64 --decode > dart_defines.json
 
+      - name: Check dart defines
+        run: dart run tool/check_dart_defines.dart --platform ios dart_defines.json
+
       - run: flutter pub get
 
       - name: Pick build number

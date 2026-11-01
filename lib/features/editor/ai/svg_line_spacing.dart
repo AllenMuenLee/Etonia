@@ -132,13 +132,13 @@ abstract final class SvgLineSpacing {
 
   /// Moves the marks drawn for a piece of text along with it: under [root],
   /// a line, shape, or path lying wholly within the [zone] round a moved
-  /// text's ink, such as its underline or the ring round it, is moved by
-  /// its [drop], and the end of a `line` that lies there, such as a leader
-  /// pointing at it, follows on its own. Returns the box round what moved,
-  /// where it now is, or null when nothing did.
+  /// text's ink, such as its underline or the ring round it, is moved [by]
+  /// as much as the text, and the end of a `line` that lies there, such as a
+  /// leader pointing at it, follows on its own. Returns the box round what
+  /// moved, where it now is, or null when nothing did.
   ///
   /// Anything transformed, or inside defs or handwriting, is left alone.
-  static Rect? carry(XmlElement root, List<({Rect zone, double drop})> moves) {
+  static Rect? carry(XmlElement root, List<({Rect zone, Offset by})> moves) {
     if (moves.isEmpty) return null;
     Rect? moved;
     void grow(Rect box) {
@@ -151,8 +151,8 @@ abstract final class SvgLineSpacing {
       final List<(double, double)>? points = _points(element);
       if (points == null || points.isEmpty) continue;
       final Rect box = _box(points);
-      ({Rect zone, double drop})? home;
-      for (final ({Rect zone, double drop}) move in moves) {
+      ({Rect zone, Offset by})? home;
+      for (final ({Rect zone, Offset by}) move in moves) {
         if (move.zone.contains(box.topLeft) &&
             move.zone.contains(box.bottomRight) &&
             (home == null || move.zone.height < home.zone.height)) {
@@ -160,8 +160,12 @@ abstract final class SvgLineSpacing {
         }
       }
       if (home != null) {
-        element.setAttribute('transform', 'translate(0 ${_text(home.drop)})');
-        grow(box.translate(0, home.drop));
+        element.setAttribute(
+          'transform',
+          'translate(${home.by.dx == 0 ? '0' : _text(home.by.dx)} '
+              '${_text(home.by.dy)})',
+        );
+        grow(box.shift(home.by));
         continue;
       }
       if (element.name.local != 'line') continue;
@@ -172,10 +176,12 @@ abstract final class SvgLineSpacing {
         final double? px = _number(element.getAttribute(x));
         final double? py = _number(element.getAttribute(y));
         if (px == null || py == null) continue;
-        for (final ({Rect zone, double drop}) move in moves) {
+        for (final ({Rect zone, Offset by}) move in moves) {
           if (move.zone.contains(Offset(px, py))) {
-            element.setAttribute(y, _text(py + move.drop));
-            grow(Rect.fromLTRB(px, py + move.drop, px, py + move.drop));
+            final Offset end = Offset(px, py) + move.by;
+            element.setAttribute(x, _text(end.dx));
+            element.setAttribute(y, _text(end.dy));
+            grow(Rect.fromPoints(end, end));
             break;
           }
         }

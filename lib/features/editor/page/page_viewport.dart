@@ -3,6 +3,7 @@ import 'dart:math' as math;
 import 'package:flutter/foundation.dart';
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/physics.dart';
 import 'package:flutter/scheduler.dart';
 
 import '../../../app/theme/app_tokens.dart';
@@ -93,9 +94,10 @@ class PageViewport extends StatefulWidget {
   final double pullToAddDistance;
 
   /// While true, fingers never write, so one finger pans the column and
-  /// two pan and pinch-zoom it, without [onScrollStart]: there is no stroke
-  /// of theirs to drop, and a resting palm must not stop the pen. A finger
-  /// is ignored while a stylus is down.
+  /// two pan and pinch-zoom it. [onScrollStart] receives an empty set only
+  /// after a finger actually moves: there is no stroke of theirs to drop,
+  /// and a resting palm must not stop the pen. A finger is ignored while a
+  /// stylus is down.
   final ValueListenable<bool>? fingersNavigate;
 
   /// Touches a canvas has taken, such as a finger moving the ruler: they
@@ -159,6 +161,8 @@ class PageViewportState extends State<PageViewport>
   final Map<Key, Widget> _builtPages = <Key, Widget>{};
   AppColors? _builtPagesColors;
   final Map<int, Offset> _touches = <int, Offset>{};
+  final Set<int> _activeTouches = <int>{};
+  bool _palmGestureBlocked = false;
   Offset _offset = Offset.zero;
   Offset _maxScroll = Offset.zero;
 
@@ -172,6 +176,12 @@ class PageViewportState extends State<PageViewport>
   Duration? _lastInertiaTick;
   Duration? _lastDragUpdate;
   Offset _dragVelocity = Offset.zero;
+  FrictionSimulation? _inertiaX;
+  FrictionSimulation? _inertiaY;
+  double _inertiaTime = 0;
+  Offset _inertiaPosition = Offset.zero;
+  bool _scrollEndPending = false;
+  bool _waitingForTouchRelease = false;
 
   /// Fingers moving the column in [PageViewport.fingersNavigate] mode.
   bool _navigating = false;
@@ -208,11 +218,18 @@ class PageViewportState extends State<PageViewport>
   /// pixels, so a page's border can be brought in from the screen's edge.
   static const double _overscroll = 48;
 
+  /// A contact this wide is a hand or palm rather than an intentional
+  /// fingertip. Flutter reports contact radii in logical pixels on both iOS
+  /// and Android. Android also reports the device-specific normalized
+  /// contact [PointerEvent.size], which covers devices that omit radii.
+  static const double _palmRadius = 28;
+  static const double _androidPalmSize = 0.28;
+
   /// How far the column is scrolled, in viewport pixels.
   Offset get scrollOffset => _offset;
 
   /// Whether two fingers are scrolling the column.
-  bool get isScrolling => _scrolling;
+  bool get isScrolling => _scrolling || _inertiaTicker.isActive;
 
   /// How far the column is pinch-zoomed; 1 shows each page at its own scale.
   double get zoom => _zoom;
@@ -301,8 +318,31 @@ class PageViewportState extends State<PageViewport>
     return sum / _touches.length.toDouble();
   }
 
-  void _onPointerDown(PointerDownEvent event) {
+  bool _isPalmSized(PointerEvent event) {
+    return event.kind == PointerDeviceKind.touch &&
+        (event.radiusMajor >= _palmRadius ||
+            event.radiusMinor >= _palmRadius ||
+            event.size >= _androidPalmSize);
+  }
+
+  void _blockNavigationForPalm() {
+    if (_palmGestureBlocked) return;
+    _palmGestureBlocked = true;
+    _touches.clear();
+    _scrolling = false;
+    _navigating = false;
+    _pullCandidate = false;
+    _waitingForTouchRelease = false;
+    _pull.value = 0;
     _stopInertia();
+    _completeScroll();
+  }
+
+  void _onPointerDown(PointerDownEvent event) {
+    if (_inertiaTicker.isActive) {
+      _stopInertia();
+      _completeScroll();
+    }
     final _ColumnLayout? layout = _layout;
     if (layout != null) {
       final Offset content =
@@ -321,6 +361,14 @@ class PageViewportState extends State<PageViewport>
     if (event.kind != PointerDeviceKind.touch) {
       return;
     }
+    _activeTouches.add(event.pointer);
+    if (_isPalmSized(event)) {
+      _blockNavigationForPalm();
+      return;
+    }
+    if (_palmGestureBlocked) {
+      return;
+    }
     if (widget.pointerClaims?.contains(event.pointer) ?? false) {
       return;
     }
@@ -332,8 +380,10 @@ class PageViewportState extends State<PageViewport>
     }
     if (!_scrolling && _touches.length >= 2) {
       if (_canScroll || _zoom != 1) {
+        _waitingForTouchRelease = false;
         _scrolling = true;
         _beginDrag(event.timeStamp);
+        _scrollEndPending = true;
         widget.onScrollStart?.call(Set<int>.of(_touches.keys));
       } else if (widget.onPullToAddPage != null && !_pullCandidate) {
         _pullCandidate = true;
@@ -343,6 +393,12 @@ class PageViewportState extends State<PageViewport>
   }
 
   void _onPointerMove(PointerMoveEvent event) {
+    if (_activeTouches.contains(event.pointer) && _isPalmSized(event)) {
+      _blockNavigationForPalm();
+    }
+    if (_palmGestureBlocked) {
+      return;
+    }
     if (!_touches.containsKey(event.pointer)) {
       return;
     }
@@ -359,6 +415,7 @@ class PageViewportState extends State<PageViewport>
         _pullCandidate = false;
         _scrolling = true;
         _beginDrag(event.timeStamp);
+        _scrollEndPending = true;
         widget.onScrollStart?.call(Set<int>.of(_touches.keys));
         _trackPull(-moved.dy);
         return;
@@ -367,6 +424,10 @@ class PageViewportState extends State<PageViewport>
     if (_scrolling || _navigating) {
       final Offset after = _centroid;
       final Offset delta = before - after;
+      if (_navigating && delta != Offset.zero && !_scrollEndPending) {
+        _scrollEndPending = true;
+        widget.onScrollStart?.call(const <int>{});
+      }
       scrollBy(delta);
       _trackPull(delta.dy);
       _recordDragVelocity(delta, event.timeStamp);
@@ -378,6 +439,15 @@ class PageViewportState extends State<PageViewport>
 
   void _onPointerEnd(PointerEvent event) {
     _styluses.remove(event.pointer);
+    if (event.kind == PointerDeviceKind.touch) {
+      _activeTouches.remove(event.pointer);
+      if (_palmGestureBlocked) {
+        if (_activeTouches.isEmpty) {
+          _palmGestureBlocked = false;
+        }
+        return;
+      }
+    }
     if (_touches.remove(event.pointer) == null) {
       return;
     }
@@ -388,14 +458,26 @@ class PageViewportState extends State<PageViewport>
       _navigating = false;
       final bool pulled = _pull.value > 0;
       _releasePull();
-      if (!pulled) _startInertia();
+      if (pulled || !_startInertia(event.timeStamp)) _completeScroll();
     }
     if (_scrolling && _touches.length < 2) {
       _scrolling = false;
       final bool pulled = _pull.value > 0;
       _releasePull();
-      if (!pulled) _startInertia();
-      widget.onScrollEnd?.call();
+      if (pulled) {
+        _waitingForTouchRelease = false;
+        _completeScroll();
+      } else if (_touches.isEmpty) {
+        _waitingForTouchRelease = false;
+        if (!_startInertia(event.timeStamp)) _completeScroll();
+      } else {
+        // Do not let the content coast under the last finger. Preserve the
+        // velocity briefly, then begin momentum only when that finger lifts.
+        _waitingForTouchRelease = true;
+      }
+    } else if (_waitingForTouchRelease && _touches.isEmpty) {
+      _waitingForTouchRelease = false;
+      if (!_startInertia(event.timeStamp)) _completeScroll();
     }
   }
 
@@ -437,15 +519,36 @@ class PageViewportState extends State<PageViewport>
   /// Zooms by [factor], keeping what is under [focal] there.
   void _zoomAround(Offset focal, double factor) {
     final double next = (_zoom * factor).clamp(widget.minZoom, widget.maxZoom);
-    if (next == _zoom || !next.isFinite) {
+    final _ColumnLayout? previous = _layout;
+    if (next == _zoom || !next.isFinite || previous == null) {
       return;
     }
     final double ratio = next / _zoom;
-    final double top = _layout?.top ?? 0;
+    final _ColumnLayout after = _ColumnLayout(
+      widget.pages,
+      previous.viewport,
+      widget.pageGap,
+      next,
+      lead: _lead,
+    );
+    final Offset inColumn = focal + _offset - Offset(0, previous.top);
+    final int page = previous.pageAt(inColumn.dy);
+    final Rect from = previous.rects[page];
+    final Rect to = after.rects[page];
     setState(() {
       _zoom = next;
-      // Clamped to the zoomed column when it is next laid out.
-      _offset = (_offset + focal - Offset(0, top)) * ratio - focal;
+      // Both fingers of a pinch report before the next frame lays out the
+      // column. Keep the geometry and its scroll limits in step with the
+      // zoom, so the next finger's pan neither maps through a stale column
+      // nor is clamped to the smaller one it had, which scrolls the page.
+      _adoptLayout(after);
+      // Page gaps and the space centering a short column do not scale. Map
+      // through the page itself so neither can turn a pure pinch into a
+      // vertical scroll. This is clamped when the new column is laid out.
+      _offset = Offset(
+        to.left + (inColumn.dx - from.left) * ratio - focal.dx,
+        after.top + to.top + (inColumn.dy - from.top) * ratio - focal.dy,
+      );
     });
   }
 
@@ -460,15 +563,20 @@ class PageViewportState extends State<PageViewport>
   }
 
   void _onPanZoomStart(PointerPanZoomStartEvent event) {
-    _stopInertia();
+    if (_inertiaTicker.isActive) {
+      _stopInertia();
+      _completeScroll();
+    }
     _panZoomScale = 1;
     _beginDrag(event.timeStamp);
+    _scrollEndPending = true;
+    widget.onScrollStart?.call(const <int>{});
   }
 
   void _onPanZoomEnd(PointerPanZoomEndEvent event) {
     final bool pulled = _pull.value > 0;
     _releasePull();
-    if (!pulled) _startInertia();
+    if (pulled || !_startInertia(event.timeStamp)) _completeScroll();
   }
 
   void _onPanZoomUpdate(PointerPanZoomUpdateEvent event) {
@@ -496,24 +604,88 @@ class PageViewportState extends State<PageViewport>
     if (previous == null) return;
     final double seconds = (timeStamp - previous).inMicroseconds / 1000000;
     if (seconds <= 0) return;
-    final Offset sample = delta / seconds;
-    _dragVelocity = Offset.lerp(_dragVelocity, sample, 0.38)!;
+    Offset sample = delta / seconds;
+    // A malformed or tightly batched pointer timestamp must not turn one
+    // event into a page-sized ballistic step.
+    const double maxVelocity = 8000;
+    if (sample.distance > maxVelocity) {
+      sample = sample / sample.distance * maxVelocity;
+    }
+    // A reversal transfers control immediately. Blending it with the old
+    // direction can otherwise make the page coast backwards on release.
+    if (_dragVelocity != Offset.zero &&
+        _dragVelocity.dx * sample.dx + _dragVelocity.dy * sample.dy <= 0) {
+      _dragVelocity = sample;
+    } else {
+      _dragVelocity = Offset.lerp(_dragVelocity, sample, 0.55)!;
+    }
   }
 
-  void _startInertia() {
+  bool _startInertia(Duration releasedAt) {
     // A normal two-finger reposition ends exactly where it was released;
     // only a genuine flick earns a coast.
-    if (_dragVelocity.distance < 800 || _maxScroll == Offset.zero) {
-      return;
+    final Duration? last = _lastDragUpdate;
+    if (_dragVelocity.distance < 250 ||
+        _maxScroll == Offset.zero ||
+        last == null ||
+        releasedAt - last > const Duration(milliseconds: 80)) {
+      _dragVelocity = Offset.zero;
+      return false;
     }
+    // Flutter's iOS scroll simulation derives this from
+    // UIScrollView.DecelerationRate.normal (0.998 per millisecond).
+    const double drag = 0.135;
+    const Tolerance tolerance = Tolerance(
+      distance: 0.5,
+      velocity: 18,
+      time: 0.01,
+    );
+    final bool canMoveX = _dragVelocity.dx < 0
+        ? _offset.dx > -_room.dx
+        : _offset.dx < _maxScroll.dx + _room.dx;
+    final bool canMoveY = _dragVelocity.dy < 0
+        ? _offset.dy > -_room.dy
+        : _offset.dy < _maxScroll.dy + _room.dy;
+    _inertiaX = _dragVelocity.dx.abs() < 1 || !canMoveX
+        ? null
+        : FrictionSimulation(
+            drag,
+            _offset.dx,
+            _dragVelocity.dx,
+            tolerance: tolerance,
+          );
+    _inertiaY = _dragVelocity.dy.abs() < 1 || !canMoveY
+        ? null
+        : FrictionSimulation(
+            drag,
+            _offset.dy,
+            _dragVelocity.dy,
+            tolerance: tolerance,
+          );
+    if (_inertiaX == null && _inertiaY == null) {
+      _dragVelocity = Offset.zero;
+      return false;
+    }
+    _inertiaTime = 0;
+    _inertiaPosition = _offset;
     _lastInertiaTick = null;
     _inertiaTicker.start();
+    return true;
   }
 
   void _stopInertia() {
     if (_inertiaTicker.isActive) _inertiaTicker.stop();
     _lastInertiaTick = null;
+    _inertiaX = null;
+    _inertiaY = null;
+    _inertiaTime = 0;
     _dragVelocity = Offset.zero;
+  }
+
+  void _completeScroll() {
+    if (!_scrollEndPending) return;
+    _scrollEndPending = false;
+    widget.onScrollEnd?.call();
   }
 
   /// Applies exponentially decaying velocity on every frame. The custom
@@ -523,18 +695,32 @@ class PageViewportState extends State<PageViewport>
     final Duration? previous = _lastInertiaTick;
     _lastInertiaTick = elapsed;
     if (previous == null) return;
-    final double seconds = (elapsed - previous).inMicroseconds / 1000000;
-    if (seconds <= 0) return;
-
+    final double elapsedSeconds = (elapsed - previous).inMicroseconds / 1000000;
+    if (elapsedSeconds <= 0) return;
+    // Do not catch up a stalled raster frame in one visible leap. Normal
+    // 60/120 Hz frames use their exact interval; only a missed frame is
+    // time-dilated, preserving continuity instead of teleporting the page.
+    _inertiaTime += math.min(elapsedSeconds, 1 / 30);
+    final FrictionSimulation? x = _inertiaX;
+    final FrictionSimulation? y = _inertiaY;
+    final Offset target = Offset(
+      x?.x(_inertiaTime) ?? _inertiaPosition.dx,
+      y?.x(_inertiaTime) ?? _inertiaPosition.dy,
+    );
     final Offset before = _offset;
-    scrollBy(_dragVelocity * seconds);
-    if (_offset.dx == before.dx) _dragVelocity = Offset(0, _dragVelocity.dy);
-    if (_offset.dy == before.dy) _dragVelocity = Offset(_dragVelocity.dx, 0);
+    scrollBy(target - _inertiaPosition);
+    _inertiaPosition = target;
+    if (_offset.dx == before.dx && target.dx != before.dx) _inertiaX = null;
+    if (_offset.dy == before.dy && target.dy != before.dy) _inertiaY = null;
 
-    // A 4.8 / s decay gives a short, natural coast without carrying past
-    // the next few pages. It also remains stable on a delayed frame.
-    _dragVelocity *= math.exp(-4.8 * seconds);
-    if (_dragVelocity.distance < 18) _stopInertia();
+    final double vx = _inertiaX?.dx(_inertiaTime) ?? 0;
+    final double vy = _inertiaY?.dx(_inertiaTime) ?? 0;
+    _dragVelocity = Offset(vx, vy);
+    if ((_inertiaX == null || _inertiaX!.isDone(_inertiaTime)) &&
+        (_inertiaY == null || _inertiaY!.isDone(_inertiaTime))) {
+      _stopInertia();
+      _completeScroll();
+    }
   }
 
   ValueNotifier<Rect> _visibleFor(Key key) {
@@ -599,17 +785,7 @@ class PageViewportState extends State<PageViewport>
           final double offset = layout.top - neededTop;
           _offset = Offset(_offset.dx, offset);
         }
-        _layout = layout;
-        _maxScroll = Offset(
-          math.max(0, layout.size.width - viewport.width),
-          math.max(0, layout.size.height + layout.top - viewport.height),
-        );
-        _room = Offset(
-          layout.rects.any((Rect rect) => rect.width >= viewport.width - 0.5)
-              ? _overscroll
-              : 0,
-          layout.size.height >= viewport.height - 0.5 ? _overscroll : 0,
-        );
+        _adoptLayout(layout);
         if (_jumpPending && widget.currentPage < widget.pages.length) {
           _jumpPending = false;
           _offset = Offset(0, layout.rects[widget.currentPage].top);
@@ -808,6 +984,22 @@ class PageViewportState extends State<PageViewport>
           ),
         );
       },
+    );
+  }
+
+  /// Makes [layout] the column, with the scroll limits it sets.
+  void _adoptLayout(_ColumnLayout layout) {
+    final Size viewport = layout.viewport;
+    _layout = layout;
+    _maxScroll = Offset(
+      math.max(0, layout.size.width - viewport.width),
+      math.max(0, layout.size.height + layout.top - viewport.height),
+    );
+    _room = Offset(
+      layout.rects.any((Rect rect) => rect.width >= viewport.width - 0.5)
+          ? _overscroll
+          : 0,
+      layout.size.height >= viewport.height - 0.5 ? _overscroll : 0,
     );
   }
 

@@ -172,4 +172,145 @@ void main() {
       expect(controller.strokes.single.points.first.y, closeTo(100, 0.01));
     });
   });
+
+  group('drawn by hand', () {
+    SvgInkConversion convert(String body, {bool sketch = true}) =>
+        SvgInkConverter.convert(
+          _svg(body),
+          defaultInk: InkPalette.ink,
+          defaultWidth: 2,
+          sketch: sketch,
+        );
+
+    double furthestFrom(List<InkVector> points, double y) =>
+        points.map((InkVector point) => (point.y - y).abs()).reduce(math.max);
+
+    test('a straight line bows a little, keeping its ends', () {
+      const String line =
+          '<line x1="20" y1="100" x2="180" y2="100" stroke="black"/>';
+      final List<InkVector> drawn = convert(line).traces.single.points;
+      expect(drawn.first.x, closeTo(20, 0.01));
+      expect(drawn.first.y, closeTo(100, 0.01));
+      expect(drawn.last.x, closeTo(180, 0.01));
+      expect(drawn.last.y, closeTo(100, 0.01));
+      // 160 long: it bows between 2 and 4 units, at most.
+      expect(furthestFrom(drawn, 100), inInclusiveRange(1.5, 5.5));
+
+      final List<InkVector> ruled = convert(
+        line,
+        sketch: false,
+      ).traces.single.points;
+      expect(furthestFrom(ruled, 100), lessThan(0.01));
+    });
+
+    test('the same notation is drawn the same way every time', () {
+      const String body =
+          '<polyline points="20,20 100,60 180,20" fill="none" stroke="black"/>'
+          '<circle cx="100" cy="130" r="40" fill="none" stroke="black"/>';
+      final SvgInkConversion once = convert(body);
+      final SvgInkConversion again = convert(body);
+      for (int i = 0; i < once.traces.length; i++) {
+        expect(again.traces[i].points, once.traces[i].points);
+      }
+    });
+
+    test('a polyline keeps its corners where they were written', () {
+      final List<InkVector> drawn = convert(
+        '<polyline points="20,20 100,60 180,20" fill="none" stroke="black"/>',
+      ).traces.single.points;
+      expect(
+        drawn.any(
+          (InkVector point) => (point - const InkVector(100, 60)).length < 0.3,
+        ),
+        isTrue,
+      );
+    });
+
+    test('a circle is one loop that runs past its start, never inside', () {
+      final List<InkVector> drawn = convert(
+        '<circle cx="100" cy="100" r="40" fill="none" stroke="black"/>',
+      ).traces.single.points;
+      for (final InkVector point in drawn) {
+        final double radius = (point - const InkVector(100, 100)).length;
+        expect(radius, inInclusiveRange(39.9, 47));
+      }
+      // The pen ends past where it began, a little further out.
+      expect((drawn.last - drawn.first).length, greaterThan(2));
+      double turned = 0;
+      for (int i = 1; i < drawn.length; i++) {
+        final InkVector a = drawn[i - 1] - const InkVector(100, 100);
+        final InkVector b = drawn[i] - const InkVector(100, 100);
+        turned += math.atan2(a.x * b.y - a.y * b.x, a.x * b.x + a.y * b.y);
+      }
+      expect(turned.abs(), greaterThan(2 * math.pi));
+    });
+
+    test('an arrow gets a head along its shaft, drawn by the app', () {
+      final SvgInkConversion result = convert(
+        '<line x1="20" y1="100" x2="180" y2="100" stroke="black" '
+        'data-etonia-arrow="end"/>',
+      );
+      expect(result.traces, hasLength(2));
+      final List<InkVector> head = result.traces[1].points;
+      // One stroke: a wing, the tip at the end of the shaft, the other wing.
+      final InkVector tip = head.reduce(
+        (InkVector a, InkVector b) => a.x > b.x ? a : b,
+      );
+      expect(tip.x, closeTo(180, 0.01));
+      expect(tip.y, closeTo(100, 0.01));
+      expect(head.first.x, lessThan(175));
+      expect(head.last.x, lessThan(175));
+      // The wings sit either side of the shaft.
+      expect((head.first.y - 100).sign, -(head.last.y - 100).sign);
+    });
+
+    test('a curved shaft points its head the way the curve ends', () {
+      final List<InkVector> head = convert(
+        '<path d="M20 20 Q180 20 180 180" fill="none" stroke="black" '
+        'data-etonia-arrow="end"/>',
+      ).traces[1].points;
+      // The curve comes down into its end, so both wings are above it.
+      expect(head.first.y, lessThan(175));
+      expect(head.last.y, lessThan(175));
+      expect((head.first.x - 180).sign, -(head.last.x - 180).sign);
+    });
+
+    test('both ends, or an SVG marker, take heads too', () {
+      expect(
+        convert(
+          '<line x1="20" y1="50" x2="180" y2="50" stroke="black" '
+          'data-etonia-arrow="both"/>',
+        ).traces,
+        hasLength(3),
+      );
+      expect(
+        convert(
+          '<line x1="20" y1="50" x2="180" y2="50" stroke="black" '
+          'marker-end="url(#head)"/>',
+        ).traces,
+        hasLength(2),
+      );
+    });
+
+    test('a head appears as its end of the shaft is drawn', () {
+      final SvgInkConversion result = SvgInkConverter.convert(
+        _svg(
+          '<line x1="20" y1="50" x2="180" y2="50" stroke="black" '
+          'data-etonia-arrow="end" data-etonia-step="1"/>',
+          animation: 'data-etonia-duration-ms="1000"',
+        ),
+        defaultInk: InkPalette.ink,
+        defaultWidth: 2,
+      );
+      expect(result.traces[1].timesMs, everyElement(1000));
+    });
+
+    test('handwritten text is left as written', () {
+      final List<InkVector> drawn = convert(
+        '<g data-etonia-handwriting="1">'
+        '<path d="M20 100 L180 100" fill="none" stroke="black"/></g>',
+      ).traces.single.points;
+      expect(furthestFrom(drawn, 100), lessThan(0.01));
+    });
+  });
 }

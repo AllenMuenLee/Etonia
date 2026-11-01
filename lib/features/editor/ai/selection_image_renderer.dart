@@ -250,6 +250,33 @@ class SelectionInkSnapshot {
     );
   }
 
+  /// This snapshot with [ink] drawn over its strokes in its own theme: ink
+  /// that has appeared where it lies since it was taken. What it was taken
+  /// from stays as it was, so [ink] never counts as chosen.
+  SelectionInkSnapshot withInkOver(Iterable<Stroke> ink) {
+    return SelectionInkSnapshot._(
+      strokes: List<SnapshotStroke>.unmodifiable(<SnapshotStroke>[
+        ...strokes,
+        for (final Stroke stroke in ink)
+          SnapshotStroke(
+            points: stroke.points,
+            width: stroke.style.width,
+            color: stroke.style.resolve(brightness),
+            isDot: stroke.isDot,
+            writing: stroke.style.writing,
+            widths: stroke.widths,
+          ),
+      ]),
+      bitmaps: bitmaps,
+      brightness: brightness,
+      background: background,
+      source: _source,
+      sourceImages: _sourceImages,
+      explicitBounds: explicitBounds,
+      stickies: stickies,
+    );
+  }
+
   /// For tests and tools: a snapshot of [strokes] as given.
   @visibleForTesting
   factory SelectionInkSnapshot.fromStrokes(

@@ -403,7 +403,7 @@ class SelectionCarry extends ChangeNotifier {
     final InkController originController = origin.widget.controller;
     SelectionHit? hit;
     final InkSelection? ownSelection = originController.selection;
-    if (ownSelection != null && !ownSelection.includesPdf) {
+    if (ownSelection != null) {
       hit = ownSelection.frame.hitTest(
         position,
         handleHitRadius: originController.selectionConfig.handleHitRadius,
@@ -411,6 +411,18 @@ class SelectionCarry extends ChangeNotifier {
             originController.selectionConfig.rotationHandleOffset,
         tolerance: originController.selectionConfig.geometryTolerance,
       );
+      // Selected PDF paper shows no handles: it can only be moved, once it
+      // has been lifted off the page.
+      if (hit != null && ownSelection.includesPdf) {
+        _updating = true;
+        try {
+          hit = originController.liftPdfSelection()
+              ? const SelectionHit.move()
+              : null;
+        } finally {
+          _updating = false;
+        }
+      }
     }
     if (hit == null) {
       for (final _InkCanvasState c in canvases) {
@@ -630,10 +642,10 @@ class SelectionCarry extends ChangeNotifier {
           c.widget.controller.clearSelection();
         }
       } else {
-        bool anyForeground = false;
-        // In AI mode the paper comes with the ink; only the page the
-        // lasso began on, since the chat reads the paper of one page.
-        final bool keepPaper = origin.widget.aiActive?.value ?? false;
+        bool anySelected = false;
+        // The paper comes with the ink only from the page the lasso began
+        // on: a PDF excerpt belongs to one page.
+        final bool keepPaper = origin.widget._takesPaper;
         for (final _InkCanvasState c in canvases) {
           final InkTransform? toC = _transformBetween(origin, c);
           if (toC == null) continue;
@@ -646,17 +658,11 @@ class SelectionCarry extends ChangeNotifier {
             selectablePdfBounds: withPaper
                 ? c.widget.selectablePdfBounds
                 : null,
-            keepPaper: withPaper,
           )) {
-            anyForeground = true;
+            anySelected = true;
           }
         }
-        if (!anyForeground && origin.widget.selectablePdfBounds != null) {
-          originController.selectWithOutline(
-            outline,
-            selectablePdfBounds: origin.widget.selectablePdfBounds,
-          );
-        } else if (anyForeground) {
+        if (anySelected) {
           _syncLinkedSelection(canvases);
           _syncUnifiedFrames(canvases);
           if (originController.selection == null) {
@@ -1376,6 +1382,7 @@ class InkCanvas extends StatefulWidget {
     this.pastePrompt,
     this.stylusOnly,
     this.selectablePdfBounds,
+    this.selectPdf,
     this.stickySettings,
     this.onStickyPlaced,
     this.textSettings,
@@ -1477,6 +1484,15 @@ class InkCanvas extends StatefulWidget {
 
   /// Page-local PDF paper that a lasso may capture as a bitmap excerpt.
   final Rect? selectablePdfBounds;
+
+  /// While true, a lasso with the Select tool takes the PDF paper inside it
+  /// along with the ink, to copy, cut, delete, or move; while false it
+  /// takes the ink alone. In AI mode the paper always comes along.
+  final ValueListenable<bool>? selectPdf;
+
+  /// Whether a lasso ending now takes the PDF paper along.
+  bool get _takesPaper =>
+      (aiActive?.value ?? false) || (selectPdf?.value ?? false);
 
   /// Global screen rectangles (such as tool palettes and top bars) where
   /// native stylus strokes must be excluded from previewing and writing.
@@ -2762,8 +2778,7 @@ class _InkCanvasState extends State<InkCanvas> with WidgetsBindingObserver {
         widget.controller.endSelectionGesture(
           event.pointer,
           _position(event),
-          widget.selectablePdfBounds,
-          widget.aiActive?.value ?? false,
+          widget._takesPaper ? widget.selectablePdfBounds : null,
         );
       }
     } else {

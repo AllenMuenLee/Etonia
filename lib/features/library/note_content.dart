@@ -247,6 +247,7 @@ class StoredPage {
     this.textElements = const <NoteTextElement>[],
     this.recognizedWords = const <StoredRecognizedInkWord>[],
     this.erasedStrokeRecords = const <ErasedStrokeRecord>[],
+    this.pdfMasks = const <Rect>[],
   });
 
   factory StoredPage.fromJson(Map<String, Object?> json) {
@@ -348,7 +349,27 @@ class StoredPage {
             in (json['erasedStrokes'] as List?) ?? const <Object?>[])
           ?_erasedStrokeFromJson(raw),
       ],
+      pdfMasks: <Rect>[
+        for (final Object? raw
+            in (json['pdfMasks'] as List?) ?? const <Object?>[])
+          ?_pdfMaskFromJson(raw),
+      ],
     );
+  }
+
+  /// A blank area of PDF paper stored as `[left, top, width, height]`, or
+  /// null when it is unusable.
+  static Rect? _pdfMaskFromJson(Object? raw) {
+    if (raw is! List || raw.length != 4 || raw.any((Object? v) => v is! num)) {
+      return null;
+    }
+    final Rect rect = Rect.fromLTWH(
+      (raw[0]! as num).toDouble(),
+      (raw[1]! as num).toDouble(),
+      (raw[2]! as num).toDouble(),
+      (raw[3]! as num).toDouble(),
+    );
+    return rect.isFinite && !rect.isEmpty ? rect : null;
   }
 
   final PageSetup setup;
@@ -360,6 +381,10 @@ class StoredPage {
   final List<StoredPlayback> playbacks;
   final List<StoredRecognizedInkWord> recognizedWords;
   final List<ErasedStrokeRecord> erasedStrokeRecords;
+
+  /// Page-local areas of [pdfSource]'s paper left blank, because what was
+  /// there was cut, deleted, or moved away.
+  final List<Rect> pdfMasks;
 
   /// In paint order, each with its ink in its own coordinates.
   final List<StickyNoteElement> stickyNotes;
@@ -613,6 +638,11 @@ class StoredPage {
             'listStyle': element.settings.listStyle.name,
           },
       ],
+    if (pdfMasks.isNotEmpty)
+      'pdfMasks': <Object?>[
+        for (final Rect mask in pdfMasks)
+          <double>[mask.left, mask.top, mask.width, mask.height],
+      ],
     if (erasedStrokeRecords.isNotEmpty)
       'erasedStrokes': <Object?>[
         for (final ErasedStrokeRecord record in erasedStrokeRecords)
@@ -849,6 +879,7 @@ class NoteContent {
             erasedStrokeRecords: List<ErasedStrokeRecord>.of(
               page.ink.erasedStrokeRecords,
             ),
+            pdfMasks: List<Rect>.of(page.ink.pdfMasks),
           ),
       ],
       aiSession: document.currentAiSession,
@@ -1039,7 +1070,8 @@ class NoteContent {
     if (page.strokes.isEmpty &&
         page.images.isEmpty &&
         page.stickyNotes.isEmpty &&
-        page.textElements.isEmpty) {
+        page.textElements.isEmpty &&
+        page.pdfMasks.isEmpty) {
       return blank;
     }
     final InkController filled = InkController(
@@ -1051,6 +1083,7 @@ class NoteContent {
       stickyNotes: page.stickyNotes,
       textElements: page.textElements,
       erasedStrokeRecords: page.erasedStrokeRecords,
+      pdfMasks: page.pdfMasks,
     );
     blank.dispose();
     for (final StoredPlayback playback in page.playbacks) {

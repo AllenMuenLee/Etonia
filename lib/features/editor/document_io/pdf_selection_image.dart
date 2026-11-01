@@ -21,11 +21,15 @@ class PdfSelectionImage {
 /// Pixel edges expand outwards, so the requested area is never clipped by
 /// rounding. The returned logical bounds remain exact and determine the size
 /// and position of the image when it is pasted back onto a note.
+///
+/// The page-local [blanks], areas of the paper left blank, come out as
+/// blank paper.
 PdfSelectionImage cropPdfSelection(
   Uint8List renderedPage,
   Size pageSize,
-  Rect selection,
-) {
+  Rect selection, {
+  List<Rect> blanks = const <Rect>[],
+}) {
   if (!pageSize.isFinite ||
       pageSize.isEmpty ||
       !selection.isFinite ||
@@ -59,6 +63,24 @@ PdfSelectionImage cropPdfSelection(
     width: right - left,
     height: bottom - top,
   );
+  for (final Rect blank in blanks) {
+    final int x1 = (blank.left * scaleX).floor() - left;
+    final int y1 = (blank.top * scaleY).floor() - top;
+    final int x2 = (blank.right * scaleX).ceil() - left;
+    final int y2 = (blank.bottom * scaleY).ceil() - top;
+    if (x2 <= 0 || y2 <= 0 || x1 >= cropped.width || y1 >= cropped.height) {
+      continue;
+    }
+    image.fillRect(
+      cropped,
+      x1: x1.clamp(0, cropped.width - 1),
+      y1: y1.clamp(0, cropped.height - 1),
+      x2: (x2 - 1).clamp(0, cropped.width - 1),
+      y2: (y2 - 1).clamp(0, cropped.height - 1),
+      color: image.ColorRgb8(255, 255, 255),
+      alphaBlend: false,
+    );
+  }
   return PdfSelectionImage(
     png: Uint8List.fromList(image.encodePng(cropped)),
     pixelSize: Size(cropped.width.toDouble(), cropped.height.toDouble()),

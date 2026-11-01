@@ -59,6 +59,54 @@ void main() {
     expect(note.space, isNotNull);
   });
 
+  test('with nothing selected, focuses on the biggest blank area', () async {
+    // Ink across the top: the blank space is the rest of the page.
+    final Stroke top = Stroke.fromPoints(
+      style: const StrokeStyle(ink: InkPalette.ink, width: 4),
+      points: const <InkVector>[InkVector(20, 40), InkVector(480, 40)],
+    );
+    final NoteImage note = await const NoteImageRenderer().render(
+      NoteInkSnapshot.of(
+        <Stroke>[top],
+        logicalSize: const Size(500, 500),
+        revision: 0,
+        brightness: Brightness.light,
+        background: Colors.white,
+        focusOnFreeSpace: true,
+      ),
+    );
+
+    expect(note.focusIsFreeSpace, isTrue);
+    expect(note.focusInk, isEmpty);
+    final Rect focus = note.space!.focus!;
+    expect(focus, note.space!.areas.first.parts.first);
+    expect(_overlaps(focus, top.bounds), isFalse);
+    expect(
+      note.normalizedFocusBounds,
+      Rect.fromLTRB(
+        focus.left / 500,
+        focus.top / 500,
+        focus.right / 500,
+        focus.bottom / 500,
+      ),
+    );
+  });
+
+  test('without a focus, and not asked to find one, has none', () async {
+    final NoteImage note = await const NoteImageRenderer().render(
+      NoteInkSnapshot.of(
+        <Stroke>[_line()],
+        logicalSize: const Size(500, 500),
+        revision: 0,
+        brightness: Brightness.light,
+        background: Colors.white,
+      ),
+    );
+
+    expect(note.focusIsFreeSpace, isFalse);
+    expect(note.normalizedFocusBounds, isNull);
+  });
+
   test('a crop reaching past the paper keeps its exact extent', () async {
     // The selected-ink image's padding runs 12 units past the top-left
     // corner. Clamping would break its linear mapping onto the note.

@@ -49,6 +49,69 @@ Map<String, Object?> _throughJson(Map<String, Object?> json) {
 }
 
 void main() {
+  test('a chat about nothing selected reopens as one', () async {
+    final InkController ink = InkController(
+      strokes: <Stroke>[_line(100), _line(300)],
+    );
+    final FakeAiClient client = FakeAiClient();
+    final AiAssistantController first = AiAssistantController(
+      client: client,
+      renderer: FakeSelectionImageRenderer(),
+      captureNote: () async =>
+          NoteImage(logicalSize: const Size(10, 10), revision: 0),
+      applyNotation: (AiNotation _, NoteImage _) => AiNotationApplication(
+        AiNotationStatus.applied,
+        strokes: <Stroke>[ink.strokes[1]],
+      ),
+    );
+    addTearDown(ink.dispose);
+    addTearDown(first.dispose);
+    first
+      ..setNotationEnabled(true)
+      ..send('Sketch a sine wave');
+    await pumpEventQueue();
+    client.answerResponse(
+      AiAssistantResponse(
+        message: 'Here.',
+        notation: AiNotation(
+          label: 'Sine',
+          items: <AiNotationItem>[
+            AiNotationStroke(
+              ink: 'green',
+              width: 3,
+              points: const <AiNotationPoint>[
+                AiNotationPoint(0.2, 0.2),
+                AiNotationPoint(0.3, 0.3),
+              ],
+            ),
+          ],
+        ),
+      ),
+    );
+    await pumpEventQueue();
+    final Map<String, Object?> saved = _throughJson(
+      first.toJson(_indexOf(ink))!,
+    );
+
+    final AiAssistantController second = AiAssistantController(
+      client: FakeAiClient(),
+      renderer: FakeSelectionImageRenderer(),
+    );
+    addTearDown(second.dispose);
+    second
+      ..restore(saved, _indexOf(ink))
+      ..open(
+        _selectionOf(ink, <int>[1]),
+        brightness: Brightness.light,
+        background: Colors.white,
+      );
+    await pumpEventQueue();
+
+    expect(second.context!.isPage, isTrue);
+    expect(second.messages.last.text, 'Here.');
+    expect(second.canSend, isTrue);
+  });
+
   test('conversations survive closing and reopening the note', () async {
     // The first session: two lines, one conversation answered with a
     // drawing, and one left waiting for its answer.

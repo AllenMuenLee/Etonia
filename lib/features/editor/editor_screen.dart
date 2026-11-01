@@ -48,6 +48,7 @@ import 'ink/input_defaults.dart';
 import 'ink/ink_notation.dart';
 import 'ink/ink_sample.dart';
 import 'ink/ink_selection.dart';
+import 'ink/native_ink_bridge.dart';
 import 'ink/notation_playback.dart';
 import 'ink/pen_settings.dart';
 import 'ink/selection_config.dart';
@@ -431,6 +432,10 @@ class EditorScreenState extends State<EditorScreen>
       );
   final ToolPaletteController _paletteController = ToolPaletteController();
 
+  /// Select's one option: whether a lasso takes the PDF paper inside it
+  /// along with the ink, to copy, cut, delete, or move.
+  final ValueNotifier<bool> _selectPdf = ValueNotifier<bool>(false);
+
   /// The ruler laid on the pages, shown from the palette's extension.
   final RulerController _ruler = RulerController();
 
@@ -574,8 +579,13 @@ class EditorScreenState extends State<EditorScreen>
     usageGate: widget.subscription,
     captureNote: _captureNote,
     applyNotation: _applyNotation,
+    inkInArea: _inkInArea,
     notationEnabled: widget.initialNotationEnabled,
   );
+
+  /// Waits for the pen to rest before the open chat's image is drawn again
+  /// over the ink just written.
+  Timer? _aiContextTimer;
   Size _surfaceSize = Size.zero;
   InkController? _notationControllerAtCapture;
   final FocusNode _editorFocus = FocusNode(debugLabel: 'Editor');
@@ -625,6 +635,12 @@ class EditorScreenState extends State<EditorScreen>
             previewStore: widget.pdfPreviewStore,
           ));
   }
+
+  /// The outline of the PDF [assetId], for the page overview's chapters. A
+  /// method, not a closure, so each build hands the overview the same one.
+  Future<List<PdfOutlineEntry>> _loadPdfOutline(String assetId) =>
+      _pageRenderCache?.outline(assetId) ??
+      Future<List<PdfOutlineEntry>>.value(const <PdfOutlineEntry>[]);
 
   /// What the PDF paper was last focused with, to focus it again on another
   /// page as a scroll passes it, without building.
@@ -892,6 +908,7 @@ class EditorScreenState extends State<EditorScreen>
     ink.completedStrokesListenable.addListener(_growToInk);
     ink.completedStrokesListenable.addListener(_appendPageNearEnd);
     ink.completedStrokesListenable.addListener(_onInkForRecognition);
+    ink.completedStrokesListenable.addListener(_onInkForAiContext);
     ink.addStrokeReplacementListener(_ai.followReplacedStrokes);
     ink.addStrokeReplacementListener(_followRecognizedStrokes);
     final List<(Stroke, String?)> locations = _strokeLocations(ink);
@@ -927,6 +944,7 @@ class EditorScreenState extends State<EditorScreen>
     ink.completedStrokesListenable.removeListener(_growToInk);
     ink.completedStrokesListenable.removeListener(_appendPageNearEnd);
     ink.completedStrokesListenable.removeListener(_onInkForRecognition);
+    ink.completedStrokesListenable.removeListener(_onInkForAiContext);
     ink.removeStrokeReplacementListener(_ai.followReplacedStrokes);
     ink.removeStrokeReplacementListener(_followRecognizedStrokes);
   }
@@ -1113,7 +1131,16 @@ class EditorScreenState extends State<EditorScreen>
   /// Two fingers began scrolling: whatever they started on any page is not
   /// writing, erasing, or selecting.
   void _onScrollStart(Set<int> pointers) {
+    // Native wet ink is painted in a root-view overlay, not inside the page
+    // transform. Its normal pointer-up handoff is asynchronous, so a preview
+    // that is still waiting to be removed would otherwise stay pinned to the
+    // screen while the committed Flutter stroke moves with the page.
+    if (widget.enableNativeInk) {
+      NativeInkBridge.instance.clearAllPreviews();
+    }
     _scrolling = true;
+    _scrollSettle?.cancel();
+    _scrolledTo = null;
     for (final int pointer in pointers) {
       _aiInput.cancel(pointer);
       _selectionCarry.cancelPointer(pointer);
@@ -1172,7 +1199,14 @@ class EditorScreenState extends State<EditorScreen>
       );
     }
     _scrollSettle?.cancel();
-    _scrollSettle = Timer(const Duration(milliseconds: 150), () {
+    // A page becoming current rebuilds the editor. Keep that work, and any
+    // programmatic page-top jump it could be mistaken for, out of a drag or
+    // ballistic coast. PageViewport calls _onScrollEnd after inertia ends.
+    if (_scrolling) return;
+    // Pointer-signal wheels have no end callback. A short inactivity window
+    // commits them; touch and trackpad momentum take the explicit
+    // _onScrollEnd path above instead.
+    _scrollSettle = Timer(const Duration(milliseconds: 100), () {
       final int? settled = _scrolledTo;
       _scrolledTo = null;
       if (mounted && settled != null) _showPage(settled);
@@ -1188,6 +1222,10 @@ class EditorScreenState extends State<EditorScreen>
 
   void _onScrollEnd() {
     _scrolling = false;
+    _scrollSettle?.cancel();
+    final int? settled = _scrolledTo;
+    _scrolledTo = null;
+    if (mounted && settled != null) _showPage(settled);
   }
 
   /// The column was pulled up past its last page: a new page goes after
@@ -1258,7 +1296,7 @@ class EditorScreenState extends State<EditorScreen>
     _notationControllerAtCapture = controller;
     final Brightness brightness = Theme.of(context).brightness;
     final Color background = AppColors.of(context).writingSurface;
-    final Rect? focusBounds = _ai.context?.image?.logicalBounds;
+    final Rect? focusBounds = _ai.context?.logicalBounds;
     final List<SnapshotBitmap> bitmaps = <SnapshotBitmap>[];
     final NotePage page = _document.current;
     final NoteAssetReader? readAsset = widget.assetReader;
@@ -1301,10 +1339,60 @@ class EditorScreenState extends State<EditorScreen>
         brightness: brightness,
         background: background,
         focusBounds: focusBounds,
+        // Asked about nothing: the notes go in this page's blank space.
+        focusOnFreeSpace: focusBounds == null,
         bitmaps: bitmaps,
         stickies: controller.stickyNotes,
         aiNotes: _ai.notationStrokesIn(controller.strokes),
       ),
+    );
+  }
+
+  /// The strokes more than half of whose points lie in [area], on [page]
+  /// when it is one of the note's pages, else on the page holding any of
+  /// [anchors].
+  Iterable<Stroke> _inkInArea(
+    Rect area,
+    Object? page,
+    Iterable<Stroke> anchors,
+  ) {
+    InkController? ink;
+    for (final NotePage notePage in _document.pages) {
+      if (identical(notePage.ink, page)) {
+        ink = notePage.ink;
+        break;
+      }
+    }
+    if (ink == null) {
+      final Set<Stroke> known = Set<Stroke>.identity()..addAll(anchors);
+      for (final NotePage notePage in _document.pages) {
+        if (notePage.ink.strokes.any(known.contains)) {
+          ink = notePage.ink;
+          break;
+        }
+      }
+    }
+    if (ink == null) return const <Stroke>[];
+    return <Stroke>[
+      for (final Stroke stroke in ink.strokes)
+        if (area.overlaps(stroke.bounds) &&
+            stroke.points
+                        .where((InkVector p) => area.contains(Offset(p.x, p.y)))
+                        .length *
+                    2 >
+                stroke.points.length)
+          stroke,
+    ];
+  }
+
+  /// Draws the open chat's image again once the pen rests, so it shows what
+  /// was just written, or erased, where its ink lies.
+  void _onInkForAiContext() {
+    if (!_ai.isOpen) return;
+    _aiContextTimer?.cancel();
+    _aiContextTimer = Timer(
+      const Duration(milliseconds: 400),
+      _ai.refreshContextImage,
     );
   }
 
@@ -1338,13 +1426,11 @@ class EditorScreenState extends State<EditorScreen>
     // Coordinates map through the captured note's size: x * width,
     // y * height, never the screen or the image's pixels.
     final List<GeneratedInkTrace> traces;
-    // The assistant never writes over its own earlier notes.
-    final NotationClearance clearance = NotationClearance(
-      pageSize: requestContext.logicalSize,
-      earlierNotes: <SpaceStroke>[
-        for (final Stroke stroke in _ai.notationStrokesIn(controller.strokes))
-          (points: stroke.points, width: stroke.style.width),
-      ],
+    // The assistant never writes over, or crowds, the ink on the page: the
+    // user's notes or its own earlier ones.
+    final NotationClearance clearance = _notationClearance(
+      controller,
+      requestContext.logicalSize,
     );
     try {
       final HandwritingSampleLibrary handwriting = HandwritingSampleLibrary(
@@ -1414,6 +1500,18 @@ class EditorScreenState extends State<EditorScreen>
     };
   }
 
+  /// Keeps what a notation writes clear of every stroke on [controller]'s
+  /// page, a paper [size] big.
+  NotationClearance _notationClearance(InkController controller, Size size) {
+    return NotationClearance(
+      pageSize: size,
+      ink: <SpaceStroke>[
+        for (final Stroke stroke in controller.strokes)
+          (points: stroke.points, width: stroke.style.width),
+      ],
+    );
+  }
+
   AiNotationApplication _applySvgNotation(
     EditableSvg vector,
     NoteImage requestContext,
@@ -1450,6 +1548,8 @@ class EditorScreenState extends State<EditorScreen>
         snapper: InkSnapper(<List<InkVector>>[
           for (final Stroke stroke in controller.strokes) stroke.points,
         ], reach: const AiNotationConfig().inkSnapDistance),
+        // Its writing keeps some space from the user's notes, and its own.
+        clearance: _notationClearance(controller, requestContext.logicalSize),
         maxTextSize: HandwritingCalibration.textSize.value.max,
       );
     } on FormatException {
@@ -1738,66 +1838,34 @@ class EditorScreenState extends State<EditorScreen>
   }
 
   /// Rasterizes immutable PDF paper only when Copy or Cut is requested, then
-  /// adds that excerpt to the ordinary in-app image clipboard.
+  /// adds that excerpt to the ordinary in-app image clipboard. Cut leaves
+  /// the paper blank where the excerpt was.
   Future<void> _copyPdfSelection(
     InkSelection selection, {
     required bool cut,
   }) async {
     final NoteRepository? repository = widget.repository;
     final String? noteId = widget.noteId;
-    final PdfPageSource? source = _document.current.pdfSource;
-    final PdfPageRenderCache? cache = _pageRenderCache;
-    final Rect? requestedBounds = selection.pdfBounds;
-    if (repository == null ||
-        noteId == null ||
-        source == null ||
-        cache == null ||
-        requestedBounds == null) {
+    if (repository == null || noteId == null) {
       _showPdfCopyError();
       return;
     }
     final int generation = ++_pdfClipboardGeneration;
     final InkController controller = _inkController;
-    final double pixelRatio = MediaQuery.devicePixelRatioOf(context);
-    String? assetId;
+    NoteImageElement? image;
     try {
-      final Uint8List page = await cache.render(
-        source,
-        source.pageSize,
-        pixelRatio,
+      image = await _pdfExcerpt(
+        controller,
+        selection,
+        wanted: () =>
+            mounted &&
+            generation == _pdfClipboardGeneration &&
+            identical(selection, controller.selection) &&
+            identical(controller, _inkController),
       );
-      final PdfSelectionImage excerpt = await Isolate.run(
-        () => cropPdfSelection(page, source.pageSize, requestedBounds),
-      );
-      if (!mounted ||
-          generation != _pdfClipboardGeneration ||
-          !identical(selection, controller.selection) ||
-          !identical(controller, _inkController)) {
+      if (image == null) {
         return;
       }
-      assetId = await repository.storeAsset(
-        noteId,
-        excerpt.png,
-        kind: NoteAssetKind.image,
-        extension: 'png',
-        fileName: 'PDF page ${source.pageIndex + 1} excerpt.png',
-      );
-      if (!mounted ||
-          generation != _pdfClipboardGeneration ||
-          !identical(selection, controller.selection) ||
-          !identical(controller, _inkController)) {
-        await repository.removeAsset(noteId, assetId);
-        return;
-      }
-      final Rect bounds = excerpt.logicalBounds;
-      final NoteImageElement image = NoteImageElement(
-        id: 'pdf-excerpt-${DateTime.now().microsecondsSinceEpoch.toRadixString(36)}',
-        assetId: assetId,
-        pixelSize: excerpt.pixelSize,
-        center: InkVector(bounds.center.dx, bounds.center.dy),
-        size: bounds.size,
-        fileName: 'PDF page ${source.pageIndex + 1} excerpt.png',
-      );
       final bool copied = cut
           ? controller.cutSelection(
               expectedSelection: selection,
@@ -1808,7 +1876,7 @@ class EditorScreenState extends State<EditorScreen>
               additionalImages: <NoteImageElement>[image],
             );
       if (!copied) {
-        await repository.removeAsset(noteId, assetId);
+        await repository.removeAsset(noteId, image.assetId);
         return;
       }
       final InkClipboard? clipboard = controller.clipboard;
@@ -1826,9 +1894,9 @@ class EditorScreenState extends State<EditorScreen>
         );
       }
     } on Object {
-      if (assetId != null) {
+      if (image != null) {
         try {
-          await repository.removeAsset(noteId, assetId);
+          await repository.removeAsset(noteId, image.assetId);
         } on Object {
           // Asset cleanup is retried when the note closes.
         }
@@ -1837,6 +1905,143 @@ class EditorScreenState extends State<EditorScreen>
         _showPdfCopyError();
       }
     }
+  }
+
+  /// Renders the PDF paper [selection] holds on [controller]'s page, the
+  /// current one, and stores it as an image of the note, placed where that
+  /// paper lies. Areas of the paper already left blank stay blank. Returns
+  /// null, keeping nothing stored, once [wanted] stops being true. Throws
+  /// when the excerpt cannot be made.
+  Future<NoteImageElement?> _pdfExcerpt(
+    InkController controller,
+    InkSelection selection, {
+    required bool Function() wanted,
+  }) async {
+    final NoteRepository? repository = widget.repository;
+    final String? noteId = widget.noteId;
+    final PdfPageSource? source = _document.current.pdfSource;
+    final PdfPageRenderCache? cache = _pageRenderCache;
+    final Rect? requestedBounds = selection.pdfBounds;
+    if (repository == null ||
+        noteId == null ||
+        source == null ||
+        cache == null ||
+        requestedBounds == null) {
+      throw StateError('This PDF selection cannot be rendered');
+    }
+    final List<Rect> blanks = List<Rect>.of(controller.pdfMasks);
+    final double pixelRatio = MediaQuery.devicePixelRatioOf(context);
+    final Uint8List page = await cache.render(
+      source,
+      source.pageSize,
+      pixelRatio,
+    );
+    final PdfSelectionImage excerpt = await Isolate.run(
+      () => cropPdfSelection(
+        page,
+        source.pageSize,
+        requestedBounds,
+        blanks: blanks,
+      ),
+    );
+    if (!wanted()) {
+      return null;
+    }
+    final String assetId = await repository.storeAsset(
+      noteId,
+      excerpt.png,
+      kind: NoteAssetKind.image,
+      extension: 'png',
+      fileName: 'PDF page ${source.pageIndex + 1} excerpt.png',
+    );
+    if (!wanted()) {
+      await repository.removeAsset(noteId, assetId);
+      return null;
+    }
+    final Rect bounds = excerpt.logicalBounds;
+    return NoteImageElement(
+      id: 'pdf-excerpt-${DateTime.now().microsecondsSinceEpoch.toRadixString(36)}',
+      assetId: assetId,
+      pixelSize: excerpt.pixelSize,
+      center: InkVector(bounds.center.dx, bounds.center.dy),
+      size: bounds.size,
+      fileName: 'PDF page ${source.pageIndex + 1} excerpt.png',
+    );
+  }
+
+  /// The PDF selection whose paper is being readied to be moved, if any.
+  InkSelection? _pdfLiftSelection;
+
+  /// The image readied for [_pdfLiftSelection], and the page it is for.
+  ({InkController controller, NoteImageElement image})? _pdfLift;
+
+  /// With Select PDF on, readies the PDF paper of a fresh selection on the
+  /// current page to be moved: a drag on it then lifts it off the page at
+  /// once, with no wait for the paper to be rendered.
+  void _preparePdfLift() {
+    final InkController controller = _inkController;
+    final InkSelection? selection = controller.selection;
+    if (identical(selection, _pdfLiftSelection)) {
+      return;
+    }
+    _discardPdfLift();
+    if (!_selectPdf.value || selection == null || !selection.includesPdf) {
+      return;
+    }
+    _pdfLiftSelection = selection;
+    // A lift that moved nothing hands its image back to the page.
+    final NoteImageElement? ready = controller.pendingPdfLift;
+    if (controller.canLiftPdfSelection && ready != null) {
+      _pdfLift = (controller: controller, image: ready);
+      return;
+    }
+    unawaited(_readyPdfLift(controller, selection));
+  }
+
+  Future<void> _readyPdfLift(
+    InkController controller,
+    InkSelection selection,
+  ) async {
+    try {
+      final NoteImageElement? image = await _pdfExcerpt(
+        controller,
+        selection,
+        wanted: () =>
+            mounted &&
+            identical(_pdfLiftSelection, selection) &&
+            identical(controller.selection, selection),
+      );
+      if (image == null) {
+        return;
+      }
+      controller.preparePdfLift(selection, image);
+      _pdfLift = (controller: controller, image: image);
+    } on Object {
+      // The paper can still be copied, cut, or deleted; it just cannot be
+      // moved.
+    }
+  }
+
+  /// Lets go of the readied PDF paper, and of its stored image unless it
+  /// was lifted onto the page.
+  void _discardPdfLift() {
+    _pdfLiftSelection = null;
+    final ({InkController controller, NoteImageElement image})? lift = _pdfLift;
+    _pdfLift = null;
+    final NoteRepository? repository = widget.repository;
+    final String? noteId = widget.noteId;
+    if (lift == null ||
+        repository == null ||
+        noteId == null ||
+        !identical(lift.controller.pendingPdfLift, lift.image)) {
+      return;
+    }
+    lift.controller.forgetPdfLift();
+    unawaited(
+      repository.removeAsset(noteId, lift.image.assetId).catchError((Object _) {
+        // Asset cleanup is retried when the note closes.
+      }),
+    );
   }
 
   void _showPdfCopyError() {
@@ -2252,6 +2457,7 @@ class EditorScreenState extends State<EditorScreen>
       _ai.updateCurrentSelection(
         _selectionCarry.combinedSelectionFor(controller),
       );
+      _preparePdfLift();
     }
   }
 
@@ -2363,6 +2569,7 @@ class EditorScreenState extends State<EditorScreen>
     });
     _attachInk(_inkController);
     _selectionCarry.addListener(_onSelectionChanged);
+    _selectPdf.addListener(_preparePdfLift);
     _document.addListener(_onDocumentChanged);
     _ai.addListener(_onAiChanged);
     _palettePlacement.addListener(_onPalettePlacementChanged);
@@ -2430,8 +2637,8 @@ class EditorScreenState extends State<EditorScreen>
       expanded: _paletteExpanded,
     );
     // Commit the dock while the drag position still owns the visual origin.
-    // Releasing it afterwards lets AnimatedPositioned ease from the exact
-    // drop point to the committed edge without an intermediate jump.
+    // Releasing it afterwards lets the palette's paint translation ease
+    // from the exact drop point to the committed edge without a jump.
     _paletteDragCenter.value = null;
   }
 
@@ -2502,6 +2709,7 @@ class EditorScreenState extends State<EditorScreen>
     _retractChrome();
     _indexingGeneration++;
     _indexingTimer?.cancel();
+    _aiContextTimer?.cancel();
     final InkController? listened = _listenedInk;
     if (listened != null) {
       _detachInk(listened);
@@ -2509,6 +2717,8 @@ class EditorScreenState extends State<EditorScreen>
     _selectionCarry
       ..removeListener(_onSelectionChanged)
       ..dispose();
+    _discardPdfLift();
+    _selectPdf.dispose();
     _releaseAiSession();
     _document.removeListener(_onDocumentChanged);
     _ai.removeListener(_onAiChanged);
@@ -2974,6 +3184,12 @@ class EditorScreenState extends State<EditorScreen>
                                           ? _pageShown
                                           : null,
                                     ),
+                                  if (page.pdfSource != null)
+                                    PdfMaskLayer(
+                                      masks: () => page.ink.pdfMasks,
+                                      changes:
+                                          page.ink.documentRevisionListenable,
+                                    ),
                                   if (widget.assetReader != null ||
                                       page.ink.images.any(
                                         (NoteImageElement image) =>
@@ -3013,6 +3229,7 @@ class EditorScreenState extends State<EditorScreen>
                                         ? null
                                         : Offset.zero &
                                               page.pdfSource!.pageSize,
+                                    selectPdf: _selectPdf,
                                     stickySettings: _stickySettings,
                                     onStickyPlaced: _onStickyPlaced,
                                     textSettings: _textSettings,
@@ -3106,20 +3323,17 @@ class EditorScreenState extends State<EditorScreen>
                     ),
                   ),
                 ),
-                AnimatedPositioned(
+                _PaintTranslatedPositioned(
                   key: const ValueKey<String>('history-position'),
-                  duration: AppMotion.resolve(
-                    context,
-                    AppMotion.snappy.duration,
-                  ),
-                  curve: AppMotion.fadeInCurve,
-                  left: layout.history.left,
-                  top: layout.history.top,
+                  origin: layout.history.topLeft,
                   child: PageOverviewAnchor(
                     open: _pageOverviewOpen,
                     document: _document,
                     writingArea: _viewportSize,
                     config: widget.pageConfig,
+                    loadOutline: widget.assetReader == null
+                        ? null
+                        : _loadPdfOutline,
                     child: FloatingHistoryControls(
                       height: layout.history.height,
                       width: layout.history.width,
@@ -3137,15 +3351,9 @@ class EditorScreenState extends State<EditorScreen>
                     ),
                   ),
                 ),
-                AnimatedPositioned(
+                _PaintTranslatedPositioned(
                   key: const ValueKey<String>('page-controls-position'),
-                  duration: AppMotion.resolve(
-                    context,
-                    AppMotion.snappy.duration,
-                  ),
-                  curve: AppMotion.fadeInCurve,
-                  left: layout.pageControls.left,
-                  top: layout.pageControls.top,
+                  origin: layout.pageControls.topLeft,
                   child: FloatingPageControls(
                     height: layout.pageControls.height,
                     width: layout.pageControls.width,
@@ -3187,9 +3395,7 @@ class EditorScreenState extends State<EditorScreen>
                     tool: _tool,
                     penSettings: _penSettings,
                     eraserSettings: _eraserSettings,
-                    clipboardListenable: _inkController.selectionListenable,
-                    canPaste: () => _inkController.canPaste,
-                    onPaste: _paste,
+                    selectPdf: _selectPdf,
                     aiActive: _aiActive,
                     onTurnOnAi: _openAi,
                     assistant: _ai,
@@ -3906,6 +4112,33 @@ class _KeyboardInset extends StatelessWidget {
 /// above it, docked against the edge its [PalettePlacement] names, or,
 /// while it is dragged, centered where it is held and lying along the
 /// edge nearest to it.
+/// Moves a fixed-footprint overlay without relaying out the editor stack on
+/// every animation frame. Transform also moves hit testing with the visual.
+class _PaintTranslatedPositioned extends StatelessWidget {
+  const _PaintTranslatedPositioned({
+    super.key,
+    required this.origin,
+    required this.child,
+  });
+
+  final Offset origin;
+  final Widget child;
+
+  @override
+  Widget build(BuildContext context) => Positioned(
+    left: 0,
+    top: 0,
+    child: TweenAnimationBuilder<Offset>(
+      tween: Tween<Offset>(begin: origin, end: origin),
+      duration: AppMotion.resolve(context, AppMotion.snappy.duration),
+      curve: AppMotion.fadeInCurve,
+      builder: (BuildContext context, Offset value, Widget? child) =>
+          Transform.translate(offset: value, child: child),
+      child: child,
+    ),
+  );
+}
+
 class _PalettePositioner extends StatefulWidget {
   const _PalettePositioner({
     required this.center,
@@ -3962,15 +4195,26 @@ class _PalettePositionerState extends State<_PalettePositioner> {
         _edge = layout.paletteEdge;
         _palette = RepaintBoundary(child: widget.builder(_edge!));
       }
-      return AnimatedPositioned(
-        key: const ValueKey<String>('tool-palette-position'),
-        duration: center == null
-            ? AppMotion.resolve(context, AppMotion.bouncy.duration)
-            : Duration.zero,
-        curve: AppMotion.fadeInCurve,
-        left: layout.paletteOrigin.dx,
-        top: layout.paletteOrigin.dy,
-        child: _palette!,
+      // The palette's footprint never participates in surrounding layout.
+      // Animate only its paint transform so a dock/drop does not lay out the
+      // editor Stack, page, ink, or PDF on every animation tick.
+      return Positioned(
+        left: 0,
+        top: 0,
+        child: TweenAnimationBuilder<Offset>(
+          key: const ValueKey<String>('tool-palette-position'),
+          tween: Tween<Offset>(
+            begin: layout.paletteOrigin,
+            end: layout.paletteOrigin,
+          ),
+          duration: center == null
+              ? AppMotion.resolve(context, AppMotion.bouncy.duration)
+              : Duration.zero,
+          curve: AppMotion.fadeInCurve,
+          builder: (BuildContext context, Offset origin, Widget? child) =>
+              Transform.translate(offset: origin, child: child),
+          child: _palette!,
+        ),
       );
     },
   );

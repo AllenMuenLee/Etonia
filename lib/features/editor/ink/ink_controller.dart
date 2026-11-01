@@ -79,11 +79,13 @@ class InkController {
     Iterable<NoteTextElement> textElements = const <NoteTextElement>[],
     Iterable<ErasedStrokeRecord> erasedStrokeRecords =
         const <ErasedStrokeRecord>[],
+    Iterable<Rect> pdfMasks = const <Rect>[],
   }) : assert(historyLimit >= 0),
        _strokes = List<Stroke>.of(strokes),
        _images = List<NoteImageElement>.of(images),
        _stickies = List<StickyNoteElement>.of(stickyNotes),
        _texts = List<NoteTextElement>.of(textElements),
+       _pdfMasks = List<Rect>.of(pdfMasks),
        _erasedStrokeRecords = List<ErasedStrokeRecord>.of(erasedStrokeRecords) {
     _committed = _snapshot();
   }
@@ -126,6 +128,10 @@ class InkController {
 
   /// Typed text boxes, in paint order above ink and sticky notes.
   List<NoteTextElement> _texts;
+
+  /// Areas of the page's PDF paper that were cut, deleted, or moved away,
+  /// and are left blank.
+  List<Rect> _pdfMasks;
   String? _editingTextId;
   bool _textEditHasHistoryStep = false;
 
@@ -193,6 +199,11 @@ class InkController {
 
   List<NoteTextElement> get textElements =>
       UnmodifiableListView<NoteTextElement>(_texts);
+
+  /// Page-local areas of the PDF paper left blank, because what was there
+  /// was cut, deleted, or moved away. They change with the document, so
+  /// [documentRevisionListenable] fires when they do.
+  List<Rect> get pdfMasks => UnmodifiableListView<Rect>(_pdfMasks);
 
   /// Fires when typed text changes, or a text box opens or closes. Strokes
   /// and erasing never fire it, so the text layer stays put while they run.
@@ -580,6 +591,7 @@ class InkController {
       List<NoteImageElement>.unmodifiable(_images),
       List<StickyNoteElement>.unmodifiable(_stickies),
       List<NoteTextElement>.unmodifiable(_texts),
+      List<Rect>.unmodifiable(_pdfMasks),
     );
   }
 
@@ -600,6 +612,7 @@ class InkController {
     _images = List<NoteImageElement>.of(_committed.images);
     _stickies = List<StickyNoteElement>.of(_committed.stickies);
     _texts = List<NoteTextElement>.of(_committed.texts);
+    _pdfMasks = List<Rect>.of(_committed.pdfMasks);
     _editingTextId = null;
     _textEditHasHistoryStep = false;
     _textEditInserted = false;
@@ -1127,14 +1140,17 @@ class InkController {
       return false;
     }
     final InkSelection? current = _selection;
-    final SelectionHit? hit = current?.includesPdf == true
-        ? null
-        : current?.frame.hitTest(
-            position,
-            handleHitRadius: selectionConfig.handleHitRadius,
-            rotationHandleOffset: selectionConfig.rotationHandleOffset,
-            tolerance: selectionConfig.geometryTolerance,
-          );
+    SelectionHit? hit = current?.frame.hitTest(
+      position,
+      handleHitRadius: selectionConfig.handleHitRadius,
+      rotationHandleOffset: selectionConfig.rotationHandleOffset,
+      tolerance: selectionConfig.geometryTolerance,
+    );
+    // Selected PDF paper shows no handles: it can only be moved, once it
+    // has been lifted off the page.
+    if (hit != null && current!.includesPdf) {
+      hit = liftPdfSelection() ? const SelectionHit.move() : null;
+    }
     if (hit != null) {
       return beginTransform(pointer: pointer, position: position, hit: hit);
     }
@@ -1185,9 +1201,8 @@ class InkController {
     int pointer, [
     InkVector? finalPosition,
     Rect? selectablePdfBounds,
-    bool keepPaper = false,
   ]) {
-    endLasso(pointer, finalPosition, selectablePdfBounds, keepPaper);
+    endLasso(pointer, finalPosition, selectablePdfBounds);
     endTransform(pointer, finalPosition);
   }
 
@@ -1250,14 +1265,12 @@ class InkController {
   /// whose ink overlaps its [LassoGesture.outline]: the rectangle spanned by
   /// a straight drag, or the loop of a freeform one that nearly closes. That
   /// replaces the previous selection, so a lasso around nothing, one left
-  /// open, or a tap, clears it. With [keepPaper], PDF paper inside the
-  /// outline is selected along with the ink, not only when the outline
-  /// stands clear of it.
+  /// open, or a tap, clears it. With [selectablePdfBounds], the PDF paper
+  /// inside the outline's bounds is selected too, along with the ink.
   void endLasso(
     int pointer, [
     InkVector? finalPosition,
     Rect? selectablePdfBounds,
-    bool keepPaper = false,
   ]) {
     final LassoGesture? lasso = _lasso;
     if (lasso == null || pointer != lasso.pointer) {
@@ -1270,7 +1283,6 @@ class InkController {
     final InkSelection? enclosed = _enclosedBy(
       lasso.outline,
       selectablePdfBounds,
-      includePdfWithForeground: keepPaper,
     );
     if (_setSelection(enclosed)) {
       _completedChanged.notify();
@@ -1286,11 +1298,7 @@ class InkController {
     if (_isBusy || _disposed) {
       return false;
     }
-    final InkSelection? enclosed = _enclosedBy(
-      outline,
-      selectablePdfBounds,
-      includePdfWithForeground: true,
-    );
+    final InkSelection? enclosed = _enclosedBy(outline, selectablePdfBounds);
     if (enclosed == null) {
       return false;
     }
@@ -1303,21 +1311,13 @@ class InkController {
 
   /// Selects every stroke, image, sticky note, or PDF excerpt enclosed by
   /// [outline], replacing the previous selection, or clears the selection when
-  /// [outline] encloses nothing. With [keepPaper], PDF paper inside the
-  /// outline is selected along with the ink.
-  bool selectWithOutline(
-    List<InkVector> outline, {
-    Rect? selectablePdfBounds,
-    bool keepPaper = false,
-  }) {
+  /// [outline] encloses nothing. With [selectablePdfBounds], PDF paper
+  /// inside the outline's bounds is selected along with the ink.
+  bool selectWithOutline(List<InkVector> outline, {Rect? selectablePdfBounds}) {
     if (_disposed || _isBusy) {
       return false;
     }
-    final InkSelection? enclosed = _enclosedBy(
-      outline,
-      selectablePdfBounds,
-      includePdfWithForeground: keepPaper,
-    );
+    final InkSelection? enclosed = _enclosedBy(outline, selectablePdfBounds);
     if (_setSelection(enclosed)) {
       _completedChanged.notify();
     }
@@ -1418,9 +1418,8 @@ class InkController {
   /// What a lasso along [outline] selects, or null for nothing.
   InkSelection? _enclosedBy(
     List<InkVector> outline,
-    Rect? selectablePdfBounds, {
-    bool includePdfWithForeground = false,
-  }) {
+    Rect? selectablePdfBounds,
+  ) {
     final LassoRegion region = LassoRegion(
       outline,
       tolerance: selectionConfig.geometryTolerance,
@@ -1451,29 +1450,8 @@ class InkController {
             region.right,
             region.bottom,
           ).intersect(selectablePdfBounds);
-    // With the Select tool, foreground objects must remain independently
-    // editable on PDF-backed pages. AI selection opts into keeping the paper
-    // too, because it needs the visual context behind the selected ink.
-    final bool selectedForeground =
-        indices.isNotEmpty ||
-        imageIndices.isNotEmpty ||
-        stickyIndices.isNotEmpty;
-    // A selection drawn well clear of the ink inside it means the paper
-    // too; one hugging the ink means the ink alone.
-    final bool clearOfForeground =
-        selectedForeground &&
-        clippedPdfBounds != null &&
-        _outlineClearOf(outline, <Rect>[
-          for (final int index in indices) _strokes[index].bounds,
-          for (final int index in imageIndices) _images[index].bounds,
-          for (final int index in stickyIndices) _stickies[index].bounds,
-        ], selectionConfig.pdfSelectionMargin);
     final Rect? selectedPdf =
-        (!includePdfWithForeground &&
-                selectedForeground &&
-                !clearOfForeground) ||
-            clippedPdfBounds == null ||
-            clippedPdfBounds.isEmpty
+        clippedPdfBounds == null || clippedPdfBounds.isEmpty
         ? null
         : clippedPdfBounds;
     return indices.isEmpty &&
@@ -2092,7 +2070,8 @@ class InkController {
       // Never below the minimum, so the clamp between them is well formed.
       maxScale: math.max(minScale, maxScaleOverride ?? localMax),
       widestStroke: widestStrokeOverride ?? localWidest,
-    );
+    ).._liftedFrom = _liftedFrom;
+    _liftedFrom = null;
     _selectionChanged.notify();
     return true;
   }
@@ -2159,6 +2138,87 @@ class InkController {
     if (pointer == _transform?.pointer) {
       _commitTransform();
     }
+  }
+
+  /// The PDF paper of [_pdfLiftFor], rasterized and stored as an image, for
+  /// [liftPdfSelection].
+  NoteImageElement? _pdfLift;
+  InkSelection? _pdfLiftFor;
+
+  /// The PDF selection the last lift replaced, for the move that follows it.
+  InkSelection? _liftedFrom;
+
+  /// Hands over [image], the PDF paper [selection] holds as a stored
+  /// bitmap, so that a move of [selection] can take the paper along. It is
+  /// used only while [selection] is still the selection.
+  void preparePdfLift(InkSelection selection, NoteImageElement image) {
+    _pdfLift = image;
+    _pdfLiftFor = selection;
+  }
+
+  /// The image handed to [preparePdfLift] and not yet lifted, if any.
+  NoteImageElement? get pendingPdfLift => _pdfLift;
+
+  /// Drops the image handed to [preparePdfLift], unused.
+  void forgetPdfLift() {
+    _pdfLift = null;
+    _pdfLiftFor = null;
+  }
+
+  /// Whether [liftPdfSelection] would lift the current selection.
+  bool get canLiftPdfSelection {
+    final InkSelection? selection = _selection;
+    return selection != null &&
+        selection.includesPdf &&
+        _pdfLift != null &&
+        identical(selection, _pdfLiftFor);
+  }
+
+  /// Turns the selected PDF paper into the image prepared for it, leaving
+  /// its place on the paper blank, so that it moves like any image. Ink
+  /// selected with the paper stays selected. One change, which a transform
+  /// begun next joins, and which is taken back if that transform moves
+  /// nothing. Returns false, and changes nothing, unless an image was
+  /// prepared for the current selection.
+  bool liftPdfSelection() {
+    final InkSelection? selection = _selection;
+    final NoteImageElement? image = _pdfLift;
+    if (_disposed || _isBusy || !canLiftPdfSelection || image == null) {
+      return false;
+    }
+    _pdfLift = null;
+    _pdfLiftFor = null;
+    _images = <NoteImageElement>[..._images, image];
+    _pdfMasks = <Rect>[..._pdfMasks, selection!.pdfBounds!];
+    _documentChanged();
+    _selection = _selectionOf(
+      selection.indices,
+      <int>[...selection.imageIndices, _images.length - 1],
+      null,
+      selection.stickyIndices,
+    );
+    _liftedFrom = selection;
+    _completedChanged.notify();
+    _selectionChanged.notify();
+    return true;
+  }
+
+  /// Takes back the lift that began [gesture], which moved nothing, so the
+  /// paper is whole again and selected as before.
+  void _unlift(SelectionTransformGesture gesture) {
+    final InkSelection? original = gesture._liftedFrom;
+    if (original == null || !_history._lastIsOf(this, 1)) {
+      return;
+    }
+    final NoteImageElement image = _images.last;
+    _committed = _history._dropLast(1);
+    _images = List<NoteImageElement>.of(_committed.images);
+    _pdfMasks = List<Rect>.of(_committed.pdfMasks);
+    _revisionBumped();
+    _selection = original;
+    _pdfLift = image;
+    _pdfLiftFor = original;
+    _completedChanged.notify();
   }
 
   /// Deselects everything, after committing any transform in progress. The
@@ -2234,9 +2294,9 @@ class InkController {
   }
 
   /// Removes the selection's strokes, images, and sticky notes, each sticky
-  /// with all of its ink, in one change, and clears the selection. The
-  /// clipboard is untouched. Returns false, and changes nothing, when
-  /// nothing removable is selected.
+  /// with all of its ink, in one change, and clears the selection. Selected
+  /// PDF paper is left blank. The clipboard is untouched. Returns false, and
+  /// changes nothing, when nothing removable is selected.
   bool deleteSelection({InkSelection? expectedSelection}) {
     finalizeSelectionGesture();
     final InkSelection? selection = _selection;
@@ -2245,7 +2305,8 @@ class InkController {
             !identical(selection, expectedSelection)) ||
         (selection.count == 0 &&
             selection.imageCount == 0 &&
-            selection.stickyCount == 0)) {
+            selection.stickyCount == 0 &&
+            !selection.includesPdf)) {
       return false;
     }
     _removeSelected(selection);
@@ -2276,11 +2337,18 @@ class InkController {
     if (_editingStickyId != null && _stickyById(_editingStickyId) == null) {
       _setEditingSticky(null);
     }
+    // PDF paper cannot be taken out of its page: what was selected of it
+    // is left blank instead.
+    final Rect? pdfBounds = selection.pdfBounds;
+    if (pdfBounds != null) {
+      _pdfMasks = <Rect>[..._pdfMasks, pdfBounds];
+    }
     _syncPlaybacks();
     _selection = null;
     if (selection.indices.isNotEmpty ||
         selection.imageIndices.isNotEmpty ||
-        selection.stickyIndices.isNotEmpty) {
+        selection.stickyIndices.isNotEmpty ||
+        pdfBounds != null) {
       _documentChanged();
     }
     _completedChanged.notify();
@@ -2545,6 +2613,7 @@ class InkController {
         !listEquals(_selection?.stickyIndices, next?.stickyIndices) ||
         _selection?.pdfBounds != next?.pdfBounds;
     _selection = next;
+    _liftedFrom = null;
     return changed;
   }
 
@@ -2570,6 +2639,7 @@ class InkController {
     _transform = null;
     final InkTransform transform = gesture._transform;
     if (selection == null || _isIdentity(transform, gesture)) {
+      _unlift(gesture);
       _selectionChanged.notify();
       return;
     }
@@ -2638,7 +2708,9 @@ class InkController {
         in List<ValueChanged<Map<Stroke, Stroke>>>.of(_replacementListeners)) {
       listener(replaced);
     }
-    _documentChanged(amendLast: gesture._carriedIn);
+    _documentChanged(
+      amendLast: gesture._carriedIn || gesture._liftedFrom != null,
+    );
     _selection = InkSelection(
       indices: selection.indices,
       strokes: transformed,
@@ -2663,10 +2735,13 @@ class InkController {
     return _isIdentity(gesture._transform, gesture);
   }
 
-  /// Drops the active transform preview without changing the document.
+  /// Drops the active transform preview without changing the document. PDF
+  /// paper lifted for it goes back.
   void discardActiveTransform() {
-    if (_transform != null) {
+    final SelectionTransformGesture? gesture = _transform;
+    if (gesture != null) {
       _transform = null;
+      _unlift(gesture);
       _selectionChanged.notify();
     }
   }
@@ -2687,6 +2762,8 @@ class InkController {
     List<StickyNoteElement> arrivingStickies = const <StickyNoteElement>[],
     SelectionFrame? selectionFrame,
   }) {
+    // PDF paper lifted for the transform and the transform are one change.
+    final bool lifted = _transform?._liftedFrom != null;
     _transform = null;
     final List<Stroke> nextStrokes = <Stroke>[];
     final List<int> selectedStrokeIndices = <int>[];
@@ -2789,7 +2866,7 @@ class InkController {
         leavingStickyIndices.isNotEmpty ||
         arrivingStickies.isNotEmpty;
     if (changed) {
-      _documentChanged();
+      _documentChanged(amendLast: lifted);
     }
     if (selectedStrokes.isEmpty &&
         selectedImages.isEmpty &&
@@ -3371,6 +3448,10 @@ class SelectionTransformGesture {
   /// that the arrival and the move are one change.
   bool _carriedIn = false;
 
+  /// The PDF selection lifted off the paper for this transform, if it was,
+  /// so that the lift and the transform are one change.
+  InkSelection? _liftedFrom;
+
   /// The preview: what the gesture would do to the selection if it ended
   /// now.
   InkTransform get transform => _transform;
@@ -3572,25 +3653,6 @@ class InkHistory extends ChangeNotifier {
   }
 }
 
-/// Whether no part of the closed [outline] comes within [margin] of any of
-/// [bounds].
-bool _outlineClearOf(
-  List<InkVector> outline,
-  List<Rect> bounds,
-  double margin,
-) {
-  if (outline.length < 2) return false;
-  for (final Rect rect in bounds) {
-    final Rect near = rect.inflate(margin);
-    for (int i = 0; i < outline.length; i++) {
-      final InkVector a = outline[i];
-      final InkVector b = outline[(i + 1) % outline.length];
-      if (_segmentTouchesRect(a, b, near)) return false;
-    }
-  }
-  return true;
-}
-
 /// Whether the segment from [a] to [b] meets [rect] (Liang-Barsky).
 bool _segmentTouchesRect(InkVector a, InkVector b, Rect rect) {
   double t0 = 0;
@@ -3626,12 +3688,19 @@ class _HistoryStep {
 }
 
 class _InkSnapshot {
-  const _InkSnapshot(this.strokes, this.images, this.stickies, this.texts);
+  const _InkSnapshot(
+    this.strokes,
+    this.images,
+    this.stickies,
+    this.texts,
+    this.pdfMasks,
+  );
 
   final List<Stroke> strokes;
   final List<NoteImageElement> images;
   final List<StickyNoteElement> stickies;
   final List<NoteTextElement> texts;
+  final List<Rect> pdfMasks;
 }
 
 /// A sticky note being placed: shown where it would land while its pointer

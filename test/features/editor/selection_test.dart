@@ -263,67 +263,56 @@ void main() {
         expect(tester.takeException(), isNull);
       });
 
-      testWidgets(
-        'the options hold Paste, disabled until something is copied',
-        (WidgetTester tester) async {
-          final SemanticsHandle handle = tester.ensureSemantics();
-          final InkController controller = await pumpEditor(
-            tester,
-            viewport: viewport,
-            strokes: _page(),
-          );
-          await _selectPair(tester, controller);
+      testWidgets('the options hold the Select PDF switch, and no Paste', (
+        WidgetTester tester,
+      ) async {
+        final SemanticsHandle handle = tester.ensureSemantics();
+        final InkController controller = await pumpEditor(
+          tester,
+          viewport: viewport,
+          strokes: _page(),
+        );
+        await _selectPair(tester, controller);
+        await tester.tap(find.byTooltip('Copy'));
+        await tester.pumpAndSettle();
 
-          // Select is already selected: this press opens its options.
-          await _selectTool(tester);
+        // Select is already selected: this press opens its options.
+        await _selectTool(tester);
 
-          final Rect screen = Offset.zero & viewport.size;
-          final Rect options = tester.getRect(find.byType(SelectOptions));
-          expect(screen.contains(options.topLeft), isTrue);
-          expect(screen.contains(options.bottomRight), isTrue);
-          expect(
-            tester.getSemantics(find.bySemanticsLabel('Paste')),
-            isSemantics(
-              label: 'Paste',
-              isButton: true,
-              hasEnabledState: true,
-              isEnabled: false,
-            ),
-          );
-          await tester.tap(find.text('Paste'));
-          await tester.pumpAndSettle();
-          expect(controller.strokes.length, 3);
-          await _dismiss(tester);
+        final Rect screen = Offset.zero & viewport.size;
+        final Rect options = tester.getRect(find.byType(SelectOptions));
+        expect(screen.contains(options.topLeft), isTrue);
+        expect(screen.contains(options.bottomRight), isTrue);
+        // Paste is offered by holding on the page instead.
+        expect(find.text('Paste'), findsNothing);
+        final ToolPalette palette = tester.widget<ToolPalette>(
+          find.byType(ToolPalette),
+        );
+        expect(palette.selectPdf.value, isFalse);
+        expect(
+          tester.getSemantics(find.bySemanticsLabel('Select PDF')),
+          isSemantics(
+            label: 'Select PDF',
+            hasToggledState: true,
+            isToggled: false,
+            hasEnabledState: true,
+            isEnabled: true,
+            hasTapAction: true,
+            isFocusable: true,
+          ),
+        );
 
-          await tester.tap(find.byTooltip('Copy'));
-          await tester.pumpAndSettle();
-          await _selectTool(tester);
+        await tester.tap(find.text('Select PDF'));
+        await tester.pumpAndSettle();
+        expect(palette.selectPdf.value, isTrue);
+        expect(tester.widget<Switch>(find.byType(Switch)).value, isTrue);
 
-          expect(
-            tester.getSemantics(find.bySemanticsLabel('Paste')),
-            isSemantics(
-              label: 'Paste',
-              isButton: true,
-              hasEnabledState: true,
-              isEnabled: true,
-              hasTapAction: true,
-              isFocusable: true,
-            ),
-          );
-          await tester.tap(find.text('Paste'));
-          await tester.pumpAndSettle();
-
-          // It pasted, selected the copies, and closed.
-          expect(find.byType(SelectOptions), findsNothing);
-          expect(controller.strokes.length, 5);
-          expect(controller.selection!.indices, <int>[3, 4]);
-          expect(controller.strokes[3].points.first, _near(144, 224));
-          expect(controller.strokes[4].style.ink, _red);
-          expect(_isSelected(tester, 'Select'), isTrue);
-          expect(tester.takeException(), isNull);
-          handle.dispose();
-        },
-      );
+        await tester.tap(find.byType(Switch));
+        await tester.pumpAndSettle();
+        expect(palette.selectPdf.value, isFalse);
+        expect(tester.takeException(), isNull);
+        handle.dispose();
+      });
     });
   }
 
@@ -654,8 +643,9 @@ void main() {
       final Rect canvas = _surface(tester);
 
       for (final Offset corner in <Offset>[
-        // Not the top left corner: the card of controls hangs there.
-        const Offset(3, 150),
+        // Not the top left corner: the card of controls hangs there, and
+        // the selection's actions just below it.
+        const Offset(3, 300),
         Offset(page.width - 3, 3),
         Offset(3, page.height - 3),
         Offset(page.width - 3, page.height - 3),
@@ -1325,9 +1315,11 @@ void main() {
     // Back on Select nothing is selected, and Paste still works.
     await _selectTool(tester);
     expect(controller.selection, isNull);
-    await _selectTool(tester);
-    await tester.tap(find.text('Paste'));
-    await tester.pumpAndSettle();
+    await _chord(
+      tester,
+      LogicalKeyboardKey.controlLeft,
+      LogicalKeyboardKey.keyV,
+    );
     expect(controller.strokes.length, 5);
   });
 
@@ -1546,9 +1538,11 @@ void main() {
     // The points are where they were put; only the drawing is clipped.
     expect(controller.strokes[0].points.first, _near(120, -15));
     expect((await captureScreen(tester)).at(above), isSameColorAs(background));
+    // The actions stay in the writing area.
     final Rect bar = _actionBarRect(tester);
-    expect(canvas.contains(bar.topLeft), isTrue);
-    expect(canvas.contains(bar.bottomRight), isTrue);
+    final Rect surface = _surface(tester);
+    expect(surface.contains(bar.topLeft), isTrue);
+    expect(surface.contains(bar.bottomRight), isTrue);
     expect(tester.takeException(), isNull);
   });
 
@@ -1598,8 +1592,8 @@ void main() {
       expect(bar.top, greaterThanOrEqualTo(canvas.top), reason: place.key);
       expect(bar.right, lessThanOrEqualTo(canvas.right), reason: place.key);
       expect(bar.bottom, lessThanOrEqualTo(canvas.bottom), reason: place.key);
-      // All four buttons are whole, so each can be pressed.
-      expect(bar.size, const Size(200, 56), reason: place.key);
+      // All five buttons are whole, so each can be pressed.
+      expect(bar.size, const Size(248, 56), reason: place.key);
       await tester.tap(find.byTooltip('Copy'));
       expect(controller.canPaste, isTrue, reason: place.key);
       expect(tester.takeException(), isNull, reason: place.key);
@@ -1681,9 +1675,11 @@ void main() {
     // Both still work on the new layout.
     await _drag(tester, _center, _center + const Offset(40, 40));
     expect(controller.strokes[0].points.first, _near(160, 240));
-    await _selectTool(tester);
-    await tester.tap(find.text('Paste'));
-    await tester.pumpAndSettle();
+    await _chord(
+      tester,
+      LogicalKeyboardKey.controlLeft,
+      LogicalKeyboardKey.keyV,
+    );
     expect(controller.strokes.length, 5);
     expect(controller.strokes[3].points.first, _near(144, 224));
     handle.dispose();
@@ -1759,6 +1755,7 @@ void main() {
     expect(find.bySemanticsLabel('Copy'), findsOneWidget);
     expect(find.bySemanticsLabel('Cut'), findsOneWidget);
     expect(find.bySemanticsLabel('Duplicate'), findsOneWidget);
+    expect(find.bySemanticsLabel('Delete'), findsOneWidget);
     // The frame and its handles are decoration: the summary and its action
     // buttons are all the page exposes.
     expect(

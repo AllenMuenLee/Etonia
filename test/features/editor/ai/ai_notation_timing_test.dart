@@ -300,7 +300,8 @@ void main() {
     expect(on, contains('If uncertain, keep it static'));
     expect(on, contains('actively look for a useful editable vector'));
     expect(on, contains('anchor the annotation to their actual ink'));
-    expect(on, contains('place a short memo immediately beside'));
+    expect(on, contains('place a short memo beside the relevant stroke'));
+    expect(on, contains('at least one text height away from their ink'));
     expect(on, contains('data-etonia-step="1"'));
     expect(on, contains('data-etonia-motion="1"'));
     expect(on, contains('data-etonia-static="1"'));

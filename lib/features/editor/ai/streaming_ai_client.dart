@@ -4,7 +4,6 @@ import 'dart:ui' as ui;
 
 import 'package:http/http.dart' as http;
 
-import '../ink/ink_sample.dart';
 import 'ai_client.dart';
 import 'ai_config.dart';
 import 'ai_notation.dart';
@@ -37,19 +36,26 @@ String stripJsonFence(String text) {
   return body.trim();
 }
 
-/// Tells the model, in words and coordinates instead of a picture, what
-/// the note's paper is, where the selected-ink image sits on it, what is
-/// near it, and where it may draw. Coordinates are rounded to 4 places,
-/// finer than a logical pixel on any page the editor shows. Every provider
-/// is sent the same words.
+/// Tells the model what surrounds the selected-ink image and its
+/// page-coordinate SVG, and where it may add ink. Coordinates are rounded to 4 places, finer than a logical
+/// pixel on any page the editor shows. Every provider is sent the same words.
 String aiNoteMetadata(NoteImage note) {
   String n(double value) => double.parse(value.toStringAsFixed(4)).toString();
   final double width = note.logicalSize.width;
   final double height = note.logicalSize.height;
+  // Asked with nothing selected, the picture is blank paper and the focus
+  // is where the notes go.
+  final bool blank = note.focusIsFreeSpace;
   final StringBuffer text = StringBuffer(
-    'The paper is ${n(width)} x ${n(height)} logical units; you are not '
-    'shown the whole sheet, only the selected-ink image and the '
-    'coordinates below.',
+    'The paper is ${n(width)} x ${n(height)} logical units. ',
+  );
+  text.write(
+    blank
+        ? 'Nothing on it was selected: the attached image is blank paper, '
+              'not the user\'s work, and you are not shown the sheet.'
+        : 'The selected part is supplied as an image and as SVG in these '
+              'same page logical coordinates; you are not shown the whole '
+              'sheet.',
   );
   final bounds = note.normalizedFocusBounds;
   Object? focus;
@@ -60,27 +66,15 @@ String aiNoteMetadata(NoteImage note) {
       'right': double.parse(n(bounds.right)),
       'bottom': double.parse(n(bounds.bottom)),
     };
+    final String range =
+        'x ${n(bounds.left)} to ${n(bounds.right)}, '
+        'y ${n(bounds.top)} to ${n(bounds.bottom)}';
     text.write(
-      ' The selected-ink image shows x ${n(bounds.left)} to '
-      '${n(bounds.right)}, y ${n(bounds.top)} to ${n(bounds.bottom)}.',
-    );
-  }
-  List<Object?>? ink;
-  if (note.focusInk.isNotEmpty) {
-    double r(double value) => double.parse(value.toStringAsFixed(3));
-    ink = <Object?>[
-      for (final List<InkVector> outline in note.focusInk)
-        <Object?>[
-          for (final InkVector point in outline)
-            <double>[r(point.x), r(point.y)],
-        ],
-    ];
-    text.write(
-      ' selected_ink: the user\'s ink near the selection, exactly, one '
-      'polyline per stroke as [x, y] note coordinates reduced to ends and '
-      'corners. Where your drawing connects to this ink, take the touching '
-      'point from selected_ink (a listed point, or interpolated along a '
-      'side), not the image, and run your line outward from exactly there.',
+      blank
+          ? ' focus_bounds, $range, is the biggest blank area of the page '
+                'the user is on: put what you write and draw there, or in '
+                'another free area.'
+          : ' The selected SVG covers $range.',
     );
   }
   final NoteFreeSpace? space = note.space;
@@ -138,21 +132,25 @@ String aiNoteMetadata(NoteImage note) {
     text.write(
       ' free_areas: blank space is provided, best first, each a box or an '
       'L of two boxes, with note coordinates and size in logical units '
-      '(width_units x height_units). ${_describeAreas(space, note, n)} '
-      'Decide if the annotation needs a separate blank space, or you can '
-      'annotate on the user\'s content. The coordinates match the grid '
-      'marked on the note image. $_stickyHowTo',
+      '(width_units x height_units). ${_describeAreas(space, note, n)} ',
+    );
+    text.write(
+      blank
+          ? 'Write and draw only inside these free areas, never on or '
+                'pointing at the user\'s content. $_stickyHowTo'
+          : 'Decide if the annotation needs a separate blank space, or you '
+                'can annotate on the user\'s content. The coordinates match '
+                'the selected SVG. $_stickyHowTo',
     );
   } else {
     text.write(
       ' No blank space is provided: annotate on the user\'s content, or use '
-      'a sticky note. The coordinates match the grid marked on the note '
-      'image. $_stickyHowTo',
+      'a sticky note. The coordinates match the selected SVG. $_stickyHowTo',
     );
   }
   text.write(
     ' Metadata: '
-    '${jsonEncode(<String, Object?>{'logical_aspect_ratio': double.parse(n(width / height)), 'focus_bounds': focus, 'note_logical_width': double.parse(n(width)), 'note_logical_height': double.parse(n(height)), 'selected_ink': ?ink, 'nearby_content': ?nearby, 'your_notes': ?yourNotes, 'free_areas': ?freeAreas})}',
+    '${jsonEncode(<String, Object?>{'logical_aspect_ratio': double.parse(n(width / height)), 'focus_bounds': focus, 'note_logical_width': double.parse(n(width)), 'note_logical_height': double.parse(n(height)), 'nearby_content': ?nearby, 'your_notes': ?yourNotes, 'free_areas': ?freeAreas})}',
   );
   return text.toString();
 }

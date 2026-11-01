@@ -223,7 +223,6 @@ void main() {
         ],
       );
       addTearDown(controller.dispose);
-      // Hugs the ink, so the Select tool takes the ink alone.
       final List<InkVector> outline = _loop(const InkVector(300, 300), 14);
       expect(
         controller.beginLasso(pointer: 1, position: outline.first),
@@ -235,13 +234,12 @@ void main() {
       controller.endLasso(
         1,
         outline.last,
-        const ui.Rect.fromLTWH(0, 0, 800, 1000),
-        keepPaper,
+        keepPaper ? const ui.Rect.fromLTWH(0, 0, 800, 1000) : null,
       );
       return controller.selection;
     }
 
-    test('takes the ink alone by default', () {
+    test('takes the ink alone without selectable paper', () {
       final InkSelection? selection = lasso(keepPaper: false);
       expect(selection!.indices, <int>[0]);
       expect(selection.includesPdf, isFalse);

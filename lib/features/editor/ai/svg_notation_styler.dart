@@ -1,5 +1,5 @@
 import 'dart:math' as math;
-import 'dart:ui' show Color, Rect;
+import 'dart:ui' show Color, Offset, Rect;
 
 import 'package:xml/xml.dart';
 
@@ -7,10 +7,12 @@ import '../document_io/svg_document.dart';
 import '../handwriting/handwriting_style.dart';
 import '../ink/ink_palette.dart';
 import '../ink/ink_sample.dart';
+import 'ai_config.dart';
 import 'chat_math.dart';
 import 'ink_attachment.dart';
 import 'notation_font.dart';
 import 'notation_math.dart';
+import 'notation_space.dart';
 import 'svg_ink_snap.dart';
 import 'svg_line_spacing.dart';
 
@@ -20,7 +22,8 @@ import 'svg_line_spacing.dart';
 /// Greatnote's configured handwriting system. Paints also receive semantic
 /// ink IDs so they resolve like the user's ink on light and dark paper. With
 /// a [InkSnapper], the free ends of its lines join the user's ink they nearly
-/// reach.
+/// reach. With a [NotationClearance], writing that lands on or crowds ink
+/// already on the paper is moved clear of it.
 abstract final class SvgNotationStyler {
   static EditableSvg apply(
     EditableSvg vector, {
@@ -28,6 +31,8 @@ abstract final class SvgNotationStyler {
     required InkColor defaultInk,
     required double penWidth,
     InkSnapper? snapper,
+    NotationClearance? clearance,
+    AiNotationConfig config = const AiNotationConfig(),
     double maxTextSize = double.infinity,
   }) {
     final XmlDocument document = XmlDocument.parse(vector.source);
@@ -73,21 +78,23 @@ abstract final class SvgNotationStyler {
           pinned: text.pinned,
         ),
     ], vector.viewBox);
-    final Rect? carried =
-        SvgLineSpacing.carry(root, <({Rect zone, double drop})>[
-          for (int i = 0; i < written.length; i++)
-            if (drops[i] != 0)
-              (
-                zone: written[i].ink.inflate(written[i].size * 0.8),
-                drop: drops[i],
-              ),
-        ]);
+    final List<Offset> moves = <Offset>[
+      for (final double drop in drops) Offset(0, drop),
+    ];
+    if (clearance != null) {
+      _keepClear(written, moves, clearance, config);
+    }
+    final Rect? carried = SvgLineSpacing.carry(root, <({Rect zone, Offset by})>[
+      for (int i = 0; i < written.length; i++)
+        if (moves[i] != Offset.zero)
+          (zone: written[i].ink.inflate(written[i].size * 0.8), by: moves[i]),
+    ]);
     if (carried != null) bounds = bounds.expandToInclude(carried);
     for (int i = 0; i < written.length; i++) {
       bounds = bounds.expandToInclude(
         _writeText(
           written[i],
-          drop: drops[i],
+          move: moves[i],
           paper: vector.viewBox,
           defaultInk: defaultInk,
         ),
@@ -102,6 +109,61 @@ abstract final class SvgNotationStyler {
     _tagSemanticPaints(root, defaultInk.id);
     root.setAttribute('data-etonia-handwriting', '1');
     return EditableSvg.parse(root.toXmlString(pretty: false));
+  }
+
+  /// Adds to [moves] what keeps each piece of [written] text
+  /// [AiNotationConfig.inkClearance] clear of the ink [clearance] knows and
+  /// of the other text. Lines of one memo or stack of working move together,
+  /// so it stays one block; a block holding a pinned label stays put, and is
+  /// kept clear of by the rest.
+  static void _keepClear(
+    List<_Written> written,
+    List<Offset> moves,
+    NotationClearance clearance,
+    AiNotationConfig config,
+  ) {
+    Rect box(int i) => written[i].ink.inflate(written[i].pad).shift(moves[i]);
+    // Lines within about a text height of each other join one block.
+    final List<int> block = <int>[for (int i = 0; i < written.length; i++) i];
+    int root(int i) => block[i] == i ? i : block[i] = root(block[i]);
+    for (int a = 0; a < written.length; a++) {
+      for (int b = a + 1; b < written.length; b++) {
+        if (box(a)
+            .inflate(written[a].size * 0.6)
+            .overlaps(box(b).inflate(written[b].size * 0.6))) {
+          block[root(b)] = root(a);
+        }
+      }
+    }
+    final Map<int, List<int>> blocks = <int, List<int>>{};
+    for (int i = 0; i < written.length; i++) {
+      (blocks[root(i)] ??= <int>[]).add(i);
+    }
+    final List<List<int>> pinned = <List<int>>[
+      for (final List<int> members in blocks.values)
+        if (members.any((int i) => written[i].pinned)) members,
+    ];
+    for (final List<int> members in pinned) {
+      for (final int i in members) {
+        clearance.reserve(box(i));
+      }
+    }
+    for (final List<int> members in blocks.values) {
+      if (pinned.contains(members)) continue;
+      Rect area = box(members.first);
+      double size = 0;
+      for (final int i in members) {
+        area = area.expandToInclude(box(i));
+        size = math.max(size, written[i].size);
+      }
+      final Offset shift = clearance.clear(
+        area,
+        gap: math.max(config.minInkClearance, size * config.inkClearance),
+      );
+      for (final int i in members) {
+        moves[i] += shift;
+      }
+    }
   }
 
   /// Makes animation opt-in for changing subject matter and never for text.
@@ -265,21 +327,22 @@ abstract final class SvgNotationStyler {
     );
   }
 
-  /// Replaces [text]'s element with its handwriting paths, moved [drop]
-  /// down, and returns the box they cover, kept inside [paper].
+  /// Replaces [text]'s element with its handwriting paths, [move]d, and
+  /// returns the box they cover, kept inside [paper].
   static Rect _writeText(
     _Written text, {
-    required double drop,
+    required Offset move,
     required Rect paper,
     required InkColor defaultInk,
   }) {
     final XmlElement element = text.element;
     final double pad = text.pad;
+    final Rect moved = text.ink.shift(move);
     final Rect written = Rect.fromLTRB(
-      math.max(paper.left, text.ink.left - pad),
-      math.max(paper.top, text.ink.top + drop - pad),
-      math.min(paper.right, text.ink.right + pad),
-      math.min(paper.bottom, text.ink.bottom + drop + pad),
+      math.max(paper.left, moved.left - pad),
+      math.max(paper.top, moved.top - pad),
+      math.min(paper.right, moved.right + pad),
+      math.min(paper.bottom, moved.bottom + pad),
     );
     final String inkId =
         _validInk(
@@ -329,7 +392,7 @@ abstract final class SvgNotationStyler {
           XmlElement(const XmlName.parts('path'), <XmlAttribute>[
             XmlAttribute(
               const XmlName.parts('d'),
-              _path(stroke, dx: text.shift, dy: drop),
+              _path(stroke, dx: text.shift + move.dx, dy: move.dy),
             ),
             XmlAttribute(const XmlName.parts('fill'), 'none'),
             XmlAttribute(

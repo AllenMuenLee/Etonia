@@ -3,6 +3,7 @@ import 'dart:math' as math;
 import 'package:flutter/material.dart';
 
 import '../../../app/theme/app_tokens.dart';
+import '../../../shared/motion/motion_memory.dart';
 import '../../../app/theme/app_icons.dart';
 import '../../../shared/widgets/app_controls.dart';
 import '../ink/ink_painter.dart';
@@ -19,9 +20,10 @@ Future<void> showPenAdvancedPanel(
   required ValueNotifier<PenSettings> settings,
   PenConfig config = const PenConfig(),
 }) {
-  final Duration duration = AppMotion.resolve(
+  final Duration duration = AppMotion.resolvePaced(
     context,
     AppMotion.snappy.duration,
+    MotionMemory.instance.recall(('popover', 'pen-advanced')),
   );
   return showGeneralDialog<void>(
     context: context,

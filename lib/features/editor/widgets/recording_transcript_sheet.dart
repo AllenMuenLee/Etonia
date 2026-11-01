@@ -16,6 +16,7 @@ Future<void> showRecordingTranscript(
 }) {
   return showAppSheet<void>(
     context: context,
+    motionKey: 'recording-transcript',
     builder: (BuildContext context) =>
         RecordingTranscriptSheet(track: track, onSeek: onSeek),
   );

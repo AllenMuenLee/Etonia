@@ -249,9 +249,7 @@ class PdfPageRenderCache {
   /// in its turn and kept there.
   Future<void> _previewFromStore(_PdfRenderEntry entry) async {
     final int generation = _generation;
-    final Uint8List? stored = await previewStore!.read(
-      _storeKey(entry.source),
-    );
+    final Uint8List? stored = await previewStore!.read(_storeKey(entry.source));
     if (stored != null) {
       try {
         // Only the encoded bytes are copied here; the engine decodes them
@@ -366,9 +364,7 @@ class PdfPageRenderCache {
       // Only once the view has settled: a scroll needs the renderer free.
       if (_settled && _toKeep.isNotEmpty && previewStore != null) {
         _rendering = true;
-        _keepNextPreview()
-            .catchError((Object _) {})
-            .whenComplete(_renderDone);
+        _keepNextPreview().catchError((Object _) {}).whenComplete(_renderDone);
       }
       return;
     }
@@ -703,6 +699,30 @@ class PdfPageRenderCache {
     }
   }
 
+  /// The outline of each PDF asked for, read once.
+  final Map<String, Future<List<PdfOutlineEntry>>> _outlines =
+      <String, Future<List<PdfOutlineEntry>>>{};
+
+  /// The outline of the PDF [assetId], its chapters: empty when it has
+  /// none, cannot be read, or the [rasterizer] does not read outlines.
+  Future<List<PdfOutlineEntry>> outline(String assetId) {
+    final PdfRasterizer rasterizer = this.rasterizer;
+    if (rasterizer is! PdfOutlineReader) {
+      return Future<List<PdfOutlineEntry>>.value(const <PdfOutlineEntry>[]);
+    }
+    return _outlines[assetId] ??= () async {
+      try {
+        final Uint8List? bytes = await _sources.load(assetId);
+        if (bytes == null) return const <PdfOutlineEntry>[];
+        return await (rasterizer as PdfOutlineReader).readOutline(bytes);
+      } on Object {
+        // Asked again next time, in case the asset was not there yet.
+        unawaited(_outlines.remove(assetId));
+        return const <PdfOutlineEntry>[];
+      }
+    }();
+  }
+
   /// The PDF [assetId], parsed once and kept open for the pages after.
   Future<OpenPdf> _open(String assetId, PdfDocumentRasterizer rasterizer) {
     final Future<OpenPdf>? cached = _documents.remove(assetId);
@@ -793,6 +813,7 @@ class PdfPageRenderCache {
     _previews.clear();
     _pending.clear();
     _sources.clear();
+    _outlines.clear();
     for (final Future<OpenPdf> document in _documents.values) {
       _closeWhenIdle(document);
     }
@@ -1073,9 +1094,7 @@ class _PdfPageLayerState extends State<PdfPageLayer> {
     final double onScreen = math.sqrt(
       transform[0] * transform[0] + transform[1] * transform[1],
     );
-    widget.cache.showAtZoom(
-      onScreen * size.width / widget.displayedSize.width,
-    );
+    widget.cache.showAtZoom(onScreen * size.width / widget.displayedSize.width);
     _sharpen(size, onScreen * (_pixelRatio ?? 1));
   }
 
@@ -1260,4 +1279,46 @@ class _PdfPageLayerState extends State<PdfPageLayer> {
       ),
     );
   }
+}
+
+/// Blank paper over the areas of a PDF page whose content was cut, deleted,
+/// or moved away. It lies just above [PdfPageLayer], below images and ink.
+class PdfMaskLayer extends StatelessWidget {
+  const PdfMaskLayer({super.key, required this.masks, required this.changes});
+
+  /// The page-local areas to leave blank.
+  final ValueGetter<List<Rect>> masks;
+
+  /// Fires when [masks] may have changed.
+  final Listenable changes;
+
+  /// The color of blank PDF paper, which is painted as it is in either
+  /// theme.
+  static const Color paper = Color(0xFFFFFFFF);
+
+  @override
+  Widget build(BuildContext context) {
+    return IgnorePointer(
+      child: RepaintBoundary(
+        child: CustomPaint(painter: _PdfMaskPainter(masks, changes)),
+      ),
+    );
+  }
+}
+
+class _PdfMaskPainter extends CustomPainter {
+  _PdfMaskPainter(this.masks, Listenable changes) : super(repaint: changes);
+
+  final ValueGetter<List<Rect>> masks;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final Paint fill = Paint()..color = PdfMaskLayer.paper;
+    for (final Rect mask in masks()) {
+      canvas.drawRect(mask, fill);
+    }
+  }
+
+  @override
+  bool shouldRepaint(_PdfMaskPainter oldDelegate) => true;
 }

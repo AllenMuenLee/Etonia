@@ -1,6 +1,7 @@
 import 'package:flutter/cupertino.dart';
 
 import '../../app/theme/app_tokens.dart';
+import '../motion/motion_memory.dart';
 
 /// Cupertino's full-width push/pop transition on every supported platform.
 ///
@@ -51,6 +52,12 @@ class AppPageTransitionsBuilder extends PageTransitionsBuilder {
 }
 
 /// A route with native Cupertino gesture ownership on every platform.
+///
+/// [motionKey] names the page for [MotionMemory]: the first time it is
+/// pushed it slides in slowly and smoothly; when it has been shown before
+/// it only fades in slightly where it is ([AppMotion.glance]). Without a
+/// key, the route's [RouteSettings.name] is used, and without either the
+/// route keeps the standard transition.
 class AppPageRoute<T> extends CupertinoPageRoute<T> {
   AppPageRoute({
     required super.builder,
@@ -59,13 +66,23 @@ class AppPageRoute<T> extends CupertinoPageRoute<T> {
     super.maintainState,
     super.allowSnapshotting,
     super.barrierDismissible,
-  });
+    Object? motionKey,
+  }) : _pace = _paceOf(motionKey ?? settings?.name);
+
+  final MotionPace _pace;
+
+  static MotionPace _paceOf(Object? key) => key == null
+      ? MotionPace.standard
+      : MotionMemory.instance.recall(('page', key));
 
   @override
-  Duration get transitionDuration => AppMotion.smooth.duration;
+  Duration get transitionDuration =>
+      AppMotion.paced(AppMotion.smooth.duration, _pace);
 
+  /// A page that faded in fades out as briefly; one that slid, slides back.
   @override
-  Duration get reverseTransitionDuration => AppMotion.smooth.duration;
+  Duration get reverseTransitionDuration =>
+      AppMotion.travels(_pace) ? AppMotion.smooth.duration : AppMotion.fadeOut;
 
   @override
   Widget buildTransitions(
@@ -73,11 +90,26 @@ class AppPageRoute<T> extends CupertinoPageRoute<T> {
     Animation<double> animation,
     Animation<double> secondaryAnimation,
     Widget child,
-  ) => const AppPageTransitionsBuilder().buildTransitions<T>(
-    this,
-    context,
-    animation,
-    secondaryAnimation,
-    child,
-  );
+  ) {
+    if (!AppMotion.travels(_pace) && !MediaQuery.disableAnimationsOf(context)) {
+      return FadeTransition(
+        opacity: CurvedAnimation(
+          parent: animation,
+          curve: AppMotion.glanceCurve,
+          reverseCurve: AppMotion.fadeOutCurve,
+        ),
+        child: ColoredBox(
+          color: AppColors.of(context).background,
+          child: child,
+        ),
+      );
+    }
+    return const AppPageTransitionsBuilder().buildTransitions<T>(
+      this,
+      context,
+      animation,
+      secondaryAnimation,
+      child,
+    );
+  }
 }

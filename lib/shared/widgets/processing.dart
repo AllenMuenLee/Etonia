@@ -3,6 +3,7 @@ import 'dart:math' as math;
 import 'package:flutter/material.dart';
 
 import '../../app/theme/app_tokens.dart';
+import '../motion/motion_memory.dart';
 
 // These resolve their colors without requiring the app theme, since they
 // stand in for content that may be shown on its own.
@@ -93,6 +94,7 @@ class LoadingReveal extends StatefulWidget {
     this.effect = RevealEffect.fade,
     this.timing,
     this.semanticsLabel,
+    this.memoryKey,
   });
 
   /// What was loaded, or null while it is still on its way.
@@ -109,6 +111,11 @@ class LoadingReveal extends StatefulWidget {
 
   /// Read out while [child] is still on its way.
   final String? semanticsLabel;
+
+  /// Names what [child] shows, for [MotionMemory]: the first time it is
+  /// revealed it arrives slowly and smoothly, and when it has been shown
+  /// before it arrives quickly. Without one the reveal keeps its token.
+  final Object? memoryKey;
 
   @override
   State<LoadingReveal> createState() => _LoadingRevealState();
@@ -143,7 +150,13 @@ class _LoadingRevealState extends State<LoadingReveal>
     super.didChangeDependencies();
     if (_started) return;
     _started = true;
-    if (widget.child == null) _wait();
+    if (widget.child == null) {
+      _wait();
+    } else {
+      // There from the start: shown at once, and remembered as shown.
+      final Object? key = widget.memoryKey;
+      if (key != null) MotionMemory.instance.remember(key);
+    }
   }
 
   @override
@@ -172,7 +185,14 @@ class _LoadingRevealState extends State<LoadingReveal>
     _reveal.value = 0;
     _arrive.value = 0;
     if (widget.placeholder == null) return;
-    _run(_arrive, AppMotion.fadeIn);
+    final Object? key = widget.memoryKey;
+    _run(
+      _arrive,
+      AppMotion.paced(
+        AppMotion.fadeIn,
+        key == null ? MotionPace.standard : MotionMemory.instance.peek(key),
+      ),
+    );
   }
 
   void _arrived() {
@@ -185,7 +205,14 @@ class _LoadingRevealState extends State<LoadingReveal>
     if (timing != null && since != null) {
       LoadTimings.instance.record(timing, took);
     }
-    _run(_reveal, AppMotion.fadeIn);
+    final Object? key = widget.memoryKey;
+    _run(
+      _reveal,
+      AppMotion.paced(
+        AppMotion.fadeIn,
+        key == null ? MotionPace.standard : MotionMemory.instance.recall(key),
+      ),
+    );
   }
 
   void _run(AnimationController controller, Duration duration) {
