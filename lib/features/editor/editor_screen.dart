@@ -19,10 +19,12 @@ import 'audio/note_audio.dart';
 import 'audio/recording_transcriber.dart';
 import 'audio/stroke_replay_controller.dart';
 import 'ai/ai_assistant_controller.dart';
+import 'ai/ai_citation.dart';
 import 'ai/ai_canvas_input.dart';
 import 'ai/ai_client.dart';
 import 'ai/ai_config.dart';
 import 'ai/ai_notation.dart';
+import 'ai/live_notation.dart';
 import 'ai/canvas_text_recognizer.dart';
 import 'ai/handwriting_prediction.dart';
 import 'ai/backend_ai_client.dart';
@@ -77,6 +79,7 @@ import 'document_io/pdf_exporter.dart';
 import 'document_io/svg_document.dart';
 import 'document_io/svg_exporter.dart';
 import 'widgets/ai_assistant_panel.dart';
+import 'widgets/ai_citation_highlight.dart';
 import 'widgets/ai_context_glow.dart';
 import 'widgets/clipboard_shortcuts.dart';
 import 'widgets/editor_app_bar.dart';
@@ -340,27 +343,6 @@ class EditorScreenState extends State<EditorScreen>
   EditorTool _writingTool = EditorTool.pen;
   EditorTool _previousTool = EditorTool.pen;
   EditorTool _observedTool = EditorTool.pen;
-
-  /// Whether what is selected shows without its frame and actions: while
-  /// AI mode has the AI tool, the assistant draws its own context frames.
-  /// Another tool brings the ordinary selection chrome back.
-  late final ValueNotifier<bool> _selectionChromeHidden = ValueNotifier<bool>(
-    _hidesSelectionChrome,
-  );
-
-  bool get _hidesSelectionChrome =>
-      _aiActive.value && _tool.value == EditorTool.ai;
-
-  void _syncSelectionChrome() =>
-      _selectionChromeHidden.value = _hidesSelectionChrome;
-
-  /// What is drawn on the page with the AI tool: a selection loop around
-  /// something, which is never ink. Tapping an existing context removes it.
-  late final AiCanvasInputController _aiInput = AiCanvasInputController(
-    config: widget.aiCanvasConfig,
-    onCircle: _onAiCircle,
-    onTap: _onAiTap,
-  );
 
   /// Ordinary pen ink waiting for on-device recognition.
   final List<(Stroke, String?)> _indexingPending = <(Stroke, String?)>[];
@@ -712,6 +694,8 @@ class EditorScreenState extends State<EditorScreen>
     usageGate: widget.subscription,
     captureNote: _captureNote,
     applyNotation: _applyNotation,
+    previewNotation: _previewNotation,
+    endNotationPreview: _endNotationPreview,
     inkInArea: _inkInArea,
     notationEnabled: widget.initialNotationEnabled,
   );
@@ -721,6 +705,13 @@ class EditorScreenState extends State<EditorScreen>
   Timer? _aiContextTimer;
   Size _surfaceSize = Size.zero;
   InkController? _notationControllerAtCapture;
+
+  /// The request whose notation is being shown as it is written, the page it
+  /// is on, and what draws it. One at a time: whichever finishes first changes
+  /// the note, and so leaves the other nothing to add.
+  NoteImage? _liveNotationRequest;
+  InkController? _liveNotationController;
+  LiveNotationPainter? _liveNotationPainter;
   final FocusNode _editorFocus = FocusNode(debugLabel: 'Editor');
 
   /// Keeps the panel's state, its text field and scroll position included,
@@ -1310,7 +1301,6 @@ class EditorScreenState extends State<EditorScreen>
     _scrollSettle?.cancel();
     _scrolledTo = null;
     for (final int pointer in pointers) {
-      _aiInput.cancel(pointer);
       _selectionCarry.cancelPointer(pointer);
     }
     for (final NotePage page in _document.pages) {
@@ -1698,44 +1688,15 @@ class EditorScreenState extends State<EditorScreen>
     if (controller.isBusy) {
       return const AiNotationApplication(AiNotationStatus.notAppliedBusy);
     }
-    final Rect page = Offset.zero & requestContext.logicalSize;
-    final Rect viewBox = vector.viewBox;
-    final Rect bounds = vector.contentBounds;
-    const double tolerance = 0.01;
-    if ((viewBox.left).abs() > tolerance ||
-        (viewBox.top).abs() > tolerance ||
-        (viewBox.width - page.width).abs() > tolerance ||
-        (viewBox.height - page.height).abs() > tolerance ||
-        !page.inflate(tolerance).contains(bounds.topLeft) ||
-        !page.inflate(tolerance).contains(bounds.bottomRight) ||
-        bounds.isEmpty) {
-      return const AiNotationApplication(AiNotationStatus.notAppliedInvalid);
-    }
-    final StrokeStyle userPenStyle = _penSettings.value.strokeStyle();
-    final EditableSvg styled;
-    try {
-      styled = SvgNotationStyler.apply(
-        vector,
-        handwriting:
-            HandwritingCalibration.current.value ?? HandwritingStyle.standard,
-        defaultInk: userPenStyle.ink,
-        penWidth: userPenStyle.width,
-        snapper: InkSnapper(<List<InkVector>>[
-          for (final Stroke stroke in controller.strokes) stroke.points,
-        ], reach: const AiNotationConfig().inkSnapDistance),
-        // Its writing keeps some space from the user's notes, and its own.
-        clearance: _notationClearance(controller, requestContext.logicalSize),
-        maxTextSize: HandwritingCalibration.textSize.value.max,
-      );
-    } on FormatException {
+    if (!_svgFitsPage(vector, requestContext.logicalSize)) {
       return const AiNotationApplication(AiNotationStatus.notAppliedInvalid);
     }
     final SvgInkConversion conversion;
     try {
-      conversion = SvgInkConverter.convert(
-        styled,
-        defaultInk: userPenStyle.ink,
-        defaultWidth: userPenStyle.width,
+      conversion = _svgInk(
+        vector,
+        controller,
+        requestContext.logicalSize,
         animate:
             controller.svgAnimationsEnabled &&
             !MediaQuery.disableAnimationsOf(context),
@@ -1748,11 +1709,7 @@ class EditorScreenState extends State<EditorScreen>
       expectedRevision: requestContext.revision,
       surfaceSize: requestContext.logicalSize,
       playbackDuration: conversion.playbackDuration,
-      limits: const GeneratedInkLimits(
-        maxPointsPerTrace: 8192,
-        maxTotalPoints: 250000,
-        maxPlaybackDuration: Duration(seconds: 20),
-      ),
+      limits: _svgInkLimits,
     );
     List<Stroke> added() {
       final List<Stroke> strokes = controller.strokes.sublist(
@@ -1762,10 +1719,16 @@ class EditorScreenState extends State<EditorScreen>
       return strokes;
     }
 
+    // One stroke per trace, in order, so each keeps its trace's paragraph.
+    final List<int?> paragraphs = <int?>[
+      for (final GeneratedInkTrace trace in conversion.traces)
+        trace.answerParagraph,
+    ];
     return switch (result) {
       AddNotationResult.added => AiNotationApplication(
         AiNotationStatus.applied,
         strokes: added(),
+        paragraphs: paragraphs,
       ),
       AddNotationResult.addedWithPlayback => AiNotationApplication(
         AiNotationStatus.animating,
@@ -1774,6 +1737,7 @@ class EditorScreenState extends State<EditorScreen>
           controller.notationPlayback!,
         ),
         strokes: added(),
+        paragraphs: paragraphs,
       ),
       AddNotationResult.stale => const AiNotationApplication(
         AiNotationStatus.notAppliedStale,
@@ -1785,6 +1749,109 @@ class EditorScreenState extends State<EditorScreen>
         AiNotationStatus.notAppliedInvalid,
       ),
     };
+  }
+
+  static const GeneratedInkLimits _svgInkLimits = GeneratedInkLimits(
+    maxPointsPerTrace: 8192,
+    maxTotalPoints: 250000,
+    maxPlaybackDuration: Duration(seconds: 20),
+  );
+
+  /// Whether [vector] is drawn in the coordinates of a page [size] big, and
+  /// stays on it.
+  static bool _svgFitsPage(EditableSvg vector, Size size) {
+    final Rect page = Offset.zero & size;
+    final Rect viewBox = vector.viewBox;
+    final Rect bounds = vector.contentBounds;
+    const double tolerance = 0.01;
+    return (viewBox.left).abs() <= tolerance &&
+        (viewBox.top).abs() <= tolerance &&
+        (viewBox.width - page.width).abs() <= tolerance &&
+        (viewBox.height - page.height).abs() <= tolerance &&
+        page.inflate(tolerance).contains(bounds.topLeft) &&
+        page.inflate(tolerance).contains(bounds.bottomRight) &&
+        !bounds.isEmpty;
+  }
+
+  /// [vector] as ink in the user's hand and pen. Throws a [FormatException]
+  /// when it cannot be.
+  SvgInkConversion _svgInk(
+    EditableSvg vector,
+    InkController controller,
+    Size size, {
+    required bool animate,
+  }) {
+    final StrokeStyle userPenStyle = _penSettings.value.strokeStyle();
+    final EditableSvg styled = SvgNotationStyler.apply(
+      vector,
+      handwriting:
+          HandwritingCalibration.current.value ?? HandwritingStyle.standard,
+      defaultInk: userPenStyle.ink,
+      penWidth: userPenStyle.width,
+      snapper: InkSnapper(<List<InkVector>>[
+        for (final Stroke stroke in controller.strokes) stroke.points,
+      ], reach: const AiNotationConfig().inkSnapDistance),
+      // Its writing keeps some space from the user's notes, and its own.
+      clearance: _notationClearance(controller, size),
+      maxTextSize: HandwritingCalibration.textSize.value.max,
+    );
+    return SvgInkConverter.convert(
+      styled,
+      defaultInk: userPenStyle.ink,
+      defaultWidth: userPenStyle.width,
+      animate: animate,
+    );
+  }
+
+  void _previewNotation(String svg, NoteImage request) {
+    if (!mounted) return;
+    if (_liveNotationRequest == null) {
+      _liveNotationRequest = request;
+      _liveNotationController = _notationControllerAtCapture;
+      _liveNotationPainter = LiveNotationPainter(
+        (String document) => _drawLiveNotation(document, request),
+      );
+    }
+    if (identical(_liveNotationRequest, request)) {
+      _liveNotationPainter?.add(svg);
+    }
+  }
+
+  /// Shows [document] the way [_applySvgNotation] would add it, static, for
+  /// as long as it could still be added. Any timed notation plays from the
+  /// start once it has been.
+  void _drawLiveNotation(String document, NoteImage request) {
+    final InkController? controller = _liveNotationController;
+    if (controller == null || !mounted) return;
+    if (!identical(controller, _inkController) ||
+        controller.documentRevision != request.revision ||
+        request.logicalSize != _surfaceSize ||
+        !_showAiNotes) {
+      controller.clearNotationPreview();
+      return;
+    }
+    final EditableSvg vector = EditableSvg.parse(document);
+    if (!_svgFitsPage(vector, request.logicalSize)) return;
+    final SvgInkConversion conversion = _svgInk(
+      vector,
+      controller,
+      request.logicalSize,
+      animate: false,
+    );
+    controller.showNotationPreview(
+      traces: conversion.traces,
+      surfaceSize: request.logicalSize,
+      limits: _svgInkLimits,
+    );
+  }
+
+  void _endNotationPreview(NoteImage request) {
+    if (!identical(_liveNotationRequest, request)) return;
+    _liveNotationPainter?.close();
+    _liveNotationController?.clearNotationPreview();
+    _liveNotationPainter = null;
+    _liveNotationController = null;
+    _liveNotationRequest = null;
   }
 
   /// The paper of the assistant's sticky notes, told apart from the user's
@@ -2426,22 +2493,18 @@ class EditorScreenState extends State<EditorScreen>
     return bitmaps;
   }
 
-  /// A loop drawn in AI mode around something on the page: what it
-  /// encloses is selected and becomes what the assistant is asked about.
-  void _onAiCircle(List<InkVector> outline, Object page) {
-    if (!mounted || !identical(page, _inkController)) return;
-    final PdfPageSource? pdf = _document.current.pdfSource;
-    final bool selected = _inkController.selectEnclosed(
-      outline,
-      selectablePdfBounds: pdf == null ? null : Offset.zero & pdf.pageSize,
-    );
-    if (selected) unawaited(_captureForAi(open: true, ask: true));
+  /// Something chosen with the AI tool, which selects as the Select tool
+  /// does, becomes what the assistant is asked about. A [tap] on a context
+  /// frame instead takes that group out of the conversation.
+  void _onAiSelection(InkVector? tap, InkController page) {
+    if (!mounted || (tap != null && _removeAiContextAt(tap, page))) return;
+    unawaited(_captureForAi(open: true, ask: true));
   }
 
-  /// A tap on a context frame removes that group from the conversation.
-  void _onAiTap(InkVector position, Object page) {
+  /// Removes the context group framed at [position], if there is one.
+  bool _removeAiContextAt(InkVector position, InkController page) {
     final AiSelectionContext? context = _ai.context;
-    if (context == null || context.isPage || page is! InkController) return;
+    if (context == null || context.isPage) return false;
     final List<AiContextGroup> groups = context.groups;
     for (int i = groups.length - 1; i >= 0; i--) {
       final AiContextGroup group = groups[i];
@@ -2461,9 +2524,10 @@ class EditorScreenState extends State<EditorScreen>
         _ai.removeContext(group);
         _selectionCarry.clearSelection();
         _editorFocus.requestFocus();
-        return;
+        return true;
       }
     }
+    return false;
   }
 
   /// Closing the chat turns AI mode off with it.
@@ -2780,6 +2844,7 @@ class EditorScreenState extends State<EditorScreen>
     _selectPdf.addListener(_preparePdfLift);
     _document.addListener(_onDocumentChanged);
     _ai.addListener(_onAiChanged);
+    _ai.paragraphFocus.addListener(_onParagraphFocusChanged);
     _palettePlacement.addListener(_onPalettePlacementChanged);
     _toolbarShown.addListener(_onToolbarShownChanged);
     _toolbarLayout.addListener(_onPalettePlacementChanged);
@@ -2788,8 +2853,6 @@ class EditorScreenState extends State<EditorScreen>
     _tool.addListener(_rememberToolbar);
     _tool.addListener(AppHaptics.toolSwitch);
     _tool.addListener(_onToolChanged);
-    _tool.addListener(_syncSelectionChrome);
-    _aiActive.addListener(_syncSelectionChrome);
     _adoptAiSession();
     _loadHandwritingCalibrationNotice();
     if (_aiActive.value) {
@@ -2952,7 +3015,6 @@ class EditorScreenState extends State<EditorScreen>
       _pdfScrollDirection = 1;
       _document.addListener(_onDocumentChanged);
       _adoptAiSession();
-      _aiInput.clear();
       _setAiNotesHidden(!_showAiNotes);
       _onDocumentChanged();
       owned?.dispose();
@@ -2995,6 +3057,7 @@ class EditorScreenState extends State<EditorScreen>
     _releaseAiSession();
     _document.removeListener(_onDocumentChanged);
     _ai.removeListener(_onAiChanged);
+    _ai.paragraphFocus.removeListener(_onParagraphFocusChanged);
     _palettePlacement.removeListener(_onPalettePlacementChanged);
     _toolbarShown.removeListener(_onToolbarShownChanged);
     _toolbarLayout.removeListener(_onPalettePlacementChanged);
@@ -3011,13 +3074,8 @@ class EditorScreenState extends State<EditorScreen>
     _tool
       ..removeListener(AppHaptics.toolSwitch)
       ..removeListener(_onToolChanged)
-      ..removeListener(_syncSelectionChrome)
       ..dispose();
-    _aiInput.dispose();
-    _aiActive
-      ..removeListener(_syncSelectionChrome)
-      ..dispose();
-    _selectionChromeHidden.dispose();
+    _aiActive.dispose();
     _ownedPenSettings?.dispose();
     _ownedPalettePlacement?.dispose();
     _ownedToolOptionsShown?.dispose();
@@ -3105,6 +3163,58 @@ class EditorScreenState extends State<EditorScreen>
     );
   }
 
+  /// The paragraph whose ink was last brought into view on its own.
+  AiParagraphRef? _revealedParagraph;
+
+  /// Keeps the ink of the paragraph being read in view as the chat moves on
+  /// to another, unless a pen or a hand is at work on the note: that is left
+  /// where it is, and only the mark changes.
+  void _onParagraphFocusChanged() {
+    final AiParagraphRef? ref = _ai.paragraphFocus.value?.ref;
+    if (ref == _revealedParagraph) return;
+    _revealedParagraph = ref;
+    if (ref == null || _scrolling || _anyPageBusy()) return;
+    // The mark is laid out with the next frame.
+    WidgetsBinding.instance.addPostFrameCallback((Duration _) {
+      if (mounted && !_scrolling && !_anyPageBusy()) {
+        _showFocusedParagraphOnNote();
+      }
+    });
+    WidgetsBinding.instance.ensureVisualUpdate();
+  }
+
+  /// Brings into view what the paragraph being read is tied to, going to its
+  /// page only when that page is too far away to scroll to. Moves nothing if
+  /// it is all in view already.
+  void _showFocusedParagraphOnNote() {
+    final AiParagraphFocus? focus = _ai.paragraphFocus.value;
+    if (focus == null) return;
+    final List<NotePage> pages = _document.pages;
+    final Set<Stroke> tied = Set<Stroke>.identity()
+      ..addAll(focus.links.cited)
+      ..addAll(focus.links.drawn);
+    int? target;
+    for (int i = 0; i < pages.length && target == null; i++) {
+      if (pages[i].ink.strokes.any(tied.contains)) target = i;
+    }
+    if (target == null && focus.links.regions.isNotEmpty) {
+      final Object? owner = _ai.context?.groups.firstOrNull?.page;
+      final int index = pages.indexWhere(
+        (NotePage page) => identical(page.ink, owner),
+      );
+      if (index >= 0) target = index;
+    }
+    if (target == null) return;
+    final InkController page = pages[target].ink;
+    if (_ai.revealOnNote(page)) return;
+    _showPage(target);
+    // The page is laid out where it now is by the next frame.
+    WidgetsBinding.instance.addPostFrameCallback((Duration _) {
+      if (mounted) _ai.revealOnNote(page);
+    });
+    WidgetsBinding.instance.ensureVisualUpdate();
+  }
+
   Widget _buildAssistantPanel() {
     return AiAssistantPanel(
       key: _aiPanelKey,
@@ -3113,6 +3223,7 @@ class EditorScreenState extends State<EditorScreen>
       onClose: _closeAi,
       onNewChat: _useCurrentSelection,
       onAddToContext: _addSelectionToAi,
+      onShowOnNote: _showFocusedParagraphOnNote,
       composerKey: _aiComposerKey,
       onOpenPlans: widget.subscription == null ? null : _openPlans,
       showHandwritingCalibrationNotice: _showHandwritingCalibrationNotice,
@@ -3549,6 +3660,11 @@ class EditorScreenState extends State<EditorScreen>
                                             .maxStoredImageDimension,
                                         carry: _selectionCarry,
                                       ),
+                                    // On the paper, under the ink.
+                                    AiCitationHighlight(
+                                      assistant: _ai,
+                                      page: page.ink,
+                                    ),
                                     InkCanvas(
                                       controller: page.ink,
                                       visible: visible,
@@ -3578,9 +3694,8 @@ class EditorScreenState extends State<EditorScreen>
                                       ruler: _ruler,
                                       pointerClaims: _pointerClaims,
                                       aiActive: _aiActive,
-                                      aiInput: _aiInput,
-                                      selectionFrameHidden:
-                                          _selectionChromeHidden,
+                                      onAiSelection: (InkVector? tap) =>
+                                          _onAiSelection(tap, page.ink),
                                       selectablePdfBounds:
                                           page.pdfSource == null
                                           ? null
@@ -3655,30 +3770,19 @@ class EditorScreenState extends State<EditorScreen>
                               return Stack(
                                 fit: StackFit.expand,
                                 children: <Widget>[
-                                  ValueListenableBuilder<bool>(
-                                    valueListenable: _selectionChromeHidden,
-                                    builder:
-                                        (
-                                          BuildContext context,
-                                          bool hidden,
-                                          Widget? bar,
-                                        ) => hidden
-                                        ? const SizedBox.shrink()
-                                        : bar!,
-                                    child: SelectionActionBar(
-                                      controller: _inkController,
-                                      crossPageListenable: _selectionCarry,
-                                      selectionResolver: _stableSelection,
-                                      onAiPressed: _openAi,
-                                      onCopy: _copy,
-                                      onCut: _cut,
-                                      onDuplicate: () => _selectionCarry
-                                          .duplicateSelection(_inkController),
-                                      onDelete: (_) => _selectionCarry
-                                          .deleteSelection(_inkController),
-                                      transform: transform,
-                                      obstruction: paletteOnPage,
-                                    ),
+                                  SelectionActionBar(
+                                    controller: _inkController,
+                                    crossPageListenable: _selectionCarry,
+                                    selectionResolver: _stableSelection,
+                                    onAiPressed: _openAi,
+                                    onCopy: _copy,
+                                    onCut: _cut,
+                                    onDuplicate: () => _selectionCarry
+                                        .duplicateSelection(_inkController),
+                                    onDelete: (_) => _selectionCarry
+                                        .deleteSelection(_inkController),
+                                    transform: transform,
+                                    obstruction: paletteOnPage,
                                   ),
                                   PastePrompt(
                                     anchor: _pastePrompt,

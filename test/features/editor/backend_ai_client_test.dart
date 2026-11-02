@@ -61,6 +61,75 @@ void main() {
     expect(answer.notation?.vector, isNotNull);
   });
 
+  group('live notation', () {
+    const String answer =
+        '<svg xmlns="http://www.w3.org/2000/svg" '
+        'data-etonia-version="1" viewBox="0 0 100 100" '
+        'data-etonia-bounds="10 10 80 20">'
+        '<desc data-etonia-role="message">Done.</desc>'
+        '<path d="M10 20 L90 20" fill="none" stroke="black"/>'
+        '</svg>';
+    AiRequest request() => AiRequest(
+      systemInstruction: 'words',
+      notationInstruction: 'drawing',
+      notationEnabled: true,
+      imagePng: Uint8List.fromList(<int>[1]),
+      noteImage: NoteImage(
+        logicalSize: const Size(100, 100),
+        revision: 0,
+        normalizedFocusBounds: const Rect.fromLTRB(.1, .1, .9, .9),
+      ),
+      messages: const <AiMessage>[AiMessage.user('Explain it')],
+    );
+
+    test('tells the listener the SVG as it grows', () async {
+      Map<String, Object?>? sent;
+      final List<String> written = <String>[];
+      final client = BackendAiClient(
+        invokeStream: (_, Map<String, Object?> body) async {
+          sent = body;
+          return Stream<Map<String, dynamic>>.fromIterable(
+            <Map<String, dynamic>>[
+              <String, dynamic>{'type': 'message', 'message': 'Done.'},
+              <String, dynamic>{'type': 'notation', 'delta': '<svg>'},
+              // Only for display: a bad one is not a failed answer.
+              <String, dynamic>{'type': 'notation', 'delta': 7},
+              <String, dynamic>{'type': 'notation', 'delta': '<g/>'},
+              <String, dynamic>{
+                'type': 'result',
+                'answer': answer,
+                'usage': <String, dynamic>{'inputTokens': 1, 'outputTokens': 2},
+              },
+            ],
+          );
+        },
+      );
+      final AiResult result = await client.send(
+        request(),
+        onNotation: written.add,
+      );
+      expect(sent?['liveNotation'], isTrue);
+      expect(written, <String>['<svg>', '<svg><g/>']);
+      expect((result as AiSuccess).notation?.vector, isNotNull);
+    });
+
+    test('is not asked for without a listener', () async {
+      Map<String, Object?>? sent;
+      final client = BackendAiClient(
+        invokeStream: (_, Map<String, Object?> body) async {
+          sent = body;
+          return Stream<Map<String, dynamic>>.value(<String, dynamic>{
+            'type': 'result',
+            'answer': answer,
+            'usage': <String, dynamic>{'inputTokens': 1, 'outputTokens': 2},
+          });
+        },
+      );
+      await client.send(request());
+      expect(sent!.containsKey('liveNotation'), isFalse);
+    });
+  });
+
   test(
     'conversation history, current prompt, and selected crop are sent but the full note is not',
     () async {

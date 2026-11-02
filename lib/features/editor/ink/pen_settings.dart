@@ -220,7 +220,7 @@ class PenSettings {
   /// the shape it was meant to be.
   final bool holdToShape;
 
-  /// Whether a stroke scribbled back and forth over ink erases that ink,
+  /// Whether a stroke scribbled rapidly up and down over ink erases that ink,
   /// and is not kept itself.
   final bool scribbleToErase;
 

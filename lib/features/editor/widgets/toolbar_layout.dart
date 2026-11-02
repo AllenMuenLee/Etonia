@@ -10,12 +10,17 @@ enum PaletteItem {
   sticky('Sticky note'),
   recording('Recordings'),
   text('Text'),
-  ruler('Ruler');
+  ruler('Ruler'),
+  customize('Customize toolbar');
 
   const PaletteItem(this.label);
 
   /// How the item is named where the toolbar is arranged.
   final String label;
+
+  /// Whether it may be taken off the palette. The customize button may not:
+  /// it alone brings hidden tools back.
+  bool get canHide => this != customize;
 
   static PaletteItem? byName(Object? name) {
     for (final PaletteItem item in values) {
@@ -40,12 +45,13 @@ class ToolbarLayout {
       PaletteItem.select,
       PaletteItem.ai,
       PaletteItem.image,
-      PaletteItem.sticky,
     ],
     folded: <PaletteItem>[
+      PaletteItem.sticky,
       PaletteItem.recording,
       PaletteItem.text,
       PaletteItem.ruler,
+      PaletteItem.customize,
     ],
   );
 
@@ -58,15 +64,17 @@ class ToolbarLayout {
       if (!shown.contains(item) && !folded.contains(item)) item,
   ];
 
-  /// [item] taken off the palette.
-  ToolbarLayout hide(PaletteItem item) => ToolbarLayout(
+  /// [item] taken off the palette, if it [PaletteItem.canHide].
+  ToolbarLayout hide(PaletteItem item) => item.canHide ? _without(item) : this;
+
+  ToolbarLayout _without(PaletteItem item) => ToolbarLayout(
     shown: <PaletteItem>[...shown.where((PaletteItem i) => i != item)],
     folded: <PaletteItem>[...folded.where((PaletteItem i) => i != item)],
   );
 
   /// [item] put back, at the end of the always-shown tools.
   ToolbarLayout show(PaletteItem item) {
-    final ToolbarLayout without = hide(item);
+    final ToolbarLayout without = _without(item);
     return ToolbarLayout(
       shown: <PaletteItem>[...without.shown, item],
       folded: without.folded,
@@ -81,7 +89,7 @@ class ToolbarLayout {
 
   /// Reads what [toJson] wrote. Names it does not know are dropped, and a
   /// button it says nothing of, one added since, goes where [standard] has
-  /// it.
+  /// it, as does one marked hidden that cannot be.
   factory ToolbarLayout.fromJson(Object? json) {
     if (json is! Map) return standard;
     final Set<PaletteItem> seen = <PaletteItem>{};
@@ -94,7 +102,9 @@ class ToolbarLayout {
     ];
     final List<PaletteItem> shown = read(json['shown']);
     final List<PaletteItem> folded = read(json['folded']);
-    read(json['hidden']);
+    for (final PaletteItem item in read(json['hidden'])) {
+      if (!item.canHide) seen.remove(item);
+    }
     for (final PaletteItem item in PaletteItem.values) {
       if (seen.contains(item)) continue;
       if (standard.folded.contains(item)) {

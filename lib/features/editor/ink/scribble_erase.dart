@@ -12,20 +12,32 @@ import 'stroke.dart';
 @immutable
 class ScribbleConfig {
   const ScribbleConfig({
-    this.minReversals = 4,
+    this.minReversals = 6,
     this.swingFraction = 0.3,
     this.minSwing = 8,
+    this.minReversalsPerSecond = 6,
+    this.maxSpacing = 0.4,
     this.coverage = 0.6,
-  }) : assert(minReversals > 0),
+  }) : assert(minReversals > 1),
        assert(swingFraction > 0 && swingFraction <= 1),
+       assert(minReversalsPerSecond > 0),
+       assert(maxSpacing > 0),
        assert(coverage > 0 && coverage <= 1);
 
-  /// A scribble swings back and forth at least [minReversals] times, along
-  /// either axis, each swing at least [swingFraction] of the stroke's
-  /// extent along that axis and at least [minSwing].
+  /// A scribble turns back vertically at least [minReversals] times, each
+  /// swing at least [swingFraction] of the stroke's height and at least
+  /// [minSwing].
   final int minReversals;
   final double swingFraction;
   final double minSwing;
+
+  /// How fast a scribble turns back, from its first turn to its last. A rate
+  /// rather than a speed, so that it means the same at any zoom.
+  final double minReversalsPerSecond;
+
+  /// How far a scribble may travel sideways per swing, as a fraction of how
+  /// far it travels vertically: the smaller, the denser the swings must be.
+  final double maxSpacing;
 
   /// How much of a stroke's box must lie within the scribble's box, by
   /// area, for the scribble to take that stroke out.
@@ -34,60 +46,70 @@ class ScribbleConfig {
 
 /// Tells a scribble drawn over ink, to cross it out, from writing.
 abstract final class ScribbleErase {
-  /// How many times [points] turn back along one axis: x when [alongX],
-  /// else y. Only turns that come back at least [swing] from the furthest
-  /// point reached count, so jitter is never a turn.
-  static int reversals(
-    List<InkVector> points, {
-    required bool alongX,
-    required double swing,
-  }) {
-    if (points.isEmpty) {
-      return 0;
-    }
-    double along(InkVector p) => alongX ? p.x : p.y;
-    int reversals = 0;
-    int direction = 0;
-    double extreme = along(points.first);
-    for (final InkVector point in points.skip(1)) {
-      final double value = along(point);
-      if (direction == 0) {
-        if ((value - extreme).abs() >= swing) {
-          direction = value > extreme ? 1 : -1;
-          extreme = value;
-        }
-      } else if ((value - extreme) * direction > 0) {
-        extreme = value;
-      } else if ((extreme - value) * direction >= swing) {
-        reversals++;
-        direction = -direction;
-        extreme = value;
-      }
-    }
-    return reversals;
-  }
-
-  /// Whether [points] zigzag like a scribble, sideways or up and down.
-  static bool isZigzag(
-    List<InkVector> points, [
+  /// Whether [samples] rush up and down in densely packed swings. Going by
+  /// the raw samples, since only those know when the pen was where.
+  static bool isScribble(
+    List<RawInkSample> samples, [
     ScribbleConfig config = const ScribbleConfig(),
   ]) {
-    if (points.length < 2 * config.minReversals) {
+    if (samples.isEmpty) {
       return false;
     }
-    final Rect bounds = _boundsOf(points);
-    for (final bool alongX in <bool>[true, false]) {
-      final double extent = alongX ? bounds.width : bounds.height;
-      final double swing = math.max(
-        config.minSwing,
-        extent * config.swingFraction,
-      );
-      if (reversals(points, alongX: alongX, swing: swing) >=
-          config.minReversals) {
-        return true;
+    final double swing = math.max(
+      config.minSwing,
+      _heightOf(samples) * config.swingFraction,
+    );
+    final List<RawInkSample> turns = _turns(samples, swing);
+    if (turns.length < config.minReversals) {
+      return false;
+    }
+    // Between the first and last turns, so that resting the pen before or
+    // after the scribble does not slow it down. Samples that all claim the
+    // same moment say nothing about speed, and do not count as a rush.
+    final Duration elapsed = turns.last.timestamp - turns.first.timestamp;
+    if (elapsed <= Duration.zero) {
+      return false;
+    }
+    final double perSecond =
+        (turns.length - 1) *
+        Duration.microsecondsPerSecond /
+        elapsed.inMicroseconds;
+    if (perSecond < config.minReversalsPerSecond) {
+      return false;
+    }
+    double vertical = 0;
+    double sideways = 0;
+    for (int i = 1; i < turns.length; i++) {
+      final InkVector step = turns[i].position - turns[i - 1].position;
+      vertical += step.y.abs();
+      sideways += step.x.abs();
+    }
+    return sideways <= vertical * config.maxSpacing;
+  }
+
+  /// The samples at which [samples] turn back vertically. Only turns that
+  /// come back at least [swing] from the furthest point reached count, so
+  /// jitter is never a turn.
+  static List<RawInkSample> _turns(List<RawInkSample> samples, double swing) {
+    final List<RawInkSample> turns = <RawInkSample>[];
+    int direction = 0;
+    RawInkSample extreme = samples.first;
+    for (final RawInkSample sample in samples.skip(1)) {
+      final double moved = sample.position.y - extreme.position.y;
+      if (direction == 0) {
+        if (moved.abs() >= swing) {
+          direction = moved > 0 ? 1 : -1;
+          extreme = sample;
+        }
+      } else if (moved * direction > 0) {
+        extreme = sample;
+      } else if (-moved * direction >= swing) {
+        turns.add(extreme);
+        direction = -direction;
+        extreme = sample;
       }
     }
-    return false;
+    return turns;
   }
 
   /// The indices of the strokes in [strokes] that [scribble] crosses out:
@@ -103,7 +125,7 @@ abstract final class ScribbleErase {
   }) {
     if (scribble.isDot ||
         scribble.style.isHighlighter ||
-        !isZigzag(scribble.points, config)) {
+        !isScribble(scribble.rawSamples, config)) {
       return const <int>[];
     }
     final Rect area = scribble.bounds;
@@ -164,17 +186,13 @@ abstract final class ScribbleErase {
     return false;
   }
 
-  static Rect _boundsOf(List<InkVector> points) {
-    double left = double.infinity;
+  static double _heightOf(List<RawInkSample> samples) {
     double top = double.infinity;
-    double right = double.negativeInfinity;
     double bottom = double.negativeInfinity;
-    for (final InkVector point in points) {
-      left = math.min(left, point.x);
-      top = math.min(top, point.y);
-      right = math.max(right, point.x);
-      bottom = math.max(bottom, point.y);
+    for (final RawInkSample sample in samples) {
+      top = math.min(top, sample.position.y);
+      bottom = math.max(bottom, sample.position.y);
     }
-    return Rect.fromLTRB(left, top, right, bottom);
+    return bottom - top;
   }
 }

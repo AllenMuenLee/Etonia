@@ -10,6 +10,7 @@ import '../ink/ink_sample.dart';
 import '../ink/ink_selection.dart';
 import '../ink/stroke.dart';
 import '../sticky/sticky_note.dart';
+import 'ai_citation.dart';
 import 'ai_client.dart';
 import 'ai_config.dart';
 import 'ai_notation.dart';
@@ -21,6 +22,14 @@ import 'selection_svg_renderer.dart';
 typedef AiNoteCapture = Future<NoteImage> Function();
 typedef AiNotationApply =
     AiNotationApplication Function(AiNotation notation, NoteImage context);
+
+/// Shows [svg], a notation as far as it has been written for the request that
+/// captured [context], on the note without adding it. Display only.
+typedef AiNotationPreview = void Function(String svg, NoteImage context);
+
+/// Takes away what [AiNotationPreview] showed for the request that captured
+/// [context].
+typedef AiNotationPreviewEnd = void Function(NoteImage context);
 
 /// The finished strokes lying mostly within [area] on a page as it is now:
 /// on [page] when it is known, else on the page holding any of [anchors].
@@ -148,7 +157,30 @@ class AiSelectionContext {
 
   SelectionInkSnapshot _snapshot;
 
-  final List<AiContextGroup> _groups;
+  List<AiContextGroup> _groups;
+
+  /// Follows strokes the editor replaced: ink moved is still the ink chosen.
+  /// Returns whether any of it was.
+  bool _followStrokes(Map<Stroke, Stroke> replaced) {
+    if (isPage || !_snapshot.sourceStrokes.any(replaced.containsKey)) {
+      return false;
+    }
+    _snapshot = _snapshot.withSourceReplaced(replaced);
+    _groups = <AiContextGroup>[
+      for (final AiContextGroup group in _groups)
+        AiContextGroup(
+          strokes: <Stroke>[
+            for (final Stroke stroke in group.strokes)
+              replaced[stroke] ?? stroke,
+          ],
+          images: group.images,
+          stickies: group.stickies,
+          pdfBounds: group.pdfBounds,
+          page: group.page,
+        ),
+    ];
+    return true;
+  }
 
   /// Whether nothing on the note was chosen for this conversation.
   final bool isPage;
@@ -228,6 +260,16 @@ class _AiConversation {
   bool partialAnswerComplete = false;
   bool sendingWithNotation = false;
   int requestToken = 0;
+
+  /// What each answer's paragraphs are tied to on the note, by message index.
+  final Map<int, AiAnswerLinks> links = <int, AiAnswerLinks>{};
+
+  /// What the line numbers of the request in flight mean.
+  AiSourceMap? source;
+
+  /// [partialAnswer]'s links, worked out once for each text it has.
+  String? partialLinksText;
+  AiAnswerLinks? partialLinks;
 }
 
 /// The AI assistant for one editor session: where the panel is, what ink
@@ -242,6 +284,8 @@ class AiAssistantController extends ChangeNotifier {
     this.renderer = const SelectionImageRenderer(),
     this.captureNote,
     this.applyNotation,
+    this.previewNotation,
+    this.endNotationPreview,
     this.inkInArea,
     AiPanelSide side = AiPanelSide.left,
     this._notationEnabled = false,
@@ -320,6 +364,11 @@ class AiAssistantController extends ChangeNotifier {
   final AiNoteCapture? captureNote;
   final AiNotationApply? applyNotation;
 
+  /// Shows a notation as it is written. [endNotationPreview] follows, once
+  /// the answer has been dealt with: added notes replace it within one frame.
+  final AiNotationPreview? previewNotation;
+  final AiNotationPreviewEnd? endNotationPreview;
+
   /// Finds the ink that has appeared where a conversation's ink lies, to
   /// draw over its image. Without it, the image stays as first drawn.
   final AiAreaInk? inkInArea;
@@ -384,6 +433,111 @@ class AiAssistantController extends ChangeNotifier {
 
   /// The ink the conversation is about, if AI has been opened.
   AiSelectionContext? get context => _conversation?.context;
+
+  /// The paragraph last read in the panel, and what to show for it on the
+  /// note, which stays until another takes its place. Changes as the chat
+  /// scrolls, without rebuilding the panel.
+  ValueListenable<AiParagraphFocus?> get paragraphFocus => _paragraphFocus;
+  final ValueNotifier<AiParagraphFocus?> _paragraphFocus =
+      ValueNotifier<AiParagraphFocus?>(null);
+
+  /// Lets [reveal] bring what [paragraphFocus] holds into view on [page], for
+  /// as long as that page is built.
+  void addNoteRevealer(Object page, bool Function() reveal) {
+    _noteRevealers[page] = reveal;
+  }
+
+  void removeNoteRevealer(Object page, bool Function() reveal) {
+    if (_noteRevealers[page] == reveal) _noteRevealers.remove(page);
+  }
+
+  final Map<Object, bool Function()> _noteRevealers =
+      Map<Object, bool Function()>.identity();
+
+  /// What message [message]'s paragraphs are tied to; for the message still
+  /// being written, one past the last, as far as it has been written.
+  AiAnswerLinks? answerLinks(int message) {
+    final _AiConversation? conversation = _conversation;
+    if (conversation == null) return null;
+    if (message != conversation.messages.length) {
+      return conversation.links[message];
+    }
+    final String? partial = conversation.partialAnswer;
+    final AiSourceMap? source = conversation.source;
+    if (partial == null || source == null) return null;
+    if (partial != conversation.partialLinksText) {
+      conversation.partialLinksText = partial;
+      conversation.partialLinks = source.resolve(partial, streaming: true);
+    }
+    return conversation.partialLinks;
+  }
+
+  /// Makes [ref] the paragraph being read. With no paragraph, or one tied to
+  /// nothing on the note, the last one stays, unless it was another
+  /// conversation's: its numbers mean nothing in this one.
+  void focusParagraph(AiParagraphRef? ref) {
+    if (_disposed) return;
+    final AiParagraphLinks? links = ref == null
+        ? null
+        : answerLinks(ref.message)?.paragraphs[ref.paragraph];
+    if (ref == null || links == null || links.isEmpty) {
+      if (!identical(_focusConversation, _conversation)) {
+        _paragraphFocus.value = null;
+      }
+    } else if (_paragraphFocus.value?.ref != ref ||
+        !identical(_paragraphFocus.value?.links, links)) {
+      _paragraphFocus.value = AiParagraphFocus(ref, links);
+    }
+    _focusConversation = _conversation;
+  }
+
+  /// The conversation [paragraphFocus] holds a paragraph of.
+  _AiConversation? _focusConversation;
+
+  /// Brings the focused paragraph's ink on [page] into view, moving nothing if
+  /// it all is already. Returns false when that page is not built, being too
+  /// far from what is on screen.
+  bool revealOnNote(Object page) {
+    if (_disposed) return false;
+    return _noteRevealers[page]?.call() ?? false;
+  }
+
+  AiParagraphRef? _paragraphToShow;
+
+  /// The paragraph the panel should scroll to, since the strokes drawn for it
+  /// were selected on the note; null when none has been asked for since this
+  /// was last called.
+  AiParagraphRef? takeParagraphToShow() {
+    final AiParagraphRef? ref = _paragraphToShow;
+    _paragraphToShow = null;
+    return ref;
+  }
+
+  /// Finds the paragraph that most of [selection]'s strokes were drawn for,
+  /// and asks the panel to show it. Selecting a drawing leads to its words.
+  void _showParagraphDrawing(InkSelection? selection) {
+    final _AiConversation? conversation = _conversation;
+    if (selection == null || conversation == null) return;
+    AiParagraphRef? best;
+    int most = 0;
+    for (final MapEntry<int, AiAnswerLinks> answer
+        in conversation.links.entries) {
+      for (final MapEntry<int, AiParagraphLinks> paragraph
+          in answer.value.paragraphs.entries) {
+        final Set<Stroke> drawn = paragraph.value.drawn;
+        if (drawn.isEmpty) continue;
+        final int count = selection.strokes.where(drawn.contains).length;
+        if (count > most) {
+          most = count;
+          best = AiParagraphRef(answer.key, paragraph.key);
+        }
+      }
+    }
+    if (best != null) {
+      _paragraphToShow = best;
+      focusParagraph(best);
+    }
+  }
 
   /// The conversation, oldest first. While a request is being sent, or has
   /// failed, the last message is the user's unanswered one.
@@ -541,6 +695,7 @@ class AiAssistantController extends ChangeNotifier {
     );
     _selectionChanged = false;
     _selectionHasChat = false;
+    _showParagraphDrawing(selection);
     _placement.value = AiPanelPlacement(isOpen: true, side: side);
     notifyListeners();
   }
@@ -566,6 +721,7 @@ class AiAssistantController extends ChangeNotifier {
     );
     _selectionChanged = false;
     _selectionHasChat = false;
+    _showParagraphDrawing(selection);
     notifyListeners();
   }
 
@@ -638,7 +794,10 @@ class AiAssistantController extends ChangeNotifier {
         selection != null &&
         !_matches(conversation, selection);
     final bool hasChat = changed && _bestMatch(selection) != null;
-    if (changed != _selectionChanged || hasChat != _selectionHasChat) {
+    if (!changed) _showParagraphDrawing(selection);
+    if (changed != _selectionChanged ||
+        hasChat != _selectionHasChat ||
+        _paragraphToShow != null) {
       _selectionChanged = changed;
       _selectionHasChat = hasChat;
       notifyListeners();
@@ -667,22 +826,32 @@ class AiAssistantController extends ChangeNotifier {
   }
 
   /// Follows strokes the editor replaced, such as ink moved with the
-  /// selection: a replacement drawn by a conversation's answer is still that
-  /// conversation's. The stroke it replaced is kept for an undo to restore.
+  /// selection: a replacement of the ink a conversation is about is still
+  /// what it is about, and one drawn by its answer is still its own. A stroke
+  /// its answer drew is kept when replaced, for an undo to restore.
   void followReplacedStrokes(Map<Stroke, Stroke> replaced) {
     if (_disposed) {
       return;
     }
     bool changed = false;
+    bool contextChanged = false;
     for (final _AiConversation conversation in _conversations) {
       for (final MapEntry<Stroke, Stroke> entry in replaced.entries) {
         if (conversation.notationStrokes.contains(entry.key)) {
           changed = conversation.notationStrokes.add(entry.value) || changed;
         }
       }
+      for (final AiAnswerLinks links in conversation.links.values) {
+        changed = links.follow(replaced) || changed;
+      }
+      contextChanged =
+          conversation.context._followStrokes(replaced) || contextChanged;
     }
-    if (changed) {
+    if (changed || contextChanged) {
       _session.notify();
+    }
+    if (contextChanged) {
+      notifyListeners();
     }
   }
 
@@ -987,26 +1156,62 @@ class AiAssistantController extends ChangeNotifier {
     // A conversation about nothing on the note has no selection to give.
     final bool isPage = conversation.context.isPage;
     String? selectionSvg;
-    if (noteImage != null && !isPage) {
+    String? sourceLines;
+    conversation.source = null;
+    if (!isPage) {
+      final AiSelectionContext context = conversation.context;
+      final SelectionInkSnapshot snapshot = context._snapshot.withInkOver(
+        context._ink,
+      );
+      final List<Stroke?> origins = snapshot.strokeOrigins;
+      final Set<int> byAssistant = <int>{
+        for (int i = 0; i < origins.length; i++)
+          if (conversation.notationStrokes.contains(origins[i])) i,
+      };
+      const SelectionSvgRenderer svgRenderer = SelectionSvgRenderer();
+      List<SelectionSvgLine> lines = const <SelectionSvgLine>[];
       try {
-        final AiSelectionContext context = conversation.context;
-        selectionSvg = const SelectionSvgRenderer().render(
-          snapshot: context._snapshot.withInkOver(context._ink),
-          preview: image,
-          pageSize: noteImage.logicalSize,
-        );
+        if (noteImage != null) {
+          final SelectionSvgDocument document = svgRenderer.document(
+            snapshot: snapshot,
+            preview: image,
+            pageSize: noteImage.logicalSize,
+            assistantStrokes: byAssistant,
+          );
+          selectionSvg = document.svg;
+          lines = document.lines;
+        } else {
+          lines = svgRenderer.lineIndex(
+            snapshot: snapshot,
+            preview: image,
+            assistantStrokes: byAssistant,
+          );
+        }
       } on Object {
-        finish(
-          const AiError(AiFailure(AiFailureKind.noteUnavailable)),
-          noteImage: noteImage,
-        );
-        return;
+        if (noteImage != null) {
+          finish(
+            const AiError(AiFailure(AiFailureKind.noteUnavailable)),
+            noteImage: noteImage,
+          );
+          return;
+        }
+      }
+      if (lines.isNotEmpty) {
+        sourceLines = SelectionSvgRenderer.outline(lines);
+        conversation.source = AiSourceMap(lines, origins);
       }
     }
     if (_disposed || token != conversation.requestToken) {
       return;
     }
     final String noSelection = isPage ? AiPrompts.noSelection : '';
+    final NoteImage? liveNote = previewNotation == null ? null : noteImage;
+    void endPreview() {
+      if (liveNote != null && !_disposed) {
+        endNotationPreview?.call(liveNote);
+      }
+    }
+
     final AiRequest request;
     final AiResult result;
     try {
@@ -1027,6 +1232,7 @@ class AiAssistantController extends ChangeNotifier {
               : null,
           imagePng: image.png,
           selectionSvg: selectionSvg,
+          sourceLines: sourceLines,
           messages: conversation.messages,
           noteImage: noteImage,
           notationEnabled: notationAuthorized,
@@ -1046,12 +1252,25 @@ class AiAssistantController extends ChangeNotifier {
             notifyListeners();
           }
         },
+        onNotation: liveNote == null
+            ? null
+            : (String svg) {
+                if (_disposed) return;
+                if (token == conversation.requestToken &&
+                    _notationEnabled &&
+                    revocations == _notationRevocations) {
+                  previewNotation?.call(svg, liveNote);
+                } else {
+                  endPreview();
+                }
+              },
       );
     } on Object {
       finish(
         const AiError(AiFailure(AiFailureKind.network)),
         noteImage: noteImage,
       );
+      endPreview();
       return;
     }
     // The provider charged for the answer whatever becomes of it here.
@@ -1062,6 +1281,7 @@ class AiAssistantController extends ChangeNotifier {
       gate.recordUsage(model, usage ?? AiTokenUsage.estimate(request, text));
     }
     finish(result, noteImage: noteImage);
+    endPreview();
   }
 
   void _finish(
@@ -1082,6 +1302,12 @@ class AiAssistantController extends ChangeNotifier {
         : null;
     conversation.partialAnswer = null;
     conversation.partialAnswerComplete = false;
+    conversation.partialLinksText = null;
+    conversation.partialLinks = null;
+    // The links of the answer about to join the messages, where it goes.
+    final AiSourceMap? source = conversation.source;
+    final int answerIndex = conversation.messages.length;
+    conversation.source = null;
     switch (result) {
       // The whole message had arrived before the answer broke off, while
       // only the notation, if any, was still to come: keep the words, and
@@ -1099,6 +1325,9 @@ class AiAssistantController extends ChangeNotifier {
                 : AiNotationStatus.none,
           ),
         ]);
+        if (source != null) {
+          conversation.links[answerIndex] = source.resolve(streamed);
+        }
         conversation.requestState = AiRequestState.idle;
       case AiSuccess(
         :final String text,
@@ -1107,6 +1336,7 @@ class AiAssistantController extends ChangeNotifier {
       ):
         AiNotationStatus status = AiNotationStatus.none;
         AiNotationPresentation? presentation;
+        final AiAnswerLinks links = source?.resolve(text) ?? AiAnswerLinks();
         if (notationRejected) {
           status = notationAuthorized
               ? AiNotationStatus.notAppliedInvalid
@@ -1135,6 +1365,7 @@ class AiAssistantController extends ChangeNotifier {
               status = application.status;
               presentation = application.presentation;
               conversation.notationStrokes.addAll(application.strokes);
+              _linkDrawing(links, text, application);
               // Asked about nothing, each answer finds blank space afresh,
               // on whichever page is shown then.
               if (!conversation.context.isPage) {
@@ -1147,6 +1378,7 @@ class AiAssistantController extends ChangeNotifier {
             }
           }
         }
+        if (!links.isEmpty) conversation.links[answerIndex] = links;
         final AiMessage reply = AiMessage.model(
           text,
           notation: notationAuthorized ? notation : null,
@@ -1164,9 +1396,36 @@ class AiAssistantController extends ChangeNotifier {
         conversation.requestState = AiRequestState.failed;
         conversation.failure = failure;
     }
+    // Shown even with the panel closed, which would otherwise choose it.
+    if (identical(conversation, _conversation)) {
+      final AiAnswerLinks? arrived = conversation.links[answerIndex];
+      final int? first = arrived?.paragraphs.keys.fold<int?>(
+        null,
+        (int? least, int key) => least == null || key < least ? key : least,
+      );
+      if (first != null) focusParagraph(AiParagraphRef(answerIndex, first));
+    }
     _session.notify();
     if (identical(conversation, _conversation)) {
       notifyListeners();
+    }
+  }
+
+  /// Ties the strokes [application] added to the paragraphs of [text] they say
+  /// they were drawn for. A number past the last paragraph ties nothing.
+  static void _linkDrawing(
+    AiAnswerLinks links,
+    String text,
+    AiNotationApplication application,
+  ) {
+    if (application.paragraphs.isEmpty) return;
+    final int paragraphs = parseAiAnswer(text).length;
+    for (int i = 0; i < application.strokes.length; i++) {
+      if (i >= application.paragraphs.length) break;
+      final int? paragraph = application.paragraphs[i];
+      if (paragraph != null && paragraph <= paragraphs) {
+        links.of(paragraph).drawn.add(application.strokes[i]);
+      }
     }
   }
 
@@ -1496,6 +1755,7 @@ class AiAssistantController extends ChangeNotifier {
     _placement.dispose();
     _hasDraft.dispose();
     _session.dispose();
+    _paragraphFocus.dispose();
     super.dispose();
   }
 
@@ -1573,15 +1833,17 @@ class AiAssistantController extends ChangeNotifier {
       'lastUsed': conversation.lastUsed,
       if (conversation.context.isPage) 'page': true,
       'messages': <Object?>[
-        for (final AiMessage message in conversation.messages)
+        for (int i = 0; i < conversation.messages.length; i++)
           <String, Object?>{
-            'role': message.role.name,
-            if (message.role == AiRole.model)
-              'wire': message.wireText
+            'role': conversation.messages[i].role.name,
+            if (conversation.messages[i].role == AiRole.model)
+              'wire': conversation.messages[i].wireText
             else
-              'text': message.text,
-            'label': ?message.label,
-            'status': message.notationStatus.name,
+              'text': conversation.messages[i].text,
+            'label': ?conversation.messages[i].label,
+            'status': conversation.messages[i].notationStatus.name,
+            if (conversation.links[i] case final AiAnswerLinks links)
+              'links': _linksJson(links, ink),
           },
       ],
       if (conversation.requestState == AiRequestState.failed)
@@ -1628,6 +1890,80 @@ class AiAssistantController extends ChangeNotifier {
       },
       'notationStrokes': refs(conversation.notationStrokes, ink.strokeRef),
     };
+  }
+
+  /// [links] as saved with the note. Ink is found again by its place on it, as
+  /// a conversation's own is; what has left the note is forgotten.
+  static List<Object?> _linksJson(AiAnswerLinks links, AiInkIndex ink) {
+    List<Object?> refs(Iterable<Stroke> strokes) => <Object?>[
+      for (final Stroke stroke in strokes)
+        if (ink.strokeRef(stroke) case (final int page, final int index))
+          <int>[page, index],
+    ];
+    return <Object?>[
+      for (final MapEntry<int, AiParagraphLinks> paragraph
+          in links.paragraphs.entries)
+        <String, Object?>{
+          'paragraph': paragraph.key,
+          'ranges': <Object?>[
+            for (final AiLineRange range in paragraph.value.ranges)
+              <int>[range.first, range.last],
+          ],
+          'regions': <Object?>[
+            for (final Rect region in paragraph.value.regions)
+              <double>[region.left, region.top, region.right, region.bottom],
+          ],
+          'cited': refs(paragraph.value.cited),
+          'drawn': refs(paragraph.value.drawn),
+        },
+    ];
+  }
+
+  /// Reads what [_linksJson] wrote. Whatever cannot be read is left out: the
+  /// words of the answer do not depend on it.
+  static AiAnswerLinks _linksFromJson(Object? json, AiInkIndex ink) {
+    final AiAnswerLinks links = AiAnswerLinks();
+    if (json is! List) return links;
+    Iterable<Stroke> strokes(Object? refs) sync* {
+      if (refs is! List) return;
+      for (final Object? ref in refs) {
+        if (ref case [final int page, final int index]) {
+          if (ink.stroke((page, index)) case final Stroke stroke) yield stroke;
+        }
+      }
+    }
+
+    for (final Object? item in json) {
+      if (item is! Map<String, Object?>) continue;
+      final Object? paragraph = item['paragraph'];
+      if (paragraph is! int) continue;
+      links.paragraphs[paragraph] = AiParagraphLinks(
+        ranges: <AiLineRange>[
+          for (final Object? range in (item['ranges'] as List?) ?? <Object?>[])
+            if (range case [final int first, final int last])
+              AiLineRange(first, last),
+        ],
+        regions: <Rect>[
+          for (final Object? region
+              in (item['regions'] as List?) ?? <Object?>[])
+            if (region case [
+              final num left,
+              final num top,
+              final num right,
+              final num bottom,
+            ])
+              Rect.fromLTRB(
+                left.toDouble(),
+                top.toDouble(),
+                right.toDouble(),
+                bottom.toDouble(),
+              ),
+        ],
+        cited: strokes(item['cited']),
+        drawn: strokes(item['drawn']),
+      );
+    }
+    return links;
   }
 
   static _AiConversation? _conversationFromJson(
@@ -1769,6 +2105,8 @@ class AiAssistantController extends ChangeNotifier {
             notationStatus: status,
           ),
         );
+        final AiAnswerLinks links = _linksFromJson(message['links'], ink);
+        if (!links.isEmpty) conversation.links[messages.length - 1] = links;
       } else {
         messages.add(
           AiMessage.user(

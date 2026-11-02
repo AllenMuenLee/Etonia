@@ -8,6 +8,7 @@ class GeneratedInkTrace {
     required List<InkVector> points,
     List<double>? timesMs,
     List<double>? widths,
+    this.answerParagraph,
   }) : points = List<InkVector>.unmodifiable(points),
        timesMs = timesMs == null ? null : List<double>.unmodifiable(timesMs),
        widths = widths == null ? null : List<double>.unmodifiable(widths);
@@ -23,6 +24,10 @@ class GeneratedInkTrace {
   /// A pen-width factor at each point. AI ink uses a restrained pressure
   /// rhythm so its traces feel drawn rather than mechanically plotted.
   final List<double>? widths;
+
+  /// The paragraph of the assistant's answer this trace was drawn for, from
+  /// one, when its notation said.
+  final int? answerParagraph;
 }
 
 enum AddNotationResult {

@@ -457,6 +457,12 @@ class _LibraryScreenState extends State<LibraryScreen> {
   static const Duration _trashKeeps = Duration(days: 30);
   static const Duration _searchDelay = Duration(milliseconds: 120);
 
+  /// How long the hint that notes were moved to Recently Deleted stays up.
+  static const Duration _deletedHintLasts = Duration(seconds: 5);
+
+  /// That hint, while it is up.
+  ScaffoldFeatureController<SnackBar, SnackBarClosedReason>? _deletedHint;
+
   final TextEditingController _search = TextEditingController();
   final FocusNode _searchFocus = FocusNode(debugLabel: 'Library search');
   Timer? _searchDebounce;
@@ -1332,22 +1338,45 @@ class _LibraryScreenState extends State<LibraryScreen> {
       ..showSnackBar(SnackBar(content: Text(message), action: action));
   }
 
-  /// Says where deleted [notes] went, with a way to bring them back.
+  /// Says where deleted [notes] went, with a way to bring them back. It goes
+  /// after [_deletedHintLasts], or with the next thing done in the library.
   void _announceDeleted(List<NoteEntry> notes) {
     if (!mounted || notes.isEmpty) return;
-    _showMessage(
-      notes.length == 1
-          ? 'Moved "${notes.single.title}" to Recently Deleted'
-          : 'Moved ${notes.length} notes to Recently Deleted',
-      action: SnackBarAction(
-        label: 'Undo',
-        onPressed: () async {
-          for (final NoteEntry note in notes) {
-            await _repository.restoreNote(note.id);
-          }
-        },
-      ),
+    final ScaffoldFeatureController<SnackBar, SnackBarClosedReason> hint =
+        (ScaffoldMessenger.of(context)..hideCurrentSnackBar()).showSnackBar(
+          SnackBar(
+            content: Text(
+              notes.length == 1
+                  ? 'Moved "${notes.single.title}" to Recently Deleted'
+                  : 'Moved ${notes.length} notes to Recently Deleted',
+            ),
+            duration: _deletedHintLasts,
+            // A snack bar with an action otherwise stays until dismissed.
+            persist: false,
+            action: SnackBarAction(
+              label: 'Undo',
+              onPressed: () async {
+                for (final NoteEntry note in notes) {
+                  await _repository.restoreNote(note.id);
+                }
+              },
+            ),
+          ),
+        );
+    _deletedHint = hint;
+    unawaited(
+      hint.closed.whenComplete(() {
+        if (identical(_deletedHint, hint)) _deletedHint = null;
+      }),
     );
+  }
+
+  /// Takes the hint from [_announceDeleted] away, if it is up. On the pointer
+  /// coming up, not down, so that holding Undo does not take it from under
+  /// the finger; the Undo still runs, as its tap is settled after this.
+  void _dismissDeletedHint(PointerUpEvent _) {
+    if (_deletedHint == null) return;
+    ScaffoldMessenger.of(context).hideCurrentSnackBar();
   }
 
   Future<void> _emptyTrash() async {
@@ -1787,8 +1816,13 @@ class _LibraryScreenState extends State<LibraryScreen> {
     // frame of its slide, under the dialog, and the slide would stutter.
     return ListenableBuilder(
       listenable: _searchFocus,
-      builder: (BuildContext context, Widget? scaffold) =>
-          IgnoreKeyboard(ignoring: !_searchFocus.hasFocus, child: scaffold!),
+      builder: (BuildContext context, Widget? scaffold) => Listener(
+        onPointerUp: _dismissDeletedHint,
+        child: IgnoreKeyboard(
+          ignoring: !_searchFocus.hasFocus,
+          child: scaffold!,
+        ),
+      ),
       child: Scaffold(
         key: _scaffold,
         backgroundColor: Colors.transparent,

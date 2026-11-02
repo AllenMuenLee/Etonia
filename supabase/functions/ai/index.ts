@@ -18,6 +18,7 @@ import {
   outputBudget,
   providerAnswer,
   providerRequest,
+  readProviderStream,
   reservationCap,
   stepMessage,
   twoStep,
@@ -33,7 +34,7 @@ const providerKeys = {
 
 function eventStream(
   message: string,
-  finish: () => Promise<Record<string, unknown>>,
+  finish: (send: (event: Record<string, unknown>) => void) => Promise<Record<string, unknown>>,
 ): Response {
   const encoder = new TextEncoder();
   let open = true;
@@ -55,7 +56,7 @@ function eventStream(
         // client disconnects after receiving the words.
         send({ type: "message", message });
         try {
-          send({ type: "result", ...await finish() });
+          send({ type: "result", ...await finish(send) });
         } catch (error) {
           send({
             type: "error",
@@ -118,6 +119,7 @@ Deno.serve(endpoint(async (req) => {
     provider: ReturnType<typeof providerRequest>,
     answerer: typeof model,
     timeoutMs = 90000,
+    onText?: (text: string) => void,
   ) => {
     sent = true;
     const response = await fetch(provider.url, {
@@ -130,6 +132,9 @@ Deno.serve(endpoint(async (req) => {
     if (!response.ok) {
       await response.body?.cancel();
       return { refused: response.status };
+    }
+    if (onText && response.body) {
+      return { result: await readProviderStream(answerer, response.body, onText) };
     }
     return {
       result: providerAnswer(
@@ -177,7 +182,7 @@ Deno.serve(endpoint(async (req) => {
         settled = true;
         throw error;
       }
-      const finishNotation = async () => {
+      const finishNotation = async (onText: (text: string) => void = () => {}) => {
         let notationAnswer: string | undefined;
         try {
           const second = await ask(
@@ -194,6 +199,7 @@ Deno.serve(endpoint(async (req) => {
             ),
             drawer,
             Math.max(5000, 105000 - (Date.now() - started)),
+            onText,
           );
           if (second.result) {
             usage = meterPass(usage, drawer, second.result);
@@ -212,7 +218,19 @@ Deno.serve(endpoint(async (req) => {
         };
       };
       if (req.headers.get("accept")?.includes("text/event-stream")) {
-        return eventStream(message, finishNotation);
+        return eventStream(message, (send) => {
+          if (input.liveNotation !== true) return finishNotation();
+          // An element can only have ended at a ">", so nothing new can be
+          // drawn before one: the pieces between are sent together.
+          let unsent = "";
+          return finishNotation((text) => {
+            unsent += text;
+            if (text.includes(">")) {
+              send({ type: "notation", delta: unsent });
+              unsent = "";
+            }
+          });
+        });
       }
       await finishNotation();
     }

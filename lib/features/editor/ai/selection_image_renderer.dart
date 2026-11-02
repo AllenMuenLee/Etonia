@@ -99,6 +99,7 @@ class SelectionInkSnapshot {
     required this._sourceImages,
     this.explicitBounds,
     List<StickyNoteElement> stickies = const <StickyNoteElement>[],
+    this._inkOver = const <Stroke>[],
   }) : stickies = List<StickyNoteElement>.unmodifiable(stickies);
 
   /// Copies [selection]'s strokes, in document order, with their colors
@@ -308,6 +309,23 @@ class SelectionInkSnapshot {
     );
   }
 
+  /// This snapshot taken from the strokes [replaced] now stands for, as when
+  /// its ink is moved: still that ink, and what it shows stays as it was.
+  SelectionInkSnapshot withSourceReplaced(Map<Stroke, Stroke> replaced) {
+    return SelectionInkSnapshot._(
+      strokes: strokes,
+      bitmaps: bitmaps,
+      brightness: brightness,
+      background: background,
+      source: List<Stroke>.unmodifiable(<Stroke>[
+        for (final Stroke stroke in _source) replaced[stroke] ?? stroke,
+      ]),
+      sourceImages: _sourceImages,
+      explicitBounds: explicitBounds,
+      stickies: stickies,
+    );
+  }
+
   /// This snapshot with [ink] drawn over its strokes in its own theme: ink
   /// that has appeared where it lies since it was taken. What it was taken
   /// from stays as it was, so [ink] never counts as chosen.
@@ -332,7 +350,32 @@ class SelectionInkSnapshot {
       sourceImages: _sourceImages,
       explicitBounds: explicitBounds,
       stickies: stickies,
+      inkOver: ink.toList(growable: false),
     );
+  }
+
+  /// The note's stroke behind each of [strokes], in the same order; null for
+  /// one no longer on the note.
+  ///
+  /// A saved conversation forgets ink erased before it was saved, so its
+  /// copies are then matched to what remains by where they start and how many
+  /// points they have.
+  List<Stroke?> get strokeOrigins {
+    final int taken = strokes.length - _inkOver.length;
+    final List<Stroke> available = List<Stroke>.of(_source);
+    Stroke? origin(int index) {
+      if (taken == _source.length) return _source[index];
+      final SnapshotStroke copy = strokes[index];
+      if (copy.points.isEmpty) return null;
+      final int match = available.indexWhere(
+        (Stroke stroke) =>
+            stroke.points.length == copy.points.length &&
+            stroke.points.first == copy.points.first,
+      );
+      return match < 0 ? null : available.removeAt(match);
+    }
+
+    return <Stroke?>[for (int i = 0; i < taken; i++) origin(i), ..._inkOver];
   }
 
   /// For tests and tools: a snapshot of [strokes] as given.
@@ -378,6 +421,9 @@ class SelectionInkSnapshot {
   /// same selection again. Finished strokes never change.
   final List<Stroke> _source;
   final List<NoteImageElement> _sourceImages;
+
+  /// What [withInkOver] added: the last of [strokes], in this order.
+  final List<Stroke> _inkOver;
 
   /// Whether [selection] is the very ink this snapshot was taken from.
   bool isOf(InkSelection selection) {

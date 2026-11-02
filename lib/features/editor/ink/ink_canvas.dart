@@ -9,7 +9,6 @@ import 'package:flutter/semantics.dart';
 
 import '../../../app/theme/app_tokens.dart';
 import '../../../shared/feedback/app_haptics.dart';
-import '../ai/ai_canvas_input.dart';
 import '../document_io/document_models.dart';
 import 'eraser_settings.dart';
 import 'ink_controller.dart';
@@ -32,6 +31,7 @@ import '../sticky/sticky_note.dart';
 import '../text/note_text.dart';
 import '../text/text_elements_layer.dart';
 import '../audio/stroke_replay_controller.dart';
+import '../page/page_viewport.dart';
 
 /// Coordinates cross-page lasso selection and smooth cross-page selection
 /// transforms across all mounted [InkCanvas]es of a note.
@@ -1365,8 +1365,8 @@ class SelectionCarry extends ChangeNotifier {
 /// stroke into the shape it was meant to be, if one is recognized. Until
 /// the pen lifts, moving it then scales and turns the shape.
 ///
-/// A pen stroke scribbled back and forth over ink erases that ink, and is
-/// not kept, when [PenSettings.scribbleToErase] is on.
+/// A pen stroke scribbled rapidly up and down over ink erases that ink, and
+/// is not kept, when [PenSettings.scribbleToErase] is on.
 class InkCanvas extends StatefulWidget {
   const InkCanvas({
     super.key,
@@ -1400,8 +1400,7 @@ class InkCanvas extends StatefulWidget {
     this.ruler,
     this.pointerClaims,
     this.aiActive,
-    this.aiInput,
-    this.selectionFrameHidden,
+    this.onAiSelection,
   });
 
   /// Whether AI mode is on. A lasso then selects the PDF paper and pictures
@@ -1409,13 +1408,11 @@ class InkCanvas extends StatefulWidget {
   /// behind the ink to read it.
   final ValueListenable<bool>? aiActive;
 
-  /// Where a stroke drawn with [EditorTool.ai] goes: a selection loop that
-  /// circles a spot for the assistant, never ink. Without it the AI tool
-  /// draws nothing.
-  final AiCanvasInputController? aiInput;
-
-  /// While true, what is selected shows without its frame and handles.
-  final ValueListenable<bool>? selectionFrameHidden;
+  /// Told when a gesture with [EditorTool.ai], which selects just as
+  /// [EditorTool.select] does, has chosen something anew rather than moved
+  /// what was chosen already. When it was a lasso that never left where it
+  /// began, the argument is where that was on the page.
+  final void Function(InkVector? tap)? onAiSelection;
 
   /// Shared with the note's other pages, so that a selection moved onto one
   /// of them goes there. Without it a selection stays on its page.
@@ -1552,6 +1549,13 @@ class _InkCanvasState extends State<InkCanvas> with WidgetsBindingObserver {
   /// Native pointers that are not ink here: they began on a widget above
   /// the page, such as the toolbar, or the pen was put down mid-stroke.
   final Set<int> _ignoredNativePointers = <int>{};
+
+  /// The pointer of a gesture with the AI tool that is choosing something
+  /// anew, where it pressed, and for a lasso still within a tap of there,
+  /// where that is on the page.
+  int? _aiPickPointer;
+  Offset _aiPickStart = Offset.zero;
+  InkVector? _aiPickTap;
 
   Timer? _holdTimer;
   int? _holdPointer;
@@ -1709,7 +1713,8 @@ class _InkCanvasState extends State<InkCanvas> with WidgetsBindingObserver {
   void _endGesture() {
     _cancelHold();
     _cancelShapeHold();
-    widget.aiInput?.clear();
+    _aiPickPointer = null;
+    _aiPickTap = null;
     widget.carry?.finalizeSelectionGesture();
     widget.controller.finalizeActiveGesture();
   }
@@ -1845,12 +1850,7 @@ class _InkCanvasState extends State<InkCanvas> with WidgetsBindingObserver {
     if (tool != EditorTool.text) {
       controller.finishTextEditing();
     }
-    if (tool == EditorTool.select) {
-      controller.exitStickyEditing();
-      return;
-    }
-    if (tool == EditorTool.ai) {
-      // What is selected stays: it is what the assistant was asked about.
+    if (tool == EditorTool.select || tool == EditorTool.ai) {
       controller.exitStickyEditing();
       return;
     }
@@ -2578,12 +2578,6 @@ class _InkCanvasState extends State<InkCanvas> with WidgetsBindingObserver {
       );
       return;
     }
-    if (widget.tool.value == EditorTool.ai) {
-      if (!controller.isBusy) {
-        widget.aiInput?.begin(event.pointer, controller, _sample(event, kind));
-      }
-      return;
-    }
     if (widget.tool.value == EditorTool.sticky) {
       widget.carry?.clearSelection();
       final Size size = _pageSize;
@@ -2610,7 +2604,9 @@ class _InkCanvasState extends State<InkCanvas> with WidgetsBindingObserver {
       _textTap(position);
       return;
     }
-    if (widget.tool.value == EditorTool.select) {
+    if (widget.tool.value == EditorTool.select ||
+        widget.tool.value == EditorTool.ai) {
+      final InkSelection? before = controller.selection;
       final SelectionCarry? carry = widget.carry;
       final bool began = carry != null
           ? carry._beginSelectionGesture(
@@ -2624,6 +2620,7 @@ class _InkCanvasState extends State<InkCanvas> with WidgetsBindingObserver {
             );
       if (began) {
         _startHold(event);
+        _noteAiPick(event, before);
       }
       return;
     }
@@ -2660,6 +2657,44 @@ class _InkCanvasState extends State<InkCanvas> with WidgetsBindingObserver {
       _cancelShapeHold();
       _shapePointer = event.pointer;
       _shapeAnchor = event.localPosition;
+    }
+  }
+
+  /// Remembers a selection gesture with the AI tool that chooses something
+  /// anew: a lasso, or a press that took up a sticky note or image. A press
+  /// that moves or lifts what [before] already held chooses nothing.
+  void _noteAiPick(PointerDownEvent event, InkSelection? before) {
+    if (widget.tool.value != EditorTool.ai) {
+      return;
+    }
+    final InkController controller = widget.controller;
+    final bool lasso = controller.activeLasso != null;
+    final InkSelection? after = controller.selection;
+    if (!lasso &&
+        (after == null ||
+            identical(before, after) ||
+            (before != null &&
+                (before.includesPdf ||
+                    (listEquals(before.strokes, after.strokes) &&
+                        listEquals(before.images, after.images) &&
+                        listEquals(before.stickies, after.stickies)))))) {
+      return;
+    }
+    _aiPickPointer = event.pointer;
+    _aiPickStart = event.position;
+    _aiPickTap = lasso ? _position(event) : null;
+  }
+
+  /// Hands over what the gesture of [event] chose, if it was choosing.
+  void _endAiPick(PointerEvent event) {
+    if (event.pointer != _aiPickPointer) {
+      return;
+    }
+    final InkVector? tap = _aiPickTap;
+    _aiPickPointer = null;
+    _aiPickTap = null;
+    if (widget.tool.value == EditorTool.ai) {
+      widget.onAiSelection?.call(tap);
     }
   }
 
@@ -2831,9 +2866,9 @@ class _InkCanvasState extends State<InkCanvas> with WidgetsBindingObserver {
         (event.position - _fingerTapStart).distance > kTouchSlop) {
       _fingerTapPointer = -1;
     }
-    if (_isDrawingForAi(event)) {
-      widget.aiInput!.add(event.pointer, _samples(event));
-      return;
+    if (event.pointer == _aiPickPointer &&
+        (event.position - _aiPickStart).distance > kTouchSlop) {
+      _aiPickTap = null;
     }
     if (_isPlacing(event)) {
       widget.controller.updateStickyPlacement(event.pointer, _position(event));
@@ -2929,10 +2964,6 @@ class _InkCanvasState extends State<InkCanvas> with WidgetsBindingObserver {
     if (event.pointer == _shapePointer) {
       _cancelShapeHold();
     }
-    if (_isDrawingForAi(event)) {
-      widget.aiInput!.end(event.pointer, _samples(event));
-      return;
-    }
     if (_isPlacing(event)) {
       final StickyNoteElement? placed = widget.controller.endStickyPlacement(
         event.pointer,
@@ -2977,6 +3008,7 @@ class _InkCanvasState extends State<InkCanvas> with WidgetsBindingObserver {
           widget._takesPaper ? widget.selectablePdfBounds : null,
         );
       }
+      _endAiPick(event);
     } else {
       // Taps are watched on notes not yet open for writing: a second one
       // opens the note.
@@ -3028,7 +3060,10 @@ class _InkCanvasState extends State<InkCanvas> with WidgetsBindingObserver {
     widget.controller
       ..cancelStickyPlacement(event.pointer)
       ..cancelStickyDrag(event.pointer);
-    widget.aiInput?.cancel(event.pointer);
+    if (event.pointer == _aiPickPointer) {
+      _aiPickPointer = null;
+      _aiPickTap = null;
+    }
     if (event.pointer == _holdPointer) {
       _cancelHold();
     }
@@ -3043,13 +3078,6 @@ class _InkCanvasState extends State<InkCanvas> with WidgetsBindingObserver {
       ..cancelStroke(event.pointer)
       ..cancelErase(event.pointer)
       ..cancelSelectionGesture(event.pointer);
-  }
-
-  bool _isDrawingForAi(PointerEvent event) {
-    final AiCanvasInputController? input = widget.aiInput;
-    return input != null &&
-        input.activePointer == event.pointer &&
-        identical(input.page, widget.controller);
   }
 
   bool _isPlacing(PointerEvent event) {
@@ -3159,6 +3187,8 @@ class _InkCanvasState extends State<InkCanvas> with WidgetsBindingObserver {
     final Brightness brightness = Theme.of(context).brightness;
     final AppColors colors = AppColors.of(context);
     final SelectionCarry? carry = widget.carry;
+    final ValueListenable<Rect>? paintArea =
+        PageViewport.paintAreaOf(context) ?? widget.visible;
     return ClipRect(
       child: Listener(
         behavior: HitTestBehavior.opaque,
@@ -3174,7 +3204,7 @@ class _InkCanvasState extends State<InkCanvas> with WidgetsBindingObserver {
                 painter: CompletedStrokesPainter(
                   controller: widget.controller,
                   brightness: brightness,
-                  visible: widget.visible,
+                  visible: paintArea,
                   replay: widget.replay,
                   replayHighlight: colors.accent,
                 ),
@@ -3188,7 +3218,7 @@ class _InkCanvasState extends State<InkCanvas> with WidgetsBindingObserver {
                   controller: widget.controller,
                   accent: colors.accent,
                   config: widget.controller.stickyConfig,
-                  visible: widget.visible,
+                  visible: paintArea,
                 ),
               ),
             ),
@@ -3252,32 +3282,11 @@ class _InkCanvasState extends State<InkCanvas> with WidgetsBindingObserver {
                           : () => carry._overlayFor(this),
                       scale: _screenScale(),
                       scaleProvider: _screenScale,
-                      frameHidden: widget.selectionFrameHidden,
                     ),
                   ),
                 ),
               ),
             ),
-            // The assistant's selection lasso is above everything else and
-            // repaints alone as it is drawn.
-            if (widget.aiInput != null)
-              IgnorePointer(
-                child: ExcludeSemantics(
-                  child: RepaintBoundary(
-                    child: CustomPaint(
-                      key: const ValueKey<String>('ai-canvas-stroke-layer'),
-                      painter: AiCanvasStrokePainter(
-                        input: widget.aiInput!,
-                        page: widget.controller,
-                        color: colors.accent,
-                        selectionConfig: widget.controller.selectionConfig,
-                        scale: _screenScale(),
-                        scaleProvider: _screenScale,
-                      ),
-                    ),
-                  ),
-                ),
-              ),
             IgnorePointer(
               child: ExcludeSemantics(
                 child: RepaintBoundary(

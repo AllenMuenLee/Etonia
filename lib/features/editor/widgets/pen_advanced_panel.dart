@@ -187,7 +187,7 @@ class PenAdvancedPanel extends StatelessWidget {
                                   'pen-scribble-to-erase',
                                 ),
                                 label: 'Scribble to erase',
-                                hint: 'Scribble over ink to erase it',
+                                hint: 'Scribble fast up and down to erase ink',
                                 value: settings.scribbleToErase,
                                 onChanged: (bool value) => onChanged(
                                   settings.copyWith(scribbleToErase: value),

@@ -619,7 +619,17 @@ abstract final class AiPrompts {
       'invent facts. Write Markdown with all LaTeX inside \$...\$ or '
       '\$\$...\$\$; never leave \\frac, \\sqrt, ^, or _ outside them. When '
       'grading, explain your reasoning; never claim an official grade '
-      'without a provided rubric.';
+      'without a provided rubric. When you are given SOURCE LINES, or a '
+      'selection SVG whose elements carry data-etonia-line, end each large '
+      'paragraph, and any paragraph about particular ink, with a citation of '
+      'the SVG lines it refers to: [[L12-L30]], or [[L12-L30,L44-L50]] for '
+      'several places. Match what the paragraph discusses in the image to '
+      'the lines at that position, and cite as narrowly as you can. You may '
+      'cite both the user\'s ink and your own earlier notation. Only cite '
+      'lines you were given, never invent a number, and write citations '
+      'nowhere else: never inside a formula or code, never on a line of '
+      'their own, and never mention them, since the app turns them into '
+      'links.';
 
   // ignore: unused_field, retained only to read legacy JSON conversations.
   static const String _responseContract =
@@ -827,7 +837,13 @@ abstract final class AiPrompts {
       'fresh diagram only when nothing on the paper can be built on. '
       'Do not redraw the user\'s note or put a white background '
       'behind the annotation. If no visual helps, include no visible '
-      'elements and omit data-etonia-bounds.';
+      'elements and omit data-etonia-bounds. Tie the drawing to the words: '
+      'set data-etonia-paragraph="N" on each visible element, or on a group '
+      'of them, where N is the paragraph of the answer it illustrates, '
+      'counting from 1 the blocks of the answer between blank lines. A '
+      'citation such as [[L12-L30]] in that paragraph names the selected '
+      'SVG\'s elements with those data-etonia-line values: draw for that '
+      'paragraph at that ink.';
 
   static const String _svgAnimationOn =
       ' Animation is permitted, not requested; the default is a completely '

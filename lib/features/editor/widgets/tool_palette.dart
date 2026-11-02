@@ -58,8 +58,8 @@ class ToolPaletteController {
   final MenuController imageMenu = MenuController();
   final MenuController recordingMenu = MenuController();
 
-  /// Whether the palette is unfolded to show its secondary tools, the
-  /// ruler. The screen lays out around the palette's size,
+  /// Whether the palette is unfolded to show its secondary tools. The
+  /// screen lays out around the palette's size,
   /// so it listens to this too.
   final ValueNotifier<bool> expanded = ValueNotifier<bool>(false);
 
@@ -201,11 +201,11 @@ class PalettePlacement {
   int get hashCode => Object.hash(edge, along);
 }
 
-/// The floating tool palette: the pen, eraser, Select, AI mode, image
-/// insertion, and Sticky note, and, folded away behind an arrow at its end,
-/// recordings, Text, and the ruler. That is as it comes: the button at its
-/// very end arranges it, in the order and with the buttons the user wants,
-/// as [layout] holds.
+/// The floating tool palette: the pen, eraser, Select, AI mode, and image
+/// insertion, and, folded away behind an arrow at its end, Sticky note,
+/// recordings, Text, the ruler, and the button that arranges it. That is as
+/// it comes: that button puts it in the order and with the buttons the user
+/// wants, as [layout] holds.
 ///
 /// The chosen tool's options lie in a bar beside the palette, parallel to
 /// it and on the page side, and stay put as the palette folds and unfolds:
@@ -306,9 +306,9 @@ class ToolPalette extends StatelessWidget {
       tool != EditorTool.sticky && (shown?.value ?? true);
 
   /// Which buttons the palette shows, in what order, and which fold away
-  /// behind its arrow; the user changes it with the button at the
-  /// palette's end. Without it the palette is as [ToolbarLayout.standard]
-  /// has it, and has no such button.
+  /// behind its arrow; the user changes it with [PaletteItem.customize].
+  /// Without it the palette is as [ToolbarLayout.standard] has it, and has
+  /// no such button.
   final ValueNotifier<ToolbarLayout>? layout;
 
   ToolbarLayout get _tools => layout?.value ?? ToolbarLayout.standard;
@@ -389,14 +389,12 @@ class ToolPalette extends StatelessWidget {
     ToolbarLayout tools = ToolbarLayout.standard,
   }) {
     const double thickness = AppSizes.minTouchTarget + 2 * _padding;
-    // The tools always shown, the arrow if anything is folded behind it,
-    // and the button that arranges them; and the folded tools beside them
-    // once unfolded.
+    // The tools always shown, the arrow if anything is folded behind it, and
+    // the folded tools beside them once unfolded.
     final bool folds = tools.folded.isNotEmpty;
     final int count =
         tools.shown.length +
         (folds ? 1 : 0) +
-        1 +
         (expanded && folds ? tools.folded.length : 0);
     final double length =
         (count - 1) * _buttonStep + AppSizes.minTouchTarget + 2 * _padding;
@@ -490,7 +488,6 @@ class ToolPalette extends StatelessWidget {
                   toggle: controller == null || secondary.isEmpty
                       ? null
                       : _extensionToggle(unfolded, secondary.length),
-                  trailing: layout == null ? null : _customizeControl(),
                 );
               },
             ),
@@ -545,6 +542,7 @@ class ToolPalette extends StatelessWidget {
     PaletteItem.sticky => stickySettings != null,
     PaletteItem.recording => recording != null,
     PaletteItem.ruler => ruler != null,
+    PaletteItem.customize => layout != null,
     _ => true,
   };
 
@@ -558,7 +556,12 @@ class ToolPalette extends StatelessWidget {
     PaletteItem.recording => _recordingControl(),
     PaletteItem.text => _textControl(),
     PaletteItem.ruler => _rulerControl(),
+    PaletteItem.customize => _customizeControl(),
   };
+
+  /// Whether the capsule behind the always-shown tools draws [item]'s
+  /// selected fill. Folded away, it draws its own.
+  bool _hostsSelection(PaletteItem item) => _tools.shown.contains(item);
 
   /// Opens the toolbar's arrangement: the order of its buttons, which are
   /// always shown, which fold away behind the arrow, and which are hidden.
@@ -675,7 +678,7 @@ class ToolPalette extends StatelessWidget {
         final PenSettings pen = penSettings.value;
         return PaletteButton(
           tooltip: pen.style.label,
-          hostsSelection: true,
+          hostsSelection: _hostsSelection(PaletteItem.pen),
           semanticLabel: PenOptions.describe(pen),
           selected: tool.value == EditorTool.pen,
           dense: dense,
@@ -696,7 +699,7 @@ class ToolPalette extends StatelessWidget {
       builder: (BuildContext context) {
         return PaletteButton(
           tooltip: 'Eraser',
-          hostsSelection: true,
+          hostsSelection: _hostsSelection(PaletteItem.eraser),
           semanticLabel:
               'Eraser, ${EraserOptions.describe(eraserSettings.value)}',
           selected: tool.value == EditorTool.eraser,
@@ -714,7 +717,7 @@ class ToolPalette extends StatelessWidget {
       builder: (BuildContext context) {
         return PaletteButton(
           tooltip: 'Select',
-          hostsSelection: true,
+          hostsSelection: _hostsSelection(PaletteItem.select),
           selected: tool.value == EditorTool.select,
           dense: dense,
           onPressed: _chooseOrToggle(context, EditorTool.select),
@@ -738,7 +741,7 @@ class ToolPalette extends StatelessWidget {
         return PaletteButton(
           key: const ValueKey<String>('sticky-note-tool'),
           tooltip: 'Sticky note',
-          hostsSelection: true,
+          hostsSelection: _hostsSelection(PaletteItem.sticky),
           semanticLabel:
               'Sticky note, ${StickyOptions.describe(settings.value)}',
           selected: selected,
@@ -823,7 +826,7 @@ class ToolPalette extends StatelessWidget {
             final bool next = !unfolded;
             controller!.expanded.value = next;
             if (!next) {
-              controller!.recordingMenu.close();
+              controller!.closeAll();
             }
             SemanticsService.sendAnnouncement(
               View.of(context),
@@ -953,6 +956,7 @@ class PaletteItemGlyph extends StatelessWidget {
     PaletteItem.recording => const Icon(AppIcons.microphone),
     PaletteItem.text => const _TextGlyph(),
     PaletteItem.ruler => const RulerIcon(),
+    PaletteItem.customize => const Icon(AppIcons.customizeToolbar),
   };
 }
 
@@ -1045,7 +1049,6 @@ class _PaletteButtonsLayout extends StatelessWidget {
     required this.toolSlot,
     required this.capsuleSize,
     this.toggle,
-    this.trailing,
   });
 
   /// The slot of the chosen tool, where the selection capsule shows; null
@@ -1058,9 +1061,6 @@ class _PaletteButtonsLayout extends StatelessWidget {
   final List<Widget> primary;
   final List<Widget> secondary;
   final Widget? toggle;
-
-  /// Last of all, after [toggle]: the button that arranges the palette.
-  final Widget? trailing;
   final bool unfolded;
   final Duration duration;
 
@@ -1076,8 +1076,7 @@ class _PaletteButtonsLayout extends StatelessWidget {
         final double slots =
             primary.length +
             secondary.length * reveal +
-            (toggle == null ? 0 : 1) +
-            (trailing == null ? 0 : 1);
+            (toggle == null ? 0 : 1);
         final double along = (slots - 1) * step + AppSizes.minTouchTarget;
         final bool across = axis == Axis.horizontal;
 
@@ -1147,13 +1146,6 @@ class _PaletteButtonsLayout extends StatelessWidget {
                   ),
               if (toggle != null)
                 place(primary.length + secondary.length * reveal, toggle!),
-              if (trailing != null)
-                place(
-                  primary.length +
-                      secondary.length * reveal +
-                      (toggle == null ? 0 : 1),
-                  trailing!,
-                ),
             ],
           ),
         );

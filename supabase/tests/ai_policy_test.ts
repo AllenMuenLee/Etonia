@@ -1,5 +1,6 @@
 import { strict as assert } from "node:assert";
 import {
+  answerParagraphs,
   answerReserve,
   billingModel,
   combineSteps,
@@ -11,6 +12,7 @@ import {
   outputBudget,
   providerAnswer,
   providerRequest,
+  readProviderStream,
   reservationCap,
   stepMessage,
   twoStep,
@@ -301,7 +303,7 @@ Deno.test("with Notation on, the chosen model writes the words and a second mode
     assert(drawingBody.includes("existing-ink"));
     assert(drawingBody.includes("ANNOTATION INPUT"));
     assert(drawingBody.includes('QUESTION: \\"Current question\\"'));
-    assert(drawingBody.includes('ANSWER: \\"Answer.\\"'));
+    assert(drawingBody.includes('[P1] \\"Answer.\\"'));
     // Handwriting cannot be read from paths: the crop comes with the SVG,
     // the question, and the answer, all in one turn.
     assert(drawingBody.includes(png));
@@ -356,14 +358,15 @@ Deno.test("with Notation on, the chosen model writes the words and a second mode
   assert(
     JSON.stringify(notation.body.system).includes("self-contained SVG"),
   );
-  // Only the drawing pass asks for high effort.
-  assert.deepEqual(notation.body.output_config, { effort: "high" });
+  // Only the drawing pass asks for an effort, and streams.
+  assert.deepEqual(notation.body.output_config, { effort: "medium" });
+  assert.equal(notation.body.stream, true);
   const turns = notation.body.messages as { role: string; content: unknown }[];
   assert.deepEqual(turns.map((t) => t.role), ["user"]);
   const notationPayload = JSON.stringify(turns[0].content);
   assert(notationPayload.includes("existing-ink"));
   assert(notationPayload.includes('QUESTION: \\"Current question\\"'));
-  assert(notationPayload.includes('ANSWER: \\"The hypotenuse is 5.\\"'));
+  assert(notationPayload.includes('[P1] \\"The hypotenuse is 5.\\"'));
 
   // The drawing step is told what the user asked, on every provider, and
   // a follow-up keeps the requests that came before it.
@@ -386,7 +389,7 @@ Deno.test("with Notation on, the chosen model writes the words and a second mode
         }).body,
       );
       assert(body.includes('QUESTION: \\"complete the inverted op amp\\"'));
-      assert(body.includes('ANSWER: \\"Answer.\\"'));
+      assert(body.includes('[P1] \\"Answer.\\"'));
       assert(body.includes("existing-ink"));
       assert(body.includes('\\"what is this?\\"'));
       assert(!body.includes("A triangle."));
@@ -473,7 +476,9 @@ Deno.test("the fixed instructions are a cacheable prefix, billed at the cached r
   assert(system.indexOf("Notation is on.") < system.indexOf("Metadata: {}"));
   assert(JSON.stringify(openai.body).includes("existing-ink"));
   assert(JSON.stringify(openai.body).includes('"image_url"'));
-  assert.equal(openai.body.reasoning_effort, "high");
+  assert.equal(openai.body.reasoning_effort, "medium");
+  assert.equal(openai.body.stream, true);
+  assert.deepEqual(openai.body.stream_options, { include_usage: true });
   // A stale AI_MODEL_CONFIG may still carry the removed reasoningEffort
   // field; answers keep the provider default regardless.
   const legacy = { ...config, reasoningEffort: "low" };
@@ -503,7 +508,7 @@ Deno.test("the fixed instructions are a cacheable prefix, billed at the cached r
   assert(blocks[1].text.includes("Metadata: {}"));
   assert.equal(blocks[1].cache_control, undefined);
   assert.deepEqual(claude.body.thinking, { type: "adaptive" });
-  assert.deepEqual(claude.body.output_config, { effort: "high" });
+  assert.deepEqual(claude.body.output_config, { effort: "medium" });
   const claudeDefault = providerRequest(
     { ...config, provider: "claude" },
     input,
@@ -522,8 +527,9 @@ Deno.test("the fixed instructions are a cacheable prefix, billed at the cached r
   );
   assert.deepEqual(
     (gemini.body.generationConfig as Record<string, unknown>).thinkingConfig,
-    { thinkingLevel: "HIGH" },
+    { thinkingLevel: "MEDIUM" },
   );
+  assert(gemini.url.endsWith(":streamGenerateContent?alt=sse"));
   const geminiDefault = providerRequest(
     { ...legacy, provider: "gemini" as const },
     input,
@@ -698,4 +704,203 @@ Deno.test("endpoint errors never disclose payloads or underlying secrets", async
       .status,
     401,
   );
+});
+
+function sseBody(text: string, chunkSize = 7): ReadableStream<Uint8Array> {
+  const bytes = new TextEncoder().encode(text);
+  let offset = 0;
+  return new ReadableStream({
+    pull(controller) {
+      if (offset >= bytes.length) return controller.close();
+      controller.enqueue(bytes.slice(offset, offset += chunkSize));
+    },
+  });
+}
+const sse = (...events: unknown[]) =>
+  events.map((event) => `data: ${JSON.stringify(event)}\n\n`).join("");
+const streamModel = {
+  model: "m",
+  inputMicroPerKilo: 1000,
+  outputMicroPerKilo: 1000,
+  maxOutputTokens: 100,
+};
+
+Deno.test("a streamed drawing reads as the whole answer would, on every provider", async () => {
+  const pieces: string[] = [];
+  const openai = await readProviderStream(
+    { ...streamModel, provider: "openai" },
+    sseBody(
+      sse(
+        { choices: [{ delta: { content: "<svg>" } }] },
+        { choices: [{ delta: { content: "</svg>" } }] },
+        {
+          choices: [],
+          usage: {
+            prompt_tokens: 10,
+            completion_tokens: 4,
+            prompt_tokens_details: { cached_tokens: 2 },
+          },
+        },
+      ) + "data: [DONE]\n\n",
+    ),
+    (text) => pieces.push(text),
+  );
+  assert.deepEqual(pieces, ["<svg>", "</svg>"]);
+  assert.deepEqual(openai, {
+    answer: "<svg></svg>",
+    input: 10,
+    output: 4,
+    cached: 2,
+    cacheWrites: 0,
+  });
+
+  const claude = await readProviderStream(
+    { ...streamModel, provider: "claude" },
+    sseBody(
+      "event: message_start\n" +
+        sse(
+          {
+            type: "message_start",
+            message: {
+              usage: {
+                input_tokens: 5,
+                cache_read_input_tokens: 3,
+                cache_creation_input_tokens: 2,
+                output_tokens: 1,
+              },
+            },
+          },
+          { type: "content_block_delta", delta: { type: "thinking_delta", thinking: "hm" } },
+          { type: "content_block_delta", delta: { type: "text_delta", text: "<svg/>" } },
+          { type: "message_delta", usage: { output_tokens: 9 } },
+          { type: "message_stop" },
+        ),
+    ),
+    () => {},
+  );
+  assert.deepEqual(claude, { answer: "<svg/>", input: 10, output: 9, cached: 3, cacheWrites: 2 });
+
+  const gemini = await readProviderStream(
+    { ...streamModel, provider: "gemini" },
+    sseBody(
+      sse(
+        { candidates: [{ content: { parts: [{ text: "hm", thought: true }] } }] },
+        { candidates: [{ content: { parts: [{ text: "<svg/>" }] } }] },
+        {
+          usageMetadata: {
+            promptTokenCount: 6,
+            candidatesTokenCount: 2,
+            thoughtsTokenCount: 3,
+          },
+        },
+      ),
+    ),
+    () => {},
+  );
+  assert.deepEqual(gemini, { answer: "<svg/>", cached: 0, cacheWrites: 0, input: 6, output: 5 });
+});
+
+Deno.test("liveNotation is a boolean that only goes with a notation request", () => {
+  const notationContext = { width: 800, height: 1100, left: 0.1, top: 0.2, right: 0.4, bottom: 0.5 };
+  const withNote = { ...input, notationInstruction: "Draw", notationContext };
+  assert.equal(validateInput({ ...withNote, liveNotation: true }).liveNotation, true);
+  assert.throws(() => validateInput({ ...withNote, liveNotation: "yes" }), Failure);
+  assert.throws(() => validateInput({ ...input, liveNotation: true }), Failure);
+});
+
+Deno.test("a broken drawing stream has no answer to bill", async () => {
+  await assert.rejects(
+    readProviderStream(
+      { ...streamModel, provider: "claude" },
+      sseBody(sse({ type: "error", error: { type: "overloaded_error" } })),
+      () => {},
+    ),
+    Failure,
+  );
+  await assert.rejects(
+    readProviderStream(
+      { ...streamModel, provider: "openai" },
+      sseBody("data: {not json\n\n"),
+      () => {},
+    ),
+  );
+  // Cut off before its usage, it reports none, like a whole answer without.
+  const cut = await readProviderStream(
+    { ...streamModel, provider: "openai" },
+    sseBody(sse({ choices: [{ delta: { content: "<svg>" } }] })),
+    () => {},
+  );
+  assert.equal(cut.input, undefined);
+});
+
+Deno.test("the service numbers an answer's paragraphs as the app does", () => {
+  // The same cases as test/features/editor/ai/ai_citation_test.dart: the
+  // number on a drawn stroke must find the same paragraph in both.
+  const numbering: [string, number][] = [
+    ["One.\n\nTwo.", 2],
+    ["One.\n\n\n\nTwo.\n", 2],
+    ["One.\nStill one.", 1],
+    ["One.\n\n```\ncode\n\nmore code\n```\n\nThree.", 3],
+    ["One.\n\n$$\na\n\nb\n$$\n\nThree.", 3],
+    ["One.\n\n$$a$$\n\nThree.", 3],
+    ["One.\n\n[[L5-L9]]\n\nTwo.", 2],
+    ["[[L5-L9]]\n\nOne.", 1],
+    ["", 0],
+  ];
+  for (const [answer, count] of numbering) {
+    assert.equal(answerParagraphs(answer).length, count, JSON.stringify(answer));
+  }
+  // A citation alone on a line stays with the paragraph it follows.
+  assert.deepEqual(answerParagraphs("One.\n\n[[L5-L9]]\n\nTwo."), [
+    "One. [[L5-L9]]",
+    "Two.",
+  ]);
+});
+
+Deno.test("the words get the citable lines, the drawing the numbered paragraphs", () => {
+  const cited = validateInput({
+    ...input,
+    notationContext: { width: 800, height: 1100, left: 0.1, top: 0.2, right: 0.4, bottom: 0.5 },
+    notationInstruction: "Notation is on",
+    selectedSvg,
+    sourceLines: "L5-L9 note 80 220 240 30",
+  });
+  const model = {
+    provider: "claude",
+    model: "m",
+    inputMicroPerKilo: 1,
+    outputMicroPerKilo: 1,
+    maxOutputTokens: 1024,
+  } as const;
+  const words = JSON.stringify(providerRequest(model, cited, 256, "k", { step: "text" }).body);
+  assert(words.includes("SOURCE LINES"));
+  assert(words.includes("L5-L9 note 80 220 240 30"));
+
+  const drawing = JSON.stringify(
+    providerRequest(model, cited, 256, "k", {
+      step: "notation",
+      message: "First. [[L5-L9]]\n\nSecond.",
+    }).body,
+  );
+  // The drawing has the SVG itself, so it is not sent the outline too.
+  assert(!drawing.includes("SOURCE LINES"));
+  assert(drawing.includes("[P1]"));
+  assert(drawing.includes("[[L5-L9]]"));
+  assert(drawing.includes("[P2]"));
+  assert(drawing.includes("data-etonia-paragraph"));
+
+  // A request with Notation off can still cite.
+  const plain = validateInput({ ...input, sourceLines: "L5 note 1 2 3 4" });
+  assert(JSON.stringify(providerRequest(model, plain, 256, "k").body).includes("SOURCE LINES"));
+  // What the outline costs is held for.
+  const priced = { ...model, inputMicroPerKilo: 1000 };
+  assert(
+    reservationCap(priced, cited, priced) >
+      reservationCap(priced, { ...cited, sourceLines: undefined }, priced),
+  );
+});
+
+Deno.test("citable lines must be a short string", () => {
+  assert.throws(() => validateInput({ ...input, sourceLines: 5 }));
+  assert.throws(() => validateInput({ ...input, sourceLines: "x".repeat(16001) }));
 });

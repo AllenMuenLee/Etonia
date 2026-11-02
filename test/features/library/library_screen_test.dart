@@ -966,6 +966,63 @@ void main() {
     expect((await repository.trash()).single.title, 'Old copy');
   });
 
+  group('the hint that a note was deleted', () {
+    const String hint = 'Moved "Old" to Recently Deleted';
+
+    testWidgets('goes by itself after five seconds', (
+      WidgetTester tester,
+    ) async {
+      final InMemoryNoteRepository repository = _repository();
+      await repository.createNote(title: 'Old');
+      await _pumpLibrary(tester, repository);
+
+      await _menuAction(tester, 'Old', 'Delete');
+      expect(find.text(hint), findsOneWidget);
+
+      await tester.pump(const Duration(milliseconds: 4900));
+      expect(find.text(hint), findsOneWidget);
+
+      await tester.pump(const Duration(milliseconds: 200));
+      await tester.pumpAndSettle();
+      expect(find.text(hint), findsNothing);
+    });
+
+    testWidgets('goes with the next action', (WidgetTester tester) async {
+      final InMemoryNoteRepository repository = _repository();
+      await repository.createNote(title: 'Old');
+      await repository.createNote(title: 'Next');
+      await _pumpLibrary(tester, repository);
+
+      await _menuAction(tester, 'Old', 'Delete');
+      expect(find.text(hint), findsOneWidget);
+
+      await tester.tap(_items(find.byTooltip('More actions for Next')));
+      await tester.pumpAndSettle();
+      expect(find.text(hint), findsNothing);
+    });
+
+    testWidgets('leaves Undo working, even held down', (
+      WidgetTester tester,
+    ) async {
+      final InMemoryNoteRepository repository = _repository();
+      await repository.createNote(title: 'Old');
+      await _pumpLibrary(tester, repository);
+
+      await _menuAction(tester, 'Old', 'Delete');
+      final TestGesture press = await tester.startGesture(
+        tester.getCenter(find.text('Undo')),
+      );
+      await tester.pump(const Duration(seconds: 1));
+      expect(find.text(hint), findsOneWidget);
+      await press.up();
+      await tester.pumpAndSettle();
+
+      expect(find.text(hint), findsNothing);
+      expect(_items(find.text('Old')), findsOneWidget);
+      expect(await repository.trash(), isEmpty);
+    });
+  });
+
   testWidgets('Recently Deleted restores notes and deletes them for good', (
     WidgetTester tester,
   ) async {

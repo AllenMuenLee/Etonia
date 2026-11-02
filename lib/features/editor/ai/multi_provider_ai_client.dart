@@ -85,7 +85,11 @@ class MultiProviderAiClient implements AiModelRouter {
   }
 
   @override
-  Future<AiResult> send(AiRequest request, {AiPartialCallback? onPartial}) {
+  Future<AiResult> send(
+    AiRequest request, {
+    AiPartialCallback? onPartial,
+    AiNotationPartialCallback? onNotation,
+  }) {
     final AiModelId model = request.model ?? defaultModel;
     if (_closed) {
       return Future<AiResult>.value(
@@ -97,7 +101,9 @@ class MultiProviderAiClient implements AiModelRouter {
         const AiError(AiFailure(AiFailureKind.notConfigured)),
       );
     }
-    return clientFor(model).send(request, onPartial: onPartial);
+    return clientFor(
+      model,
+    ).send(request, onPartial: onPartial, onNotation: onNotation);
   }
 
   @override

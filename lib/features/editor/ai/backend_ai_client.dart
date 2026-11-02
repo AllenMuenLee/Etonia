@@ -93,6 +93,7 @@ class BackendAiClient implements AiModelRouter {
   Future<AiResult> send(
     AiRequest request, {
     AiPartialCallback? onPartial,
+    AiNotationPartialCallback? onNotation,
   }) async {
     if (_closed) return const AiError(AiFailure(AiFailureKind.interrupted));
     if (!isConfigured) {
@@ -137,11 +138,15 @@ class BackendAiClient implements AiModelRouter {
         if (notation && request.notationInstruction != null)
           'notationInstruction': request.notationInstruction,
         if (notation) 'animationAllowed': request.animationEnabled,
+        // Asked for, since a client that does not know the events refuses them.
+        if (notation && onNotation != null) 'liveNotation': true,
         // The note travels as coordinates, never as a picture: where the
         // selection is, its ink, boxes round what is near it, and where the
         // paper is blank. Apart, so it does not break the cached prefix.
         if (notation) 'noteMetadata': aiNoteMetadata(note),
         'selectedImage': base64Encode(request.imagePng),
+        // Where each line of the selection SVG lies, for the words to cite.
+        'sourceLines': ?request.sourceLines,
         if (notation && request.selectionSvg != null)
           'selectedSvg': request.selectionSvg,
         // Formatted output: the provider must answer in exactly this
@@ -161,6 +166,7 @@ class BackendAiClient implements AiModelRouter {
         body,
         notation: notation,
         onPartial: onPartial,
+        onNotation: onNotation,
       );
       if (_closed) return const AiError(AiFailure(AiFailureKind.interrupted));
       final String raw = stripJsonFence(response['answer'] as String);
@@ -215,6 +221,7 @@ class BackendAiClient implements AiModelRouter {
     Map<String, Object?> body, {
     required bool notation,
     required AiPartialCallback? onPartial,
+    required AiNotationPartialCallback? onNotation,
   }) async {
     final BackendInvokeStream? streamCall =
         invokeStream ?? (invoke == null ? _backend.invokeStream : null);
@@ -222,6 +229,7 @@ class BackendAiClient implements AiModelRouter {
       return (invoke ?? _backend.invoke)('ai', body);
     }
     Map<String, dynamic>? result;
+    final StringBuffer svg = StringBuffer();
     await for (final Map<String, dynamic> event in await streamCall(
       'ai',
       body,
@@ -233,6 +241,12 @@ class BackendAiClient implements AiModelRouter {
             throw const BackendFailure('server');
           }
           onPartial?.call(message, true);
+        case 'notation':
+          // Only for display, so a bad one costs the preview at most.
+          if (event['delta'] case final String delta) {
+            svg.write(delta);
+            onNotation?.call(svg.toString());
+          }
         case 'result':
           if (event['answer'] is! String ||
               event['usage'] is! Map<String, dynamic>) {

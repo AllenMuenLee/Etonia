@@ -25,18 +25,31 @@ class FakeAiClient implements AiClient {
   final List<AiRequest> requests = <AiRequest>[];
   final List<Completer<AiResult>> _pending = <Completer<AiResult>>[];
   final List<AiPartialCallback?> _partials = <AiPartialCallback?>[];
+  final List<AiNotationPartialCallback?> _notations =
+      <AiNotationPartialCallback?>[];
   bool closed = false;
 
   @override
   String get modelLabel => 'Fake model';
 
   @override
-  Future<AiResult> send(AiRequest request, {AiPartialCallback? onPartial}) {
+  Future<AiResult> send(
+    AiRequest request, {
+    AiPartialCallback? onPartial,
+    AiNotationPartialCallback? onNotation,
+  }) {
     requests.add(request);
     final Completer<AiResult> completer = Completer<AiResult>();
     _pending.add(completer);
     _partials.add(onPartial);
+    _notations.add(onNotation);
     return completer.future;
+  }
+
+  /// Streams [svg] as the part of request number [index]'s notation written
+  /// so far.
+  void streamNotation(String svg, {int? index}) {
+    _notations[index ?? _notations.length - 1]?.call(svg);
   }
 
   /// Streams [message] as the part of request number [index]'s answer

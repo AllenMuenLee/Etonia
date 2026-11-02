@@ -84,6 +84,8 @@ class GeminiAiClient implements AiClient {
             },
             if (selectionSvg != null)
               <String, Object?>{'text': aiSelectionSvgText(selectionSvg)},
+            if (request.sourceLines case final String lines)
+              <String, Object?>{'text': aiSourceLinesText(lines)},
           ],
           if (request.noteImage case final note? when index == lastUser)
             <String, Object?>{'text': aiNoteMetadata(note)},
@@ -114,6 +116,7 @@ class GeminiAiClient implements AiClient {
   Future<AiResult> send(
     AiRequest request, {
     AiPartialCallback? onPartial,
+    AiNotationPartialCallback? onNotation,
   }) async {
     if (!isConfigured) {
       return const AiError(AiFailure(AiFailureKind.notConfigured));
@@ -126,7 +129,11 @@ class GeminiAiClient implements AiClient {
         notationConfig: notationConfig,
       ),
     );
-    final _AnswerReader reader = _AnswerReader(notationConfig, onPartial);
+    final _AnswerReader reader = _AnswerReader(
+      notationConfig,
+      onPartial,
+      onNotation,
+    );
     AiResult result = await _attempt(body, reader);
     // Only an internal error or an unavailable service is sent again: the
     // service answers those at once, having generated nothing. Anything
@@ -247,10 +254,11 @@ class GeminiAiClient implements AiClient {
 /// service reported part way. A body that is not server-sent events is
 /// read as one whole response, or a list of them.
 class _AnswerReader {
-  _AnswerReader(this._config, this._onPartial);
+  _AnswerReader(this._config, this._onPartial, this._onNotation);
 
   final AiNotationConfig _config;
   final AiPartialCallback? _onPartial;
+  final AiNotationPartialCallback? _onNotation;
 
   int _status = 200;
 
@@ -470,13 +478,16 @@ class _AnswerReader {
 
   /// Tells the listener the message written so far, when it has grown.
   void _report() {
-    final AiPartialCallback? onPartial = _onPartial;
-    if (onPartial == null || _stopped || _texts.isEmpty) {
+    if (_stopped || _texts.isEmpty) {
       return;
     }
-    final (String, bool)? state = AiAssistantResponse.partialMessageState(
-      _texts.values.first.toString(),
-    );
+    final String text = _texts.values.first.toString();
+    _onNotation?.call(text);
+    final AiPartialCallback? onPartial = _onPartial;
+    if (onPartial == null) {
+      return;
+    }
+    final (String, bool)? state = AiAssistantResponse.partialMessageState(text);
     if (state == null) {
       return;
     }

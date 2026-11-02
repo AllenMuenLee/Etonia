@@ -9,7 +9,6 @@ import 'package:greatnote/features/editor/editor_screen.dart';
 import 'package:greatnote/features/editor/ink/eraser_settings.dart';
 import 'package:greatnote/features/editor/ink/ink_canvas.dart';
 import 'package:greatnote/features/editor/ink/ink_controller.dart';
-import 'package:greatnote/features/editor/ink/ink_painter.dart';
 import 'package:greatnote/features/editor/ink/ink_palette.dart';
 import 'package:greatnote/features/editor/ink/ink_sample.dart';
 import 'package:greatnote/features/editor/ink/stroke.dart';
@@ -116,14 +115,6 @@ List<Offset> _letter(Offset start) => <Offset>[
 /// Whether the composer has the keyboard.
 bool _composing(WidgetTester tester) =>
     FocusManager.instance.primaryFocus?.debugLabel == 'AI composer';
-
-/// Whether the selection's frame and handles are painted.
-bool _framed(WidgetTester tester) {
-  final CustomPaint layer = tester.widget<CustomPaint>(
-    find.byKey(const ValueKey<String>('selection-layer')).first,
-  );
-  return !((layer.painter! as SelectionPainter).frameHidden?.value ?? false);
-}
 
 Future<void> _turnOnAi(WidgetTester tester) async {
   await tester.tap(find.byTooltip('Turn on AI'));
@@ -243,9 +234,7 @@ void main() {
     });
 
     testWidgets('asked about a selection, the composer takes the keyboard, '
-        'and the selection shows without its frame or actions', (
-      WidgetTester tester,
-    ) async {
+        'and the selection keeps its actions', (WidgetTester tester) async {
       final _Editor editor = await _pump(
         tester,
         strokes: <Stroke>[_mark(const Offset(200, 200))],
@@ -255,7 +244,6 @@ void main() {
       selectInk(editor.ink, const Rect.fromLTRB(150, 180, 250, 220));
       await tester.pump();
       expect(find.byTooltip('Copy'), findsOneWidget);
-      expect(_framed(tester), isTrue);
       expect(_composing(tester), isFalse);
 
       await tester.tap(find.byTooltip('AI assistant'));
@@ -264,15 +252,101 @@ void main() {
 
       expect(_composing(tester), isTrue);
       expect(editor.ink.selection, isNotNull);
-      expect(find.byTooltip('Copy'), findsNothing);
-      expect(_framed(tester), isFalse);
+      expect(find.byTooltip('Copy'), findsOneWidget);
+    });
 
-      // Another tool beside AI mode brings them back.
-      await tester.tap(find.byTooltip('Select'));
+    testWidgets('the AI tool takes what any lasso encloses, as Select does', (
+      WidgetTester tester,
+    ) async {
+      final _Editor editor = await _pump(
+        tester,
+        strokes: <Stroke>[_mark(const Offset(200, 200))],
+      );
+      await _turnOnAi(tester);
+
+      // An open arc, far from a round closed loop.
+      await _write(tester, const <Offset>[
+        Offset(170, 185),
+        Offset(230, 185),
+        Offset(230, 215),
+        Offset(170, 215),
+      ]);
       await tester.pumpAndSettle();
+      await settleAi(tester);
+
       expect(editor.ink.selection, isNotNull);
       expect(find.byTooltip('Copy'), findsOneWidget);
-      expect(_framed(tester), isTrue);
+      expect(_assistant(tester).context!.snapshot.sourceStrokeCount, 1);
+    });
+
+    testWidgets('the AI tool moves what is selected, as Select does, without '
+        'asking about it again', (WidgetTester tester) async {
+      final _Editor editor = await _pump(
+        tester,
+        strokes: <Stroke>[_mark(const Offset(200, 200))],
+      );
+      await _turnOnAi(tester);
+      await _write(tester, const <Offset>[
+        Offset(260, 200),
+        Offset(260, 260),
+        Offset(140, 260),
+        Offset(140, 170),
+        Offset(260, 170),
+      ]);
+      await tester.pumpAndSettle();
+      await settleAi(tester);
+      final AiSelectionContext first = _assistant(tester).context!;
+      final Offset before = editor.ink.strokes.single.bounds.center;
+      FocusManager.instance.primaryFocus?.unfocus();
+      await tester.pump();
+
+      await _write(tester, const <Offset>[
+        Offset(200, 200),
+        Offset(240, 220),
+        Offset(280, 240),
+      ]);
+      await tester.pumpAndSettle();
+
+      expect(editor.ink.selection, isNotNull);
+      expect(
+        (editor.ink.strokes.single.bounds.center -
+                (before + const Offset(80, 40)))
+            .distance,
+        lessThan(0.01),
+      );
+      expect(_assistant(tester).context, same(first));
+      expect(
+        _assistant(tester).context!.groups.single.strokes.single,
+        same(editor.ink.strokes.single),
+      );
+      expect(find.text('New selection'), findsNothing);
+      expect(_composing(tester), isFalse);
+    });
+
+    testWidgets('a tap with the AI tool clears the selection, as Select does, '
+        'and the chat keeps what it was given', (WidgetTester tester) async {
+      final _Editor editor = await _pump(
+        tester,
+        strokes: <Stroke>[_mark(const Offset(200, 200))],
+      );
+      await _turnOnAi(tester);
+      await _write(tester, const <Offset>[
+        Offset(260, 200),
+        Offset(260, 260),
+        Offset(140, 260),
+        Offset(140, 170),
+        Offset(260, 170),
+      ]);
+      await tester.pumpAndSettle();
+      await settleAi(tester);
+      final AiSelectionContext first = _assistant(tester).context!;
+
+      await tester.tapAt(_screen(tester, const Offset(500, 500)));
+      await tester.pumpAndSettle();
+
+      expect(editor.ink.selection, isNull);
+      expect(find.byTooltip('Copy'), findsNothing);
+      expect(_assistant(tester).context, same(first));
     });
 
     testWidgets('circled with the AI tool, the composer takes the keyboard', (
@@ -302,8 +376,7 @@ void main() {
       expect(editor.ink.selection, isNotNull);
       expect(_assistant(tester).hasSelection, isTrue);
       expect(_composing(tester), isTrue);
-      expect(find.byTooltip('Copy'), findsNothing);
-      expect(_framed(tester), isFalse);
+      expect(find.byTooltip('Copy'), findsOneWidget);
     });
 
     testWidgets(

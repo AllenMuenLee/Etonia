@@ -974,6 +974,96 @@ void main() {
       expect(tester.takeException(), isNull);
     });
 
+    testWidgets('an SVG is shown on the note as it is written, then added', (
+      WidgetTester tester,
+    ) async {
+      final (InkController controller, FakeAiClient client) = await _pumpOpen(
+        tester,
+      );
+      final int before = controller.strokes.length;
+      _assistant(tester).setNotationEnabled(true);
+      await tester.pump();
+      await tester.tap(_quickAction('Explain this'));
+      await settleAi(tester);
+      final Size page = client.requests.single.noteImage!.logicalSize;
+      final String root =
+          '<svg xmlns="http://www.w3.org/2000/svg" data-etonia-version="1" '
+          'viewBox="0 0 ${page.width} ${page.height}" '
+          'data-etonia-bounds="100 80 160 40">'
+          '<desc data-etonia-role="message">Answer</desc>';
+      const String line =
+          '<line x1="100" y1="90" x2="250" y2="90" stroke="black"/>';
+      const String lower =
+          '<line x1="100" y1="110" x2="250" y2="110" stroke="black"/>';
+
+      client.streamNotation('$root<line x1="100" y1="9');
+      expect(controller.notationPreview, isEmpty);
+
+      // Long enough for any wait between draws, which depends on real time.
+      const Duration drawn = Duration(seconds: 5);
+      await tester.pump(drawn);
+      client.streamNotation('$root$line<line x1="100"');
+      await tester.pump(drawn);
+      expect(controller.notationPreview, isNotEmpty);
+      final int first = controller.notationPreview.length;
+      // Only shown: the note itself has not changed.
+      expect(controller.strokes.length, before);
+
+      client.streamNotation('$root$line$lower');
+      await tester.pump(drawn);
+      expect(controller.notationPreview.length, greaterThan(first));
+      expect(controller.strokes.length, before);
+
+      client.answerResponse(
+        AiAssistantResponse(
+          message: 'Done.',
+          notation: AiNotation.vector(
+            EditableSvg.parse('$root$line$lower</svg>', modelResponse: true),
+          ),
+        ),
+      );
+      await tester.pump();
+
+      expect(controller.notationPreview, isEmpty);
+      expect(controller.strokes.length, greaterThan(before));
+      await tester.pumpAndSettle();
+      expect(tester.takeException(), isNull);
+    });
+
+    testWidgets('writing on the note takes away the SVG being shown', (
+      WidgetTester tester,
+    ) async {
+      final (InkController controller, FakeAiClient client) = await _pumpOpen(
+        tester,
+      );
+      _assistant(tester).setNotationEnabled(true);
+      await tester.pump();
+      await tester.tap(_quickAction('Explain this'));
+      await settleAi(tester);
+      final Size page = client.requests.single.noteImage!.logicalSize;
+      final String root =
+          '<svg xmlns="http://www.w3.org/2000/svg" data-etonia-version="1" '
+          'viewBox="0 0 ${page.width} ${page.height}" '
+          'data-etonia-bounds="100 80 160 40">';
+      const String line =
+          '<line x1="100" y1="90" x2="250" y2="90" stroke="black"/>';
+      // Long enough for any wait between draws, which depends on real time.
+      const Duration drawn = Duration(seconds: 5);
+      client.streamNotation('$root$line');
+      await tester.pump(drawn);
+      expect(controller.notationPreview, isNotEmpty);
+
+      // The answer can no longer be added, so it must not look as if it will.
+      expect(controller.deleteSelection(), isTrue);
+      client.streamNotation('$root$line$line');
+      await tester.pump(drawn);
+      expect(controller.notationPreview, isEmpty);
+
+      client.answer('Words.');
+      await tester.pumpAndSettle();
+      expect(tester.takeException(), isNull);
+    });
+
     testWidgets('a completed SVG response appears as native notation ink', (
       WidgetTester tester,
     ) async {

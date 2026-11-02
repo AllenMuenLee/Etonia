@@ -168,6 +168,7 @@ class InkController {
   InkClipboard? _clipboard;
   int _pasteCount = 0;
   final List<NotationPlayback> _playbacks = <NotationPlayback>[];
+  List<Stroke> _notationPreview = const <Stroke>[];
   Duration _notationClock = Duration.zero;
   bool _disposed = false;
   bool _svgAnimationsEnabled = true;
@@ -331,6 +332,41 @@ class InkController {
   /// playback layer instead of the finished-ink layer.
   List<NotationPlayback> get notationPlaybacks {
     return UnmodifiableListView<NotationPlayback>(_playbacks);
+  }
+
+  /// An AI notation as far as it has been written: painted over the ink, and
+  /// no part of the document, so it is never saved, selected, or undone.
+  List<Stroke> get notationPreview => _notationPreview;
+
+  /// Shows [traces] as the [notationPreview], in place of any before. Traces
+  /// that [addAiNotation] would refuse change nothing, and return false.
+  bool showNotationPreview({
+    required List<GeneratedInkTrace> traces,
+    required Size surfaceSize,
+    GeneratedInkLimits limits = const GeneratedInkLimits(),
+  }) {
+    if (_disposed || traces.length > limits.maxTraces) {
+      return false;
+    }
+    final List<Stroke>? strokes = _generatedStrokes(
+      traces,
+      surfaceSize,
+      limits,
+    );
+    if (strokes == null) {
+      return false;
+    }
+    _notationPreview = List<Stroke>.unmodifiable(strokes);
+    _playbackChanged.notify();
+    return true;
+  }
+
+  void clearNotationPreview() {
+    if (_disposed || _notationPreview.isEmpty) {
+      return;
+    }
+    _notationPreview = const <Stroke>[];
+    _playbackChanged.notify();
   }
 
   /// The most recently added of [notationPlaybacks], if any.
@@ -1365,25 +1401,6 @@ class InkController {
       _completedChanged.notify();
     }
     _selectionChanged.notify();
-  }
-
-  /// Selects everything [outline] encloses, as a lasso drawn along it
-  /// would, without a lasso gesture: used when a loop drawn in AI mode
-  /// circles a spot. Returns whether anything was selected; when nothing
-  /// was, the selection is left as it was. Not while a pointer is busy.
-  bool selectEnclosed(List<InkVector> outline, {Rect? selectablePdfBounds}) {
-    if (_isBusy || _disposed) {
-      return false;
-    }
-    final InkSelection? enclosed = _enclosedBy(outline, selectablePdfBounds);
-    if (enclosed == null) {
-      return false;
-    }
-    if (_setSelection(enclosed)) {
-      _completedChanged.notify();
-    }
-    _selectionChanged.notify();
-    return true;
   }
 
   /// Selects every stroke, image, sticky note, or PDF excerpt enclosed by

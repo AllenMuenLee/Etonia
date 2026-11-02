@@ -40,7 +40,7 @@ class PageBackgroundLayer extends StatelessWidget {
             background: background,
             rule: colors.pageRule,
             marginRule: colors.pageMarginRule,
-            visible: visible,
+            visible: PageViewport.paintAreaOf(context) ?? visible,
             scale: PageViewport.scaleOf(context),
             config: config,
           ),

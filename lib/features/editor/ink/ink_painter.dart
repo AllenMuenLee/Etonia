@@ -312,6 +312,17 @@ class NotationPlaybackPainter extends CustomPainter {
 
   @override
   void paint(Canvas canvas, Size size) {
+    for (final Stroke stroke in controller.notationPreview) {
+      _paintStroke(
+        canvas,
+        style: stroke.style,
+        path: stroke.path,
+        origin: stroke.points.first,
+        isDot: stroke.isDot,
+        brightness: brightness,
+        outline: stroke.outline,
+      );
+    }
     final List<NotationPlayback> playbacks = controller.notationPlaybacks;
     if (playbacks.isEmpty) {
       return;
@@ -605,12 +616,10 @@ class SelectionPainter extends CustomPainter {
     this.crossPageOverlay,
     this.scale = 1,
     this.scaleProvider,
-    this.frameHidden,
   }) : super(
          repaint: Listenable.merge(<Listenable>[
            controller.selectionListenable,
            ?crossPageListenable,
-           ?frameHidden,
          ]),
        );
 
@@ -635,10 +644,6 @@ class SelectionPainter extends CustomPainter {
 
   /// Optional dynamic provider for the latest screen scale.
   final double Function()? scaleProvider;
-
-  /// While true, the selection's strokes are painted without their frame
-  /// and handles.
-  final ValueListenable<bool>? frameHidden;
 
   double get _screenScale {
     final double? dynamicScale = scaleProvider?.call();
@@ -714,7 +719,7 @@ class SelectionPainter extends CustomPainter {
     final SelectionFrame? frame =
         extra?.frame ??
         (selection == null ? null : (gesture?.frame ?? selection.frame));
-    if (frame != null && !(frameHidden?.value ?? false)) {
+    if (frame != null) {
       _paintFrame(
         canvas,
         frame,
@@ -865,7 +870,6 @@ class SelectionPainter extends CustomPainter {
         oldDelegate.crossPageListenable != crossPageListenable ||
         oldDelegate.crossPageOverlay != crossPageOverlay ||
         oldDelegate.scale != scale ||
-        oldDelegate.scaleProvider != scaleProvider ||
-        oldDelegate.frameHidden != frameHidden;
+        oldDelegate.scaleProvider != scaleProvider;
   }
 }

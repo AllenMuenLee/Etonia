@@ -1385,6 +1385,99 @@ void _streamingTests() {
     ]);
   });
 
+  group('notation shown as it is written', () {
+    late FakeAiClient client;
+    late List<String> events;
+    late AiAssistantController assistant;
+    final NoteImage note = NoteImage(
+      logicalSize: const Size(100, 50),
+      revision: 0,
+    );
+
+    setUp(() {
+      client = FakeAiClient();
+      events = <String>[];
+      assistant = AiAssistantController(
+        client: client,
+        renderer: FakeSelectionImageRenderer(),
+        animationEnabled: false,
+        captureNote: () async => note,
+        applyNotation: (AiNotation _, NoteImage _) {
+          events.add('apply');
+          return const AiNotationApplication(AiNotationStatus.applied);
+        },
+        previewNotation: (String svg, NoteImage context) {
+          expect(context, same(note));
+          events.add(svg);
+        },
+        endNotationPreview: (NoteImage context) {
+          expect(context, same(note));
+          events.add('end');
+        },
+      );
+      addTearDown(assistant.dispose);
+    });
+
+    AiNotation notation() => AiNotation(
+      label: 'Line',
+      items: <AiNotationItem>[
+        AiNotationStroke(
+          ink: 'green',
+          width: 3,
+          points: const <AiNotationPoint>[
+            AiNotationPoint(.1, .1),
+            AiNotationPoint(.2, .2),
+          ],
+        ),
+      ],
+    );
+
+    test('is replaced by the notes it became', () async {
+      assistant
+        ..setNotationEnabled(true)
+        ..send('Draw');
+      await pumpEventQueue();
+      client.streamNotation('<svg>');
+      client.streamNotation('<svg><g/>');
+      client.answerResponse(
+        AiAssistantResponse(message: 'Here.', notation: notation()),
+      );
+      await pumpEventQueue();
+      expect(events, <String>['<svg>', '<svg><g/>', 'apply', 'end']);
+    });
+
+    test('goes away when the answer fails', () async {
+      assistant
+        ..setNotationEnabled(true)
+        ..send('Draw');
+      await pumpEventQueue();
+      client.streamNotation('<svg>');
+      client.fail(AiFailureKind.server);
+      await pumpEventQueue();
+      expect(events, <String>['<svg>', 'end']);
+    });
+
+    test('stops when Notation is turned off part way', () async {
+      assistant
+        ..setNotationEnabled(true)
+        ..send('Draw');
+      await pumpEventQueue();
+      client.streamNotation('<svg>');
+      assistant.setNotationEnabled(false);
+      client.streamNotation('<svg><g/>');
+      expect(events, <String>['<svg>', 'end']);
+    });
+
+    test('is not asked for with Notation off', () async {
+      assistant.send('Draw');
+      await pumpEventQueue();
+      client.streamNotation('<svg>');
+      client.answer('Words.');
+      await pumpEventQueue();
+      expect(events, isEmpty);
+    });
+  });
+
   test('a failure part way drops what had streamed', () async {
     await rig.open();
     rig.assistant.send('Question');
@@ -1495,6 +1588,7 @@ class _ThrowingClient implements AiClient {
   Future<AiResult> send(
     AiRequest request, {
     AiPartialCallback? onPartial,
+    AiNotationPartialCallback? onNotation,
   }) async => throw StateError('boom');
 
   @override

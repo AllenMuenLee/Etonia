@@ -57,6 +57,7 @@ abstract final class SvgInkConverter {
       const _Affine.identity(),
       _Presentation.root(defaultInk, defaultWidth),
       handwritten: false,
+      paragraph: null,
     );
     if (collector.traces.isEmpty) {
       throw const FormatException('SVG has no editable strokes');
@@ -115,6 +116,7 @@ class _Collector {
     _Affine parentTransform,
     _Presentation parentPaint, {
     required bool handwritten,
+    required int? paragraph,
   }) {
     final String name = element.name.local.toLowerCase();
     if (_nonDrawingTrees.contains(name)) return;
@@ -133,14 +135,33 @@ class _Collector {
       sketch && !writing ? math.Random(_seed(element)) : null,
       config,
     );
+    // Children are drawn for their group's paragraph unless they name one.
+    final int? drawnFor = _paragraph(element) ?? paragraph;
     final Path? path = _geometry(element, name, hand);
     if (path != null) {
-      _addPath(path, transform, paint, name, _arrow(element), hand.random);
+      _addPath(
+        path,
+        transform,
+        paint,
+        name,
+        _arrow(element),
+        hand.random,
+        drawnFor,
+      );
       return;
     }
     for (final XmlElement child in element.childElements) {
-      visit(child, transform, paint, handwritten: writing);
+      visit(child, transform, paint, handwritten: writing, paragraph: drawnFor);
     }
+  }
+
+  /// The answer paragraph [element] says it was drawn for. A bad number says
+  /// nothing: the drawing is still good.
+  static int? _paragraph(XmlElement element) {
+    final int? number = int.tryParse(
+      element.getAttribute('data-etonia-paragraph')?.trim() ?? '',
+    );
+    return number != null && number > 0 ? number : null;
   }
 
   /// The same element always gets the same hand, so converting a notation
@@ -248,6 +269,7 @@ class _Collector {
     String elementName,
     ({bool start, bool end}) arrow,
     math.Random? random,
+    int? paragraph,
   ) {
     final bool canFill = <String>{
       'path',
@@ -317,7 +339,12 @@ class _Collector {
       final List<InkVector> smooth = _simplify(points, _curveTolerance);
       final List<double>? times = _times(smooth.length, paint.step);
       traces.add(
-        GeneratedInkTrace(style: style, points: smooth, timesMs: times),
+        GeneratedInkTrace(
+          style: style,
+          points: smooth,
+          timesMs: times,
+          answerParagraph: paragraph,
+        ),
       );
       if (!metric.isClosed && points.length > 1) {
         first ??= (points, times);
@@ -339,6 +366,7 @@ class _Collector {
           style: style,
           points: points,
           timesMs: at == null ? null : List<double>.filled(points.length, at),
+          answerParagraph: paragraph,
         ),
       );
     }

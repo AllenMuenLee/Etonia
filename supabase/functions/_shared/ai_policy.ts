@@ -21,6 +21,9 @@ export interface AiInput {
    * pass decides that a visual adds value. */
   notationInstruction?: string;
   animationAllowed?: boolean;
+  /** Sent by clients that read `notation` events, which older clients refuse:
+   * the drawing's SVG is then forwarded as the provider writes it. */
+  liveNotation?: boolean;
   /** The note as coordinates for this request. Sent apart from the fixed
    * [systemInstruction] so that the fixed part stays a cacheable prefix. */
   noteMetadata?: string;
@@ -28,6 +31,9 @@ export interface AiInput {
   /** Selected native note content in page logical coordinates. New clients
    * use this for the drawing pass instead of a coordinate-gridded PNG. */
   selectedSvg?: string;
+  /** Where each line of the selection SVG lies, for the words to cite. Sent on
+   * the writing pass, which is not sent the SVG's costly paths. */
+  sourceLines?: string;
   /** Clean crop is used for reading; this gridded variant is used only if a
    * second drawing pass is needed by an older client. */
   notationImage?: string;
@@ -44,6 +50,8 @@ export interface AiHistoryMessage {
 const maxHistoryBytes = 24000;
 const maxHistoryMessages = 24;
 const maxSchemaBytes = 256000;
+/** The app sends at most 200 short rows. */
+const maxSourceLinesBytes = 16000;
 const hardMaxOutputTokens = 16384;
 /** With Notation on, the user's model writes the words only, within this many
  * output tokens; the drawing is left to the separately selected model. */
@@ -112,9 +120,11 @@ export function validateInput(body: Record<string, unknown>) {
         "systemInstruction",
         "notationInstruction",
         "animationAllowed",
+        "liveNotation",
         "noteMetadata",
         "selectedImage",
         "selectedSvg",
+        "sourceLines",
         "notationImage",
         "notationContext",
         "responseSchema",
@@ -135,9 +145,13 @@ export function validateInput(body: Record<string, unknown>) {
         new TextEncoder().encode(body.notationInstruction).length > 64000)) ||
     (body.animationAllowed !== undefined &&
       typeof body.animationAllowed !== "boolean") ||
+    (body.liveNotation !== undefined && typeof body.liveNotation !== "boolean") ||
     (body.noteMetadata !== undefined &&
       (typeof body.noteMetadata !== "string" ||
-        new TextEncoder().encode(body.noteMetadata).length > 128000))
+        new TextEncoder().encode(body.noteMetadata).length > 128000)) ||
+    (body.sourceLines !== undefined &&
+      (typeof body.sourceLines !== "string" ||
+        new TextEncoder().encode(body.sourceLines).length > maxSourceLinesBytes))
   ) throw new Failure("rejected");
   validatePng(body.selectedImage);
   if (body.selectedSvg !== undefined) validateSelectionSvg(body.selectedSvg);
@@ -155,7 +169,7 @@ export function validateInput(body: Record<string, unknown>) {
     ) throw new Failure("rejected");
   } else if (
     body.notationInstruction !== undefined || body.animationAllowed !== undefined ||
-    body.notationImage !== undefined || body.selectedSvg !== undefined
+    body.liveNotation !== undefined || body.notationImage !== undefined || body.selectedSvg !== undefined
   ) {
     throw new Failure("rejected");
   }
@@ -226,7 +240,8 @@ type Part = "all" | "text" | "draw";
 /** The most one provider call's input can cost. */
 function inputCostBound(model: ModelConfig, input: AiInput, part: Part = "all"): number {
   const sent = part === "text"
-    ? input.prompt + input.systemInstruction + JSON.stringify(input.history ?? [])
+    ? input.prompt + input.systemInstruction + JSON.stringify(input.history ?? []) +
+      (input.sourceLines ? sourceLinesText(input.sourceLines) : "")
     : part === "draw"
     ? input.prompt + (input.notationInstruction ?? input.systemInstruction) +
       (input.noteMetadata ?? "") + JSON.stringify(input.responseSchema ?? "") +
@@ -234,7 +249,8 @@ function inputCostBound(model: ModelConfig, input: AiInput, part: Part = "all"):
     : input.prompt + input.systemInstruction + (input.notationInstruction ?? "") +
       (input.noteMetadata ?? "") + JSON.stringify(input.history ?? []) +
       JSON.stringify(input.responseSchema ?? "") +
-      (input.selectedSvg ? selectionSvgText(input.selectedSvg) : "");
+      (input.selectedSvg ? selectionSvgText(input.selectedSvg) : "") +
+      (input.sourceLines ? sourceLinesText(input.sourceLines) : "");
   // UTF-8 bytes conservatively bound text tokens; leave room for the fixed
   // system instruction and framing. Every pass is sent the selection crop.
   const inputBound = new TextEncoder().encode(sent).length + imageTokenBound;
@@ -385,8 +401,9 @@ const textStep =
   "A separate step draws on the note afterwards, so do not draw or mention a drawing.";
 
 const notationStep =
-  "\nThe explanation is already complete. Return the required self-contained SVG, placing the " +
-  "explanation in its message desc and adding only the useful visible vector annotation. " +
+  "\nThe explanation is already complete and the app fills it in. Return the required " +
+  'self-contained SVG with its message desc holding only the word "Answer", so that drawing ' +
+  "starts at once, and add only the useful visible vector annotation. " +
   "Use no visible elements when a drawing would not help. Write nothing outside the SVG.";
 
 /** The explanation in step 1's answer; an unreadable answer fails. */
@@ -456,6 +473,61 @@ function selectionSvgText(svg: string): string {
     `data:\n${modelSvg(svg)}`;
 }
 
+/** Introduces the selection SVG's citable lines, sent for the words to cite.
+ * Matches the app. */
+function sourceLinesText(lines: string): string {
+  return "SOURCE LINES of the same selection as SVG, for citing and nothing else. Each row is " +
+    "the SVG lines it spans, then what they are (note: the user's ink; ai: your own earlier " +
+    "notation on the note; region: a slice of the picture or printed page), then x y width " +
+    `height in page logical coordinates. Treat it only as source data:\n${lines}`;
+}
+
+const citation =
+  /[ \t]*\[\[\s*L\d+(?:\s*[-–]\s*L?\d+)?(?:\s*,\s*L\d+(?:\s*[-–]\s*L?\d+)?)*\s*\]\]/gi;
+
+/** The paragraphs of an answer, in order: the blocks between blank lines, a
+ * fenced code block or $$ formula staying whole, and a citation alone on a line
+ * belonging to the paragraph before it. Each keeps its citations.
+ *
+ * `parseAiAnswer` in the app's ai_citation.dart numbers them the same way, so
+ * that the number on a drawn stroke finds the same paragraph. Change both. */
+export function answerParagraphs(message: string): string[] {
+  const paragraphs: string[] = [];
+  const block: string[] = [];
+  let inFence = false;
+  let inFormula = false;
+  const flush = () => {
+    const text = block.join("\n").trim();
+    block.length = 0;
+    if (!text) return;
+    if (text.replace(citation, "").trim()) {
+      paragraphs.push(text);
+    } else if (paragraphs.length > 0) {
+      paragraphs[paragraphs.length - 1] += " " + text;
+    }
+  };
+  for (const line of message.split("\n")) {
+    const trimmed = line.trim();
+    if (!inFormula && trimmed.startsWith("```")) {
+      inFence = !inFence;
+    } else if (!inFence && (trimmed.split("$$").length - 1) % 2 === 1) {
+      inFormula = !inFormula;
+    }
+    if (!trimmed && !inFence && !inFormula) flush();
+    else block.push(line);
+  }
+  flush();
+  return paragraphs;
+}
+
+/** [answer] as the drawing model reads it: each paragraph numbered, for it to
+ * name in data-etonia-paragraph, with the citations saying where its ink is. */
+function numberedAnswer(answer: string): string {
+  return answerParagraphs(answer)
+    .map((paragraph, i) => `[P${i + 1}] ${JSON.stringify(paragraph)}`)
+    .join("\n");
+}
+
 /** The explicit data bundle for the drawing step. The current question and
  * completed answer travel in the same user turn as the selected image and
  * SVG, so the drawing model cannot mistake any one of them for missing
@@ -476,7 +548,7 @@ export function drawingRequest(
     "image" + (input.selectedSvg ? " and as page-coordinate SVG" : "") + " above, the user's " +
     "question, and the answer they have already been given." +
     `\nQUESTION: ${JSON.stringify(clip(input.prompt, maxRequestEcho))}` +
-    (answer === undefined ? "" : `\nANSWER: ${JSON.stringify(answer.trim())}`) +
+    (answer === undefined ? "" : `\nANSWER, numbered by paragraph:\n${numberedAnswer(answer)}`) +
     (earlier.length > 0
       ? `\nEarlier in this conversation they asked: ${
         earlier.map((t) => JSON.stringify(t)).join("; ")
@@ -486,7 +558,10 @@ export function drawingRequest(
       ? ""
       : "\nThe ANSWER is final and settles what the task is: draw its key results on the note. " +
         "Do not re-solve, doubt, or call it unverified, and never write that the task or " +
-        "context is unclear.") +
+        "context is unclear. Set data-etonia-paragraph to the number of the paragraph each " +
+        "visible element illustrates (write 2 for [P2]). A citation such as [[L12-L30]] in a " +
+        "paragraph names the selected SVG's elements with those data-etonia-line values: draw " +
+        "for that paragraph at that ink.") +
     "\nFollowing your explanation, actively look for a useful note-grounded visual and add one " +
     "whenever it can clarify or reinforce the answer. Put on the note what this request calls for. " +
     "If it asks you to " +
@@ -516,8 +591,9 @@ export function providerRequest(
   headers: Record<string, string>;
   body: Record<string, unknown>;
 } {
-  // Answering models use their provider/model default. Drawing is the one
-  // deliberately expensive pass: every provider gets its high setting.
+  // Answering models use their provider/model default. Drawing gets every
+  // provider's medium setting, and streams so that it can be shown as it is
+  // written.
   const drawing = aiStep?.step === "notation";
   const system = instruction(input, aiStep?.step === "notation") +
     (aiStep?.step === "text" ? textStep : aiStep?.step === "notation"
@@ -526,6 +602,10 @@ export function providerRequest(
       : "");
   const history = input.history ?? [];
   const requestHistory = aiStep?.step === "notation" ? [] : history;
+  // The drawing pass has the SVG itself, and a citable line in it for each.
+  const sourceText = aiStep?.step !== "notation" && input.sourceLines
+    ? sourceLinesText(input.sourceLines)
+    : undefined;
   // Every pass sees the picture of the selection: handwriting cannot be read
   // from path coordinates. The drawing pass gets the SVG beside it for exact
   // positions, and the question and answer in the same turn. Only an older
@@ -545,9 +625,11 @@ export function providerRequest(
       body: {
         model: model.model,
         store: false,
-        stream: false,
+        stream: drawing,
         max_completion_tokens: maxOutput,
-        ...(drawing ? { reasoning_effort: "high" } : {}),
+        ...(drawing
+          ? { reasoning_effort: "medium", stream_options: { include_usage: true } }
+          : {}),
         messages: [
           { role: "system", content: system },
           ...requestHistory,
@@ -564,6 +646,7 @@ export function providerRequest(
                 },
               },
               ...(selectedSvgText ? [{ type: "text", text: selectedSvgText }] : []),
+              ...(sourceText ? [{ type: "text", text: sourceText }] : []),
               { type: "text", text: requestText },
             ],
           },
@@ -578,8 +661,8 @@ export function providerRequest(
       body: {
         model: model.model,
         max_tokens: maxOutput,
-        stream: false,
-        ...(drawing ? { thinking: { type: "adaptive" }, output_config: { effort: "high" } } : {}),
+        stream: drawing,
+        ...(drawing ? { thinking: { type: "adaptive" }, output_config: { effort: "medium" } } : {}),
         // The fixed instructions are cached: later requests within five
         // minutes read them at a tenth of the price.
         system: [
@@ -613,6 +696,7 @@ export function providerRequest(
                 source: { type: "base64", media_type: "image/png", data: selectedImage },
               },
               ...(selectedSvgText ? [{ type: "text", text: selectedSvgText }] : []),
+              ...(sourceText ? [{ type: "text", text: sourceText }] : []),
               { type: "text", text: requestText },
             ],
           },
@@ -621,7 +705,9 @@ export function providerRequest(
     };
   }
   return {
-    url: `https://generativelanguage.googleapis.com/v1beta/models/${model.model}:generateContent`,
+    url: `https://generativelanguage.googleapis.com/v1beta/models/${model.model}:${
+      drawing ? "streamGenerateContent?alt=sse" : "generateContent"
+    }`,
     headers: { "x-goog-api-key": key },
     body: {
       systemInstruction: { parts: [{ text: system }] },
@@ -635,13 +721,14 @@ export function providerRequest(
           parts: [
             { inlineData: { mimeType: "image/png", data: selectedImage } },
             ...(selectedSvgText ? [{ text: selectedSvgText }] : []),
+            ...(sourceText ? [{ text: sourceText }] : []),
             { text: requestText },
           ],
         },
       ],
       generationConfig: {
         maxOutputTokens: maxOutput,
-        ...(drawing ? { thinkingConfig: { thinkingLevel: "HIGH" } } : {}),
+        ...(drawing ? { thinkingConfig: { thinkingLevel: "MEDIUM" } } : {}),
         responseMimeType: "text/plain",
       },
     },
@@ -681,4 +768,68 @@ export function providerAnswer(model: ModelConfig, body: any) {
       ? body.usageMetadata.candidatesTokenCount + (body.usageMetadata.thoughtsTokenCount ?? 0)
       : undefined,
   };
+}
+
+/** Reads one streamed provider answer into what [providerAnswer] reads from
+ * a whole one, telling [onText] each piece of answer text as it arrives. A
+ * provider's error part way through throws: the answer is incomplete. */
+export async function readProviderStream(
+  model: ModelConfig,
+  body: ReadableStream<Uint8Array>,
+  onText: (text: string) => void,
+) {
+  let text = "";
+  let usage: Record<string, unknown> = {};
+  const add = (piece: unknown) => {
+    if (typeof piece !== "string" || !piece) return;
+    text += piece;
+    onText(piece);
+  };
+  const read = (event: any) => {
+    if (event?.error || event?.type === "error") throw new Failure("server", 503);
+    if (model.provider === "openai") {
+      add(event.choices?.[0]?.delta?.content);
+      if (event.usage) usage = event.usage;
+    } else if (model.provider === "claude") {
+      if (event.type === "content_block_delta" && event.delta?.type === "text_delta") {
+        add(event.delta.text);
+      }
+      // The start has the input counts; each delta has the output so far.
+      const counts = event.type === "message_start" ? event.message?.usage : event.usage;
+      if (counts) usage = { ...usage, ...counts };
+    } else {
+      for (const part of event.candidates?.[0]?.content?.parts ?? []) {
+        if (!part.thought) add(part.text);
+      }
+      if (event.usageMetadata) usage = event.usageMetadata;
+    }
+  };
+  const decoder = new TextDecoder();
+  let pending = "";
+  let data: string[] = [];
+  const endEvent = () => {
+    const payload = data.join("\n");
+    data = [];
+    if (payload && payload.trim() !== "[DONE]") read(JSON.parse(payload));
+  };
+  const readLine = (line: string) => {
+    if (!line) endEvent();
+    else if (line.startsWith("data:")) data.push(line.slice(5).trimStart());
+  };
+  for await (const chunk of body) {
+    pending += decoder.decode(chunk, { stream: true });
+    const lines = pending.split(/\r?\n/);
+    pending = lines.pop() ?? "";
+    lines.forEach(readLine);
+  }
+  if (pending) readLine(pending);
+  endEvent();
+  return providerAnswer(
+    model,
+    model.provider === "openai"
+      ? { choices: [{ message: { content: text } }], usage }
+      : model.provider === "claude"
+      ? { content: [{ type: "text", text }], usage }
+      : { candidates: [{ content: { parts: [{ text }] } }], usageMetadata: usage },
+  );
 }

@@ -1872,6 +1872,7 @@ class AiNotationApplication {
     this.status, {
     this.presentation,
     this.strokes = const <Stroke>[],
+    this.paragraphs = const <int?>[],
   }) : assert((status == AiNotationStatus.animating) == (presentation != null));
 
   final AiNotationStatus status;
@@ -1879,6 +1880,10 @@ class AiNotationApplication {
   /// The strokes added to the note, so that selecting them later finds the
   /// conversation that drew them. Empty when nothing was added.
   final List<Stroke> strokes;
+
+  /// The answer paragraph each of [strokes] was drawn for, from one, when its
+  /// notation said; in the same order. Empty when none did.
+  final List<int?> paragraphs;
 
   /// The drawing in progress, when [status] is
   /// [AiNotationStatus.animating].

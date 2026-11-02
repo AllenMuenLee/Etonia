@@ -97,12 +97,15 @@ class ToolbarCustomizer extends StatelessWidget {
     return ToolbarLayout(shown: shown, folded: folded);
   }
 
-  /// Moves the entry at [from] to [to], counted with it already taken out.
+  /// Moves the entry at [from] to [to], counted with it already taken out. A
+  /// tool that cannot be hidden goes back if dropped among the hidden ones.
   void _reorder(List<_Entry> entries, int from, int to) {
     final List<_Entry> moved = <_Entry>[...entries];
     final _Entry entry = moved.removeAt(from);
     moved.insert(to, entry);
-    layout.value = _layoutOf(moved);
+    final ToolbarLayout next = _layoutOf(moved);
+    if (next.hidden.any((PaletteItem item) => !item.canHide)) return;
+    layout.value = next;
   }
 
   @override
@@ -256,18 +259,19 @@ class ToolbarCustomizer extends StatelessWidget {
                           ),
                         ),
                       ),
-                      CompactIconButton(
-                        key: ValueKey<String>(
-                          'toolbar-visibility-${item.name}',
+                      if (item.canHide)
+                        CompactIconButton(
+                          key: ValueKey<String>(
+                            'toolbar-visibility-${item.name}',
+                          ),
+                          tooltip: hidden
+                              ? 'Show ${item.label}'
+                              : 'Hide ${item.label}',
+                          onPressed: () => layout.value = hidden
+                              ? layout.value.show(item)
+                              : layout.value.hide(item),
+                          icon: hidden ? AppIcons.hide : AppIcons.show,
                         ),
-                        tooltip: hidden
-                            ? 'Show ${item.label}'
-                            : 'Hide ${item.label}',
-                        onPressed: () => layout.value = hidden
-                            ? layout.value.show(item)
-                            : layout.value.hide(item),
-                        icon: hidden ? AppIcons.hide : AppIcons.show,
-                      ),
                       ReorderableDragStartListener(
                         index: index,
                         child: Tooltip(

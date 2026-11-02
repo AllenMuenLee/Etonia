@@ -226,6 +226,9 @@ abstract class SseAnswerReader {
   final AiNotationConfig config;
   final AiPartialCallback? _onPartial;
 
+  /// Told the answer so far, for one that is an SVG.
+  AiNotationPartialCallback? onNotation;
+
   int _status = 200;
   final StringBuffer _text = StringBuffer();
   final List<String> _data = <String>[];
@@ -353,8 +356,12 @@ abstract class SseAnswerReader {
 
   /// Tells the listener the message written so far, when it has grown.
   void _report() {
+    if (_stopped || _text.isEmpty) {
+      return;
+    }
+    onNotation?.call(_text.toString());
     final AiPartialCallback? onPartial = _onPartial;
-    if (onPartial == null || _stopped || _text.isEmpty) {
+    if (onPartial == null) {
       return;
     }
     final (String, bool)? state = AiAssistantResponse.partialMessageState(
@@ -410,12 +417,14 @@ abstract class SseAiClient implements AiClient {
   Future<AiResult> send(
     AiRequest request, {
     AiPartialCallback? onPartial,
+    AiNotationPartialCallback? onNotation,
   }) async {
     if (!isConfigured) {
       return const AiError(AiFailure(AiFailureKind.notConfigured));
     }
     final String encoded = jsonEncode(body(request));
-    final SseAnswerReader reader = newReader(onPartial);
+    final SseAnswerReader reader = newReader(onPartial)
+      ..onNotation = onNotation;
     AiResult result = await _attempt(encoded, reader);
     for (
       int retry = 0;

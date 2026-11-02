@@ -1,5 +1,6 @@
 import 'dart:async' show unawaited;
 
+import 'package:flutter/foundation.dart' show ValueListenable;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:gpt_markdown/gpt_markdown.dart';
@@ -14,10 +15,12 @@ import '../../../shared/motion/motion_memory.dart';
 import '../../../app/theme/app_icons.dart';
 import '../../../shared/widgets/app_controls.dart';
 import '../ai/ai_assistant_controller.dart';
+import '../ai/ai_citation.dart';
 import '../ai/ai_client.dart';
 import '../ai/ai_config.dart';
 import '../ai/ai_usage_gate.dart';
 import '../ai/chat_math.dart';
+import 'ai_citation_highlight.dart';
 
 /// The AI assistant: the selected ink the conversation is about, the
 /// conversation, quick actions, and a composer. Editor preferences live in
@@ -33,6 +36,7 @@ class AiAssistantPanel extends StatefulWidget {
     required this.onClose,
     required this.onNewChat,
     required this.onAddToContext,
+    this.onShowOnNote,
     this.config = const AiLayoutConfig(),
     this.composerKey,
     this.onOpenPlans,
@@ -70,6 +74,10 @@ class AiAssistantPanel extends StatefulWidget {
   /// conversation.
   final VoidCallback onAddToContext;
 
+  /// Called to bring into view on the note what the focused paragraph is tied
+  /// to, as its citation was pressed.
+  final VoidCallback? onShowOnNote;
+
   final AiLayoutConfig config;
 
   /// Given to the composer's message field, so the editor can tell where it
@@ -95,6 +103,16 @@ class _AiAssistantPanelState extends State<AiAssistantPanel> {
   );
   final FocusNode _composerFocus = FocusNode(debugLabel: 'AI composer');
   final ScrollController _scroll = ScrollController();
+  final GlobalKey _transcriptKey = GlobalKey();
+
+  /// The paragraphs of the answers built now, to find the one being read.
+  final Map<AiParagraphRef, BuildContext> _paragraphs =
+      <AiParagraphRef, BuildContext>{};
+
+  /// A paragraph asked for by name, which stays the one being read, however
+  /// little the transcript could scroll to it, until the user scrolls.
+  AiParagraphRef? _pinnedParagraph;
+  bool _focusUpdateScheduled = false;
   final SpeechToText _speech = SpeechToText();
   int _shownMessages = 0;
   String? _shownPartial;
@@ -111,10 +129,123 @@ class _AiAssistantPanelState extends State<AiAssistantPanel> {
     super.initState();
     _text.addListener(_onTextChanged);
     widget.controller.addListener(_onControllerChanged);
+    _scroll.addListener(_scheduleFocusUpdate);
     _shownMessages = widget.controller.messages.length;
     _shownState = widget.controller.requestState;
     _scrollToEnd();
     _takeComposerRequest();
+    _scheduleFocusUpdate();
+  }
+
+  /// Works out the paragraph being read after the next layout, which is when
+  /// everything the scroll moved is where it now is.
+  void _scheduleFocusUpdate() {
+    if (_focusUpdateScheduled) return;
+    _focusUpdateScheduled = true;
+    WidgetsBinding.instance.addPostFrameCallback((Duration _) {
+      _focusUpdateScheduled = false;
+      if (mounted) _updateFocusedParagraph();
+    });
+    WidgetsBinding.instance.ensureVisualUpdate();
+  }
+
+  /// Makes the paragraph nearest the line being read, of those on show and
+  /// tied to something on the note, the focused one.
+  void _updateFocusedParagraph() {
+    final AiAssistantController controller = widget.controller;
+    final AiParagraphRef? pinned = _pinnedParagraph;
+    if (pinned != null) {
+      controller.focusParagraph(pinned);
+      return;
+    }
+    final RenderObject? transcript = _transcriptKey.currentContext
+        ?.findRenderObject();
+    if (transcript is! RenderBox || !transcript.hasSize) return;
+    final double height = transcript.size.height;
+    final double readingLine = height * _readingLine;
+    AiParagraphRef? nearest;
+    double nearestDistance = double.infinity;
+    for (final MapEntry<AiParagraphRef, BuildContext> entry
+        in _paragraphs.entries) {
+      final AiParagraphRef ref = entry.key;
+      final AiParagraphLinks? links = controller
+          .answerLinks(ref.message)
+          ?.paragraphs[ref.paragraph];
+      if (links == null || links.isEmpty) continue;
+      final RenderObject? box = entry.value.findRenderObject();
+      if (box is! RenderBox || !box.hasSize || !box.attached) continue;
+      final double top = box
+          .localToGlobal(Offset.zero, ancestor: transcript)
+          .dy;
+      final double bottom = top + box.size.height;
+      if (bottom <= 0 || top >= height) continue;
+      final double distance = readingLine < top
+          ? top - readingLine
+          : readingLine > bottom
+          ? readingLine - bottom
+          : 0;
+      if (distance < nearestDistance) {
+        nearest = ref;
+        nearestDistance = distance;
+      }
+    }
+    controller.focusParagraph(nearest);
+  }
+
+  /// How far down the transcript the line being read is taken to be.
+  static const double _readingLine = 0.4;
+
+  /// The most steps taken towards a paragraph not built yet, each about a
+  /// transcript's height.
+  static const int _maxStepsToParagraph = 60;
+
+  /// Scrolls the transcript to [ref]. A long transcript builds only what is
+  /// near what it shows, so it is walked towards a paragraph not built yet.
+  Future<void> _scrollToParagraph(AiParagraphRef ref) async {
+    _pinnedParagraph = ref;
+    for (int step = 0; step < _maxStepsToParagraph; step++) {
+      await WidgetsBinding.instance.endOfFrame;
+      if (!mounted || _pinnedParagraph != ref || !_scroll.hasClients) return;
+      final BuildContext? built = _paragraphs[ref];
+      if (built != null && built.mounted) {
+        await Scrollable.ensureVisible(
+          built,
+          alignment: _readingLine,
+          duration: MediaQuery.disableAnimationsOf(context)
+              ? Duration.zero
+              : const Duration(milliseconds: 220),
+          curve: Curves.easeOutCubic,
+        );
+        return;
+      }
+      final bool isAbove = _paragraphs.keys.every(
+        (AiParagraphRef shown) => shown.message > ref.message,
+      );
+      final ScrollPosition position = _scroll.position;
+      final double next =
+          (position.pixels +
+                  (isAbove ? -1 : 1) * position.viewportDimension * 0.9)
+              .clamp(position.minScrollExtent, position.maxScrollExtent);
+      if (next == position.pixels) return;
+      _scroll.jumpTo(next);
+    }
+  }
+
+  /// The citation under a paragraph was pressed: reads that paragraph, and
+  /// shows what it is tied to on the note.
+  void _showParagraphOnNote(AiParagraphRef ref) {
+    _pinnedParagraph = ref;
+    widget.controller.focusParagraph(ref);
+    widget.onShowOnNote?.call();
+  }
+
+  void _registerParagraph(AiParagraphRef ref, BuildContext? context) {
+    if (context == null) {
+      _paragraphs.remove(ref);
+    } else {
+      _paragraphs[ref] = context;
+    }
+    _scheduleFocusUpdate();
   }
 
   /// Puts the caret in the composer, after the frame that lays it out, if
@@ -190,6 +321,7 @@ class _AiAssistantPanelState extends State<AiAssistantPanel> {
         controller.requestState != _shownState) {
       _shownMessages = controller.messages.length;
       _shownState = controller.requestState;
+      _pinnedParagraph = null;
       _scrollToEnd();
     } else if (controller.partialAnswer != _shownPartial && _isAtEnd) {
       // Follows the answer as it is written, unless the user has scrolled
@@ -197,6 +329,11 @@ class _AiAssistantPanelState extends State<AiAssistantPanel> {
       _scrollToEnd();
     }
     _shownPartial = controller.partialAnswer;
+    // After any scroll to the end above: selecting a drawing goes to its words.
+    if (controller.takeParagraphToShow() case final AiParagraphRef ref) {
+      unawaited(_scrollToParagraph(ref));
+    }
+    _scheduleFocusUpdate();
     setState(() {});
   }
 
@@ -314,12 +451,20 @@ class _AiAssistantPanelState extends State<AiAssistantPanel> {
                   child: Stack(
                     children: <Widget>[
                       Positioned.fill(
-                        child: ListView.builder(
-                          controller: _scroll,
-                          padding: const EdgeInsets.all(AppSpacing.md),
-                          itemCount: _bodyItemCount(controller),
-                          itemBuilder: (BuildContext context, int index) =>
-                              _bodyItem(context, controller, index),
+                        child: NotificationListener<UserScrollNotification>(
+                          onNotification: (UserScrollNotification _) {
+                            _pinnedParagraph = null;
+                            _scheduleFocusUpdate();
+                            return false;
+                          },
+                          child: ListView.builder(
+                            key: _transcriptKey,
+                            controller: _scroll,
+                            padding: const EdgeInsets.all(AppSpacing.md),
+                            itemCount: _bodyItemCount(controller),
+                            itemBuilder: (BuildContext context, int index) =>
+                                _bodyItem(context, controller, index),
+                          ),
                         ),
                       ),
                       // Floats just above the composer, over the transcript.
@@ -422,6 +567,17 @@ class _AiAssistantPanelState extends State<AiAssistantPanel> {
     ];
   }
 
+  /// How the paragraphs of message [index] join up with the note.
+  _AnswerLinking _answerLinking(AiAssistantController controller, int index) {
+    return _AnswerLinking(
+      message: index,
+      links: controller.answerLinks(index),
+      focus: controller.paragraphFocus,
+      register: _registerParagraph,
+      onShow: _showParagraphOnNote,
+    );
+  }
+
   int _bodyItemCount(AiAssistantController controller) {
     final bool hasPartial =
         controller.requestState == AiRequestState.sending &&
@@ -487,7 +643,10 @@ class _AiAssistantPanelState extends State<AiAssistantPanel> {
     if (messageIndex >= 0 && messageIndex < controller.messages.length) {
       return Padding(
         padding: const EdgeInsets.only(bottom: AppSpacing.sm),
-        child: _MessageBubble(message: controller.messages[messageIndex]),
+        child: _MessageBubble(
+          message: controller.messages[messageIndex],
+          answer: _answerLinking(controller, messageIndex),
+        ),
       );
     }
     cursor += controller.messages.length;
@@ -504,6 +663,8 @@ class _AiAssistantPanelState extends State<AiAssistantPanel> {
           child: _MessageBubble(
             key: const ValueKey<String>('ai-partial-answer'),
             message: AiMessage.model(partial),
+            streaming: true,
+            answer: _answerLinking(controller, controller.messages.length),
           ),
         );
       }
@@ -1155,9 +1316,57 @@ class _Notice extends StatelessWidget {
 /// trailing edge on a tinted fill; the assistant's at the leading edge,
 /// outlined, with its Markdown and formulas rendered and selectable.
 class _MessageBubble extends StatelessWidget {
-  const _MessageBubble({super.key, required this.message});
+  const _MessageBubble({
+    super.key,
+    required this.message,
+    this.answer,
+    this.streaming = false,
+  });
 
   final AiMessage message;
+
+  /// How its paragraphs join up with the note.
+  final _AnswerLinking? answer;
+
+  /// Whether it is still being written, and may end in half a citation.
+  final bool streaming;
+
+  /// The answer's words: one block, or, once anything in it is tied to the
+  /// note, a block for each paragraph with its citation after it.
+  Widget _answer(BuildContext context, TextTheme text) {
+    Widget markdown(String source) => GptMarkdown(
+      delimitBareMath(normalizeInlineMath(source)),
+      style: text.bodyMedium,
+      textDirection: Directionality.of(context),
+      useDollarSignsForLatex: true,
+      // An answer never makes the app fetch anything.
+      imageBuilder: _imagePlaceholder,
+    );
+
+    final _AnswerLinking? answer = this.answer;
+    final AiAnswerLinks? links = answer?.links;
+    if (answer == null || links == null || links.isEmpty) {
+      return markdown(
+        stripAiCitations(message.displayText, streaming: streaming),
+      );
+    }
+    final List<AiAnswerParagraph> paragraphs = parseAiAnswer(
+      message.displayText,
+      streaming: streaming,
+    );
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: <Widget>[
+        for (int i = 0; i < paragraphs.length; i++)
+          _LinkedParagraph(
+            ref: AiParagraphRef(answer.message, i + 1),
+            answer: answer,
+            links: links.paragraphs[i + 1],
+            child: markdown(paragraphs[i].text),
+          ),
+      ],
+    );
+  }
 
   /// Stands in for an image the answer links to.
   static Widget _imagePlaceholder(
@@ -1209,22 +1418,194 @@ class _MessageBubble extends StatelessWidget {
                     : EdgeInsets.zero,
                 child: fromUser
                     ? Text(message.displayText, style: text.bodyMedium)
-                    : SelectionArea(
-                        child: GptMarkdown(
-                          delimitBareMath(
-                            normalizeInlineMath(message.displayText),
-                          ),
-                          style: text.bodyMedium,
-                          textDirection: Directionality.of(context),
-                          useDollarSignsForLatex: true,
-                          // An answer never makes the app fetch anything.
-                          imageBuilder: _imagePlaceholder,
-                        ),
-                      ),
+                    : SelectionArea(child: _answer(context, text)),
               ),
             ),
           ),
         ],
+      ),
+    );
+  }
+}
+
+/// What the paragraphs of one answer need to join up with the note.
+class _AnswerLinking {
+  const _AnswerLinking({
+    required this.message,
+    required this.links,
+    required this.focus,
+    required this.register,
+    required this.onShow,
+  });
+
+  /// The message's index among the conversation's messages.
+  final int message;
+  final AiAnswerLinks? links;
+  final ValueListenable<AiParagraphFocus?> focus;
+  final void Function(AiParagraphRef ref, BuildContext? context) register;
+  final void Function(AiParagraphRef ref) onShow;
+}
+
+/// One paragraph of an answer tied to the note: marked while it is the one
+/// being read, and followed by its citation when it has anything to show.
+class _LinkedParagraph extends StatefulWidget {
+  const _LinkedParagraph({
+    required this.ref,
+    required this.answer,
+    required this.links,
+    required this.child,
+  });
+
+  final AiParagraphRef ref;
+  final _AnswerLinking answer;
+  final AiParagraphLinks? links;
+  final Widget child;
+
+  @override
+  State<_LinkedParagraph> createState() => _LinkedParagraphState();
+}
+
+class _LinkedParagraphState extends State<_LinkedParagraph> {
+  @override
+  void initState() {
+    super.initState();
+    widget.answer.register(widget.ref, context);
+  }
+
+  @override
+  void didUpdateWidget(_LinkedParagraph oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.ref != widget.ref) {
+      oldWidget.answer.register(oldWidget.ref, null);
+      widget.answer.register(widget.ref, context);
+    }
+  }
+
+  @override
+  void dispose() {
+    widget.answer.register(widget.ref, null);
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final AiParagraphLinks? links = widget.links;
+    final bool hasLinks = links != null && !links.isEmpty;
+    return ValueListenableBuilder<AiParagraphFocus?>(
+      key: ValueKey<String>(
+        'ai-paragraph-${widget.ref.message}-${widget.ref.paragraph}',
+      ),
+      valueListenable: widget.answer.focus,
+      builder: (BuildContext context, AiParagraphFocus? focus, Widget? child) {
+        final bool focused = focus?.ref == widget.ref;
+        // The same mark as on the note, to tell which words it belongs to.
+        return DecoratedBox(
+          decoration: BoxDecoration(
+            color: focused
+                ? aiCitationHighlightColor.withValues(alpha: 0.22)
+                : null,
+            border: BorderDirectional(
+              start: BorderSide(
+                color: focused ? aiCitationHighlightColor : Colors.transparent,
+                width: _CitationChip.markWidth,
+              ),
+            ),
+          ),
+          child: child,
+        );
+      },
+      child: Padding(
+        padding: const EdgeInsetsDirectional.only(start: AppSpacing.xs),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: <Widget>[
+            widget.child,
+            if (hasLinks)
+              SelectionContainer.disabled(
+                child: _CitationChip(
+                  label: links.label,
+                  onPressed: () => widget.answer.onShow(widget.ref),
+                ),
+              )
+            else
+              const SizedBox(height: AppSpacing.xs),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+/// The lines of the selection a paragraph refers to. Pressing it shows them
+/// on the note.
+class _CitationChip extends StatelessWidget {
+  const _CitationChip({required this.label, required this.onPressed});
+
+  /// The bar beside the paragraph being read.
+  static const double markWidth = 3;
+
+  final String label;
+  final VoidCallback onPressed;
+
+  @override
+  Widget build(BuildContext context) {
+    final AppColors colors = AppColors.of(context);
+    return Tooltip(
+      message: 'Show on the note',
+      // A node of its own, or it would join the message's one and could not
+      // be pressed by itself.
+      child: Semantics(
+        container: true,
+        button: true,
+        label: 'Show on the note: $label',
+        excludeSemantics: true,
+        child: InkWell(
+          onTap: onPressed,
+          customBorder: const StadiumBorder(),
+          child: ConstrainedBox(
+            constraints: const BoxConstraints(
+              minWidth: AppSizes.minTouchTarget,
+              minHeight: AppSizes.minTouchTarget,
+            ),
+            child: Align(
+              alignment: AlignmentDirectional.centerStart,
+              widthFactor: 1,
+              heightFactor: 1,
+              child: DecoratedBox(
+                decoration: ShapeDecoration(
+                  shape: const StadiumBorder(),
+                  color: colors.selected,
+                ),
+                child: Padding(
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: AppSpacing.xs,
+                    vertical: 2,
+                  ),
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: <Widget>[
+                      Icon(
+                        AppIcons.note,
+                        size: 12,
+                        color: colors.textSecondary,
+                      ),
+                      const SizedBox(width: AppSpacing.xxs),
+                      Flexible(
+                        child: Text(
+                          label,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: Theme.of(context).textTheme.labelSmall
+                              ?.copyWith(color: colors.textSecondary),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            ),
+          ),
+        ),
       ),
     );
   }

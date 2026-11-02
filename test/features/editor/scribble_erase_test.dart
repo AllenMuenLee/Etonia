@@ -18,19 +18,19 @@ Stroke _word(double x, double y) => Stroke.fromPoints(
   ],
 );
 
-/// Points zigzagging left and right [swings] times over the box from
-/// (left, top) to (right, bottom), moving down as they go.
+/// Points zigzagging up and down [swings] times over the box from
+/// (left, top) to (right, bottom), moving right as they go.
 List<InkVector> _zigzag(
   double left,
   double top,
   double right,
   double bottom, {
-  int swings = 6,
+  int swings = 16,
 }) {
   final List<InkVector> points = <InkVector>[];
   for (int i = 0; i <= swings; i++) {
-    final double y = top + (bottom - top) * i / swings;
-    final double x = i.isEven ? left : right;
+    final double x = left + (right - left) * i / swings;
+    final double y = i.isEven ? top : bottom;
     // Several samples along each swing, as a pen would report.
     if (points.isNotEmpty) {
       final InkVector from = points.last;
@@ -43,11 +43,22 @@ List<InkVector> _zigzag(
   return points;
 }
 
+/// [points] as raw samples taken every [interval]. At the default, a swing
+/// of [_zigzag] takes 64 ms.
+List<RawInkSample> _samples(
+  List<InkVector> points, {
+  Duration interval = const Duration(milliseconds: 8),
+}) => <RawInkSample>[
+  for (int i = 0; i < points.length; i++)
+    RawInkSample(position: points[i], timestamp: interval * i),
+];
+
 /// Draws [points] as one stroke through [controller].
 int _draw(
   InkController controller,
   List<InkVector> points, {
   ScribbleConfig? scribble = const ScribbleConfig(),
+  Duration interval = const Duration(milliseconds: 8),
 }) {
   controller.startStroke(
     pointer: 1,
@@ -57,37 +68,87 @@ int _draw(
   );
   for (int i = 1; i < points.length; i++) {
     controller.addSamples(1, <RawInkSample>[
-      RawInkSample(
-        position: points[i],
-        timestamp: Duration(milliseconds: 8 * i),
-      ),
+      RawInkSample(position: points[i], timestamp: interval * i),
     ]);
   }
   return controller.endStroke(1);
 }
 
 void main() {
-  group('ScribbleErase.isZigzag', () {
-    test('a back-and-forth stroke is a zigzag', () {
-      expect(ScribbleErase.isZigzag(_zigzag(0, 0, 100, 40)), isTrue);
+  group('ScribbleErase.isScribble', () {
+    test('a rushed, dense up-and-down stroke is a scribble', () {
+      expect(ScribbleErase.isScribble(_samples(_zigzag(0, 0, 80, 20))), isTrue);
     });
 
-    test('an up-and-down zigzag moving sideways is one too', () {
-      final List<InkVector> points = <InkVector>[
-        for (final InkVector p in _zigzag(0, 0, 40, 120)) InkVector(p.y, p.x),
-      ];
-      expect(ScribbleErase.isZigzag(points), isTrue);
-    });
-
-    test('a line or a single turn is not', () {
+    test('a slow one is not', () {
       expect(
-        ScribbleErase.isZigzag(<InkVector>[
-          for (int i = 0; i <= 20; i++) InkVector(i * 5.0, 0),
-        ]),
+        ScribbleErase.isScribble(
+          _samples(
+            _zigzag(0, 0, 80, 20),
+            interval: const Duration(milliseconds: 40),
+          ),
+        ),
         isFalse,
       );
+    });
+
+    test('a rushed one with its swings far apart is not', () {
       expect(
-        ScribbleErase.isZigzag(_zigzag(0, 0, 100, 40, swings: 2)),
+        ScribbleErase.isScribble(_samples(_zigzag(0, 0, 320, 20))),
+        isFalse,
+      );
+    });
+
+    test('a rushed, dense side-to-side one is not', () {
+      final List<InkVector> sideways = <InkVector>[
+        for (final InkVector p in _zigzag(0, 0, 80, 20)) InkVector(p.y, p.x),
+      ];
+      expect(ScribbleErase.isScribble(_samples(sideways)), isFalse);
+    });
+
+    test('too few swings are not', () {
+      expect(
+        ScribbleErase.isScribble(_samples(_zigzag(0, 0, 10, 20, swings: 6))),
+        isFalse,
+      );
+    });
+
+    test('a straight line is not', () {
+      expect(
+        ScribbleErase.isScribble(
+          _samples(<InkVector>[
+            for (int i = 0; i <= 20; i++) InkVector(0, i * 5.0),
+          ]),
+        ),
+        isFalse,
+      );
+    });
+
+    test('resting the pen before and after does not slow it down', () {
+      final List<RawInkSample> rush = _samples(_zigzag(0, 0, 80, 20));
+      const Duration rest = Duration(seconds: 5);
+      expect(
+        ScribbleErase.isScribble(<RawInkSample>[
+          RawInkSample(position: rush.first.position, timestamp: Duration.zero),
+          for (final RawInkSample sample in rush)
+            RawInkSample(
+              position: sample.position,
+              timestamp: sample.timestamp + rest,
+            ),
+          RawInkSample(
+            position: rush.last.position,
+            timestamp: rush.last.timestamp + rest * 2,
+          ),
+        ]),
+        isTrue,
+      );
+    });
+
+    test('samples without timing are not a rush', () {
+      expect(
+        ScribbleErase.isScribble(
+          _samples(_zigzag(0, 0, 80, 20), interval: Duration.zero),
+        ),
         isFalse,
       );
     });
@@ -131,6 +192,31 @@ void main() {
 
       expect(_draw(controller, _zigzag(90, 95, 170, 115)), 0);
       expect(controller.strokes.first, same(long));
+      expect(controller.strokes, hasLength(2));
+    });
+
+    test('a slow zigzag over a word is kept as ink', () {
+      final Stroke word = _word(100, 100);
+      final InkController controller = InkController(strokes: <Stroke>[word]);
+      addTearDown(controller.dispose);
+
+      expect(
+        _draw(
+          controller,
+          _zigzag(90, 95, 170, 115),
+          interval: const Duration(milliseconds: 40),
+        ),
+        0,
+      );
+      expect(controller.strokes, hasLength(2));
+    });
+
+    test('a sparse zigzag over a word is kept as ink', () {
+      final Stroke word = _word(100, 100);
+      final InkController controller = InkController(strokes: <Stroke>[word]);
+      addTearDown(controller.dispose);
+
+      expect(_draw(controller, _zigzag(90, 95, 170, 115, swings: 6)), 0);
       expect(controller.strokes, hasLength(2));
     });
 
