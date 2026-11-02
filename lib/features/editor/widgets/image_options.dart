@@ -1,20 +1,14 @@
-﻿import 'package:flutter/material.dart';
+import 'package:flutter/material.dart';
 
 import '../../../app/theme/app_icons.dart';
 import '../../../app/theme/app_tokens.dart';
 
 /// The image tool's options: choose from gallery or take a photo.
 class ImageOptions extends StatelessWidget {
-  const ImageOptions({
-    super.key,
-    this.onChooseFromGallery,
-    this.onTakePhoto,
-    this.onChooseSvg,
-  });
+  const ImageOptions({super.key, this.onChooseFromGallery, this.onTakePhoto});
 
   final VoidCallback? onChooseFromGallery;
   final VoidCallback? onTakePhoto;
-  final VoidCallback? onChooseSvg;
 
   @override
   Widget build(BuildContext context) {
@@ -32,12 +26,6 @@ class ImageOptions extends StatelessWidget {
           icon: AppIcons.camera,
           label: 'Take photo',
           onPressed: onTakePhoto,
-        ),
-        const SizedBox(height: AppSpacing.xxs),
-        _ImageOptionRow(
-          icon: AppIcons.note,
-          label: 'Import editable SVG',
-          onPressed: onChooseSvg,
         ),
       ],
     );

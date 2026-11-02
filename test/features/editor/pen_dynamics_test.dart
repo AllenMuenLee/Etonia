@@ -91,8 +91,6 @@ Future<void> _penLine(
 }
 
 Future<void> _openAdvanced(WidgetTester tester) async {
-  await tester.tap(find.byTooltip('Pen'));
-  await tester.pumpAndSettle();
   await tester.tap(find.byKey(const ValueKey<String>('pen-advanced-toggle')));
   await tester.pumpAndSettle();
 }
@@ -298,17 +296,18 @@ void main() {
     });
   });
 
-  group('the pen panel', () {
-    testWidgets('shows the basics; the advanced settings open on the left', (
+  group('the pen options', () {
+    testWidgets('show the basics; the advanced settings open on the left', (
       WidgetTester tester,
     ) async {
       final SemanticsHandle handle = tester.ensureSemantics();
       await pumpEditor(tester);
-      await tester.tap(find.byTooltip('Pen'));
-      await tester.pumpAndSettle();
 
       expect(find.byKey(const ValueKey<String>('pen-advanced')), findsNothing);
-      expect(find.text('Advanced'), findsOneWidget);
+      expect(
+        find.byKey(const ValueKey<String>('pen-advanced-toggle')),
+        findsOneWidget,
+      );
       expect(
         tester.getSemantics(find.bySemanticsLabel('Advanced pen settings')),
         isSemantics(isButton: true),
@@ -320,8 +319,6 @@ void main() {
       await tester.pumpAndSettle();
       final Finder panel = find.byKey(const ValueKey<String>('pen-advanced'));
       expect(panel, findsOneWidget);
-      // The pen's popover gave way to it.
-      expect(find.text('Stroke width'), findsNothing);
       final Rect screen =
           Offset.zero & tester.view.physicalSize / tester.view.devicePixelRatio;
       expect(tester.getRect(panel).left, lessThan(screen.width / 4));

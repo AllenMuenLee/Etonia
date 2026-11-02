@@ -252,31 +252,57 @@ void main() {
   });
 
   group('tool palette', () {
-    testWidgets('the capsule glides to the tapped tool and stays', (
-      WidgetTester tester,
-    ) async {
-      await pumpApp(tester);
-      Rect capsule() => tester.getRect(
-        find
-            .descendant(
-              of: find.byType(SelectionCapsule),
-              matching: find.byType(DecoratedBox),
+    testWidgets(
+      'the capsule fades across to the tapped tool, without sliding',
+      (WidgetTester tester) async {
+        await pumpApp(tester);
+        Finder capsule(int index) => find.byType(SelectionCapsule).at(index);
+        double center(int index) => tester
+            .getRect(
+              find.descendant(
+                of: capsule(index),
+                matching: find.byType(DecoratedBox),
+              ),
             )
-            .first,
-      );
+            .center
+            .dx;
+        double opacity(int index) => tester
+            .widget<FadeTransition>(
+              find
+                  .ancestor(
+                    of: capsule(index),
+                    matching: find.byType(FadeTransition),
+                  )
+                  .first,
+            )
+            .opacity
+            .value;
 
-      final Rect pen = capsule();
-      await tester.tap(find.byTooltip('Eraser'));
-      await tester.pump();
-      await tester.pump(const Duration(milliseconds: 40));
-      final Rect underway = capsule();
-      await tester.pumpAndSettle();
-      final Rect landed = capsule();
-      final Rect eraser = tester.getRect(find.byTooltip('Eraser'));
+        final Rect pen = tester.getRect(find.byTooltip('Pen'));
+        await tester.tap(find.byTooltip('Eraser'));
+        await tester.pump();
+        await tester.pump(const Duration(milliseconds: 40));
+        final Rect eraser = tester.getRect(find.byTooltip('Eraser'));
 
-      expect(underway.center.dx, greaterThan(pen.center.dx));
-      expect(underway.center.dx, lessThan(landed.center.dx));
-      expect(landed.center.dx, closeTo(eraser.center.dx, 1));
-    });
+        // The last tool's capsule leaves where it was as the new one arrives.
+        expect(find.byType(SelectionCapsule), findsNWidgets(2));
+        expect(center(0), closeTo(pen.center.dx, 1));
+        expect(center(1), closeTo(eraser.center.dx, 1));
+        expect(opacity(0), greaterThan(0));
+        expect(opacity(0), lessThan(1));
+        expect(opacity(1), greaterThan(0));
+        expect(opacity(1), lessThan(1));
+        expect(
+          tester.widget<SelectionCapsule>(capsule(1)).decoration,
+          isNull,
+          reason: 'the chosen tool sits on the plain accent fill',
+        );
+
+        await tester.pumpAndSettle();
+        expect(find.byType(SelectionCapsule), findsOneWidget);
+        expect(center(0), closeTo(eraser.center.dx, 1));
+        expect(opacity(0), 1);
+      },
+    );
   });
 }

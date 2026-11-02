@@ -25,22 +25,12 @@ abstract interface class DocumentPicker {
   Future<PickedDocument?> pickImage(DocumentImageSource source);
 }
 
-/// Optional capability kept separate so existing embedders and test pickers
-/// do not have to implement SVG support until they opt in.
-abstract interface class SvgDocumentPicker {
-  Future<PickedDocument?> pickSvg();
-}
-
-class SystemDocumentPicker implements DocumentPicker, SvgDocumentPicker {
+class SystemDocumentPicker implements DocumentPicker {
   const SystemDocumentPicker();
 
   @override
   Future<PickedDocument?> pickPdf() =>
       _pick(FileType.custom, const <String>['pdf']);
-
-  @override
-  Future<PickedDocument?> pickSvg() =>
-      _pick(FileType.custom, const <String>['svg']);
 
   @override
   Future<PickedDocument?> pickImage(DocumentImageSource source) async {

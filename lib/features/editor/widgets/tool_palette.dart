@@ -27,10 +27,12 @@ import 'pen_advanced_panel.dart';
 import 'recording_options.dart';
 import 'select_options.dart';
 import 'sticky_options.dart';
-import 'stroke_width_picker.dart';
 import '../sticky/sticky_note.dart';
 import '../text/note_text.dart';
 import 'text_options_bar.dart';
+import 'tool_options_bar.dart';
+import 'toolbar_customizer.dart';
+import 'toolbar_layout.dart';
 
 class PopoverChanged extends ChangeNotifier {
   void notify() => notifyListeners();
@@ -52,12 +54,8 @@ class _ConstantTextSettings implements ValueListenable<TextSettings> {
 /// Handles to the palette's popovers, for code outside the palette that
 /// needs to know whether one is open.
 class ToolPaletteController {
-  final MenuController penMenu = MenuController();
-  final MenuController eraserMenu = MenuController();
-  final MenuController selectMenu = MenuController();
   final MenuController stickyMenu = MenuController();
   final MenuController imageMenu = MenuController();
-  final MenuController aiMenu = MenuController();
   final MenuController recordingMenu = MenuController();
 
   /// Whether the palette is unfolded to show its secondary tools, the
@@ -69,22 +67,12 @@ class ToolPaletteController {
   final PopoverChanged popoverChanged = PopoverChanged();
 
   bool get hasOpenPopover {
-    return penMenu.isOpen ||
-        eraserMenu.isOpen ||
-        selectMenu.isOpen ||
-        stickyMenu.isOpen ||
-        imageMenu.isOpen ||
-        aiMenu.isOpen ||
-        recordingMenu.isOpen;
+    return stickyMenu.isOpen || imageMenu.isOpen || recordingMenu.isOpen;
   }
 
   void closeAll() {
-    penMenu.close();
-    eraserMenu.close();
-    selectMenu.close();
     stickyMenu.close();
     imageMenu.close();
-    aiMenu.close();
     recordingMenu.close();
   }
 }
@@ -118,8 +106,17 @@ class PalettePlacement {
 
   /// The palette's top-left corner when docked in [region], [margin] from
   /// its edge.
-  Offset originIn(Rect region, double margin, {bool expanded = false}) {
-    final Size size = ToolPalette.sizeFor(edge.axis, expanded: expanded);
+  Offset originIn(
+    Rect region,
+    double margin, {
+    bool expanded = false,
+    ToolbarLayout tools = ToolbarLayout.standard,
+  }) {
+    final Size size = ToolPalette.sizeFor(
+      edge.axis,
+      expanded: expanded,
+      tools: tools,
+    );
     final double freeX = math.max(0, region.width - 2 * margin - size.width);
     final double freeY = math.max(0, region.height - 2 * margin - size.height);
     final double alongX = region.left + margin + freeX * along;
@@ -166,9 +163,14 @@ class PalettePlacement {
     Offset center,
     double margin, {
     bool expanded = false,
+    ToolbarLayout tools = ToolbarLayout.standard,
   }) {
     final PaletteEdge edge = nearestEdge(region, center);
-    final Size size = ToolPalette.sizeFor(edge.axis, expanded: expanded);
+    final Size size = ToolPalette.sizeFor(
+      edge.axis,
+      expanded: expanded,
+      tools: tools,
+    );
     final bool across = edge.axis == Axis.horizontal;
     final double offMiddle = across
         ? center.dx - region.center.dx
@@ -200,11 +202,18 @@ class PalettePlacement {
 }
 
 /// The floating tool palette: the pen, eraser, Select, AI mode, image
-/// insertion, and Sticky note, and, folded away behind an arrow at its end, the
-/// ruler. Each tool,
-/// pressed while selected, opens its options: the pen's ink color and
-/// width (and, folded away, its advanced settings), the eraser's mode and
-/// size, Select's Select PDF switch, and the assistant's notation settings.
+/// insertion, and Sticky note, and, folded away behind an arrow at its end,
+/// recordings, Text, and the ruler. That is as it comes: the button at its
+/// very end arranges it, in the order and with the buttons the user wants,
+/// as [layout] holds.
+///
+/// The chosen tool's options lie in a bar beside the palette, parallel to
+/// it and on the page side, and stay put as the palette folds and unfolds:
+/// the pen's style, inks, and width, the
+/// eraser's mode and size, Select's Select PDF switch, the assistant's
+/// switches, and Text's formatting. Pressing the chosen tool again hides
+/// the bar, or shows it, for every tool from then on. The Sticky note and
+/// image options, and the recordings, open as panels instead.
 ///
 /// Holding it anywhere, on its tools too, moves it: held a moment, the
 /// palette lights up in the accent color; held for [liftDelay], it lifts
@@ -241,22 +250,34 @@ class ToolPalette extends StatelessWidget {
     this.stickyTargetLabel,
     this.onChooseImageFromGallery,
     this.onTakePhoto,
-    this.onChooseSvg,
     this.ruler,
     this.recording,
     this.textSettings,
     this.onTextSettingsChanged,
+    this.optionsShown,
+    this.layout,
+    this.growsBefore = 0.5,
+    this.optionsMaxLength = double.infinity,
   });
 
   static const double _padding = AppSpacing.xxs;
 
-  /// The tools always shown; an arrow folds the rest in and out.
-  static const int _primaryCount = 6;
-  static const int _secondaryCount = 3;
+  /// The gap between the palette and the options bar beside it.
+  static const double _optionsGap = AppSpacing.xxs;
+
   static const double _buttonStep = 44;
 
   /// How long the secondary tools take to fold in or out.
   static Duration get unfoldDuration => AppMotion.snappy.duration;
+
+  /// How much of its growth as it unfolds goes toward the palette's start,
+  /// from 0 (it grows only toward its end) to 1 (only toward its start). The
+  /// options bar stays centered on where the folded palette lies, so unfolding
+  /// moves only the palette.
+  final double growsBefore;
+
+  /// The longest the options bar may be before it scrolls.
+  final double optionsMaxLength;
 
   /// The ruler the Ruler button shows and hides. Without it there is no
   /// Ruler button.
@@ -274,10 +295,27 @@ class ToolPalette extends StatelessWidget {
   ValueListenable<TextSettings> get _effectiveTextSettings =>
       textSettings ?? const _ConstantTextSettings();
 
+  /// Whether the chosen tool's options bar shows beside the palette.
+  /// Pressing the chosen tool again shows or hides it, and the choice holds
+  /// for every tool chosen after. Without it the bar always shows.
+  final ValueNotifier<bool>? optionsShown;
+
+  /// Whether an options bar shows beside the palette now, with [tool]
+  /// chosen. The Sticky note's options open as a panel instead.
+  static bool showsOptions(EditorTool tool, ValueListenable<bool>? shown) =>
+      tool != EditorTool.sticky && (shown?.value ?? true);
+
+  /// Which buttons the palette shows, in what order, and which fold away
+  /// behind its arrow; the user changes it with the button at the
+  /// palette's end. Without it the palette is as [ToolbarLayout.standard]
+  /// has it, and has no such button.
+  final ValueNotifier<ToolbarLayout>? layout;
+
+  ToolbarLayout get _tools => layout?.value ?? ToolbarLayout.standard;
+
   /// Callbacks for inserting images from gallery or camera.
   final VoidCallback? onChooseImageFromGallery;
   final VoidCallback? onTakePhoto;
-  final VoidCallback? onChooseSvg;
 
   /// The look of the next sticky note. Without it there is no Sticky note
   /// tool.
@@ -335,13 +373,31 @@ class ToolPalette extends StatelessWidget {
   /// place of dragging.
   final ValueChanged<PaletteEdge>? onMoveTo;
 
-  /// The palette's outer size, folded or [expanded]; fixed so the screen can
-  /// lay out around it.
-  static Size sizeFor(Axis axis, {bool expanded = false}) {
+  /// How much longer the palette with [tools] is unfolded than folded.
+  static double unfoldGrowth(
+    Axis axis, {
+    ToolbarLayout tools = ToolbarLayout.standard,
+  }) =>
+      sizeFor(axis, expanded: true, tools: tools).longestSide -
+      sizeFor(axis, tools: tools).longestSide;
+
+  /// The palette's outer size with [tools], folded or [expanded]; fixed so
+  /// the screen can lay out around it.
+  static Size sizeFor(
+    Axis axis, {
+    bool expanded = false,
+    ToolbarLayout tools = ToolbarLayout.standard,
+  }) {
     const double thickness = AppSizes.minTouchTarget + 2 * _padding;
-    // The primary tools and the toggle, and the secondary tools beside them
+    // The tools always shown, the arrow if anything is folded behind it,
+    // and the button that arranges them; and the folded tools beside them
     // once unfolded.
-    final int count = _primaryCount + 1 + (expanded ? _secondaryCount : 0);
+    final bool folds = tools.folded.isNotEmpty;
+    final int count =
+        tools.shown.length +
+        (folds ? 1 : 0) +
+        1 +
+        (expanded && folds ? tools.folded.length : 0);
     final double length =
         (count - 1) * _buttonStep + AppSizes.minTouchTarget + 2 * _padding;
     return axis == Axis.vertical
@@ -352,6 +408,8 @@ class ToolPalette extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final Widget palette = _LiftableSurface(
+      // Keyed, so it keeps its place as the options come and go before it.
+      key: const ValueKey<String>('tool-palette-card'),
       semanticLabel: 'Move tools, docked at the ${edge.label}',
       moveActions: <CustomSemanticsAction, VoidCallback>{
         if (onMoveTo != null)
@@ -382,41 +440,57 @@ class ToolPalette extends StatelessWidget {
                 ?ruler,
                 ?recording?.recorder,
                 ?controller?.expanded,
+                ?layout,
               ]),
               builder: (BuildContext context, Widget? _) {
-                final bool unfolded = controller?.expanded.value ?? false;
+                final ToolbarLayout tools = _tools;
+                final List<PaletteItem> primary = <PaletteItem>[
+                  ...tools.shown.where(_available),
+                ];
+                final List<PaletteItem> secondary = <PaletteItem>[
+                  ...tools.folded.where(_available),
+                ];
+                final bool unfolded =
+                    secondary.isNotEmpty &&
+                    (controller?.expanded.value ?? false);
+                // The capsule sits behind the chosen tool when it is one
+                // always shown.
+                final PaletteItem? chosen = switch (tool.value) {
+                  EditorTool.pen => PaletteItem.pen,
+                  EditorTool.eraser => PaletteItem.eraser,
+                  EditorTool.select => PaletteItem.select,
+                  EditorTool.sticky => PaletteItem.sticky,
+                  EditorTool.text => PaletteItem.text,
+                  EditorTool.ai => null,
+                };
+                final int slot = chosen == null ? -1 : primary.indexOf(chosen);
                 return _PaletteButtonsLayout(
                   axis: axis,
                   step: _buttonStep,
                   unfolded: unfolded,
                   duration: AppMotion.resolve(context, unfoldDuration),
-                  toolSlot: switch (tool.value) {
-                    EditorTool.pen => 0,
-                    EditorTool.eraser => 1,
-                    EditorTool.select => 2,
-                    EditorTool.sticky => stickySettings != null ? 5 : null,
-                    EditorTool.ai => null,
-                    EditorTool.text => null,
-                  },
+                  toolSlot: slot < 0 ? null : slot,
                   capsuleSize: dense
                       ? AppSizes.paletteButtonVisualDense
                       : AppSizes.paletteButtonVisual,
                   primary: <Widget>[
-                    _penControl(),
-                    _eraserControl(),
-                    _selectControl(),
-                    _aiControl(),
-                    _imageControl(),
-                    if (stickySettings != null) _stickyControl(),
+                    for (final PaletteItem item in primary)
+                      KeyedSubtree(
+                        key: ValueKey<PaletteItem>(item),
+                        child: _control(item),
+                      ),
                   ],
                   secondary: <Widget>[
-                    if (recording != null) _recordingControl(),
-                    _textControl(),
-                    if (ruler != null) _rulerControl(),
+                    for (final PaletteItem item in secondary)
+                      KeyedSubtree(
+                        key: ValueKey<PaletteItem>(item),
+                        child: _control(item),
+                      ),
                   ],
-                  toggle: controller == null
+                  toggle: controller == null || secondary.isEmpty
                       ? null
-                      : _extensionToggle(unfolded),
+                      : _extensionToggle(unfolded, secondary.length),
+                  trailing: layout == null ? null : _customizeControl(),
                 );
               },
             ),
@@ -426,45 +500,186 @@ class ToolPalette extends StatelessWidget {
     );
     final ValueListenable<TextSettings> settings = _effectiveTextSettings;
     return ListenableBuilder(
-      listenable: Listenable.merge(<Listenable>[tool, settings]),
+      listenable: Listenable.merge(<Listenable>[
+        tool,
+        settings,
+        penSettings,
+        eraserSettings,
+        selectPdf,
+        ?optionsShown,
+        ?layout,
+      ]),
       builder: (BuildContext context, Widget? _) {
-        final bool showOptions = tool.value == EditorTool.text;
-        return Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: <Widget>[
-            palette,
-            if (showOptions) ...<Widget>[
-              const SizedBox(height: AppSpacing.xxs),
-              TextOptionsBar(
-                settings: settings.value,
-                onChanged: onTextSettingsChanged ?? (_) {},
-              ),
-            ],
+        final Widget? bar = showsOptions(tool.value, optionsShown)
+            ? _optionsBar(context, settings.value)
+            : null;
+        // Parallel to the palette and centered on where it lies folded, on
+        // the side toward the page.
+        final bool towardPage =
+            edge == PaletteEdge.top || edge == PaletteEdge.left;
+        final List<Widget> children = <Widget>[
+          _paletteSlot(context, palette),
+          if (bar != null) ...<Widget>[
+            const SizedBox.square(dimension: _optionsGap),
+            ConstrainedBox(
+              constraints: axis == Axis.horizontal
+                  ? BoxConstraints(maxWidth: optionsMaxLength)
+                  : BoxConstraints(maxHeight: optionsMaxLength),
+              child: bar,
+            ),
           ],
+        ];
+        return Flex(
+          direction: axis == Axis.horizontal ? Axis.vertical : Axis.horizontal,
+          mainAxisSize: MainAxisSize.min,
+          // Placed on screen, as the palette is, whatever the reading order.
+          textDirection: TextDirection.ltr,
+          children: towardPage ? children : children.reversed.toList(),
         );
       },
     );
   }
 
-  /// Selects the pen; pressed again, opens its ink color and width.
+  /// Whether this palette has what [item] needs.
+  bool _available(PaletteItem item) => switch (item) {
+    PaletteItem.sticky => stickySettings != null,
+    PaletteItem.recording => recording != null,
+    PaletteItem.ruler => ruler != null,
+    _ => true,
+  };
+
+  Widget _control(PaletteItem item) => switch (item) {
+    PaletteItem.pen => _penControl(),
+    PaletteItem.eraser => _eraserControl(),
+    PaletteItem.select => _selectControl(),
+    PaletteItem.ai => _aiControl(),
+    PaletteItem.image => _imageControl(),
+    PaletteItem.sticky => _stickyControl(),
+    PaletteItem.recording => _recordingControl(),
+    PaletteItem.text => _textControl(),
+    PaletteItem.ruler => _rulerControl(),
+  };
+
+  /// Opens the toolbar's arrangement: the order of its buttons, which are
+  /// always shown, which fold away behind the arrow, and which are hidden.
+  Widget _customizeControl() {
+    return Builder(
+      builder: (BuildContext context) {
+        return PaletteButton(
+          key: const ValueKey<String>('customize-toolbar'),
+          tooltip: 'Customize toolbar',
+          semanticLabel: 'Customize toolbar',
+          dense: dense,
+          onPressed: () {
+            controller?.closeAll();
+            unawaited(showToolbarCustomizer(context, layout: layout!));
+          },
+          child: const Icon(AppIcons.customizeToolbar),
+        );
+      },
+    );
+  }
+
+  /// Room for the palette unfolded, its middle where the folded palette's
+  /// middle lies. Its size never follows the palette's, so what is centered
+  /// beside it stays put as the palette unfolds.
+  Widget _paletteSlot(BuildContext context, Widget palette) {
+    final bool across = axis == Axis.horizontal;
+    return TweenAnimationBuilder<double>(
+      // Keyed, so it keeps its place as the options come and go before it.
+      key: const ValueKey<String>('tool-palette-slot'),
+      tween: Tween<double>(end: growsBefore),
+      // As the palette's own docking moves, so a drop that changes this does
+      // not jump it.
+      duration: AppMotion.resolve(context, AppMotion.bouncy.duration),
+      curve: AppMotion.fadeInCurve,
+      child: palette,
+      builder: (BuildContext context, double before, Widget? child) {
+        final double growth = unfoldGrowth(axis, tools: _tools);
+        final double lean = 2 * before - 1;
+        final double start = math.max(0, -lean) * growth;
+        final double end = math.max(0, lean) * growth;
+        return Padding(
+          padding: across
+              ? EdgeInsets.only(left: start, right: end)
+              : EdgeInsets.only(top: start, bottom: end),
+          child: SizedBox.fromSize(
+            size: sizeFor(axis, expanded: true, tools: _tools),
+            child: Align(
+              alignment: across ? Alignment(lean, 0) : Alignment(0, lean),
+              child: child,
+            ),
+          ),
+        );
+      },
+    );
+  }
+
+  /// The chosen tool's options, lying along [axis] as the palette does.
+  Widget? _optionsBar(BuildContext context, TextSettings text) {
+    return switch (tool.value) {
+      EditorTool.pen => PenOptions(
+        axis: axis,
+        settings: penSettings.value,
+        config: penConfig,
+        onChanged: (PenSettings next) => penSettings.value = next,
+        onOpenAdvanced: () => showPenAdvancedPanel(
+          context,
+          settings: penSettings,
+          config: penConfig,
+        ),
+      ),
+      EditorTool.eraser => EraserOptions(
+        axis: axis,
+        settings: eraserSettings.value,
+        config: eraserConfig,
+        onChanged: (EraserSettings next) => eraserSettings.value = next,
+      ),
+      EditorTool.select => SelectOptions(
+        axis: axis,
+        selectPdf: selectPdf.value,
+        onSelectPdfChanged: (bool next) => selectPdf.value = next,
+      ),
+      EditorTool.text => TextOptionsBar(
+        axis: axis,
+        settings: text,
+        onChanged: onTextSettingsChanged ?? (_) {},
+      ),
+      EditorTool.ai =>
+        assistant == null ? null : AiOptions(axis: axis, assistant: assistant!),
+      EditorTool.sticky => null,
+    };
+  }
+
+  /// What a press on [mine] does: chooses it, or, once it is chosen, shows
+  /// or hides the options bar from then on.
+  VoidCallback _chooseOrToggle(BuildContext context, EditorTool mine) {
+    final ValueNotifier<bool>? shown = optionsShown;
+    if (tool.value != mine || shown == null) {
+      return () => tool.value = mine;
+    }
+    return () {
+      shown.value = !shown.value;
+      SemanticsService.sendAnnouncement(
+        View.of(context),
+        shown.value ? 'Tool options shown' : 'Tool options hidden',
+        Directionality.of(context),
+      );
+    };
+  }
+
+  /// Selects the pen; pressed again, shows or hides its options.
   Widget _penControl() {
-    return PalettePopover(
-      paletteEdge: edge,
-      controller: controller?.penMenu,
-      onChanged: controller?.popoverChanged.notify,
-      anchorBuilder: (BuildContext context, VoidCallback toggle) {
-        final bool selected = tool.value == EditorTool.pen;
+    return Builder(
+      builder: (BuildContext context) {
         final PenSettings pen = penSettings.value;
         return PaletteButton(
           tooltip: pen.style.label,
           hostsSelection: true,
           semanticLabel: PenOptions.describe(pen),
-          selected: selected,
+          selected: tool.value == EditorTool.pen,
           dense: dense,
-          onPressed: selected
-              ? toggle
-              : _choose(() => tool.value = EditorTool.pen),
+          onPressed: _chooseOrToggle(context, EditorTool.pen),
           child: _PenIcon(
             ink: pen.activeInk,
             style: pen.style,
@@ -472,95 +687,38 @@ class ToolPalette extends StatelessWidget {
           ),
         );
       },
-      panelBuilder: (BuildContext context, VoidCallback close) {
-        return ValueListenableBuilder<PenSettings>(
-          valueListenable: penSettings,
-          builder: (BuildContext context, PenSettings current, Widget? _) {
-            return PenOptions(
-              settings: current,
-              config: penConfig,
-              onChanged: (PenSettings next) => penSettings.value = next,
-              onOpenAdvanced: () {
-                // The popover's context goes with it; the navigator stays.
-                final NavigatorState navigator = Navigator.of(context);
-                close();
-                showPenAdvancedPanel(
-                  navigator.context,
-                  settings: penSettings,
-                  config: penConfig,
-                );
-              },
-            );
-          },
-        );
-      },
     );
   }
 
-  /// Selects the eraser; pressed again, opens its options.
+  /// Selects the eraser; pressed again, shows or hides its options.
   Widget _eraserControl() {
-    return PalettePopover(
-      paletteEdge: edge,
-      controller: controller?.eraserMenu,
-      onChanged: controller?.popoverChanged.notify,
-      anchorBuilder: (BuildContext context, VoidCallback toggle) {
-        final bool selected = tool.value == EditorTool.eraser;
+    return Builder(
+      builder: (BuildContext context) {
         return PaletteButton(
           tooltip: 'Eraser',
           hostsSelection: true,
           semanticLabel:
               'Eraser, ${EraserOptions.describe(eraserSettings.value)}',
-          selected: selected,
+          selected: tool.value == EditorTool.eraser,
           dense: dense,
-          onPressed: selected
-              ? toggle
-              : _choose(() => tool.value = EditorTool.eraser),
+          onPressed: _chooseOrToggle(context, EditorTool.eraser),
           child: const EraserIcon(),
-        );
-      },
-      panelBuilder: (BuildContext context, VoidCallback close) {
-        return ValueListenableBuilder<EraserSettings>(
-          valueListenable: eraserSettings,
-          builder: (BuildContext context, EraserSettings current, Widget? _) {
-            return EraserOptions(
-              settings: current,
-              config: eraserConfig,
-              onChanged: (EraserSettings next) => eraserSettings.value = next,
-            );
-          },
         );
       },
     );
   }
 
-  /// Selects the Select tool; pressed again, opens its options.
+  /// Selects the Select tool; pressed again, shows or hides its options.
   Widget _selectControl() {
-    return PalettePopover(
-      paletteEdge: edge,
-      controller: controller?.selectMenu,
-      onChanged: controller?.popoverChanged.notify,
-      anchorBuilder: (BuildContext context, VoidCallback toggle) {
-        final bool selected = tool.value == EditorTool.select;
+    return Builder(
+      builder: (BuildContext context) {
         return PaletteButton(
           tooltip: 'Select',
           hostsSelection: true,
-          selected: selected,
+          selected: tool.value == EditorTool.select,
           dense: dense,
-          onPressed: selected
-              ? toggle
-              : _choose(() => tool.value = EditorTool.select),
+          onPressed: _chooseOrToggle(context, EditorTool.select),
           child: const Icon(AppIcons.lasso),
-        );
-      },
-      panelBuilder: (BuildContext context, VoidCallback close) {
-        return ValueListenableBuilder<bool>(
-          valueListenable: selectPdf,
-          builder: (BuildContext context, bool on, Widget? _) {
-            return SelectOptions(
-              selectPdf: on,
-              onSelectPdfChanged: (bool next) => selectPdf.value = next,
-            );
-          },
         );
       },
     );
@@ -613,9 +771,7 @@ class ToolPalette extends StatelessWidget {
   /// Opens image insertion options: gallery or camera.
   Widget _imageControl() {
     final bool enabled =
-        onChooseImageFromGallery != null ||
-        onTakePhoto != null ||
-        onChooseSvg != null;
+        onChooseImageFromGallery != null || onTakePhoto != null;
     return PalettePopover(
       paletteEdge: edge,
       controller: controller?.imageMenu,
@@ -632,12 +788,6 @@ class ToolPalette extends StatelessWidget {
       },
       panelBuilder: (BuildContext context, VoidCallback close) {
         return ImageOptions(
-          onChooseSvg: onChooseSvg == null
-              ? null
-              : () {
-                  close();
-                  onChooseSvg!();
-                },
           onChooseFromGallery: onChooseImageFromGallery == null
               ? null
               : () {
@@ -657,7 +807,7 @@ class ToolPalette extends StatelessWidget {
 
   /// Folds the secondary tools in and out. The arrow points the way the
   /// palette will grow, and back the other way once it has.
-  Widget _extensionToggle(bool unfolded) {
+  Widget _extensionToggle(bool unfolded, int folded) {
     final bool across = axis == Axis.horizontal;
     final IconData icon = unfolded
         ? (across ? AppIcons.toolsCollapseAcross : AppIcons.toolsCollapseDown)
@@ -678,7 +828,7 @@ class ToolPalette extends StatelessWidget {
             SemanticsService.sendAnnouncement(
               View.of(context),
               next
-                  ? 'Tools expanded, $_secondaryCount additional tools available'
+                  ? 'Tools expanded, $folded additional tools available'
                   : 'Tools collapsed',
               Directionality.of(context),
             );
@@ -713,17 +863,21 @@ class ToolPalette extends StatelessWidget {
     );
   }
 
-  /// Selects typed text placement; its formatting controls appear below.
+  /// Selects typed text placement; pressed again, shows or hides its
+  /// formatting.
   Widget _textControl() {
-    final bool selected = tool.value == EditorTool.text;
-    return PaletteButton(
-      key: const ValueKey<String>('text-tool'),
-      tooltip: 'Text',
-      semanticLabel: 'Text',
-      selected: selected,
-      dense: dense,
-      onPressed: _choose(() => tool.value = EditorTool.text),
-      child: const _TextGlyph(),
+    return Builder(
+      builder: (BuildContext context) {
+        return PaletteButton(
+          key: const ValueKey<String>('text-tool'),
+          tooltip: 'Text',
+          semanticLabel: 'Text',
+          selected: tool.value == EditorTool.text,
+          dense: dense,
+          onPressed: _chooseOrToggle(context, EditorTool.text),
+          child: const _TextGlyph(),
+        );
+      },
     );
   }
 
@@ -755,14 +909,12 @@ class ToolPalette extends StatelessWidget {
   }
 
   /// Turns AI mode on: it shows the assistant's notes and opens the chat.
-  /// Pressed again, it opens the assistant's options. Closing the chat
+  /// Pressed while on, it takes up the AI tool, whose options show beside
+  /// the palette; pressed again, it shows or hides them. Closing the chat
   /// turns it off; other tools can stay on beside it.
   Widget _aiControl() {
-    return PalettePopover(
-      paletteEdge: edge,
-      controller: controller?.aiMenu,
-      onChanged: controller?.popoverChanged.notify,
-      anchorBuilder: (BuildContext context, VoidCallback toggle) {
+    return Builder(
+      builder: (BuildContext context) {
         final bool on = aiActive.value;
         return PaletteButton(
           key: const ValueKey<String>('ai-mode-toggle'),
@@ -775,15 +927,33 @@ class ToolPalette extends StatelessWidget {
               ? onTurnOnAi
               : assistant == null
               ? null
-              : toggle,
+              : _chooseOrToggle(context, EditorTool.ai),
           child: const _AiGlyph(),
         );
       },
-      panelBuilder: (BuildContext context, VoidCallback close) {
-        return AiOptions(assistant: assistant!);
-      },
     );
   }
+}
+
+/// What stands for [item] where the toolbar is arranged: the glyph its
+/// button shows, at rest.
+class PaletteItemGlyph extends StatelessWidget {
+  const PaletteItemGlyph(this.item, {super.key});
+
+  final PaletteItem item;
+
+  @override
+  Widget build(BuildContext context) => switch (item) {
+    PaletteItem.pen => const PenIcon(),
+    PaletteItem.eraser => const EraserIcon(),
+    PaletteItem.select => const Icon(AppIcons.lasso),
+    PaletteItem.ai => const _AiGlyph(),
+    PaletteItem.image => const PictureIcon(),
+    PaletteItem.sticky => _StickyIcon(color: const StickyNoteSettings().color),
+    PaletteItem.recording => const Icon(AppIcons.microphone),
+    PaletteItem.text => const _TextGlyph(),
+    PaletteItem.ruler => const RulerIcon(),
+  };
 }
 
 /// The letters "AI", drawn in the icon's color and size.
@@ -875,9 +1045,10 @@ class _PaletteButtonsLayout extends StatelessWidget {
     required this.toolSlot,
     required this.capsuleSize,
     this.toggle,
+    this.trailing,
   });
 
-  /// The slot of the chosen tool, which the selection capsule glides to; null
+  /// The slot of the chosen tool, where the selection capsule shows; null
   /// when no button in the row is the chosen tool.
   final int? toolSlot;
   final double capsuleSize;
@@ -887,6 +1058,9 @@ class _PaletteButtonsLayout extends StatelessWidget {
   final List<Widget> primary;
   final List<Widget> secondary;
   final Widget? toggle;
+
+  /// Last of all, after [toggle]: the button that arranges the palette.
+  final Widget? trailing;
   final bool unfolded;
   final Duration duration;
 
@@ -902,7 +1076,8 @@ class _PaletteButtonsLayout extends StatelessWidget {
         final double slots =
             primary.length +
             secondary.length * reveal +
-            (toggle == null ? 0 : 1);
+            (toggle == null ? 0 : 1) +
+            (trailing == null ? 0 : 1);
         final double along = (slots - 1) * step + AppSizes.minTouchTarget;
         final bool across = axis == Axis.horizontal;
 
@@ -922,20 +1097,34 @@ class _PaletteButtonsLayout extends StatelessWidget {
           child: Stack(
             clipBehavior: Clip.none,
             children: <Widget>[
-              // One capsule behind the buttons, gliding to the chosen tool.
+              // A capsule behind the chosen tool. Keyed by its slot, so the
+              // chosen tool's capsule fades in where it is, without sliding
+              // over from the last one, and the last one's fades out as its
+              // glyph turns back: a light glyph is never left on bare card.
               Positioned.fill(
                 child: IgnorePointer(
-                  child: AnimatedOpacity(
-                    opacity: toolSlot == null ? 0 : 1,
-                    duration: AppMotion.resolve(context, AppMotion.fadeIn),
-                    curve: AppMotion.fadeInCurve,
-                    child: SelectionCapsule(
-                      index: toolSlot ?? 0,
-                      count: primary.length,
-                      axis: axis,
-                      slotExtent: step,
-                      size: capsuleSize,
-                      origin: (AppSizes.minTouchTarget - capsuleSize) / 2,
+                  child: RepaintBoundary(
+                    child: AnimatedSwitcher(
+                      duration: AppMotion.resolve(context, AppMotion.fadeIn),
+                      switchInCurve: AppMotion.fadeInCurve,
+                      switchOutCurve: AppMotion.fadeInCurve,
+                      layoutBuilder: (Widget? current, List<Widget> previous) =>
+                          Stack(
+                            fit: StackFit.expand,
+                            children: <Widget>[...previous, ?current],
+                          ),
+                      child: toolSlot == null
+                          ? const SizedBox.shrink()
+                          : SelectionCapsule(
+                              key: ValueKey<int>(toolSlot!),
+                              index: toolSlot!,
+                              count: primary.length,
+                              axis: axis,
+                              slotExtent: step,
+                              size: capsuleSize,
+                              origin:
+                                  (AppSizes.minTouchTarget - capsuleSize) / 2,
+                            ),
                     ),
                   ),
                 ),
@@ -958,6 +1147,13 @@ class _PaletteButtonsLayout extends StatelessWidget {
                   ),
               if (toggle != null)
                 place(primary.length + secondary.length * reveal, toggle!),
+              if (trailing != null)
+                place(
+                  primary.length +
+                      secondary.length * reveal +
+                      (toggle == null ? 0 : 1),
+                  trailing!,
+                ),
             ],
           ),
         );
@@ -972,6 +1168,7 @@ class _PaletteButtonsLayout extends StatelessWidget {
 /// deeper shadow, to be dragged.
 class _LiftableSurface extends StatefulWidget {
   const _LiftableSurface({
+    super.key,
     required this.semanticLabel,
     required this.moveActions,
     required this.onLift,
@@ -1457,8 +1654,9 @@ class _PenIcon extends StatelessWidget {
   }
 }
 
-/// The pen's options: its ink color and width, and a way into the advanced
-/// settings, which open in their own panel.
+/// The pen's options, along a [ToolOptionsBar]: the writing style, the
+/// three inks at hand, the width, and a way into the advanced settings,
+/// which open in their own panel.
 class PenOptions extends StatelessWidget {
   const PenOptions({
     super.key,
@@ -1466,6 +1664,7 @@ class PenOptions extends StatelessWidget {
     required this.onChanged,
     this.config = const PenConfig(),
     this.onOpenAdvanced,
+    this.axis = Axis.horizontal,
   });
 
   final PenSettings settings;
@@ -1474,75 +1673,69 @@ class PenOptions extends StatelessWidget {
 
   /// Opens the advanced settings; with none there is no way in.
   final VoidCallback? onOpenAdvanced;
+  final Axis axis;
+
+  static String describeWidth(double width) => '${width.round()} px';
 
   /// The style, the ink, and the width, as screen readers announce them:
   /// "Highlighter, Yellow, 12 px".
   static String describe(PenSettings settings) {
     return '${settings.style.label}, ${settings.activeInk.label}, '
-        '${StrokeWidthPicker.describe(settings.activeWidth)}';
+        '${describeWidth(settings.activeWidth)}';
   }
 
   @override
   Widget build(BuildContext context) {
-    return Column(
-      mainAxisSize: MainAxisSize.min,
-      crossAxisAlignment: CrossAxisAlignment.stretch,
+    final double min = config.minWidthFor(settings.style);
+    final double max = config.maxWidthFor(settings.style);
+    return ToolOptionsBar(
+      key: const ValueKey<String>('pen-options-bar'),
+      axis: axis,
       children: <Widget>[
-        SegmentedChoice<WritingStyle>(
-          options: WritingStyle.values,
-          selected: settings.style,
-          labelOf: (WritingStyle style) => style.label,
-          iconOnly: true,
-          visualOf: (WritingStyle style, Color color) =>
-              _WritingTipGlyph(style: style, color: color),
-          keyOf: (WritingStyle style) =>
-              ValueKey<String>('writing-style-${style.name}'),
-          onSelected: (WritingStyle style) =>
-              onChanged(settings.copyWith(style: style)),
-        ),
-        const SizedBox(height: AppSpacing.md),
-        InkColorPicker(
+        for (final WritingStyle style in WritingStyle.values)
+          OptionsButton(
+            key: ValueKey<String>('writing-style-${style.name}'),
+            // Not the bare style, which is the palette's pen button.
+            tooltip: '${style.label} style',
+            selected: settings.style == style,
+            onPressed: () => onChanged(settings.copyWith(style: style)),
+            child: _WritingToolGlyph(style: style),
+          ),
+        OptionsDivider(axis: axis),
+        InkSwatches(
+          axis: axis,
+          swatches: settings.activeSwatches,
           selected: settings.activeInk,
-          colors: settings.isHighlighter
-              ? InkPalette.highlighterColors
-              : InkPalette.colors,
-          onSelected: (InkColor ink) => onChanged(settings.withActiveInk(ink)),
+          onSelected: (int index) =>
+              onChanged(settings.withActiveInk(settings.activeSwatches[index])),
+          onReplaced: (int index, InkColor ink) =>
+              onChanged(settings.withActiveSwatch(index, ink)),
         ),
-        const SizedBox(height: AppSpacing.md),
-        StrokeWidthPicker(
-          settings: settings,
-          config: config,
+        OptionsDivider(axis: axis),
+        OptionsSlider(
+          key: const ValueKey<String>('pen-width-slider'),
+          axis: axis,
+          value: settings.activeWidth,
+          min: min,
+          max: max,
+          divisions: (max - min).round(),
+          semanticFormatterCallback: describeWidth,
+          start: const OptionsDot(diameter: 4),
+          end: const OptionsDot(diameter: 12),
           onChanged: (double width) =>
               onChanged(settings.withActiveWidth(width)),
         ),
         // Taper, pressure, stabilization, and shapes belong to the pen.
         if (onOpenAdvanced != null && !settings.isHighlighter) ...<Widget>[
-          const SizedBox(height: AppSpacing.xs),
-          const Divider(height: 1),
-          const SizedBox(height: AppSpacing.xxs),
-          _AdvancedButton(onPressed: onOpenAdvanced!),
+          OptionsDivider(axis: axis),
+          OptionsButton(
+            key: const ValueKey<String>('pen-advanced-toggle'),
+            tooltip: 'Advanced pen settings',
+            onPressed: onOpenAdvanced,
+            child: const Icon(AppIcons.tune),
+          ),
         ],
       ],
-    );
-  }
-}
-
-/// A close-up of the part that touches the page, so the writing styles can
-/// be distinguished by their nib rather than by a label or generic tool icon.
-class _WritingTipGlyph extends StatelessWidget {
-  const _WritingTipGlyph({required this.style, required this.color});
-
-  final WritingStyle style;
-  final Color color;
-
-  @override
-  Widget build(BuildContext context) {
-    return SizedBox.square(
-      dimension: 24,
-      child: CustomPaint(
-        key: ValueKey<String>('writing-style-tip-${style.name}'),
-        painter: _WritingTipPainter(style: style, color: color),
-      ),
     );
   }
 }
@@ -1663,44 +1856,5 @@ class _WritingTipPainter extends CustomPainter {
   @override
   bool shouldRepaint(_WritingTipPainter oldDelegate) {
     return oldDelegate.style != style || oldDelegate.color != color;
-  }
-}
-
-/// Opens the advanced pen settings panel.
-class _AdvancedButton extends StatelessWidget {
-  const _AdvancedButton({required this.onPressed});
-
-  final VoidCallback onPressed;
-
-  @override
-  Widget build(BuildContext context) {
-    final AppColors colors = AppColors.of(context);
-    return Semantics(
-      button: true,
-      label: 'Advanced pen settings',
-      onTap: onPressed,
-      excludeSemantics: true,
-      child: InkWell(
-        key: const ValueKey<String>('pen-advanced-toggle'),
-        onTap: onPressed,
-        borderRadius: AppBorderRadius.medium,
-        child: SizedBox(
-          height: AppSizes.minTouchTarget,
-          child: Row(
-            children: <Widget>[
-              Icon(AppIcons.tune, size: 18, color: colors.textSecondary),
-              const SizedBox(width: AppSpacing.sm),
-              Expanded(
-                child: Text(
-                  'Advanced',
-                  style: Theme.of(context).textTheme.labelLarge,
-                ),
-              ),
-              Icon(AppIcons.disclosure, size: 20, color: colors.textSecondary),
-            ],
-          ),
-        ),
-      ),
-    );
   }
 }

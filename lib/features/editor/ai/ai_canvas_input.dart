@@ -1,9 +1,12 @@
 import 'dart:math' as math;
+import 'dart:ui' show PathMetric;
 
 import 'package:flutter/material.dart';
 
+import '../../../app/theme/app_tokens.dart';
 import '../ink/ink_sample.dart';
 import '../ink/one_euro_smoother.dart';
+import '../ink/selection_config.dart';
 import '../ink/smoothing_config.dart';
 
 /// Thresholds for circling on the page in AI mode, and timing and image
@@ -20,7 +23,7 @@ class AiCanvasConfig {
     this.minLoopArea = 2400,
     this.minLoopCompactness = 0.2,
     this.minPointSpacing = 0.75,
-    this.glowWidth = 3,
+    this.tapSlop = 12,
     this.recognitionInkWidth = 4,
     this.recognitionPadding = 24,
     this.maxRecognitionDimension = 1600,
@@ -30,6 +33,7 @@ class AiCanvasConfig {
        assert(minLoopExtent > 0),
        assert(loopClosingFraction > 0 && loopClosingFraction < 1),
        assert(minLoopCompactness > 0 && minLoopCompactness <= 1),
+       assert(tapSlop >= 0 && tapSlop < double.infinity),
        assert(maxRecognitionScale >= minRecognitionScale);
 
   /// How long the pen stays off the page after a stroke before the ink
@@ -55,8 +59,8 @@ class AiCanvasConfig {
   /// Pointer samples closer than this to the last kept point are dropped.
   final double minPointSpacing;
 
-  /// The width of the glowing stroke's bright core.
-  final double glowWidth;
+  /// The largest width and height of a press that still counts as a tap.
+  final double tapSlop;
 
   /// How the strokes are drawn for the recognizer: dark ink of this width
   /// on white, with this much margin around them.
@@ -259,17 +263,18 @@ class _ActiveAiStroke {
   }
 }
 
-/// What is drawn on the page in AI mode: a glowing stroke that is never ink.
+/// What is drawn on the page in AI mode: a selection lasso that is never ink.
 /// A finished stroke that circles a spot is handed to [onCircle], which takes
-/// it as the assistant's context; any other stroke is dropped, for writing in
-/// AI mode is not read.
+/// it as the assistant's context. A tap is handed to [onTap], and any other
+/// stroke is dropped, for writing in AI mode is not read.
 ///
-/// It notifies only the glow layer that paints it, never the editor.
+/// It notifies only the selection layer that paints it, never the editor.
 class AiCanvasInputController extends ChangeNotifier {
   AiCanvasInputController({
     this.config = const AiCanvasConfig(),
     this.smoothing = const SmoothingConfig(),
     this.onCircle,
+    this.onTap,
   });
 
   final AiCanvasConfig config;
@@ -277,6 +282,9 @@ class AiCanvasInputController extends ChangeNotifier {
 
   /// Asked with the outline of a loop drawn on [page].
   void Function(List<InkVector> outline, Object page)? onCircle;
+
+  /// Asked when [page] is tapped rather than circled.
+  void Function(InkVector position, Object page)? onTap;
 
   _ActiveAiStroke? _active;
   Object? _page;
@@ -344,6 +352,11 @@ class AiCanvasInputController extends ChangeNotifier {
     notifyListeners();
     if (outline != null) {
       onCircle?.call(outline, page);
+    } else if (active.points.isNotEmpty) {
+      final Rect bounds = AiCanvasStroke(active.points).bounds;
+      if (bounds.width <= config.tapSlop && bounds.height <= config.tapSlop) {
+        onTap?.call(active.points.first.position, page);
+      }
     }
   }
 
@@ -373,23 +386,33 @@ class AiCanvasInputController extends ChangeNotifier {
   }
 }
 
-/// Paints what is drawn in AI mode on [page] as a glowing path: a soft,
-/// blurred halo in [color], a translucent aura, and a bright core with
-/// round caps and joins. Repaints only when [input] changes.
+/// Paints what is drawn in AI mode on [page] like the ordinary selection
+/// lasso: a dashed accent outline, with no neon halo. Repaints only when
+/// [input] changes.
 class AiCanvasStrokePainter extends CustomPainter {
   AiCanvasStrokePainter({
     required this.input,
     required this.page,
     required this.color,
-    required this.core,
-    this.width = 3,
+    this.selectionConfig = const SelectionConfig(),
+    this.scale = 1,
+    this.scaleProvider,
   }) : super(repaint: input);
 
   final AiCanvasInputController input;
   final Object page;
   final Color color;
-  final Color core;
-  final double width;
+  final SelectionConfig selectionConfig;
+  final double scale;
+  final double Function()? scaleProvider;
+
+  double get _screenScale {
+    final double? dynamicScale = scaleProvider?.call();
+    if (dynamicScale != null && dynamicScale > 0 && dynamicScale.isFinite) {
+      return dynamicScale;
+    }
+    return scale > 0 && scale.isFinite ? scale : 1;
+  }
 
   @override
   void paint(Canvas canvas, Size size) {
@@ -398,38 +421,39 @@ class AiCanvasStrokePainter extends CustomPainter {
     }
     final Path path = Path();
     _addSmooth(path, input.activePoints);
+    final double screenScale = _screenScale;
     final Paint paint = Paint()
       ..style = PaintingStyle.stroke
       ..strokeCap = StrokeCap.round
-      ..strokeJoin = StrokeJoin.round;
-    canvas
-      ..drawPath(
+      ..strokeJoin = StrokeJoin.round
+      ..color = color
+      ..strokeWidth = AppSizes.focusRingWidth / screenScale;
+    canvas.drawPath(
+      _dashed(
         path,
-        paint
-          ..color = color.withValues(alpha: 0.45)
-          ..strokeWidth = width * 5
-          ..maskFilter = MaskFilter.blur(BlurStyle.normal, width * 2.2),
-      )
-      ..drawPath(
-        path,
-        paint
-          ..color = color.withValues(alpha: 0.55)
-          ..strokeWidth = width * 2.2
-          ..maskFilter = MaskFilter.blur(BlurStyle.normal, width * 0.6),
-      )
-      ..drawPath(
-        path,
-        paint
-          ..color = color
-          ..strokeWidth = width
-          ..maskFilter = null,
-      )
-      ..drawPath(
-        path,
-        paint
-          ..color = core
-          ..strokeWidth = width * 0.45,
-      );
+        selectionConfig.lassoDashLength / screenScale,
+        selectionConfig.lassoDashGap / screenScale,
+      ),
+      paint,
+    );
+  }
+
+  static Path _dashed(Path source, double dash, double gap) {
+    final Path result = Path();
+    for (final PathMetric metric in source.computeMetrics()) {
+      double distance = 0;
+      while (distance < metric.length) {
+        result.addPath(
+          metric.extractPath(
+            distance,
+            math.min(distance + dash, metric.length),
+          ),
+          Offset.zero,
+        );
+        distance += dash + gap;
+      }
+    }
+    return result;
   }
 
   /// Through the midpoints of [points], curving at each point, so a stroke
@@ -458,7 +482,8 @@ class AiCanvasStrokePainter extends CustomPainter {
     return oldDelegate.input != input ||
         oldDelegate.page != page ||
         oldDelegate.color != color ||
-        oldDelegate.core != core ||
-        oldDelegate.width != width;
+        oldDelegate.selectionConfig != selectionConfig ||
+        oldDelegate.scale != scale ||
+        oldDelegate.scaleProvider != scaleProvider;
   }
 }

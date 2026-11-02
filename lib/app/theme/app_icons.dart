@@ -16,6 +16,8 @@ abstract final class AppIcons {
   static const IconData clear = CupertinoIcons.xmark_circle_fill;
   static const IconData more = CupertinoIcons.ellipsis;
   static const IconData settings = CupertinoIcons.gear;
+  static const IconData fullscreen = CupertinoIcons.fullscreen;
+  static const IconData exitFullscreen = CupertinoIcons.fullscreen_exit;
 
   // Marks.
   static const IconData check = CupertinoIcons.checkmark;
@@ -68,12 +70,18 @@ abstract final class AppIcons {
   static const IconData highlighter = CupertinoIcons.paintbrush;
   static const IconData stickyNote = CupertinoIcons.square_on_square;
   static const IconData lasso = CupertinoIcons.lasso;
+  static const IconData eraseArea = CupertinoIcons.circle;
+  static const IconData eraseStroke = CupertinoIcons.scribble;
+  static const IconData notation = CupertinoIcons.hand_draw;
+  static const IconData animation = CupertinoIcons.play_circle;
   // The palette's extension toggle: along a row it points right to open and
   // left to close; down a column, down and up.
   static const IconData toolsExpandAcross = CupertinoIcons.chevron_right;
   static const IconData toolsCollapseAcross = CupertinoIcons.chevron_left;
   static const IconData toolsExpandDown = CupertinoIcons.chevron_down;
   static const IconData toolsCollapseDown = CupertinoIcons.chevron_up;
+  static const IconData customizeToolbar = CupertinoIcons.gear_alt;
+  static const IconData dragHandle = CupertinoIcons.line_horizontal_3;
   static const IconData undo = CupertinoIcons.arrow_uturn_left;
   static const IconData redo = CupertinoIcons.arrow_uturn_right;
   static const IconData copy = CupertinoIcons.doc_on_doc;

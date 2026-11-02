@@ -123,13 +123,12 @@ void main() {
     expect(find.text('Panel side'), findsNothing);
     expect(find.text('Add to note'), findsNothing);
 
-    // The assistant's settings are the AI tool's options.
-    await tester.tap(find.byTooltip('AI settings'));
-    await tester.pumpAndSettle();
+    // The assistant's settings are the AI tool's options, beside the
+    // palette while it is chosen.
     expect(find.byType(AiOptions), findsOneWidget);
-    expect(find.text('Enable notation'), findsOneWidget);
-    expect(find.text('Enable animation'), findsOneWidget);
-    expect(find.text('Show notes in chat'), findsOneWidget);
+    expect(find.byTooltip('Notation: on'), findsOneWidget);
+    expect(find.byTooltip('Animation: on'), findsOneWidget);
+    expect(find.byTooltip('Show notes in chat: on'), findsOneWidget);
     expect(
       tester
           .widget<AiAssistantPanel>(find.byType(AiAssistantPanel))

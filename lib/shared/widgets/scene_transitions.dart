@@ -2,28 +2,36 @@ import 'package:flutter/widgets.dart';
 
 import '../../app/theme/app_tokens.dart';
 
-/// Replaces a library detail scene. Going [direction] 1 into a folder zooms
-/// into it: the scene left grows past the viewer as it fades and the folder's
-/// rises from a little smaller. -1 is the same move reversed, out of a folder.
-/// Between folders side by side (0) it is a cross-fade with a small vertical
-/// drift. There is intentionally no horizontal slide or per-item stagger.
+/// [child], drawn as one picture whenever [controller] allows: the form a
+/// scene takes while it moves or leaves, the library's folders and the
+/// note editor alike. The note editor opens with a move drawn this way, so
+/// it shares one set of drawing operations, warmed up by `MotionWarmUp`.
+Widget scenePicture(SnapshotController controller, Widget child) =>
+    SnapshotWidget(
+      controller: controller,
+      mode: SnapshotMode.permissive,
+      child: RepaintBoundary(child: child),
+    );
+
+/// Replaces a library detail scene with a quick cross-fade where it is:
+/// no zoom, slide or drift, whichever way the move goes. The scene
+/// arriving brings its items in one after another (`StaggeredReveal`), so
+/// it stays live; the scene leaving is drawn once into a picture and only
+/// that picture fades, so nothing inside it is laid out, painted or
+/// rasterized again on its way out.
 ///
-/// [pace] says whether the scene arriving was shown before: a first visit
-/// plays the move slowly and smoothly while it is read; a revisit from
-/// memory has no zoom or drift, only a slight cross-fade
-/// ([AppMotion.glance]). One controller drives both scenes, inside the
-/// frame update.
+/// [pace] says whether the scene arriving was shown before: a revisit
+/// fades in with [AppMotion.glance], anything else with [AppMotion.fadeIn].
+/// One controller drives both scenes, inside the frame update.
 class SceneCrossfade extends StatefulWidget {
   const SceneCrossfade({
     super.key,
     required this.scope,
     required this.child,
-    this.direction = 0,
     this.pace = MotionPace.standard,
   });
 
   final Object? scope;
-  final int direction;
   final MotionPace pace;
   final Widget child;
 
@@ -40,6 +48,12 @@ class _SceneCrossfadeState extends State<SceneCrossfade>
     value: 1,
   )..addStatusListener(_settled);
 
+  /// Draws the leaving scene as a picture; the arriving one stays live.
+  final SnapshotController _pictures = SnapshotController(
+    allowSnapshotting: true,
+  );
+  final SnapshotController _live = SnapshotController();
+
   /// The scene leaving, as it was last built, and how far it had come in
   /// when it began to leave: one cut short on its way in leaves from there.
   Widget? _leaving;
@@ -48,11 +62,7 @@ class _SceneCrossfadeState extends State<SceneCrossfade>
 
   /// How the switch under way is timed, fixed as it starts.
   bool _reduced = false;
-
-  /// Only fading: motion is reduced, or the scene is a revisit.
-  bool _still = false;
-  bool _zoom = false;
-  int _direction = 0;
+  bool _revisit = false;
   Duration _inFor = AppMotion.fadeIn;
   Duration _outFor = AppMotion.fadeOut;
 
@@ -64,23 +74,12 @@ class _SceneCrossfadeState extends State<SceneCrossfade>
     _leaving = oldWidget.child;
     _leavingScope = oldWidget.scope;
     _reduced = MediaQuery.disableAnimationsOf(context);
-    _direction = widget.direction;
-    _still = _reduced || !AppMotion.travels(widget.pace);
-    _zoom = !_still && _direction != 0;
+    _revisit = !AppMotion.travels(widget.pace);
     if (_reduced) {
       _inFor = _outFor = AppMotion.reduced;
-    } else if (_still) {
-      _inFor = AppMotion.glance;
-      _outFor = AppMotion.fadeOut;
     } else {
-      _inFor = AppMotion.paced(
-        _zoom ? AppMotion.zoom : AppMotion.fadeIn,
-        widget.pace,
-      );
-      _outFor = AppMotion.paced(
-        _zoom ? AppMotion.zoom : AppMotion.fadeOut,
-        widget.pace,
-      );
+      _inFor = _revisit ? AppMotion.glance : AppMotion.fadeIn;
+      _outFor = AppMotion.fadeOut;
     }
     _switch.duration = _inFor > _outFor ? _inFor : _outFor;
     _switch.forward(from: 0);
@@ -89,11 +88,14 @@ class _SceneCrossfadeState extends State<SceneCrossfade>
   @override
   void dispose() {
     _switch.dispose();
+    _pictures.dispose();
+    _live.dispose();
     super.dispose();
   }
 
   void _settled(AnimationStatus status) {
-    if (status == AnimationStatus.completed && _leaving != null && mounted) {
+    if (status != AnimationStatus.completed || !mounted) return;
+    if (_leaving != null) {
       setState(() {
         _leaving = null;
         _leavingScope = null;
@@ -117,9 +119,7 @@ class _SceneCrossfadeState extends State<SceneCrossfade>
     _inFor,
     _reduced
         ? AppMotion.reducedCurve
-        : _zoom
-        ? AppMotion.zoomInCurve
-        : _still
+        : _revisit
         ? AppMotion.glanceCurve
         : AppMotion.fadeInCurve,
   );
@@ -130,11 +130,7 @@ class _SceneCrossfadeState extends State<SceneCrossfade>
       (1 -
           _along(
             _outFor,
-            _reduced
-                ? AppMotion.reducedCurve
-                : _zoom
-                ? AppMotion.zoomOutCurve
-                : AppMotion.fadeOutCurve,
+            _reduced ? AppMotion.reducedCurve : AppMotion.fadeOutCurve,
           ));
 
   /// [child] at [level] of the way to rest: 0 out of view, 1 at rest.
@@ -146,31 +142,13 @@ class _SceneCrossfadeState extends State<SceneCrossfade>
     double level, {
     required bool arriving,
   }) {
-    double scale = 1;
-    double rise = 0;
-    if (_zoom) {
-      // Into a folder the arrival starts small and the departure ends
-      // large; out of one, the other way round.
-      final bool smallAtRest = arriving == (_direction > 0);
-      final double far = smallAtRest ? AppMotion.zoomFar : AppMotion.zoomNear;
-      scale = far + (1 - far) * level;
-    } else if (!_still && arriving) {
-      // A small rise, as a fraction of the scene's height.
-      rise = 0.02 * (1 - level);
-    }
     return KeyedSubtree(
       key: ValueKey<Object?>(scope),
       child: IgnorePointer(
         ignoring: !arriving,
         child: Opacity(
           opacity: level,
-          child: FractionalTranslation(
-            translation: Offset(0, rise),
-            child: Transform.scale(
-              scale: scale,
-              child: RepaintBoundary(child: child),
-            ),
-          ),
+          child: scenePicture(arriving ? _live : _pictures, child),
         ),
       ),
     );

@@ -4,6 +4,7 @@ import 'package:flutter/services.dart';
 import 'package:pdfrx/pdfrx.dart';
 
 import 'app/greatnote_app.dart';
+import 'app/system_bars.dart';
 import 'backend/backend_service.dart';
 import 'features/library/file_note_repository.dart';
 import 'features/library/library_screen.dart';
@@ -11,6 +12,7 @@ import 'shared/widgets/processing.dart';
 
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
+  SystemBars.install();
   // AI notation writes with glyphs from EMS Readability.
   LicenseRegistry.addLicense(() async* {
     yield LicenseEntryWithLineBreaks(<String>[
@@ -63,10 +65,9 @@ class _StartupHomeState extends State<_StartupHome> {
     return FutureBuilder<void>(
       future: _ready,
       builder: (BuildContext context, AsyncSnapshot<void> snapshot) {
-        // While Etonia starts, its name comes forward; the library then
-        // comes forward over it.
+        // While Etonia starts, its name fades in; the library then fades in
+        // quickly over it, and its items one after another.
         return LoadingReveal(
-          effect: RevealEffect.zoom,
           timing: LoadTimings.startup,
           semanticsLabel: 'Starting Etonia',
           placeholder: const StartupWordmark(),

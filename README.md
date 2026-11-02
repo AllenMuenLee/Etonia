@@ -362,15 +362,27 @@ another.
 | --- | --- |
 | Fit to screen (default) | as big as the writing area |
 | A4, US Letter (portrait or landscape), Square | scaled to the area's width |
-| Infinite | at scale 1, grows right or down when ink comes within `edgeMargin` of an edge; the column scrolls sideways when it is wider than the area |
+| Infinite | a whiteboard: shown alone, edge to edge with no paper edge or desk, panning in every direction and zooming from 0.1 to 4 |
 
 Backgrounds are Blank, Lined, Grid, and Dotted, painted under the ink in page
 coordinates. A scrollable page scrolls with two fingers, a mouse wheel, or a
 trackpad, never with one finger or the pen; a second finger that starts a
-scroll drops the stroke the first finger began. Spacings and growth are in
+scroll drops the stroke the first finger began. Spacings are in
 `PageConfig` (`lib/features/editor/page/page_setup.dart`): `lineSpacing` 32,
-`gridSpacing` 24, `dotSpacing` 24, `edgeMargin` 96, `growthFraction` 0.5,
-`minGrowthStep` 256, `maxExtent` 20000.
+`gridSpacing` 24, `dotSpacing` 24; zoomed far out, rules are thinned to stay
+`minRuleGap` (10) screen pixels apart.
+
+An infinite page is an `InfiniteBoard`: one fixed square of 131072 page
+units whose ink starts at its middle (`InfiniteBoard.origin`), so there is
+as much room above and left of the first stroke as below and right of it.
+It opens on its ink, or on the origin when empty. Whiteboards are not part
+of the page column; they open alone from the page overview. Thumbnails, the
+page overview, and PDF and SVG export show a whiteboard as the frame round
+its ink (`InfiniteBoard.frameOf`). Turning a paper page into a whiteboard
+moves its ink to the origin, and back again, with its undo history. Notes
+saved before whiteboards had their infinite pages grow from the top-left
+corner; that corner becomes the origin when the note is read, and the page
+is written back with a `boardOrigin`.
 
 ## Library
 

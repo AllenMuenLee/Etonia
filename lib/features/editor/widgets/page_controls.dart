@@ -17,8 +17,7 @@ import 'page_chapters.dart';
 import '../../../shared/navigation/app_dialogs.dart';
 import '../../../shared/widgets/app_controls.dart';
 
-/// The action chosen from the Add menu; remembered so subsequent clicks
-/// on the Add button trigger the action directly without asking again.
+/// The action chosen from the Add menu.
 enum AddPageAction { addPage, insertPdf }
 
 /// The floating card hanging from the top bar over the page at the right:
@@ -35,10 +34,17 @@ class FloatingPageControls extends StatelessWidget {
   final double width;
   final Widget child;
 
-  static double widthFor(double height, {required bool find}) {
+  static double widthFor(
+    double height, {
+    required bool find,
+    bool exitFullscreen = false,
+  }) {
     const double touch = AppSizes.minTouchTarget;
     final double padding = (height - touch) / 2;
-    return (find ? touch : 0) + 2 * touch + 2 * padding;
+    return (find ? touch : 0) +
+        (exitFullscreen ? touch : 0) +
+        2 * touch +
+        2 * padding;
   }
 
   @override
@@ -142,11 +148,14 @@ class PageControls extends StatelessWidget {
     required this.onOpenSettings,
     this.canFind = false,
     this.onFind,
+    @Deprecated('The add button no longer remembers actions.')
     this.lastAddAction,
+    @Deprecated('The add button no longer remembers actions.')
     this.onAddActionChanged,
     this.onChooseImageFromGallery,
     this.onTakePhoto,
     this.onInsertPdf,
+    this.onExitFullscreen,
   });
 
   final NoteDocument document;
@@ -163,6 +172,10 @@ class PageControls extends StatelessWidget {
   final VoidCallback? onChooseImageFromGallery;
   final VoidCallback? onTakePhoto;
   final VoidCallback? onInsertPdf;
+
+  /// Brings back the top bar, when the window is fullscreen and nothing
+  /// else on screen can.
+  final VoidCallback? onExitFullscreen;
 
   @override
   Widget build(BuildContext context) {
@@ -187,8 +200,6 @@ class PageControls extends StatelessWidget {
             AddMenuButton(
               onAddPage: document.addPage,
               onInsertPdf: onInsertPdf,
-              lastAction: lastAddAction,
-              onActionChanged: onAddActionChanged,
             ),
             ToolbarIconButton(
               key: const ValueKey<String>('page-settings-button'),
@@ -196,6 +207,13 @@ class PageControls extends StatelessWidget {
               onPressed: onOpenSettings,
               icon: AppIcons.more,
             ),
+            if (onExitFullscreen != null)
+              ToolbarIconButton(
+                key: const ValueKey<String>('exit-fullscreen'),
+                tooltip: 'Exit full screen',
+                onPressed: onExitFullscreen,
+                icon: AppIcons.exitFullscreen,
+              ),
           ],
         );
       },
@@ -450,14 +468,14 @@ class ImageMenuButton extends StatelessWidget {
 }
 
 /// A round, accent-tinted button whose menu adds a new page or inserts a
-/// PDF's pages. Once an action has been chosen, clicking it executes that
-/// action directly without asking again; long press opens the menu to switch.
+/// PDF's pages.
 class AddMenuButton extends StatefulWidget {
   const AddMenuButton({
     super.key,
     required this.onAddPage,
     this.onInsertPdf,
-    this.lastAction,
+    @Deprecated('The add button no longer remembers actions.') this.lastAction,
+    @Deprecated('The add button no longer remembers actions.')
     this.onActionChanged,
   });
 
@@ -474,45 +492,8 @@ class AddMenuButton extends StatefulWidget {
 
 class _AddMenuButtonState extends State<AddMenuButton> {
   final MenuController _menu = MenuController();
-  AddPageAction? _localAction;
-
-  AddPageAction? get _effectiveAction => widget.lastAction ?? _localAction;
-
-  void _chooseAction(AddPageAction action) {
-    setState(() {
-      _localAction = action;
-    });
-    widget.onActionChanged?.call(action);
-    switch (action) {
-      case AddPageAction.addPage:
-        widget.onAddPage();
-      case AddPageAction.insertPdf:
-        widget.onInsertPdf?.call();
-    }
-  }
 
   void _handleClick() {
-    final AddPageAction? action = _effectiveAction;
-    if (action != null) {
-      switch (action) {
-        case AddPageAction.addPage:
-          widget.onAddPage();
-          return;
-        case AddPageAction.insertPdf:
-          if (widget.onInsertPdf != null) {
-            widget.onInsertPdf!();
-            return;
-          }
-      }
-    }
-    if (_menu.isOpen) {
-      _menu.close();
-    } else {
-      _menu.open();
-    }
-  }
-
-  void _handleLongPress() {
     if (_menu.isOpen) {
       _menu.close();
     } else {
@@ -530,12 +511,12 @@ class _AddMenuButtonState extends State<AddMenuButton> {
       menuChildren: <Widget>[
         MenuItemButton(
           leadingIcon: const Icon(AppIcons.pdf),
-          onPressed: () => _chooseAction(AddPageAction.insertPdf),
+          onPressed: () => widget.onInsertPdf?.call(),
           child: const Text('Insert PDF'),
         ),
         MenuItemButton(
           leadingIcon: const Icon(AppIcons.newNote),
-          onPressed: () => _chooseAction(AddPageAction.addPage),
+          onPressed: widget.onAddPage,
           child: const Text('Add blank page'),
         ),
       ],
@@ -548,7 +529,6 @@ class _AddMenuButtonState extends State<AddMenuButton> {
             (AppSizes.minTouchTarget - AddMenuButton._diameter) / 2,
           ),
           onPressed: _handleClick,
-          onLongPress: _handleLongPress,
           icon: Container(
             width: AddMenuButton._diameter,
             height: AddMenuButton._diameter,
@@ -846,15 +826,11 @@ class _PageOverviewPanelState extends State<PageOverviewPanel> {
     super.dispose();
   }
 
-  Size _paperFor(NotePage page) {
-    final PdfPageSource? pdf = page.pdfSource;
-    if (pdf != null) return pdf.pageSize;
-    final PageSetup setup = page.setup;
-    if (setup.size == PageSize.custom) return setup.customSize!;
+  /// The part of [page] its thumbnail shows: its paper, or the frame round
+  /// a whiteboard's ink.
+  Rect _paperFor(NotePage page) {
     final Size writingArea = widget.writingArea;
-    return setup.size.fixedSize ??
-        page.extent ??
-        (writingArea.isEmpty ? const Size(4, 3) : writingArea);
+    return page.frame(writingArea.isEmpty ? const Size(4, 3) : writingArea);
   }
 
   void _select(int index) {
@@ -975,7 +951,7 @@ class _PageOverviewPanelState extends State<PageOverviewPanel> {
                             itemCount: document.pageCount,
                             itemBuilder: (BuildContext context, int index) {
                               final NotePage page = document.pages[index];
-                              final Size paper = _paperFor(page);
+                              final Rect paper = _paperFor(page);
                               final bool selected =
                                   index == document.currentIndex;
                               return Semantics(
@@ -1014,7 +990,7 @@ class _PageOverviewPanelState extends State<PageOverviewPanel> {
                                         Expanded(
                                           child: Center(
                                             child: PagePreview(
-                                              paper: paper,
+                                              paper: paper.size,
                                               background: page.setup.background,
                                               config: widget.config,
                                               infinite:
@@ -1590,7 +1566,9 @@ class _PageInkPreview extends StatelessWidget {
   const _PageInkPreview({required this.page, required this.paper});
 
   final NotePage page;
-  final Size paper;
+
+  /// The part of the page shown, in page units.
+  final Rect paper;
 
   @override
   Widget build(BuildContext context) {
@@ -1619,7 +1597,7 @@ class _PageInkPreviewPainter extends CustomPainter {
   });
 
   final List<Stroke> strokes;
-  final Size paper;
+  final Rect paper;
   final Brightness brightness;
   final int revision;
 
@@ -1629,7 +1607,9 @@ class _PageInkPreviewPainter extends CustomPainter {
     final double scale = size.width / paper.width;
     canvas
       ..save()
-      ..scale(scale);
+      ..clipRect(Offset.zero & size)
+      ..scale(scale)
+      ..translate(-paper.left, -paper.top);
     for (final Stroke stroke in strokes) {
       paintInkStroke(
         canvas,

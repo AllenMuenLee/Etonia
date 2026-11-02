@@ -5,6 +5,7 @@ import 'dart:io';
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/rendering.dart';
 
 import '../../app/theme/app_tokens.dart';
 import '../../app/theme/app_icons.dart';
@@ -54,6 +55,7 @@ import 'ink/pen_settings.dart';
 import 'ink/selection_config.dart';
 import 'ink/shape_config.dart';
 import 'ink/stroke.dart';
+import 'ink/stylus_actions.dart';
 import 'page/note_document.dart';
 import 'sticky/sticky_note.dart';
 import 'text/note_text.dart';
@@ -68,6 +70,8 @@ import 'document_io/document_platform.dart';
 import 'document_io/pdf_page_layer.dart';
 import 'document_io/pdf_preview_store.dart';
 import 'document_io/page_image_cache.dart';
+import 'page/note_cache_page.dart';
+import '../../shared/memory/note_cache_pool.dart';
 import 'document_io/pdf_selection_image.dart';
 import 'document_io/pdf_exporter.dart';
 import 'document_io/svg_document.dart';
@@ -86,6 +90,7 @@ import 'widgets/selection_action_bar.dart';
 import 'widgets/recording_options.dart';
 import 'widgets/recording_transcript_sheet.dart';
 import 'widgets/tool_palette.dart';
+import 'widgets/toolbar_layout.dart';
 import 'widgets/writing_surface_frame.dart';
 import '../payment/payment_page.dart';
 import '../payment/subscription_controller.dart';
@@ -129,6 +134,7 @@ class EditorScreen extends StatefulWidget {
     this.pdfRasterizer = const PdfrxRasterizer(),
     this.pdfPreviewStore,
     this.documentIoConfig = const DocumentIoConfig(),
+    this.cacheScope,
     this.repository,
     this.noteId,
     this.documentPicker = const SystemDocumentPicker(),
@@ -138,6 +144,10 @@ class EditorScreen extends StatefulWidget {
     this.enableNativeInk = true,
     this.penSettings,
     this.palettePlacement,
+    this.toolOptionsShown,
+    this.toolbarShown,
+    this.toolbarLayout,
+    this.stylusActions,
     this.initialNotationEnabled = true,
     this.tabs,
     this.aiCanvasConfig = const AiCanvasConfig(),
@@ -234,12 +244,19 @@ class EditorScreen extends StatefulWidget {
   /// How far the pages are zoomed when a note opens: the column of pages
   /// sits narrower than the writing area, centered in it.
   static const double openingZoom = 0.7;
+
+  /// How far out a whiteboard zooms, to take in a whole map of ink at once.
+  static const double boardMinZoom = 0.1;
   final PdfRasterizer pdfRasterizer;
 
   /// Keeps PDF pages' previews between visits; without it they are
   /// rendered each time.
   final PdfPreviewStore? pdfPreviewStore;
   final DocumentIoConfig documentIoConfig;
+
+  /// This note's share of the memory all open notes keep things in; without
+  /// one the editor has a pool to itself.
+  final NoteCacheScope? cacheScope;
   final NoteRepository? repository;
   final String? noteId;
   final DocumentPicker documentPicker;
@@ -263,6 +280,21 @@ class EditorScreen extends StatefulWidget {
   /// Where the tool palette floats, shared from outside so it stays where
   /// the user dragged it; otherwise the screen owns one, across the top.
   final ValueNotifier<PalettePlacement>? palettePlacement;
+
+  /// Whether the chosen tool's options bar shows beside the palette,
+  /// shared from outside so that showing or hiding it holds from note to
+  /// note; otherwise the screen owns one, showing it.
+  final ValueNotifier<bool>? toolOptionsShown;
+
+  /// Whether the floating tool palette is visible, shared across notes.
+  final ValueNotifier<bool>? toolbarShown;
+
+  /// Which buttons the tool palette shows, in what order, shared across
+  /// notes; otherwise the screen owns one, as the palette comes.
+  final ValueNotifier<ToolbarLayout>? toolbarLayout;
+
+  /// Hardware stylus shortcuts shared across notes.
+  final ValueNotifier<StylusActionBindings>? stylusActions;
 
   /// Whether the assistant may draw on the note when the editor opens. On,
   /// unless turned off in the editor's settings.
@@ -306,12 +338,28 @@ class EditorScreenState extends State<EditorScreen>
 
   /// The tool AI mode hands the page back to when it is turned off.
   EditorTool _writingTool = EditorTool.pen;
+  EditorTool _previousTool = EditorTool.pen;
+  EditorTool _observedTool = EditorTool.pen;
 
-  /// What is drawn on the page with the AI tool: a glowing loop around
-  /// something, which is never ink.
+  /// Whether what is selected shows without its frame and actions: while
+  /// AI mode has the AI tool, the assistant draws its own context frames.
+  /// Another tool brings the ordinary selection chrome back.
+  late final ValueNotifier<bool> _selectionChromeHidden = ValueNotifier<bool>(
+    _hidesSelectionChrome,
+  );
+
+  bool get _hidesSelectionChrome =>
+      _aiActive.value && _tool.value == EditorTool.ai;
+
+  void _syncSelectionChrome() =>
+      _selectionChromeHidden.value = _hidesSelectionChrome;
+
+  /// What is drawn on the page with the AI tool: a selection loop around
+  /// something, which is never ink. Tapping an existing context removes it.
   late final AiCanvasInputController _aiInput = AiCanvasInputController(
     config: widget.aiCanvasConfig,
     onCircle: _onAiCircle,
+    onTap: _onAiTap,
   );
 
   /// Ordinary pen ink waiting for on-device recognition.
@@ -339,6 +387,35 @@ class EditorScreenState extends State<EditorScreen>
         const PalettePlacement(),
       ));
 
+  ValueNotifier<bool>? _ownedToolOptionsShown;
+
+  ValueNotifier<bool> get _toolOptionsShown =>
+      widget.toolOptionsShown ??
+      (_ownedToolOptionsShown ??= ValueNotifier<bool>(true));
+
+  ValueNotifier<bool>? _ownedToolbarShown;
+
+  ValueNotifier<bool> get _toolbarShown =>
+      widget.toolbarShown ?? (_ownedToolbarShown ??= ValueNotifier<bool>(true));
+
+  ValueNotifier<ToolbarLayout>? _ownedToolbarLayout;
+
+  ValueNotifier<ToolbarLayout> get _toolbarLayout =>
+      widget.toolbarLayout ??
+      (_ownedToolbarLayout ??= ValueNotifier<ToolbarLayout>(
+        ToolbarLayout.standard,
+      ));
+
+  ToolbarLayout get _paletteTools => _toolbarLayout.value;
+
+  ValueNotifier<StylusActionBindings>? _ownedStylusActions;
+
+  ValueNotifier<StylusActionBindings> get _stylusActions =>
+      widget.stylusActions ??
+      (_ownedStylusActions ??= ValueNotifier<StylusActionBindings>(
+        const StylusActionBindings(),
+      ));
+
   /// Where the palette's center is held while it is dragged, in the
   /// body's coordinates; null when it is docked.
   final ValueNotifier<Offset?> _paletteDragCenter = ValueNotifier<Offset?>(
@@ -352,6 +429,7 @@ class EditorScreenState extends State<EditorScreen>
   /// Hands the shared top bar this editor's settings, when the bar is not
   /// this editor's own.
   EditorChromeScope? _chromeScope;
+  Listenable? _fullscreenSettled;
   EditorChromeEntry? _chromeEntry;
 
   void _publishChrome() {
@@ -391,9 +469,6 @@ class EditorScreenState extends State<EditorScreen>
         ),
   );
 
-  /// The remembered add action (addPage or insertPdf).
-  AddPageAction? _lastAddAction;
-
   List<Rect> _nativeExclusionRects() {
     final EditorLayout? layout = _lastLayout;
     if (layout == null) return const <Rect>[];
@@ -406,6 +481,7 @@ class EditorScreenState extends State<EditorScreen>
     final Size paletteSize = ToolPalette.sizeFor(
       layout.paletteAxis,
       expanded: _paletteExpanded,
+      tools: _paletteTools,
     );
     final Rect paletteRect = layout.paletteOrigin & paletteSize;
     final double topMargin = layout.surface.top;
@@ -416,7 +492,7 @@ class EditorScreenState extends State<EditorScreen>
         ? body.localToGlobal(Offset.zero)
         : Offset.zero;
     return <Rect>[
-      paletteRect.shift(origin),
+      if (_toolbarShown.value) paletteRect.shift(origin),
       layout.history.shift(origin),
       layout.pageControls.shift(origin),
       if (topMargin > 0)
@@ -445,6 +521,67 @@ class EditorScreenState extends State<EditorScreen>
 
   /// Whether the palette is unfolded: the screen lays out around its size.
   bool get _paletteExpanded => _paletteController.expanded.value;
+
+  void _onToolbarShownChanged() {
+    if (mounted) setState(() {});
+  }
+
+  void _claimStylusGestures() {
+    if (!mounted || !TickerMode.getValuesNotifier(context).value.enabled) {
+      return;
+    }
+    NativeInkBridge.instance.claimStylusGestures(_onStylusGesture);
+  }
+
+  void _onStylusGesture(StylusGesture gesture) {
+    if (!mounted || !TickerMode.getValuesNotifier(context).value.enabled) {
+      return;
+    }
+    final StylusAction action = _stylusActions.value.actionFor(gesture);
+    switch (action) {
+      case StylusAction.none:
+        return;
+      case StylusAction.toggleToolOptions:
+        _toolOptionsShown.value = !_toolOptionsShown.value;
+        return;
+      case StylusAction.toggleToolbar:
+        if (_toolbarShown.value) _paletteController.closeAll();
+        _toolbarShown.value = !_toolbarShown.value;
+        return;
+      case StylusAction.togglePenEraser:
+        _tool.value = _tool.value == EditorTool.eraser
+            ? EditorTool.pen
+            : EditorTool.eraser;
+        return;
+      case StylusAction.previousTool:
+        _tool.value = _previousTool;
+        return;
+      case StylusAction.pen:
+        _penSettings.value = _penSettings.value.copyWith(
+          style: WritingStyle.pen,
+        );
+        _tool.value = EditorTool.pen;
+        return;
+      case StylusAction.eraser:
+        _tool.value = EditorTool.eraser;
+        return;
+      case StylusAction.highlighter:
+        _penSettings.value = _penSettings.value.copyWith(
+          style: WritingStyle.highlighter,
+        );
+        _tool.value = EditorTool.pen;
+        return;
+      case StylusAction.select:
+        _tool.value = EditorTool.select;
+        return;
+      case StylusAction.undo:
+        _undo();
+        return;
+      case StylusAction.redo:
+        _redo();
+        return;
+    }
+  }
 
   /// The look of the next sticky note: yellow and lined until the user
   /// chooses otherwise, then remembered for the session.
@@ -494,11 +631,7 @@ class EditorScreenState extends State<EditorScreen>
       return true;
     }
     final ToolPaletteController palette = _paletteController;
-    if (_tool.value == EditorTool.sticky &&
-        palette.stickyMenu.isOpen &&
-        !palette.penMenu.isOpen &&
-        !palette.eraserMenu.isOpen &&
-        !palette.selectMenu.isOpen) {
+    if (_tool.value == EditorTool.sticky && palette.stickyMenu.isOpen) {
       palette.stickyMenu.close();
       return false;
     }
@@ -616,6 +749,48 @@ class EditorScreenState extends State<EditorScreen>
   PageImageCache? _imageCache;
   bool _reportedPageShown = false;
 
+  /// A scope of our own has to be closed with the editor.
+  NoteCacheScope? _ownedCacheScope;
+  NoteCacheScope get _cacheScope =>
+      widget.cacheScope ??
+      (_ownedCacheScope ??= NoteCachePool(
+        maxBytes: const CacheBudget().notesBytes,
+      ).scope());
+
+  /// What the paths of each page's ink are charged as, while they are kept.
+  final Map<NotePage, NoteCacheItem> _inkItems = <NotePage, NoteCacheItem>{};
+
+  /// Charges the paths of [page]'s ink, which painting the page builds. They
+  /// go with the page when its turn comes.
+  void _keepInkOf(NotePage page) {
+    final int bytes = page.inkGeometryBytes;
+    final NoteCacheItem? item = _inkItems[page];
+    if (item != null) {
+      item.resize(bytes);
+      return;
+    }
+    _inkItems[page] = _cacheScope.add(
+      page: page.cacheKey,
+      bytes: bytes,
+      onPop: () {
+        _inkItems.remove(page);
+        page.releaseInkGeometry();
+      },
+    );
+  }
+
+  /// The user has come to page [index]. A note working in a tab out of view
+  /// has not been used for that.
+  void _pageUsed(int index) {
+    if (!mounted || !TickerMode.getValuesNotifier(context).value.enabled) {
+      return;
+    }
+    final List<NotePage> pages = _document.pages;
+    if (index < 0 || index >= pages.length) return;
+    _cacheScope.touch(pages[index].cacheKey);
+    _keepInkOf(pages[index]);
+  }
+
   void _pageShown() {
     if (_reportedPageShown) return;
     _reportedPageShown = true;
@@ -633,6 +808,7 @@ class EditorScreenState extends State<EditorScreen>
             rasterizer: widget.pdfRasterizer,
             config: widget.documentIoConfig,
             previewStore: widget.pdfPreviewStore,
+            cacheScope: _cacheScope,
           ));
   }
 
@@ -645,6 +821,8 @@ class EditorScreenState extends State<EditorScreen>
   /// What the PDF paper was last focused with, to focus it again on another
   /// page as a scroll passes it, without building.
   _PdfFocusInputs? _pdfFocusInputs;
+  int? _lastPdfFocusedPage;
+  int _pdfScrollDirection = 1;
 
   /// Has the PDF paper of [current], by default the current page, and the
   /// pages around it rendered nearest first: [current] and those next to it
@@ -666,11 +844,21 @@ class EditorScreenState extends State<EditorScreen>
       pixelRatio: devicePixelRatio,
     );
     current ??= _scrolledTo ?? _document.currentIndex;
+    final int? previousFocus = _lastPdfFocusedPage;
+    if (previousFocus != null && previousFocus != current) {
+      _pdfScrollDirection = current.compareTo(previousFocus);
+    }
+    _lastPdfFocusedPage = current;
     final DocumentIoConfig config = widget.documentIoConfig;
     final List<PdfFocusPage> focus = <PdfFocusPage>[];
     int sharpPages = 0;
     for (int step = 0; step <= config.pdfPreloadDistance; step++) {
-      for (final int index in <int>{current + step, current - step}) {
+      final List<int> candidates = step == 0
+          ? <int>[current]
+          : _pdfScrollDirection < 0
+          ? <int>[current - step, current + step]
+          : <int>[current + step, current - step];
+      for (final int index in candidates) {
         if (index < 0 || index >= pages.length) continue;
         final PdfPageSource? pdf = pages[index].pdfSource;
         if (pdf == null) continue;
@@ -683,7 +871,12 @@ class EditorScreenState extends State<EditorScreen>
     // scrolling there later.
     final List<PdfPageSource> rest = <PdfPageSource>[];
     for (int step = 0; step < pages.length; step++) {
-      for (final int index in <int>{current + step, current - step}) {
+      final List<int> candidates = step == 0
+          ? <int>[current]
+          : _pdfScrollDirection < 0
+          ? <int>[current - step, current + step]
+          : <int>[current + step, current - step];
+      for (final int index in candidates) {
         if (index < 0 || index >= pages.length) continue;
         final PdfPageSource? pdf = pages[index].pdfSource;
         if (pdf != null) rest.add(pdf);
@@ -904,8 +1097,6 @@ class EditorScreenState extends State<EditorScreen>
   void _attachInk(InkController ink) {
     ink.recordingContext = _activeRecordingContext;
     ink.selectionListenable.addListener(_onSelectionChanged);
-    ink.activeStrokeListenable.addListener(_onActiveInkChanged);
-    ink.completedStrokesListenable.addListener(_growToInk);
     ink.completedStrokesListenable.addListener(_appendPageNearEnd);
     ink.completedStrokesListenable.addListener(_onInkForRecognition);
     ink.completedStrokesListenable.addListener(_onInkForAiContext);
@@ -940,8 +1131,6 @@ class EditorScreenState extends State<EditorScreen>
 
   void _detachInk(InkController ink) {
     ink.selectionListenable.removeListener(_onSelectionChanged);
-    ink.activeStrokeListenable.removeListener(_onActiveInkChanged);
-    ink.completedStrokesListenable.removeListener(_growToInk);
     ink.completedStrokesListenable.removeListener(_appendPageNearEnd);
     ink.completedStrokesListenable.removeListener(_onInkForRecognition);
     ink.completedStrokesListenable.removeListener(_onInkForAiContext);
@@ -964,6 +1153,13 @@ class EditorScreenState extends State<EditorScreen>
       ];
 
   void _followRecognizedStrokes(Map<Stroke, Stroke> replacements) {
+    // Ink that only moved, as when a page becomes a whiteboard, is not new
+    // ink: it is not read again.
+    final List<Stroke> moved = <Stroke>[
+      for (final MapEntry<Stroke, Stroke> entry in replacements.entries)
+        if (_knownPageStrokes.remove(entry.key)) entry.value,
+    ];
+    _knownPageStrokes.addAll(moved);
     final NotePage? page = _pageFor(_inkController);
     if (page != null) {
       _document.reconcileRecognizedWords(page, replacements: replacements);
@@ -1070,66 +1266,38 @@ class EditorScreenState extends State<EditorScreen>
         next.takeClipboardFrom(previous);
       }
       _attachInk(next);
+      if (previous != null) {
+        final NotePage? left = _pageFor(previous);
+        // Its ink may have changed while it was written on.
+        if (left != null) _keepInkOf(left);
+        _pageUsed(_document.currentIndex);
+      }
       _pastePrompt.value = null;
       _scrolling = false;
       _onSelectionChanged();
     }
-    _growToInk();
     if (mounted) {
       setState(() {});
     }
   }
 
-  /// Grows an infinite page to keep the stroke being drawn off its edges.
-  void _onActiveInkChanged() {
-    final ActiveStroke? active = _inkController.activeStroke;
-    if (active == null) {
-      return;
-    }
-    final InkVector tip = active.lastPoint;
-    _growPage(
-      Rect.fromCircle(
-        center: Offset(tip.x, tip.y),
-        radius: active.style.width / 2,
-      ),
-    );
-  }
-
-  /// Grows an infinite page to keep all of its ink off its edges.
-  void _growToInk() {
-    if (_document.current.setup.size != PageSize.infinite) {
-      return;
-    }
-    Rect? reach;
-    for (final Stroke stroke in _inkController.strokes) {
-      reach = reach?.expandToInclude(stroke.bounds) ?? stroke.bounds;
-    }
-    for (final StickyNoteElement note in _inkController.stickyNotes) {
-      reach = reach?.expandToInclude(note.bounds) ?? note.bounds;
-    }
-    if (reach != null) {
-      _growPage(reach);
-    }
-  }
-
-  void _growPage(Rect ink) {
-    final NotePage page = _document.current;
-    if (page.setup.size != PageSize.infinite || _viewportSize.isEmpty) {
-      return;
-    }
-    final Size? grown = grownPageExtent(
-      current: PageGeometry.of(page.setup, page.extent, _viewportSize).pageSize,
-      viewport: _viewportSize,
-      ink: ink,
-      config: widget.pageConfig,
-    );
-    if (grown != null) {
-      _document.setExtent(page, grown);
-    }
-  }
-
   /// Two fingers began scrolling: whatever they started on any page is not
   /// writing, erasing, or selecting.
+  /// The part of the current whiteboard on screen, in page units, while one
+  /// is shown.
+  ValueListenable<Rect>? _boardVisible;
+
+  /// Where something placed "in view", such as an inserted picture, goes:
+  /// the whole of a paper page, or the part of a whiteboard on screen.
+  Rect get _visiblePart {
+    final Rect page = Offset.zero & _surfaceSize;
+    final Rect? board = _document.current.setup.size == PageSize.infinite
+        ? _boardVisible?.value
+        : null;
+    if (board == null || board.isEmpty) return page;
+    return board.intersect(page);
+  }
+
   void _onScrollStart(Set<int> pointers) {
     // Native wet ink is painted in a root-view overlay, not inside the page
     // transform. Its normal pointer-up handoff is asynchronous, so a preview
@@ -1188,6 +1356,7 @@ class EditorScreenState extends State<EditorScreen>
   Timer? _scrollSettle;
 
   void _onScrolledToPage(int index) {
+    if (_scrolledTo != index) _pageUsed(index);
     _scrolledTo = index;
     final _PdfFocusInputs? inputs = _pdfFocusInputs;
     if (inputs != null && index < inputs.pages.length) {
@@ -1215,12 +1384,18 @@ class EditorScreenState extends State<EditorScreen>
 
   /// A page touched becomes current at once, ahead of any scroll settling.
   void _onPageTouched(int index) {
+    _claimStylusGestures();
     _scrollSettle?.cancel();
     _scrolledTo = null;
     _showPage(index);
   }
 
+  /// A scroll slowing down has the PDF paper in view rendered sharp before
+  /// it stops.
+  void _onScrollSpeed(double speed) => _pdfCache?.scrollSpeed(speed);
+
   void _onScrollEnd() {
+    _pdfCache?.scrollEnded();
     _scrolling = false;
     _scrollSettle?.cancel();
     final int? settled = _scrolledTo;
@@ -2105,6 +2280,10 @@ class EditorScreenState extends State<EditorScreen>
   /// Keeps track of the tool AI mode gives back.
   void _onToolChanged() {
     final EditorTool tool = _tool.value;
+    if (tool != _observedTool) {
+      _previousTool = _observedTool;
+      _observedTool = tool;
+    }
     if (tool != EditorTool.ai) {
       _writingTool = tool;
     }
@@ -2135,7 +2314,12 @@ class EditorScreenState extends State<EditorScreen>
   }
 
   /// Switches to the current selection, resuming a matching conversation.
-  void _useCurrentSelection() => unawaited(_captureForAi(open: false));
+  void _useCurrentSelection() {
+    unawaited(() async {
+      await _captureForAi(open: false);
+      if (mounted) _ai.requestComposer();
+    }());
+  }
 
   /// Adds the current selection to the open conversation's ink.
   Future<void> _addSelectionToAi() async {
@@ -2145,6 +2329,7 @@ class EditorScreenState extends State<EditorScreen>
     final List<SnapshotBitmap> bitmaps = await _selectionBitmaps(selection);
     if (!mounted || !identical(selection, _stableSelection())) return;
     _ai.addToContext(selection, bitmaps: bitmaps, page: page);
+    _ai.requestComposer();
   }
 
   /// Hands [capture] the selection and the page's look, unless a gesture is
@@ -2175,6 +2360,13 @@ class EditorScreenState extends State<EditorScreen>
         page: page,
         ask: ask,
       );
+      if (_ai.selectionChanged) {
+        // A second context is only a proposal until the user chooses how it
+        // belongs. Keep the keyboard down while those choices are visible.
+        _editorFocus.requestFocus();
+      } else {
+        _ai.requestComposer();
+      }
     } else {
       _ai.useSelection(
         selection,
@@ -2243,7 +2435,35 @@ class EditorScreenState extends State<EditorScreen>
       outline,
       selectablePdfBounds: pdf == null ? null : Offset.zero & pdf.pageSize,
     );
-    if (selected) unawaited(_captureForAi(open: true));
+    if (selected) unawaited(_captureForAi(open: true, ask: true));
+  }
+
+  /// A tap on a context frame removes that group from the conversation.
+  void _onAiTap(InkVector position, Object page) {
+    final AiSelectionContext? context = _ai.context;
+    if (context == null || context.isPage || page is! InkController) return;
+    final List<AiContextGroup> groups = context.groups;
+    for (int i = groups.length - 1; i >= 0; i--) {
+      final AiContextGroup group = groups[i];
+      final Object? owner = group.page;
+      final bool onPage = owner != null
+          ? identical(owner, page)
+          : (group.strokes.isNotEmpty &&
+                    page.strokes.contains(group.strokes.first)) ||
+                (group.images.isNotEmpty &&
+                    page.images.contains(group.images.first));
+      final Rect? bounds = group.bounds;
+      if (onPage &&
+          bounds != null &&
+          bounds
+              .inflate(page.selectionConfig.handleHitRadius)
+              .contains(Offset(position.x, position.y))) {
+        _ai.removeContext(group);
+        _selectionCarry.clearSelection();
+        _editorFocus.requestFocus();
+        return;
+      }
+    }
   }
 
   /// Closing the chat turns AI mode off with it.
@@ -2256,6 +2476,7 @@ class EditorScreenState extends State<EditorScreen>
         return EditorSettingsSheet(
           controller: _ai,
           stylusOnly: _stylusOnly,
+          stylusActions: _stylusActions,
           textSize: HandwritingCalibration.textSize,
           onTextSizeChanged: _setAiTextSize,
           onChooseHandwriting: widget.handwritingProfileStore == null
@@ -2336,28 +2557,7 @@ class EditorScreenState extends State<EditorScreen>
         noteId: widget.noteId!,
         controller: _inkController,
         picked: picked,
-        visiblePage: Offset.zero & _surfaceSize,
-      );
-      _tool.value = EditorTool.select;
-      AppHaptics.success();
-    } on Object catch (error) {
-      if (mounted) _showIoError(error);
-    } finally {
-      _documentIoPending--;
-    }
-  }
-
-  Future<void> _insertSvg() async {
-    if (widget.documentPicker is! SvgDocumentPicker) return;
-    final SvgDocumentPicker picker = widget.documentPicker as SvgDocumentPicker;
-    _documentIoPending++;
-    try {
-      final PickedDocument? picked = await picker.pickSvg();
-      if (picked == null || !mounted) return;
-      await _importer.insertSvg(
-        controller: _inkController,
-        picked: picked,
-        visiblePage: Offset.zero & _surfaceSize,
+        visiblePage: _visiblePart,
       );
       _tool.value = EditorTool.select;
       AppHaptics.success();
@@ -2394,7 +2594,6 @@ class EditorScreenState extends State<EditorScreen>
             repository: widget.repository!,
             options: options,
             currentPage: _document.currentIndex,
-            currentWritingArea: _viewportSize,
             cancellation: cancellation,
             onProgress: report,
           ),
@@ -2415,9 +2614,11 @@ class EditorScreenState extends State<EditorScreen>
     try {
       _inkController.finalizeActiveGesture();
       _inkController.finishNotationPlayback();
+      final Rect frame = _document.current.frame(_surfaceSize);
       await SvgExporter(sink: widget.exportSink).exportAndShare(
         title: widget.title,
-        pageSize: _surfaceSize,
+        pageSize: frame.size,
+        origin: frame.topLeft,
         controller: _inkController,
         brightness: Theme.of(context).brightness,
       );
@@ -2454,9 +2655,15 @@ class EditorScreenState extends State<EditorScreen>
     if (controller.activeLasso == null &&
         controller.activeTransform == null &&
         !_selectionCarry.isGesturing) {
+      final bool wasPending = _ai.selectionChanged;
       _ai.updateCurrentSelection(
         _selectionCarry.combinedSelectionFor(controller),
       );
+      if (!wasPending && _ai.selectionChanged) {
+        // The selection choice must be made before the composer becomes the
+        // active destination for typing.
+        _editorFocus.requestFocus();
+      }
       _preparePdfLift();
     }
   }
@@ -2566,6 +2773,7 @@ class EditorScreenState extends State<EditorScreen>
           (_document.current.pdfSource == null || _pageRenderCache == null)) {
         _pageShown();
       }
+      _claimStylusGestures();
     });
     _attachInk(_inkController);
     _selectionCarry.addListener(_onSelectionChanged);
@@ -2573,9 +2781,15 @@ class EditorScreenState extends State<EditorScreen>
     _document.addListener(_onDocumentChanged);
     _ai.addListener(_onAiChanged);
     _palettePlacement.addListener(_onPalettePlacementChanged);
+    _toolbarShown.addListener(_onToolbarShownChanged);
+    _toolbarLayout.addListener(_onPalettePlacementChanged);
     _paletteController.expanded.addListener(_onPalettePlacementChanged);
+    _paletteController.expanded.addListener(_rememberToolbar);
+    _tool.addListener(_rememberToolbar);
     _tool.addListener(AppHaptics.toolSwitch);
     _tool.addListener(_onToolChanged);
+    _tool.addListener(_syncSelectionChrome);
+    _aiActive.addListener(_syncSelectionChrome);
     _adoptAiSession();
     _loadHandwritingCalibrationNotice();
     if (_aiActive.value) {
@@ -2585,14 +2799,57 @@ class EditorScreenState extends State<EditorScreen>
     _setAiNotesHidden(!_showAiNotes);
   }
 
+  /// The page slid with the top bar without being laid out: the native pen
+  /// surface has to hear where it now is, or strokes land off from the pen.
+  void _onFullscreenSettled() => _paletteController.popoverChanged.notify();
+
   @override
   void didChangeDependencies() {
     super.didChangeDependencies();
+    final Listenable? settled = EditorFullscreenScope.maybeOf(context)?.settled;
+    if (settled != _fullscreenSettled) {
+      _fullscreenSettled?.removeListener(_onFullscreenSettled);
+      settled?.addListener(_onFullscreenSettled);
+      _fullscreenSettled = settled;
+    }
     final EditorChromeScope? scope = EditorChromeScope.maybeOf(context);
-    if (scope != _chromeScope) {
+    final EditorChromeScope? previous = _chromeScope;
+    // Only a different window or note takes the bar back; the toolbar
+    // passing to or from this editor does not.
+    if (scope?.host != previous?.host || scope?.noteId != previous?.noteId) {
       _retractChrome();
       _chromeScope = scope;
+      _restoreToolbar();
+    } else {
+      _chromeScope = scope;
     }
+  }
+
+  /// Takes up what this tab had on the shared toolbar, kept while its
+  /// editor was put away. No haptic: nothing was chosen just now.
+  void _restoreToolbar() {
+    final EditorChromeScope? scope = _chromeScope;
+    final ToolbarMemo? memo = scope?.host.toolbarOf(scope.noteId);
+    if (memo == null) return;
+    if (memo.tool != EditorTool.ai && memo.tool != _tool.value) {
+      _tool.removeListener(AppHaptics.toolSwitch);
+      _tool.value = memo.tool;
+      _tool.addListener(AppHaptics.toolSwitch);
+    }
+    _paletteController.expanded.value = memo.expanded;
+  }
+
+  /// Keeps what this tab has on the shared toolbar, for when it is shown
+  /// again after its editor was put away.
+  void _rememberToolbar() {
+    final EditorChromeScope? scope = _chromeScope;
+    scope?.host.rememberToolbar(
+      scope.noteId,
+      ToolbarMemo(
+        tool: _tool.value,
+        expanded: _paletteController.expanded.value,
+      ),
+    );
   }
 
   void _retractChrome() {
@@ -2635,6 +2892,7 @@ class EditorScreenState extends State<EditorScreen>
       center,
       margin,
       expanded: _paletteExpanded,
+      tools: _paletteTools,
     );
     // Commit the dock while the drag position still owns the visual origin.
     // Releasing it afterwards lets the palette's paint translation ease
@@ -2659,6 +2917,18 @@ class EditorScreenState extends State<EditorScreen>
       );
       _palettePlacement.addListener(_onPalettePlacementChanged);
     }
+    if (oldWidget.toolbarLayout != widget.toolbarLayout) {
+      (oldWidget.toolbarLayout ?? _ownedToolbarLayout)?.removeListener(
+        _onPalettePlacementChanged,
+      );
+      _toolbarLayout.addListener(_onPalettePlacementChanged);
+    }
+    if (oldWidget.toolbarShown != widget.toolbarShown) {
+      (oldWidget.toolbarShown ?? _ownedToolbarShown)?.removeListener(
+        _onToolbarShownChanged,
+      );
+      _toolbarShown.addListener(_onToolbarShownChanged);
+    }
     if (oldWidget.assetReader != widget.assetReader ||
         oldWidget.pdfRasterizer != widget.pdfRasterizer ||
         oldWidget.documentIoConfig != widget.documentIoConfig) {
@@ -2678,6 +2948,8 @@ class EditorScreenState extends State<EditorScreen>
       final NoteDocument? owned = _ownedDocument;
       _ownedDocument = null;
       _document = _createDocument();
+      _lastPdfFocusedPage = null;
+      _pdfScrollDirection = 1;
       _document.addListener(_onDocumentChanged);
       _adoptAiSession();
       _aiInput.clear();
@@ -2690,6 +2962,7 @@ class EditorScreenState extends State<EditorScreen>
   @override
   void dispose() {
     _scrollSettle?.cancel();
+    _fullscreenSettled?.removeListener(_onFullscreenSettled);
     WidgetsBinding.instance.removeObserver(this);
     _audioPlayer.removeListener(_onAudioPlayerChanged);
     _strokeReplay.dispose();
@@ -2723,6 +2996,10 @@ class EditorScreenState extends State<EditorScreen>
     _document.removeListener(_onDocumentChanged);
     _ai.removeListener(_onAiChanged);
     _palettePlacement.removeListener(_onPalettePlacementChanged);
+    _toolbarShown.removeListener(_onToolbarShownChanged);
+    _toolbarLayout.removeListener(_onPalettePlacementChanged);
+    _ownedToolbarLayout?.dispose();
+    NativeInkBridge.instance.releaseStylusGestures(_onStylusGesture);
     _paletteController.expanded
       ..removeListener(_onPalettePlacementChanged)
       ..dispose();
@@ -2734,11 +3011,18 @@ class EditorScreenState extends State<EditorScreen>
     _tool
       ..removeListener(AppHaptics.toolSwitch)
       ..removeListener(_onToolChanged)
+      ..removeListener(_syncSelectionChrome)
       ..dispose();
     _aiInput.dispose();
-    _aiActive.dispose();
+    _aiActive
+      ..removeListener(_syncSelectionChrome)
+      ..dispose();
+    _selectionChromeHidden.dispose();
     _ownedPenSettings?.dispose();
     _ownedPalettePlacement?.dispose();
+    _ownedToolOptionsShown?.dispose();
+    _ownedToolbarShown?.dispose();
+    _ownedStylusActions?.dispose();
     _paletteDragCenter.dispose();
     _eraserSettings.dispose();
     _stickySettings.dispose();
@@ -2750,6 +3034,10 @@ class EditorScreenState extends State<EditorScreen>
     MemoryPressure.instance.removeListener(_releaseMemory);
     _pdfCache?.clear();
     _imageCache?.clear();
+    for (final NoteCacheItem item in _inkItems.values) {
+      item.remove();
+    }
+    _ownedCacheScope?.close();
     super.dispose();
   }
 
@@ -3029,6 +3317,9 @@ class EditorScreenState extends State<EditorScreen>
       _aiPanelWidth = _aiPanelDragWidth.value;
     }
     _publishChrome();
+    final VoidCallback? exitFullscreen = EditorFullscreenScope.maybeOf(
+      context,
+    )?.onExit;
     return Scaffold(
       // The keyboard only ever serves the assistant's composer, which lifts
       // itself clear of it. Resizing the body would lay the page out again
@@ -3079,6 +3370,7 @@ class EditorScreenState extends State<EditorScreen>
             final double pageControlsWidth = FloatingPageControls.widthFor(
               ToolPalette.sizeFor(Axis.horizontal).height,
               find: _canFind,
+              exitFullscreen: exitFullscreen != null,
             );
             final bool isAiOpen = panelSide != null;
             final EditorLayout layout = EditorLayout.compute(
@@ -3089,11 +3381,21 @@ class EditorScreenState extends State<EditorScreen>
               pageControlsWidth: pageControlsWidth,
               isAiOpen: isAiOpen,
               paletteExpanded: _paletteExpanded,
+              paletteTools: _paletteTools,
             );
             _lastLayout = layout;
             final List<NotePage> pages = _document.pages;
+            final int current = _document.currentIndex;
             final bool infiniteCanvas =
-                pages[_document.currentIndex].setup.size == PageSize.infinite;
+                pages[current].setup.size == PageSize.infinite;
+            // A whiteboard is shown alone. Paper pages are a column, without
+            // any whiteboard among them, which is opened from the overview.
+            final List<int> shown = infiniteCanvas
+                ? <int>[current]
+                : <int>[
+                    for (int i = 0; i < pages.length; i++)
+                      if (pages[i].setup.size != PageSize.infinite) i,
+                  ];
             final List<PageGeometry> geometries = <PageGeometry>[
               for (final NotePage page in pages)
                 PageGeometry.of(
@@ -3117,176 +3419,233 @@ class EditorScreenState extends State<EditorScreen>
             final Rect historyOnPage = layout.history.shift(
               -layout.surface.topLeft,
             );
-            final Rect paletteOnPage =
-                ((layout.paletteOrigin - layout.surface.topLeft) &
-                        ToolPalette.sizeFor(
-                          layout.paletteAxis,
-                          expanded: _paletteExpanded,
-                        ))
-                    .expandToInclude(historyOnPage);
+            final Rect paletteOnPage = _toolbarShown.value
+                ? ((layout.paletteOrigin - layout.surface.topLeft) &
+                          ToolPalette.sizeFor(
+                            layout.paletteAxis,
+                            expanded: _paletteExpanded,
+                            tools: _paletteTools,
+                          ))
+                      .expandToInclude(historyOnPage)
+                : historyOnPage;
             final BorderSide edge = BorderSide(
               color: colors.divider,
               width: AppSizes.hairline,
             );
             return Stack(
               key: _bodyKey,
+              // The body's constraints are loose: without this, the empty
+              // toolbar slot would size the Stack to nothing and clip the
+              // whole editor away.
+              fit: StackFit.expand,
               children: <Widget>[
                 Positioned.fromRect(
                   rect: layout.surface,
                   child: RepaintBoundary(
                     child: WritingSurfaceFrame(
                       child: PageViewport(
-                        key: const ValueKey<String>('page-viewport'),
-                        pages: geometries,
-                        pageKeys: <Key>[
-                          for (final NotePage page in pages) ObjectKey(page),
+                        // Each whiteboard opens fresh, on its ink.
+                        key: infiniteCanvas
+                            ? ValueKey<Object>((
+                                'page-viewport-board',
+                                pages[current],
+                              ))
+                            : const ValueKey<String>('page-viewport'),
+                        pages: <PageGeometry>[
+                          for (final int i in shown) geometries[i],
                         ],
-                        currentPage: _document.currentIndex,
-                        // Infinite canvas is the writing surface itself. It
-                        // must never shrink enough to reveal a desk edge.
-                        minZoom: infiniteCanvas ? 1 : 0.5,
+                        pageKeys: <Key>[
+                          for (final int i in shown) ObjectKey(pages[i]),
+                        ],
+                        currentPage: math.max(0, shown.indexOf(current)),
+                        infinite: infiniteCanvas,
+                        // On its ink, or where ink starts on an empty one.
+                        boardFocus: infiniteCanvas
+                            ? pages[current].contentBounds ??
+                                  (InfiniteBoard.origin & Size.zero)
+                            : null,
+                        minZoom: infiniteCanvas
+                            ? EditorScreen.boardMinZoom
+                            : 0.5,
                         initialZoom: infiniteCanvas
                             ? 1
                             : EditorScreen.openingZoom,
-                        onPageTouched: _onPageTouched,
+                        onPageTouched: (int slot) =>
+                            _onPageTouched(shown[slot]),
                         onDeskTap: _selectionCarry.clearSelection,
-                        onVisiblePageChanged: _onScrolledToPage,
+                        onVisiblePageChanged: (int slot) =>
+                            _onScrolledToPage(shown[slot]),
                         onScrollStart: _onScrollStart,
                         onScrollEnd: _onScrollEnd,
+                        onScrollSpeed: _onScrollSpeed,
                         fingersNavigate: _stylusOnly,
                         pointerClaims: _pointerClaims,
-                        onPullToAddPage: _addPageAtEnd,
+                        // A whiteboard has no end to pull past.
+                        onPullToAddPage: infiniteCanvas ? null : _addPageAtEnd,
                         pullToAddDistance: 180,
                         pageBuilder:
                             (
                               BuildContext context,
-                              int index,
+                              int slot,
                               ValueListenable<Rect> visible,
                             ) {
+                              final int index = shown[slot];
                               final NotePage page = pages[index];
-                              return Stack(
-                                fit: StackFit.expand,
-                                children: <Widget>[
-                                  PageBackgroundLayer(
-                                    background: page.setup.background,
-                                    visible: visible,
-                                    config: widget.pageConfig,
-                                  ),
-                                  if (page.pdfSource != null &&
-                                      _pageRenderCache != null)
-                                    PdfPageLayer(
-                                      source: page.pdfSource!,
-                                      displayedSize:
-                                          geometries[index].displaySize,
-                                      cache: _pageRenderCache!,
+                              if (infiniteCanvas) _boardVisible = visible;
+                              return NoteCachePage(
+                                scope: _cacheScope,
+                                page: page.cacheKey,
+                                onChanged: () => _keepInkOf(page),
+                                child: Stack(
+                                  fit: StackFit.expand,
+                                  children: <Widget>[
+                                    PageBackgroundLayer(
+                                      background: page.setup.background,
                                       visible: visible,
-                                      onShown: index == _document.currentIndex
-                                          ? _pageShown
-                                          : null,
+                                      config: widget.pageConfig,
                                     ),
-                                  if (page.pdfSource != null)
-                                    PdfMaskLayer(
-                                      masks: () => page.ink.pdfMasks,
-                                      changes:
-                                          page.ink.documentRevisionListenable,
-                                    ),
-                                  if (widget.assetReader != null ||
-                                      page.ink.images.any(
-                                        (NoteImageElement image) =>
-                                            image.isVector,
-                                      ))
-                                    PageImageLayer(
-                                      cache: widget.assetReader == null
-                                          ? null
-                                          : _imageCache ??= PageImageCache(
-                                              readAsset: widget.assetReader!,
-                                            ),
-                                      controller: page.ink,
-                                      readAsset: widget.assetReader,
-                                      maxDecodeDimension: widget
-                                          .documentIoConfig
-                                          .maxStoredImageDimension,
-                                      carry: _selectionCarry,
-                                    ),
-                                  InkCanvas(
-                                    controller: page.ink,
-                                    visible: visible,
-                                    enableNativeInk: widget.enableNativeInk,
-                                    tool: _tool,
-                                    penSettings: _penSettings,
-                                    eraserSettings: _eraserSettings,
-                                    penConfig: widget.penConfig,
-                                    eraserConfig: widget.eraserConfig,
-                                    shapeConfig: widget.shapeConfig,
-                                    isInputBlocked: _isPageInputBlocked,
-                                    pastePrompt: _pastePrompt,
-                                    stylusOnly: _stylusOnly,
-                                    ruler: _ruler,
-                                    pointerClaims: _pointerClaims,
-                                    aiActive: _aiActive,
-                                    aiInput: _aiInput,
-                                    selectablePdfBounds: page.pdfSource == null
-                                        ? null
-                                        : Offset.zero &
-                                              page.pdfSource!.pageSize,
-                                    selectPdf: _selectPdf,
-                                    stickySettings: _stickySettings,
-                                    onStickyPlaced: _onStickyPlaced,
-                                    textSettings: _textSettings,
-                                    onTextSelected: (TextSettings settings) {
-                                      _textSettings.value = settings;
-                                    },
-                                    pageGrows:
-                                        page.setup.size == PageSize.infinite,
-                                    carry: _selectionCarry,
-                                    exclusionRects: _nativeExclusionRects,
-                                    exclusionsChanged:
-                                        _paletteController.popoverChanged,
-                                    replay: _strokeReplay,
-                                    onReplayStrokeTapped: _seekToStroke,
-                                    // The page the selection is on is the
-                                    // current one; the view stays put.
-                                    onSelectionCarried: () => context
-                                        .findAncestorStateOfType<
-                                          PageViewportState
-                                        >()
-                                        ?.touchPage(index),
-                                  ),
-                                  AiContextGlow(assistant: _ai, page: page.ink),
-                                  ValueListenableBuilder<
-                                    _HandwritingFindTarget?
-                                  >(
-                                    valueListenable: _handwritingFindTarget,
-                                    builder:
-                                        (
-                                          BuildContext context,
-                                          _HandwritingFindTarget? target,
-                                          Widget? _,
-                                        ) {
-                                          if (target == null ||
-                                              !identical(target.page, page)) {
-                                            return const SizedBox.shrink();
-                                          }
-                                          return IgnorePointer(
-                                            child: ExcludeSemantics(
-                                              child: CustomPaint(
-                                                key: ValueKey<String>(
-                                                  'handwriting-search-highlight-$index',
-                                                ),
-                                                painter:
-                                                    _HandwritingFindHighlightPainter(
-                                                      page: page,
-                                                      target: target,
-                                                      color: AppColors.of(
-                                                        context,
-                                                      ).accent,
-                                                    ),
+                                    if (page.pdfSource != null &&
+                                        _pageRenderCache != null)
+                                      RepaintBoundary(
+                                        // Tool changes update input/text layers
+                                        // above the paper. At high zoom the PDF
+                                        // is a screen-sized raster; keep those
+                                        // updates from painting it again.
+                                        child: PdfPageLayer(
+                                          source: page.pdfSource!,
+                                          displayedSize:
+                                              geometries[index].displaySize,
+                                          cache: _pageRenderCache!,
+                                          visible: visible,
+                                          onShown:
+                                              index == _document.currentIndex
+                                              ? _pageShown
+                                              : null,
+                                        ),
+                                      ),
+                                    if (page.pdfSource != null)
+                                      PdfMaskLayer(
+                                        masks: () => page.ink.pdfMasks,
+                                        changes:
+                                            page.ink.documentRevisionListenable,
+                                      ),
+                                    if (widget.assetReader != null ||
+                                        page.ink.images.any(
+                                          (NoteImageElement image) =>
+                                              image.isVector,
+                                        ))
+                                      PageImageLayer(
+                                        cache: widget.assetReader == null
+                                            ? null
+                                            : _imageCache ??= PageImageCache(
+                                                readAsset: widget.assetReader!,
+                                                cacheScope: _cacheScope,
                                               ),
-                                            ),
-                                          );
-                                        },
-                                  ),
-                                ],
+                                        cachePage: page.cacheKey,
+                                        controller: page.ink,
+                                        readAsset: widget.assetReader,
+                                        maxDecodeDimension: widget
+                                            .documentIoConfig
+                                            .maxStoredImageDimension,
+                                        carry: _selectionCarry,
+                                      ),
+                                    InkCanvas(
+                                      controller: page.ink,
+                                      visible: visible,
+                                      enableNativeInk: widget.enableNativeInk,
+                                      tool: _tool,
+                                      penSettings: _penSettings,
+                                      eraserSettings: _eraserSettings,
+                                      penConfig: widget.penConfig,
+                                      eraserConfig: widget.eraserConfig,
+                                      shapeConfig: widget.shapeConfig,
+                                      isInputBlocked: _isPageInputBlocked,
+                                      // A pen set down while the page still
+                                      // coasts from a pinch or fling stops it
+                                      // there and writes, rather than being
+                                      // dropped as part of the scroll.
+                                      onStylusDown: () {
+                                        if (_scrolling) {
+                                          context
+                                              .findAncestorStateOfType<
+                                                PageViewportState
+                                              >()
+                                              ?.yieldToPen();
+                                        }
+                                      },
+                                      pastePrompt: _pastePrompt,
+                                      stylusOnly: _stylusOnly,
+                                      ruler: _ruler,
+                                      pointerClaims: _pointerClaims,
+                                      aiActive: _aiActive,
+                                      aiInput: _aiInput,
+                                      selectionFrameHidden:
+                                          _selectionChromeHidden,
+                                      selectablePdfBounds:
+                                          page.pdfSource == null
+                                          ? null
+                                          : Offset.zero &
+                                                page.pdfSource!.pageSize,
+                                      selectPdf: _selectPdf,
+                                      stickySettings: _stickySettings,
+                                      onStickyPlaced: _onStickyPlaced,
+                                      textSettings: _textSettings,
+                                      onTextSelected: (TextSettings settings) {
+                                        _textSettings.value = settings;
+                                      },
+                                      carry: _selectionCarry,
+                                      exclusionRects: _nativeExclusionRects,
+                                      exclusionsChanged:
+                                          _paletteController.popoverChanged,
+                                      replay: _strokeReplay,
+                                      onReplayStrokeTapped: _seekToStroke,
+                                      // The page the selection is on is the
+                                      // current one; the view stays put.
+                                      onSelectionCarried: () => context
+                                          .findAncestorStateOfType<
+                                            PageViewportState
+                                          >()
+                                          ?.touchPage(slot),
+                                    ),
+                                    AiContextSelection(
+                                      assistant: _ai,
+                                      page: page.ink,
+                                    ),
+                                    ValueListenableBuilder<
+                                      _HandwritingFindTarget?
+                                    >(
+                                      valueListenable: _handwritingFindTarget,
+                                      builder:
+                                          (
+                                            BuildContext context,
+                                            _HandwritingFindTarget? target,
+                                            Widget? _,
+                                          ) {
+                                            if (target == null ||
+                                                !identical(target.page, page)) {
+                                              return const SizedBox.shrink();
+                                            }
+                                            return IgnorePointer(
+                                              child: ExcludeSemantics(
+                                                child: CustomPaint(
+                                                  key: ValueKey<String>(
+                                                    'handwriting-search-highlight-$index',
+                                                  ),
+                                                  painter:
+                                                      _HandwritingFindHighlightPainter(
+                                                        page: page,
+                                                        target: target,
+                                                        color: AppColors.of(
+                                                          context,
+                                                        ).accent,
+                                                      ),
+                                                ),
+                                              ),
+                                            );
+                                          },
+                                    ),
+                                  ],
+                                ),
                               );
                             },
                         // Above the current page, so their presses stay off
@@ -3296,19 +3655,30 @@ class EditorScreenState extends State<EditorScreen>
                               return Stack(
                                 fit: StackFit.expand,
                                 children: <Widget>[
-                                  SelectionActionBar(
-                                    controller: _inkController,
-                                    crossPageListenable: _selectionCarry,
-                                    selectionResolver: _stableSelection,
-                                    onAiPressed: _openAi,
-                                    onCopy: _copy,
-                                    onCut: _cut,
-                                    onDuplicate: () => _selectionCarry
-                                        .duplicateSelection(_inkController),
-                                    onDelete: (_) => _selectionCarry
-                                        .deleteSelection(_inkController),
-                                    transform: transform,
-                                    obstruction: paletteOnPage,
+                                  ValueListenableBuilder<bool>(
+                                    valueListenable: _selectionChromeHidden,
+                                    builder:
+                                        (
+                                          BuildContext context,
+                                          bool hidden,
+                                          Widget? bar,
+                                        ) => hidden
+                                        ? const SizedBox.shrink()
+                                        : bar!,
+                                    child: SelectionActionBar(
+                                      controller: _inkController,
+                                      crossPageListenable: _selectionCarry,
+                                      selectionResolver: _stableSelection,
+                                      onAiPressed: _openAi,
+                                      onCopy: _copy,
+                                      onCut: _cut,
+                                      onDuplicate: () => _selectionCarry
+                                          .duplicateSelection(_inkController),
+                                      onDelete: (_) => _selectionCarry
+                                          .deleteSelection(_inkController),
+                                      transform: transform,
+                                      obstruction: paletteOnPage,
+                                    ),
                                   ),
                                   PastePrompt(
                                     anchor: _pastePrompt,
@@ -3362,80 +3732,97 @@ class EditorScreenState extends State<EditorScreen>
                       onOpenSettings: _openPageSettings,
                       canFind: _canFind,
                       onFind: _openHandwritingFind,
-                      lastAddAction: _lastAddAction,
-                      onAddActionChanged: (AddPageAction action) {
-                        setState(() => _lastAddAction = action);
-                      },
                       onInsertPdf: _canUseDocumentIo ? _insertPdf : null,
+                      onExitFullscreen: exitFullscreen,
                     ),
                   ),
                 ),
-                _PalettePositioner(
-                  historyWidth: historyWidth,
-                  pageControlsWidth: pageControlsWidth,
-                  center: _paletteDragCenter,
-                  sizeClass: sizeClass,
-                  region: region,
-                  placement: _palettePlacement.value,
-                  isAiOpen: isAiOpen,
-                  expanded: _paletteExpanded,
-                  builder: (PaletteEdge edge) => ToolPalette(
-                    edge: edge,
-                    onDragStart: () => _onPaletteDragStart(
-                      layout.paletteOrigin +
-                          ToolPalette.sizeFor(
-                            layout.paletteAxis,
-                            expanded: _paletteExpanded,
-                          ).center(Offset.zero),
-                    ),
-                    onDragUpdate: _onPaletteDragUpdate,
-                    onDragEnd: _onPaletteDragEnd,
-                    onMoveTo: _movePaletteTo,
-                    dense: sizeClass == WindowSizeClass.medium,
-                    tool: _tool,
-                    penSettings: _penSettings,
-                    eraserSettings: _eraserSettings,
-                    selectPdf: _selectPdf,
-                    aiActive: _aiActive,
-                    onTurnOnAi: _openAi,
-                    assistant: _ai,
-                    penConfig: widget.penConfig,
-                    eraserConfig: widget.eraserConfig,
-                    controller: _paletteController,
-                    ruler: _ruler,
-                    recording: RecordingToolData(
-                      recorder: _audioRecorder,
-                      document: _document,
-                      replay: _strokeReplay,
-                      onStart: () => unawaited(_startRecording()),
-                      onPause: () => unawaited(_pauseRecording()),
-                      onResume: () => unawaited(_resumeRecording()),
-                      onStop: () => unawaited(finalizeRecording()),
-                      onOpen: (NoteRecordingTrack track) =>
-                          unawaited(_openReplay(track)),
-                      transcription: _transcription,
-                      onTranscribe: (NoteRecordingTrack track) =>
-                          unawaited(_transcribeRecording(track)),
-                      onShowTranscript: _showTranscript,
-                    ),
-                    textSettings: _textSettings,
-                    onTextSettingsChanged: _onTextSettingsChanged,
-                    stickySettings: _stickySettings,
-                    onStickySettingsChanged: _onStickySettingsChanged,
-                    stickyTargetLabel: () =>
-                        _inkController.editingSticky?.label,
-                    onChooseImageFromGallery: _canUseDocumentIo
-                        ? () => _insertImage(DocumentImageSource.gallery)
-                        : null,
-                    onTakePhoto: _canUseDocumentIo
-                        ? () => _insertImage(DocumentImageSource.camera)
-                        : null,
-                    onChooseSvg:
-                        _canUseDocumentIo &&
-                            widget.documentPicker is SvgDocumentPicker
-                        ? _insertSvg
-                        : null,
-                  ),
+                // Only the toolbar listens to which editor shows it, so
+                // switching tabs never builds this editor again.
+                EditorToolbarSlot(
+                  builder: (GlobalKey? toolbarKey) {
+                    _claimStylusGestures();
+                    if (!_toolbarShown.value) {
+                      return const SizedBox.shrink();
+                    }
+                    return _PalettePositioner(
+                      historyWidth: historyWidth,
+                      pageControlsWidth: pageControlsWidth,
+                      center: _paletteDragCenter,
+                      sizeClass: sizeClass,
+                      region: region,
+                      placement: _palettePlacement.value,
+                      isAiOpen: isAiOpen,
+                      expanded: _paletteExpanded,
+                      tools: _paletteTools,
+                      builder:
+                          (
+                            PaletteEdge edge,
+                            double growsBefore,
+                            double optionsMaxLength,
+                          ) => ToolPalette(
+                            // The window's one toolbar while this editor is in
+                            // front: moved here, not built again.
+                            key: toolbarKey,
+                            edge: edge,
+                            growsBefore: growsBefore,
+                            optionsMaxLength: optionsMaxLength,
+                            onDragStart: () => _onPaletteDragStart(
+                              layout.paletteOrigin +
+                                  ToolPalette.sizeFor(
+                                    layout.paletteAxis,
+                                    expanded: _paletteExpanded,
+                                    tools: _paletteTools,
+                                  ).center(Offset.zero),
+                            ),
+                            onDragUpdate: _onPaletteDragUpdate,
+                            onDragEnd: _onPaletteDragEnd,
+                            onMoveTo: _movePaletteTo,
+                            dense: sizeClass == WindowSizeClass.medium,
+                            tool: _tool,
+                            penSettings: _penSettings,
+                            eraserSettings: _eraserSettings,
+                            selectPdf: _selectPdf,
+                            aiActive: _aiActive,
+                            onTurnOnAi: _openAi,
+                            assistant: _ai,
+                            penConfig: widget.penConfig,
+                            eraserConfig: widget.eraserConfig,
+                            controller: _paletteController,
+                            ruler: _ruler,
+                            recording: RecordingToolData(
+                              recorder: _audioRecorder,
+                              document: _document,
+                              replay: _strokeReplay,
+                              onStart: () => unawaited(_startRecording()),
+                              onPause: () => unawaited(_pauseRecording()),
+                              onResume: () => unawaited(_resumeRecording()),
+                              onStop: () => unawaited(finalizeRecording()),
+                              onOpen: (NoteRecordingTrack track) =>
+                                  unawaited(_openReplay(track)),
+                              transcription: _transcription,
+                              onTranscribe: (NoteRecordingTrack track) =>
+                                  unawaited(_transcribeRecording(track)),
+                              onShowTranscript: _showTranscript,
+                            ),
+                            textSettings: _textSettings,
+                            onTextSettingsChanged: _onTextSettingsChanged,
+                            optionsShown: _toolOptionsShown,
+                            layout: _toolbarLayout,
+                            stickySettings: _stickySettings,
+                            onStickySettingsChanged: _onStickySettingsChanged,
+                            stickyTargetLabel: () =>
+                                _inkController.editingSticky?.label,
+                            onChooseImageFromGallery: _canUseDocumentIo
+                                ? () =>
+                                      _insertImage(DocumentImageSource.gallery)
+                                : null,
+                            onTakePhoto: _canUseDocumentIo
+                                ? () => _insertImage(DocumentImageSource.camera)
+                                : null,
+                          ),
+                    );
+                  },
                 ),
                 // What a narrowing panel uncovers before the page is laid
                 // out again: more of the desk the page sits on.
@@ -3679,7 +4066,12 @@ class _HandwritingFindHighlightPainter extends CustomPainter {
       ..rotate(sticky.rotation)
       ..scale(sticky.scale)
       ..translate(-local.width / 2, -local.height / 2);
-    _paintHighlight(canvas, target.bounds, scale: sticky.scale);
+    // A minimized note's ink is hidden, so the note itself is what was found.
+    _paintHighlight(
+      canvas,
+      sticky.minimized ? Offset.zero & sticky.paperLocalSize : target.bounds,
+      scale: sticky.scale,
+    );
     canvas.restore();
   }
 
@@ -4150,15 +4542,22 @@ class _PalettePositioner extends StatefulWidget {
     required this.builder,
     this.isAiOpen = false,
     this.expanded = false,
+    this.tools = ToolbarLayout.standard,
   });
   final bool expanded;
+  final ToolbarLayout tools;
   final double historyWidth;
   final double pageControlsWidth;
   final ValueListenable<Offset?> center;
   final WindowSizeClass sizeClass;
   final Rect region;
   final PalettePlacement placement;
-  final Widget Function(PaletteEdge) builder;
+  final Widget Function(
+    PaletteEdge edge,
+    double growsBefore,
+    double optionsMaxLength,
+  )
+  builder;
   final bool isAiOpen;
 
   @override
@@ -4167,12 +4566,40 @@ class _PalettePositioner extends StatefulWidget {
 
 class _PalettePositionerState extends State<_PalettePositioner> {
   PaletteEdge? _edge;
+  bool _builtDragged = false;
   Widget? _palette;
 
   @override
   void didUpdateWidget(_PalettePositioner oldWidget) {
     super.didUpdateWidget(oldWidget);
     _palette = null;
+  }
+
+  /// How much of its growth the palette takes toward its start as it unfolds
+  /// docked against [edge]: as far as its docked origin moves back.
+  double _growsBefore(PaletteEdge edge) {
+    double dockedAlong({required bool expanded}) {
+      final Offset origin = EditorLayout.compute(
+        widget.sizeClass,
+        widget.region,
+        PalettePlacement(edge: edge, along: widget.placement.along),
+        historyWidth: widget.historyWidth,
+        pageControlsWidth: widget.pageControlsWidth,
+        isAiOpen: widget.isAiOpen,
+        paletteExpanded: expanded,
+        paletteTools: widget.tools,
+      ).paletteOrigin;
+      return edge.axis == Axis.horizontal ? origin.dx : origin.dy;
+    }
+
+    final double growth = ToolPalette.unfoldGrowth(
+      edge.axis,
+      tools: widget.tools,
+    );
+    if (growth == 0) return 0.5;
+    final double back =
+        dockedAlong(expanded: false) - dockedAlong(expanded: true);
+    return (back / growth).clamp(0.0, 1.0);
   }
 
   @override
@@ -4188,12 +4615,48 @@ class _PalettePositionerState extends State<_PalettePositioner> {
         dragCenter: center,
         isAiOpen: widget.isAiOpen,
         paletteExpanded: widget.expanded,
+        paletteTools: widget.tools,
+      );
+      final Axis axis = layout.paletteAxis;
+      final bool across = axis == Axis.horizontal;
+      final double growsBefore = _growsBefore(layout.paletteEdge);
+      // Where the palette would lie folded, whether it is or not: the options
+      // bar goes by this, so folding and unfolding leave it where it is.
+      final double back = widget.expanded
+          ? growsBefore * ToolPalette.unfoldGrowth(axis, tools: widget.tools)
+          : 0;
+      final Offset docked =
+          layout.paletteOrigin + (across ? Offset(back, 0) : Offset(0, back));
+      final Size paletteSize = ToolPalette.sizeFor(axis, tools: widget.tools);
+      final double margin = EditorLayout.marginFor(widget.sizeClass);
+      // The options bar is centered on the folded palette, as long as the
+      // region has room for on both sides, and scrolls beyond that.
+      final double middle = across
+          ? docked.dx + paletteSize.width / 2
+          : docked.dy + paletteSize.height / 2;
+      final double half = across
+          ? math.min(middle - widget.region.left, widget.region.right - middle)
+          : math.min(middle - widget.region.top, widget.region.bottom - middle);
+      final double room = math.max(
+        paletteSize.longestSide,
+        2 * (half - margin),
       );
       // Reuse the entire control subtree until the edge or editor inputs
       // change. Each move updates only Stack parent data and compositing.
-      if (_palette == null || _edge != layout.paletteEdge) {
+      final bool dragged = center != null;
+      if (_palette == null ||
+          _edge != layout.paletteEdge ||
+          (_builtDragged && !dragged)) {
         _edge = layout.paletteEdge;
-        _palette = RepaintBoundary(child: widget.builder(_edge!));
+        _builtDragged = dragged;
+        _palette = RepaintBoundary(
+          child: widget.builder(
+            _edge!,
+            growsBefore,
+            // Only docked: a dragged palette relays out no options.
+            dragged ? double.infinity : room,
+          ),
+        );
       }
       // The palette's footprint never participates in surrounding layout.
       // Animate only its paint transform so a dock/drop does not lay out the
@@ -4201,23 +4664,124 @@ class _PalettePositionerState extends State<_PalettePositioner> {
       return Positioned(
         left: 0,
         top: 0,
-        child: TweenAnimationBuilder<Offset>(
-          key: const ValueKey<String>('tool-palette-position'),
-          tween: Tween<Offset>(
-            begin: layout.paletteOrigin,
-            end: layout.paletteOrigin,
+        child: _PaletteAnchor(
+          edge: layout.paletteEdge,
+          paletteSize: paletteSize,
+          child: TweenAnimationBuilder<Offset>(
+            key: const ValueKey<String>('tool-palette-position'),
+            tween: Tween<Offset>(begin: docked, end: docked),
+            duration: center == null
+                ? AppMotion.resolve(context, AppMotion.bouncy.duration)
+                : Duration.zero,
+            curve: AppMotion.fadeInCurve,
+            builder: (BuildContext context, Offset origin, Widget? child) =>
+                Transform.translate(offset: origin, child: child),
+            child: _palette,
           ),
-          duration: center == null
-              ? AppMotion.resolve(context, AppMotion.bouncy.duration)
-              : Duration.zero,
-          curve: AppMotion.fadeInCurve,
-          builder: (BuildContext context, Offset origin, Widget? child) =>
-              Transform.translate(offset: origin, child: child),
-          child: _palette!,
         ),
       );
     },
   );
+}
+
+/// Holds the palette, folded, where it is docked while the room for it to
+/// unfold and the options bar beside it, both centered on it, make the whole
+/// longer than the palette: lays [child] out at whatever size it takes, then
+/// moves it back by as much as the folded palette sits from its top-left
+/// corner.
+class _PaletteAnchor extends SingleChildRenderObjectWidget {
+  const _PaletteAnchor({
+    required this.edge,
+    required this.paletteSize,
+    super.child,
+  });
+
+  final PaletteEdge edge;
+  final Size paletteSize;
+
+  @override
+  _RenderPaletteAnchor createRenderObject(BuildContext context) =>
+      _RenderPaletteAnchor(edge, paletteSize);
+
+  @override
+  void updateRenderObject(
+    BuildContext context,
+    _RenderPaletteAnchor renderObject,
+  ) {
+    renderObject
+      ..edge = edge
+      ..paletteSize = paletteSize;
+  }
+}
+
+class _RenderPaletteAnchor extends RenderProxyBox {
+  _RenderPaletteAnchor(this._edge, this._paletteSize);
+
+  PaletteEdge get edge => _edge;
+  PaletteEdge _edge;
+  set edge(PaletteEdge value) {
+    if (value == _edge) return;
+    _edge = value;
+    markNeedsPaint();
+  }
+
+  Size get paletteSize => _paletteSize;
+  Size _paletteSize;
+  set paletteSize(Size value) {
+    if (value == _paletteSize) return;
+    _paletteSize = value;
+    markNeedsPaint();
+  }
+
+  /// How far the child is moved back: by where the palette sits in it,
+  /// centered across a bar along the top or bottom, or down a side, and
+  /// after a bar on the page side of it at the bottom or right.
+  Offset get _shift {
+    final Size whole = child?.size ?? Size.zero;
+    final double dx = switch (_edge) {
+      PaletteEdge.top ||
+      PaletteEdge.bottom => (whole.width - _paletteSize.width) / 2,
+      PaletteEdge.left => 0,
+      PaletteEdge.right => whole.width - _paletteSize.width,
+    };
+    final double dy = switch (_edge) {
+      PaletteEdge.left ||
+      PaletteEdge.right => (whole.height - _paletteSize.height) / 2,
+      PaletteEdge.top => 0,
+      PaletteEdge.bottom => whole.height - _paletteSize.height,
+    };
+    return Offset(-math.max(0.0, dx), -math.max(0.0, dy));
+  }
+
+  @override
+  void paint(PaintingContext context, Offset offset) {
+    final RenderBox? child = this.child;
+    if (child != null) context.paintChild(child, offset + _shift);
+  }
+
+  // The child hangs out of this box's own bounds, as a transform's does:
+  // it is hit where it is painted.
+  @override
+  bool hitTest(BoxHitTestResult result, {required Offset position}) =>
+      hitTestChildren(result, position: position);
+
+  @override
+  bool hitTestChildren(BoxHitTestResult result, {required Offset position}) {
+    final RenderBox? child = this.child;
+    if (child == null) return false;
+    return result.addWithPaintOffset(
+      offset: _shift,
+      position: position,
+      hitTest: (BoxHitTestResult result, Offset transformed) =>
+          child.hitTest(result, position: transformed),
+    );
+  }
+
+  @override
+  void applyPaintTransform(RenderBox child, Matrix4 transform) {
+    final Offset shift = _shift;
+    transform.translateByDouble(shift.dx, shift.dy, 0, 1);
+  }
 }
 
 class EditorLayout {
@@ -4265,10 +4829,12 @@ class EditorLayout {
     double historyWidth,
     double pageControlsWidth, {
     bool expanded = false,
+    ToolbarLayout tools = ToolbarLayout.standard,
   }) {
     final Size palette = ToolPalette.sizeFor(
       placement.edge.axis,
       expanded: expanded,
+      tools: tools,
     );
     return palette.width + historyWidth + pageControlsWidth + 4 * margin <=
         region.width;
@@ -4285,11 +4851,13 @@ class EditorLayout {
     double pageControlsWidth, {
     bool isAiOpen = false,
     bool expanded = false,
+    ToolbarLayout tools = ToolbarLayout.standard,
   }) {
     final Offset origin = placement.originIn(
       region,
       margin,
       expanded: expanded,
+      tools: tools,
     );
     if (placement.edge != PaletteEdge.top) {
       return origin;
@@ -4303,6 +4871,7 @@ class EditorLayout {
       historyWidth,
       pageControlsWidth,
       expanded: expanded,
+      tools: tools,
     )) {
       return Offset(origin.dx, math.max(origin.dy, leftCard.bottom + margin));
     }
@@ -4310,6 +4879,7 @@ class EditorLayout {
       final Size paletteSize = ToolPalette.sizeFor(
         placement.edge.axis,
         expanded: expanded,
+        tools: tools,
       );
       final double middleX = (leftCard.right + rightCard.left) / 2;
       final double centeredX = middleX - paletteSize.width / 2;
@@ -4346,6 +4916,7 @@ class EditorLayout {
     Offset? dragCenter,
     bool isAiOpen = false,
     bool paletteExpanded = false,
+    ToolbarLayout paletteTools = ToolbarLayout.standard,
   }) {
     final double margin = marginFor(sizeClass);
     final Rect history = _historyRect(region, historyWidth);
@@ -4355,6 +4926,7 @@ class EditorLayout {
       final Size size = ToolPalette.sizeFor(
         edge.axis,
         expanded: paletteExpanded,
+        tools: paletteTools,
       );
       final Offset origin = dragCenter - size.center(Offset.zero);
       return EditorLayout(
@@ -4387,6 +4959,7 @@ class EditorLayout {
         pageControlsWidth,
         isAiOpen: isAiOpen,
         expanded: paletteExpanded,
+        tools: paletteTools,
       ),
     );
   }

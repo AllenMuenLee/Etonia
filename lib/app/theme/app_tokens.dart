@@ -143,6 +143,15 @@ abstract final class AppMotion {
   static const Duration glance = Duration(milliseconds: 180);
   static const Curve glanceCurve = Curves.easeOut;
 
+  /// Loaded items come into view one after another (`StaggeredReveal`):
+  /// each fades in where it is, [staggerStep] after the one before, once
+  /// [staggerLead] has let the scene before them fade out. A revisit uses
+  /// [staggerRevisitStep]. Items past [staggerCount] arrive with the last.
+  static const Duration staggerLead = Duration(milliseconds: 60);
+  static const Duration staggerStep = Duration(milliseconds: 35);
+  static const Duration staggerRevisitStep = Duration(milliseconds: 20);
+  static const int staggerCount = 12;
+
   /// Whether a transition at [pace] moves (zoom, slide, scale) or only
   /// fades in where it is.
   static bool travels(MotionPace pace) => pace != MotionPace.revisit;

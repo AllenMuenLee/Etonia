@@ -1,4 +1,5 @@
 import 'dart:math' as math;
+import 'dart:typed_data';
 import 'dart:ui';
 
 import 'package:flutter_test/flutter_test.dart';
@@ -832,6 +833,204 @@ void main() {
         'one',
         'two',
       ]);
+    });
+  });
+
+  group('minimized', () {
+    test('only the top-left corner shows, where it was on the open note', () {
+      final StickyNoteElement open = _note(
+        rotation: 0.4,
+        scale: 1.5,
+        strokes: <Stroke>[
+          _line(const InkVector(10, 10), const InkVector(90, 10)),
+        ],
+      );
+      final StickyNoteElement note = open.copyWith(minimized: true);
+
+      expect(note.size, open.size);
+      expect(note.center, open.center);
+      expect(note.strokes, hasLength(1));
+      const double side = StickyNoteElement.minimizedSide;
+      expect(note.paperLocalSize, const Size(side, side));
+      expect(note.paperSize, const Size(side * 1.5, side * 1.5));
+      final InkVector corner = note.corners.first;
+      expect(corner.x, closeTo(open.corners.first.x, 1e-9));
+      expect(corner.y, closeTo(open.corners.first.y, 1e-9));
+      expect(note.contains(note.paperCenter), isTrue);
+      expect(open.contains(open.center), isTrue);
+      expect(note.contains(open.center), isFalse);
+      expect(note.bounds.width, lessThan(open.bounds.width));
+    });
+
+    test('a transform carries its full frame along', () {
+      final StickyNoteElement note = _note().copyWith(minimized: true);
+      final StickyNoteElement moved = note.transformed(
+        InkTransform.translation(const InkVector(10, 20)),
+      );
+      expect(moved.minimized, isTrue);
+      expect(moved.size, note.size);
+      expect(moved.center, const InkVector(310, 320));
+    });
+
+    test('the button is at the top-left, wider for a finger than a pen', () {
+      final StickyNoteElement open = _note();
+      final InkVector corner = open.corners.first;
+      InkVector at(double x, double y) => corner + InkVector(x, y);
+      bool pen(StickyNoteElement note, InkVector p) => note.toggleContains(
+        p,
+        config: _config,
+        hitRadius: _config.toggleStylusHitRadius,
+      );
+      bool finger(StickyNoteElement note, InkVector p) => note.toggleContains(
+        p,
+        config: _config,
+        hitRadius: _config.toggleTouchHitRadius,
+      );
+
+      expect(pen(open, at(22, 22)), isTrue);
+      expect(pen(open, at(42, 22)), isFalse);
+      expect(finger(open, at(42, 22)), isTrue);
+      expect(finger(open, at(100, 100)), isFalse);
+
+      // All of a minimized note is its button, for a pen too.
+      final StickyNoteElement note = open.copyWith(minimized: true);
+      expect(pen(note, at(42, 42)), isTrue);
+      expect(pen(note, at(60, 22)), isFalse);
+    });
+
+    test('the controller minimizes and opens as one change each', () {
+      final InkController controller = InkController();
+      addTearDown(controller.dispose);
+      final Stroke ink = _line(
+        const InkVector(10, 10),
+        const InkVector(90, 10),
+      );
+      controller.insertStickyNote(_note(strokes: <Stroke>[ink]));
+      expect(controller.editingSticky?.id, 'a');
+
+      expect(controller.toggleStickyMinimized('a'), isTrue);
+      final StickyNoteElement note = controller.stickyNotes.single;
+      expect(note.minimized, isTrue);
+      expect(note.strokes.single, same(ink));
+      expect(controller.editingSticky, isNull);
+      expect(controller.enterStickyEditing('a'), isFalse);
+
+      controller.undo();
+      expect(controller.stickyNotes.single.minimized, isFalse);
+      controller.enterStickyEditing('a');
+      expect(controller.editingSticky?.id, 'a');
+
+      // Redo back to minimized leaves no minimized note open for writing.
+      controller.redo();
+      expect(controller.stickyNotes.single.minimized, isTrue);
+      expect(controller.editingSticky, isNull);
+      expect(controller.toggleStickyMinimized('missing'), isFalse);
+    });
+
+    test('dragged, its corner stays on the page; opened, all of it does', () {
+      final InkController controller = InkController();
+      addTearDown(controller.dispose);
+      const Rect page = Rect.fromLTWH(0, 0, 800, 1000);
+      controller.insertStickyNote(_note());
+      controller.toggleStickyMinimized('a');
+
+      final InkVector start = controller.stickyNotes.single.paperCenter;
+      expect(
+        controller.beginStickyDrag(
+          pointer: 1,
+          position: start,
+          pageBounds: page,
+        ),
+        isTrue,
+      );
+      controller.endStickyDrag(1, const InkVector(5000, 5000));
+      final StickyNoteElement dragged = controller.stickyNotes.single;
+      expect(dragged.bounds.right, closeTo(800, 1e-6));
+      expect(dragged.bounds.bottom, closeTo(1000, 1e-6));
+      expect(controller.editingSticky, isNull);
+
+      controller.toggleStickyMinimized('a', pageBounds: page);
+      final StickyNoteElement opened = controller.stickyNotes.single;
+      expect(opened.minimized, isFalse);
+      expect(page.contains(opened.bounds.topLeft), isTrue);
+      expect(opened.bounds.right, closeTo(800, 1e-6));
+      expect(opened.bounds.bottom, closeTo(1000, 1e-6));
+    });
+
+    test('stored, and absent from a note that is not minimized', () {
+      StickyNoteElement through(StickyNoteElement note) {
+        final StoredPage page = StoredPage.fromJson(
+          StoredPage(
+            setup: const PageSetup(),
+            strokes: const <Stroke>[],
+            stickyNotes: <StickyNoteElement>[note],
+          ).toJson(),
+        );
+        return page.stickyNotes.single;
+      }
+
+      final StickyNoteElement back = through(
+        _note(
+          strokes: <Stroke>[
+            _line(const InkVector(10, 10), const InkVector(90, 10)),
+          ],
+        ).copyWith(minimized: true),
+      );
+      expect(back.minimized, isTrue);
+      expect(back.size, const Size(240, 180));
+      expect(back.strokes, hasLength(1));
+      expect(through(_note()).minimized, isFalse);
+      final Map<String, Object?> json = StoredPage(
+        setup: const PageSetup(),
+        strokes: const <Stroke>[],
+        stickyNotes: <StickyNoteElement>[_note()],
+      ).toJson();
+      expect(json.toString(), isNot(contains('minimized')));
+    });
+
+    testWidgets('paints no ink or pattern, and the button only if asked', (
+      WidgetTester tester,
+    ) async {
+      Future<List<int>> pixelsOf(StickyNoteElement note, bool toggle) async {
+        return (await tester.runAsync(() async {
+          final PictureRecorder recorder = PictureRecorder();
+          paintStickyNote(
+            Canvas(recorder),
+            note,
+            shadow: false,
+            showToggle: toggle,
+          );
+          final Image image = await recorder.endRecording().toImage(100, 100);
+          final ByteData? bytes = await image.toByteData();
+          image.dispose();
+          return bytes!.buffer.asUint8List().toList();
+        }))!;
+      }
+
+      // The corner is at (0, 0), the ink right through it.
+      final StickyNoteElement note = _note(
+        center: const InkVector(120, 90),
+        paper: StickyPaperStyle.grid,
+        strokes: <Stroke>[
+          _line(const InkVector(0, 10), const InkVector(240, 10), width: 8),
+        ],
+      );
+      List<int> at(List<int> pixels, int x, int y) =>
+          pixels.sublist((y * 100 + x) * 4, (y * 100 + x) * 4 + 4);
+      final List<int> paper = <int>[0xFF, 0xF3, 0xA8, 0xFF];
+
+      expect(at(await pixelsOf(note, false), 30, 10), isNot(paper));
+      final List<int> chip = await pixelsOf(
+        note.copyWith(minimized: true),
+        false,
+      );
+      expect(at(chip, 30, 10), paper);
+      // Past the corner, nothing at all.
+      expect(at(chip, 60, 10)[3], 0);
+      expect(
+        at(await pixelsOf(note.copyWith(minimized: true), true), 22, 22),
+        isNot(paper),
+      );
     });
   });
 }

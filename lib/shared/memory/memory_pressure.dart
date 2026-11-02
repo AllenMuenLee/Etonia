@@ -7,7 +7,8 @@ import 'package:flutter/widgets.dart';
 /// Flutter's image cache already empties on it; what the app keeps of its
 /// own, decoded PDF pages and pictures, library thumbnails and the editors
 /// of notes out of view, listens here. Whatever is let go is made again
-/// when it is next shown.
+/// when it is next shown. This comes on top of the limits the caches keep
+/// to anyway, see note_cache_pool.dart.
 class MemoryPressure with WidgetsBindingObserver {
   MemoryPressure._();
 

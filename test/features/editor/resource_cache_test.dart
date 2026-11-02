@@ -11,6 +11,7 @@ import 'package:greatnote/features/editor/document_io/page_image_cache.dart';
 import 'package:greatnote/features/editor/document_io/pdf_page_layer.dart';
 import 'package:greatnote/features/editor/document_io/pdf_paper.dart';
 import 'package:greatnote/features/editor/document_io/pdf_preview_store.dart';
+import 'package:greatnote/shared/memory/note_cache_pool.dart';
 
 class _Rasterizer implements PdfRasterizer, PdfImageRasterizer {
   int renders = 0;
@@ -130,6 +131,43 @@ void main() {
       expect(rasterizer.log, ['2:457', '3:457', '1:457']);
       await _until(() => rasterizer.log.length >= 6);
       expect(rasterizer.log.sublist(3), ['2:1000', '3:1000', '1:1000']);
+      cache.clear();
+    });
+  });
+
+  testWidgets('a scroll slowed to a fraction of its fastest renders sharp '
+      'before it stops, and waits again should it speed up', (tester) async {
+    await tester.runAsync(() async {
+      final rasterizer = _Rasterizer();
+      final cache = PdfPageRenderCache(
+        readAsset: (_) async => Uint8List(1),
+        rasterizer: rasterizer,
+        config: const DocumentIoConfig(
+          pdfSettleDelay: Duration(seconds: 5),
+          pdfScrollSettleDelay: Duration(seconds: 5),
+        ),
+      );
+      cache.scrollSpeed(4000);
+      cache.focus([_focus(2), _focus(3)], 1, sharpPages: 2);
+      cache.viewMoved();
+      await _until(() => rasterizer.log.length >= 2);
+      // Still at 40% of its fastest: only previews.
+      cache.scrollSpeed(1600);
+      cache.viewMoved();
+      await Future<void>.delayed(const Duration(milliseconds: 100));
+      expect(rasterizer.log, ['2:457', '3:457']);
+      // At 30%, sharp renders start while the view still moves.
+      cache.scrollSpeed(1200);
+      cache.viewMoved();
+      await _until(() => rasterizer.log.length >= 4);
+      expect(rasterizer.log.sublist(2), ['2:1000', '3:1000']);
+      // Sped up again, to another page: sharp renders wait once more.
+      cache.scrollSpeed(3000);
+      cache.focus([_focus(5), _focus(6)], 1, sharpPages: 2);
+      cache.viewMoved();
+      await _until(() => rasterizer.log.length >= 6);
+      await Future<void>.delayed(const Duration(milliseconds: 100));
+      expect(rasterizer.log.sublist(4), ['5:457', '6:457']);
       cache.clear();
     });
   });
@@ -306,7 +344,8 @@ void main() {
       final cache = PdfPageRenderCache(
         readAsset: (_) async => Uint8List(5),
         rasterizer: rasterizer,
-        config: const DocumentIoConfig(pdfRenderCacheBytes: 800),
+        config: const DocumentIoConfig(pdfSourceCacheBytes: 0),
+        cacheScope: NoteCachePool(maxBytes: 800).scope(),
       );
       final a = await cache.renderImage(_source(0), const ui.Size(10, 10), 1);
       final b = await cache.renderImage(_source(1), const ui.Size(10, 10), 1);
@@ -327,6 +366,39 @@ void main() {
     });
   });
 
+  testWidgets('PDF diagnostics report cache reuse and bounded queue samples', (
+    tester,
+  ) async {
+    await tester.runAsync(() async {
+      final rasterizer = _Rasterizer();
+      final cache = PdfPageRenderCache(
+        readAsset: (_) async => Uint8List(1),
+        rasterizer: rasterizer,
+      );
+      final first = await cache.renderImage(
+        _source(0),
+        const ui.Size(20, 20),
+        1,
+      );
+      first.dispose();
+      final second = await cache.renderImage(
+        _source(0),
+        const ui.Size(20, 20),
+        1,
+      );
+      second.dispose();
+
+      final PdfRenderDiagnostics diagnostics = cache.diagnostics;
+      expect(diagnostics.requests, 2);
+      expect(diagnostics.cacheHits, 1);
+      expect(diagnostics.cacheHitRate, 0.5);
+      expect(diagnostics.completedJobs, 1);
+      expect(diagnostics.peakQueueLength, 1);
+      expect(diagnostics.renderLatencyP50Ms, greaterThanOrEqualTo(0));
+      cache.clear();
+    });
+  });
+
   testWidgets(
     'PDF eviction during render and PNG encoding keeps borrows alive',
     (tester) async {
@@ -335,7 +407,7 @@ void main() {
         final cache = PdfPageRenderCache(
           readAsset: (_) async => Uint8List(1),
           rasterizer: rasterizer,
-          config: const DocumentIoConfig(pdfRenderCacheBytes: 1),
+          cacheScope: NoteCachePool(maxBytes: 1).scope(),
         );
         final first = cache.renderImage(_source(0), const ui.Size(20, 20), 1);
         final second = cache.renderImage(_source(0), const ui.Size(20, 20), 1);
@@ -400,7 +472,7 @@ void main() {
       var reads = 0;
       final gate = Completer<Uint8List?>();
       final cache = PageImageCache(
-        maxBytes: 400,
+        cacheScope: NoteCachePool(maxBytes: 400).scope(),
         sourceMaxBytes: 0,
         readAsset: (_) {
           reads++;
@@ -430,6 +502,88 @@ void main() {
     });
   });
 
+  testWidgets('open notes share one pool: the note used longest ago gives up '
+      'its pages first, each with its PDF paper and its pictures', (
+    tester,
+  ) async {
+    await tester.runAsync(() async {
+      final original = await _Rasterizer().renderImage(
+        Uint8List(0),
+        0,
+        pixelWidth: 10,
+        pixelHeight: 10,
+      );
+      final data = (await original.toByteData(format: ui.ImageByteFormat.png))!;
+      original.dispose();
+      final png = data.buffer.asUint8List();
+
+      // Room for three pages of 400 bytes of paper and one 100 byte picture,
+      // with none left over for the bytes read to make them.
+      final pool = NoteCachePool(maxBytes: 1300);
+      final scope1 = pool.scope();
+      final scope2 = pool.scope();
+      final rasterizer = _Rasterizer();
+      PdfPageRenderCache pdf(NoteCacheScope scope) => PdfPageRenderCache(
+        readAsset: (_) async => Uint8List(0),
+        rasterizer: rasterizer,
+        config: const DocumentIoConfig(pdfSourceCacheBytes: 0),
+        cacheScope: scope,
+      );
+      final note1 = pdf(scope1);
+      final note2 = pdf(scope2);
+      final pictures = PageImageCache(
+        cacheScope: scope2,
+        sourceMaxBytes: 0,
+        readAsset: (_) async => png,
+      );
+
+      Future<void> use(
+        PdfPageRenderCache cache,
+        NoteCacheScope scope,
+        int page,
+      ) async {
+        scope.touch(_source(page));
+        (await cache.renderImage(
+          _source(page),
+          const ui.Size(10, 10),
+          1,
+        )).dispose();
+      }
+
+      await use(note1, scope1, 4);
+      await use(note2, scope2, 5);
+      // Kept with note 2's page 5, to go with it.
+      (await pictures.image('a', 5, 5, page: _source(5))).dispose();
+      await use(note1, scope1, 5);
+      expect(note1.entryCount, 2);
+      expect(note2.entryCount, 1);
+      expect(pictures.retainedBytes, 100);
+      expect(pool.usedBytes, 1300);
+
+      await use(note1, scope1, 6);
+      await Future<void>.delayed(Duration.zero);
+      expect(note2.entryCount, 0, reason: 'note 2 was used longest ago');
+      expect(pictures.retainedBytes, 0, reason: 'the whole page goes');
+      expect(note1.entryCount, 3, reason: 'note 1 keeps even its oldest page');
+      expect(pool.usedBytes, 1200);
+
+      // With note 2 empty, note 1's own oldest page goes.
+      await use(note1, scope1, 7);
+      await Future<void>.delayed(Duration.zero);
+      expect(note1.entryCount, 3);
+      final rendersBefore = rasterizer.renders;
+      await use(note1, scope1, 5);
+      expect(rasterizer.renders, rendersBefore, reason: 'page 5 stayed');
+      await use(note1, scope1, 4);
+      expect(rasterizer.renders, rendersBefore + 1, reason: 'page 4 went');
+
+      note1.clear();
+      note2.clear();
+      pictures.clear();
+      expect(pool.usedBytes, 0);
+    });
+  });
+
   testWidgets('zoomed out, PDF pages render sharp only as big as they are '
       'seen, in tenths', (tester) async {
     await tester.runAsync(() async {
@@ -452,6 +606,38 @@ void main() {
       cache.showAtZoom(2.5);
       await _until(() => rasterizer.log.length >= 4);
       expect(rasterizer.log.last, '0:1000');
+      cache.clear();
+    });
+  });
+
+  testWidgets('deep PDF zoom keeps only the current sharp base page', (
+    tester,
+  ) async {
+    await tester.runAsync(() async {
+      final rasterizer = _Rasterizer();
+      final cache = PdfPageRenderCache(
+        readAsset: (_) async => Uint8List(1),
+        rasterizer: rasterizer,
+        config: const DocumentIoConfig(
+          pdfSettleDelay: Duration.zero,
+          // These test pages are small enough not to need previews.
+          pdfPreviewDimension: 2000,
+        ),
+      );
+      cache.showAtZoom(0.7);
+      cache.focus(
+        <PdfFocusPage>[_focus(0), _focus(1), _focus(2)],
+        1,
+        sharpPages: 3,
+      );
+      await _until(() => rasterizer.log.length >= 3);
+      expect(cache.entryCount, 3);
+
+      cache.showAtZoom(4);
+      await _until(() => rasterizer.log.length >= 4);
+      expect(rasterizer.log.last, '0:1000');
+      expect(cache.entryCount, 1);
+      expect(cache.retainedBytes, 1000 * 1400 * 4);
       cache.clear();
     });
   });

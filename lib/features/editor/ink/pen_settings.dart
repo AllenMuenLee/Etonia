@@ -76,9 +76,13 @@ class PenSettings {
     this.stabilization = defaultStabilization,
     this.holdToShape = true,
     this.scribbleToErase = true,
+    this.swatches = defaultSwatches,
+    this.highlighterSwatches = defaultHighlighterSwatches,
   }) : assert(tipSharpness >= 0 && tipSharpness <= 1),
        assert(pressureSensitivity >= 0 && pressureSensitivity <= 1),
-       assert(stabilization >= 0 && stabilization <= 1);
+       assert(stabilization >= 0 && stabilization <= 1),
+       assert(swatches.length == swatchCount),
+       assert(highlighterSwatches.length == swatchCount);
 
   PenSettings.defaults([PenConfig config = const PenConfig()])
     : this(
@@ -86,6 +90,23 @@ class PenSettings {
         width: config.defaultWidth,
         highlighterWidth: config.highlighterDefaultWidth,
       );
+
+  /// How many inks the pen, and the highlighter, keep at hand.
+  static const int swatchCount = 3;
+
+  /// The pen's inks at hand until the user changes them: black, blue, red.
+  static const List<InkColor> defaultSwatches = <InkColor>[
+    InkPalette.ink,
+    InkPalette.blue,
+    InkPalette.red,
+  ];
+
+  /// The highlighter's: yellow, green, pink.
+  static const List<InkColor> defaultHighlighterSwatches = <InkColor>[
+    InkPalette.highlighterYellow,
+    InkPalette.highlighterGreen,
+    InkPalette.highlighterPink,
+  ];
 
   static const double defaultTipSharpness = 0;
   static const double defaultPressureSensitivity = 0;
@@ -125,6 +146,27 @@ class PenSettings {
 
   /// The width of the current [style].
   double get activeWidth => isHighlighter ? highlighterWidth : width;
+
+  /// The pen's [swatchCount] inks at hand, shared by the pen and pencil.
+  final List<InkColor> swatches;
+
+  /// The highlighter's.
+  final List<InkColor> highlighterSwatches;
+
+  /// The inks at hand for the current [style].
+  List<InkColor> get activeSwatches =>
+      isHighlighter ? highlighterSwatches : swatches;
+
+  /// These settings with the current [style]'s swatch at [index] made
+  /// [value], and that ink chosen.
+  PenSettings withActiveSwatch(int index, InkColor value) {
+    final List<InkColor> next = List<InkColor>.of(activeSwatches)
+      ..[index] = value;
+    final List<InkColor> fixed = List<InkColor>.unmodifiable(next);
+    return isHighlighter
+        ? copyWith(highlighterInk: value, highlighterSwatches: fixed)
+        : copyWith(ink: value, swatches: fixed);
+  }
 
   /// These settings with the current [style]'s ink changed.
   PenSettings withActiveInk(InkColor value) {
@@ -242,6 +284,8 @@ class PenSettings {
     double? stabilization,
     bool? holdToShape,
     bool? scribbleToErase,
+    List<InkColor>? swatches,
+    List<InkColor>? highlighterSwatches,
   }) {
     return PenSettings(
       ink: ink ?? this.ink,
@@ -254,6 +298,8 @@ class PenSettings {
       stabilization: stabilization ?? this.stabilization,
       holdToShape: holdToShape ?? this.holdToShape,
       scribbleToErase: scribbleToErase ?? this.scribbleToErase,
+      swatches: swatches ?? this.swatches,
+      highlighterSwatches: highlighterSwatches ?? this.highlighterSwatches,
     );
   }
 
@@ -269,7 +315,9 @@ class PenSettings {
         other.pressureSensitivity == pressureSensitivity &&
         other.stabilization == stabilization &&
         other.holdToShape == holdToShape &&
-        other.scribbleToErase == scribbleToErase;
+        other.scribbleToErase == scribbleToErase &&
+        listEquals(other.swatches, swatches) &&
+        listEquals(other.highlighterSwatches, highlighterSwatches);
   }
 
   @override
@@ -284,5 +332,7 @@ class PenSettings {
     stabilization,
     holdToShape,
     scribbleToErase,
+    Object.hashAll(swatches),
+    Object.hashAll(highlighterSwatches),
   );
 }

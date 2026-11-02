@@ -27,6 +27,44 @@ double _metricLength(ui.Path path) => path.computeMetrics().fold<double>(
 
 void main() {
   test(
+    'native wet ink suppresses the duplicate Flutter active stroke',
+    () async {
+      final InkController controller = InkController();
+      final ValueNotifier<bool> nativePreview = ValueNotifier<bool>(false);
+      controller.startStroke(
+        pointer: 1,
+        sample: const RawInkSample(
+          position: InkVector(20, 20),
+          timestamp: Duration.zero,
+        ),
+        style: _style,
+      );
+
+      Future<int> centerAlpha() async {
+        final ui.PictureRecorder recorder = ui.PictureRecorder();
+        ActiveStrokePainter(
+          controller: controller,
+          brightness: Brightness.light,
+          inkHidden: nativePreview,
+        ).paint(Canvas(recorder), const Size(40, 40));
+        final ui.Image image = await recorder.endRecording().toImage(40, 40);
+        final ByteData data = (await image.toByteData(
+          format: ui.ImageByteFormat.rawRgba,
+        ))!;
+        image.dispose();
+        return data.getUint8((20 * 40 + 20) * 4 + 3);
+      }
+
+      expect(await centerAlpha(), greaterThan(0));
+      nativePreview.value = true;
+      expect(await centerAlpha(), 0);
+
+      nativePreview.dispose();
+      controller.dispose();
+    },
+  );
+
+  test(
     'active dynamic outlines grow at every sample and finish canonically',
     () {
       RawInkSample sample(int i) => RawInkSample(

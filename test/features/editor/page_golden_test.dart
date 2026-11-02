@@ -14,6 +14,7 @@ import 'package:greatnote/features/editor/ink/ink_sample.dart';
 import 'package:greatnote/features/editor/ink/stroke.dart';
 import 'package:greatnote/features/editor/page/note_document.dart';
 import 'package:greatnote/features/editor/page/page_setup.dart';
+import 'package:greatnote/features/editor/widgets/tool_palette.dart';
 
 import '../../helpers/pump_app.dart';
 
@@ -36,7 +37,11 @@ Future<NoteDocument> _pump(
   PageSetup setup, {
   TestViewport viewport = TestViewport.tabletLandscape,
   ThemeMode themeMode = ThemeMode.light,
+  PalettePlacement placement = const PalettePlacement(),
 }) async {
+  final ValueNotifier<PalettePlacement> palette =
+      ValueNotifier<PalettePlacement>(placement);
+  addTearDown(palette.dispose);
   final NoteDocument document = NoteDocument(
     pages: <NotePage>[
       NotePage(
@@ -50,7 +55,7 @@ Future<NoteDocument> _pump(
     tester,
     viewport: viewport,
     themeMode: themeMode,
-    home: EditorScreen(document: document),
+    home: EditorScreen(document: document, palettePlacement: palette),
   );
   return document;
 }
@@ -146,8 +151,6 @@ void main() {
     WidgetTester tester,
   ) async {
     await _pump(tester, const PageSetup());
-    await tester.tap(find.byTooltip('Pen'));
-    await tester.pumpAndSettle();
     await tester.tap(
       find.byKey(const ValueKey<String>('writing-style-pencil')),
     );
@@ -158,12 +161,25 @@ void main() {
     );
   });
 
+  testWidgets('pen options, docked at the left: tablet_landscape_dark', (
+    WidgetTester tester,
+  ) async {
+    await _pump(
+      tester,
+      const PageSetup(),
+      themeMode: ThemeMode.dark,
+      placement: const PalettePlacement(edge: PaletteEdge.left),
+    );
+    await expectLater(
+      find.byType(GreatnoteApp),
+      matchesGoldenFile('goldens/pen_options_left_tablet_landscape_dark.png'),
+    );
+  });
+
   testWidgets('pen advanced: tablet_landscape_light', (
     WidgetTester tester,
   ) async {
     await _pump(tester, const PageSetup());
-    await tester.tap(find.byTooltip('Pen'));
-    await tester.pumpAndSettle();
     await tester.tap(find.byKey(const ValueKey<String>('pen-advanced-toggle')));
     await tester.pumpAndSettle();
     await expectLater(

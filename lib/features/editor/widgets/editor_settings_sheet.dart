@@ -1,4 +1,4 @@
-﻿import 'package:flutter/foundation.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 
 import '../../../app/theme/app_tokens.dart';
@@ -7,6 +7,7 @@ import '../../../app/theme/app_icons.dart';
 import '../../../shared/widgets/app_controls.dart';
 import '../ai/ai_assistant_controller.dart';
 import '../ai/ai_config.dart';
+import '../ink/stylus_actions.dart';
 
 /// Opens the editor's settings as a floating card under the top bar's
 /// trailing corner, beside the gear that opened it. A tap outside, or
@@ -42,8 +43,13 @@ Future<void> showEditorSettings(
             child: Align(
               alignment: AlignmentDirectional.topEnd,
               child: ConstrainedBox(
-                constraints: const BoxConstraints(
+                constraints: BoxConstraints(
                   maxWidth: EditorSettingsSheet.width,
+                  maxHeight:
+                      media.size.height -
+                      media.padding.vertical -
+                      AppSizes.appBarHeight -
+                      AppSpacing.xs * 2,
                 ),
                 child: _SettingsCard(child: builder(context)),
               ),
@@ -102,6 +108,7 @@ class EditorSettingsSheet extends StatelessWidget {
     this.textSize,
     this.onTextSizeChanged,
     this.onChooseHandwriting,
+    this.stylusActions,
     this.onExportPdf,
     this.onExportSvg,
   });
@@ -123,92 +130,105 @@ class EditorSettingsSheet extends StatelessWidget {
   /// write the letters again; hidden without it.
   final VoidCallback? onChooseHandwriting;
 
+  /// Hardware stylus shortcuts shared by every open note.
+  final ValueNotifier<StylusActionBindings>? stylusActions;
+
   final VoidCallback? onExportPdf;
   final VoidCallback? onExportSvg;
 
   @override
   Widget build(BuildContext context) {
+    final StylusFamily? family = StylusFamily.current;
+    final List<StylusControl> stylusControls = stylusActions == null
+        ? const <StylusControl>[]
+        : family?.controls ?? const <StylusControl>[];
     return ListView(
       shrinkWrap: true,
-      padding: const EdgeInsets.fromLTRB(
-        AppSpacing.lg,
-        AppSpacing.sm,
-        AppSpacing.sm,
-        AppSpacing.lg,
-      ),
+      padding: const EdgeInsets.only(top: AppSpacing.xs, bottom: AppSpacing.md),
       children: <Widget>[
-        Row(
-          children: <Widget>[
-            Expanded(
-              child: Semantics(
-                header: true,
-                child: Text(
-                  'Settings',
-                  style: Theme.of(context).textTheme.titleLarge,
+        Padding(
+          padding: const EdgeInsetsDirectional.only(
+            start: AppSpacing.md + AppSpacing.sm,
+            end: AppSpacing.xs,
+          ),
+          child: Row(
+            children: <Widget>[
+              Expanded(
+                child: Semantics(
+                  header: true,
+                  child: Text(
+                    'Settings',
+                    style: Theme.of(context).textTheme.titleLarge,
+                  ),
                 ),
               ),
-            ),
-            CompactIconButton(
-              tooltip: 'Close settings',
-              onPressed: () => Navigator.of(context).maybePop(),
-              icon: AppIcons.close,
-            ),
-          ],
+              CompactIconButton(
+                tooltip: 'Close settings',
+                onPressed: () => Navigator.of(context).maybePop(),
+                icon: AppIcons.close,
+              ),
+            ],
+          ),
         ),
-        Padding(
-          padding: const EdgeInsetsDirectional.only(end: AppSpacing.sm),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.stretch,
+        if (stylusOnly != null || stylusControls.isNotEmpty)
+          _SettingsGroup(
+            title: family?.title ?? StylusFamily.androidStylus.title,
             children: <Widget>[
-              const SizedBox(height: AppSpacing.sm),
-              if (onExportPdf != null) ...<Widget>[
-                _ActionRow(
-                  icon: AppIcons.share,
-                  label: 'Export as PDF',
-                  onTap: onExportPdf!,
-                ),
-                const SizedBox(height: AppSpacing.sm),
-              ],
-              if (onExportSvg != null) ...<Widget>[
-                _ActionRow(
-                  icon: AppIcons.share,
-                  label: 'Export page vectors as SVG',
-                  onTap: onExportSvg!,
-                ),
-                const SizedBox(height: AppSpacing.sm),
-              ],
-              if (stylusOnly != null) ...<Widget>[
-                const SectionLabel('Writing'),
+              if (stylusOnly != null)
                 ValueListenableBuilder<bool>(
                   valueListenable: stylusOnly!,
                   builder: (BuildContext context, bool value, Widget? child) {
                     return ToggleSetting(
-                      label: 'Only write with stylus',
-                      hint:
-                          'Fingers scroll and tap but leave no ink. A mouse '
-                          'still writes, as some tablets report themselves '
-                          'as one.',
+                      label:
+                          family?.stylusOnlyLabel ??
+                          StylusFamily.androidStylus.stylusOnlyLabel,
+                      hint: 'Fingers scroll and tap but leave no ink.',
                       value: value,
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: AppSpacing.sm,
+                        vertical: AppSpacing.xs,
+                      ),
                       onChanged: (bool enabled) => stylusOnly!.value = enabled,
                     );
                   },
                 ),
-                const SizedBox(height: AppSpacing.md),
-              ],
-              // What the assistant may draw is chosen from the palette's AI
-              // button; here is only how its writing looks.
-              if (onChooseHandwriting != null) ...<Widget>[
-                const SectionLabel('Assistant'),
-                _ActionRow(
-                  icon: AppIcons.pen,
-                  label: 'Handwriting font',
-                  onTap: onChooseHandwriting!,
+              for (final StylusControl control in stylusControls)
+                ValueListenableBuilder<StylusActionBindings>(
+                  valueListenable: stylusActions!,
+                  builder:
+                      (
+                        BuildContext context,
+                        StylusActionBindings bindings,
+                        Widget? child,
+                      ) {
+                        return _StylusActionRow(
+                          control: control,
+                          action: bindings.actionFor(control.gesture),
+                          onChanged: (StylusAction action) {
+                            stylusActions!.value = bindings.withAction(
+                              control.gesture,
+                              action,
+                            );
+                          },
+                        );
+                      },
                 ),
-              ],
-              if (textSize != null && onTextSizeChanged != null) ...<Widget>[
-                const SizedBox(height: AppSpacing.md),
-                const SectionLabel('Text size'),
-                ValueListenableBuilder<AiTextSize>(
+            ],
+          ),
+        // What the assistant may draw is chosen from the palette's AI button;
+        // here is only how its writing looks and where its panel sits.
+        _SettingsGroup(
+          title: 'Assistant',
+          children: <Widget>[
+            if (onChooseHandwriting != null)
+              _ActionRow(
+                label: 'Handwriting font',
+                onTap: onChooseHandwriting!,
+              ),
+            if (textSize != null && onTextSizeChanged != null)
+              _ChoiceRow(
+                label: 'Text size',
+                control: ValueListenableBuilder<AiTextSize>(
                   valueListenable: textSize!,
                   builder:
                       (BuildContext context, AiTextSize size, Widget? child) {
@@ -220,10 +240,10 @@ class EditorSettingsSheet extends StatelessWidget {
                         );
                       },
                 ),
-              ],
-              const SizedBox(height: AppSpacing.md),
-              const SectionLabel('Panel side'),
-              ValueListenableBuilder<AiPanelPlacement>(
+              ),
+            _ChoiceRow(
+              label: 'Panel side',
+              control: ValueListenableBuilder<AiPanelPlacement>(
                 valueListenable: controller.placement,
                 builder:
                     (
@@ -246,54 +266,243 @@ class EditorSettingsSheet extends StatelessWidget {
                       );
                     },
               ),
+            ),
+          ],
+        ),
+        if (onExportPdf != null || onExportSvg != null)
+          _SettingsGroup(
+            title: 'Export',
+            children: <Widget>[
+              if (onExportPdf != null)
+                _ActionRow(label: 'Export as PDF', onTap: onExportPdf!),
+              if (onExportSvg != null)
+                _ActionRow(label: 'Export page as SVG', onTap: onExportSvg!),
             ],
           ),
-        ),
       ],
+    );
+  }
+}
+
+/// A headed, grouped list: the rows share one quiet surface, with hairlines
+/// between them.
+class _SettingsGroup extends StatelessWidget {
+  const _SettingsGroup({required this.title, required this.children});
+
+  final String title;
+  final List<Widget> children;
+
+  @override
+  Widget build(BuildContext context) {
+    final AppColors colors = AppColors.of(context);
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(
+        AppSpacing.md,
+        AppSpacing.md,
+        AppSpacing.md,
+        0,
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: <Widget>[
+          Padding(
+            padding: const EdgeInsetsDirectional.only(start: AppSpacing.sm),
+            child: Semantics(header: true, child: SectionLabel(title)),
+          ),
+          Material(
+            color: AppGlass.muted(colors),
+            borderRadius: AppBorderRadius.medium,
+            clipBehavior: Clip.antiAlias,
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: <Widget>[
+                for (int i = 0; i < children.length; i++) ...<Widget>[
+                  if (i > 0)
+                    Divider(
+                      height: AppSizes.hairline,
+                      thickness: AppSizes.hairline,
+                      indent: AppSpacing.sm,
+                      color: colors.divider,
+                    ),
+                  children[i],
+                ],
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+/// A row of a [_SettingsGroup]: its name, its [value] if it shows one, and an
+/// [icon] saying what a tap does.
+class _SettingsRow extends StatelessWidget {
+  const _SettingsRow({
+    required this.label,
+    this.hint,
+    this.value,
+    required this.icon,
+  });
+
+  final String label;
+  final String? hint;
+  final String? value;
+  final IconData icon;
+
+  @override
+  Widget build(BuildContext context) {
+    final AppColors colors = AppColors.of(context);
+    final String? value = this.value;
+    return ConstrainedBox(
+      constraints: const BoxConstraints(minHeight: AppSizes.minTouchTarget),
+      child: Padding(
+        padding: const EdgeInsets.symmetric(
+          horizontal: AppSpacing.sm,
+          vertical: AppSpacing.xs,
+        ),
+        child: Row(
+          children: <Widget>[
+            Expanded(
+              flex: 2,
+              child: SettingText(label: label, hint: hint),
+            ),
+            if (value != null) ...<Widget>[
+              const SizedBox(width: AppSpacing.sm),
+              Expanded(
+                flex: 3,
+                child: Text(
+                  value,
+                  textAlign: TextAlign.end,
+                  maxLines: 2,
+                  overflow: TextOverflow.ellipsis,
+                  style: Theme.of(context).textTheme.bodySmall,
+                ),
+              ),
+            ],
+            const SizedBox(width: AppSpacing.xxs),
+            Icon(icon, size: 14, color: colors.textSecondary),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+/// A stylus gesture and what it does; the row opens the list of actions.
+class _StylusActionRow extends StatelessWidget {
+  const _StylusActionRow({
+    required this.control,
+    required this.action,
+    required this.onChanged,
+  });
+
+  final StylusControl control;
+  final StylusAction action;
+  final ValueChanged<StylusAction> onChanged;
+
+  @override
+  Widget build(BuildContext context) {
+    final AppColors colors = AppColors.of(context);
+    return PopupMenuButton<StylusAction>(
+      key: ValueKey<String>('stylus-${control.gesture.name}-action'),
+      popUpAnimationStyle: AppMotion.pacedPopupStyle(
+        MotionMemory.instance.peek(('popup', 'stylus-action')),
+      ),
+      onOpened: () =>
+          MotionMemory.instance.remember(('popup', 'stylus-action')),
+      tooltip: 'Choose action for ${control.label}',
+      initialValue: action,
+      onSelected: onChanged,
+      position: PopupMenuPosition.under,
+      constraints: const BoxConstraints(minWidth: 240),
+      itemBuilder: (BuildContext context) {
+        return <PopupMenuEntry<StylusAction>>[
+          for (final StylusAction option in StylusAction.values)
+            PopupMenuItem<StylusAction>(
+              value: option,
+              child: Row(
+                children: <Widget>[
+                  SizedBox(
+                    width: AppSpacing.lg,
+                    child: option == action
+                        ? Icon(AppIcons.check, size: 16, color: colors.accent)
+                        : null,
+                  ),
+                  Expanded(child: Text(option.label)),
+                ],
+              ),
+            ),
+        ];
+      },
+      child: Semantics(
+        button: true,
+        label: '${control.label}: ${action.label}',
+        hint: control.hint,
+        excludeSemantics: true,
+        child: _SettingsRow(
+          label: control.label,
+          hint: control.hint,
+          value: action.label,
+          icon: AppIcons.expand,
+        ),
+      ),
+    );
+  }
+}
+
+/// A setting chosen from a few options: on one line where it fits, the
+/// options under the name where it does not.
+class _ChoiceRow extends StatelessWidget {
+  const _ChoiceRow({required this.label, required this.control});
+
+  static const double _controlWidth = 200;
+
+  final String label;
+  final Widget control;
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(
+        horizontal: AppSpacing.sm,
+        vertical: AppSpacing.xs,
+      ),
+      child: OverflowBar(
+        alignment: MainAxisAlignment.spaceBetween,
+        overflowSpacing: AppSpacing.xs,
+        overflowAlignment: OverflowBarAlignment.start,
+        children: <Widget>[
+          SizedBox(
+            height: AppSizes.minTouchTarget - 4,
+            child: Align(
+              alignment: AlignmentDirectional.centerStart,
+              widthFactor: 1,
+              child: SettingText(label: label),
+            ),
+          ),
+          SizedBox(
+            width: MediaQuery.textScalerOf(context).scale(_controlWidth),
+            child: control,
+          ),
+        ],
+      ),
     );
   }
 }
 
 /// A row that does something when tapped, such as exporting.
 class _ActionRow extends StatelessWidget {
-  const _ActionRow({
-    required this.icon,
-    required this.label,
-    required this.onTap,
-  });
+  const _ActionRow({required this.label, required this.onTap});
 
-  final IconData icon;
   final String label;
   final VoidCallback onTap;
 
   @override
   Widget build(BuildContext context) {
-    final AppColors colors = AppColors.of(context);
-    return Material(
-      color: AppGlass.muted(colors),
-      borderRadius: AppBorderRadius.medium,
-      child: InkWell(
-        onTap: onTap,
-        borderRadius: AppBorderRadius.medium,
-        child: SizedBox(
-          height: AppSizes.minTouchTarget,
-          child: Row(
-            children: <Widget>[
-              const SizedBox(width: AppSpacing.sm),
-              Icon(icon, size: 20, color: colors.textSecondary),
-              const SizedBox(width: AppSpacing.sm),
-              Expanded(
-                child: Text(
-                  label,
-                  style: Theme.of(context).textTheme.labelLarge,
-                ),
-              ),
-              Icon(AppIcons.disclosure, size: 20, color: colors.textSecondary),
-              const SizedBox(width: AppSpacing.xs),
-            ],
-          ),
-        ),
-      ),
+    return InkWell(
+      onTap: onTap,
+      child: _SettingsRow(label: label, icon: AppIcons.disclosure),
     );
   }
 }

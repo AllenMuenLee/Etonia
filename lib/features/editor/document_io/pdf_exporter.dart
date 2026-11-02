@@ -52,7 +52,6 @@ class ExportPageGeometry {
 /// Maps every page kind to paper points and applies the PDF 14,400 pt cap.
 ExportPageGeometry exportPageGeometry(
   StoredPage page, {
-  ui.Size? currentWritingArea,
   DocumentIoConfig config = const DocumentIoConfig(),
 }) {
   ui.Size logical;
@@ -81,14 +80,8 @@ ExportPageGeometry exportPageGeometry(
         logical = page.setup.customSize!;
         points = logical * DocumentUnits.pdfPointsPerPageUnit;
       case PageSize.infinite:
-        final ui.Size fallback = PageSize.a4Portrait.fixedSize!;
-        final ui.Size extent = page.extent ?? currentWritingArea ?? fallback;
-        logical = currentWritingArea == null
-            ? extent
-            : ui.Size(
-                math.max(extent.width, currentWritingArea.width),
-                math.max(extent.height, currentWritingArea.height),
-              );
+        // A whiteboard is exported as the frame round its ink.
+        logical = InfiniteBoard.frameOf(page.contentBounds).size;
         points = logical * DocumentUnits.pdfPointsPerPageUnit;
     }
   }
@@ -132,7 +125,6 @@ class PdfExporter {
     required NoteRepository repository,
     PdfExportOptions options = const PdfExportOptions(),
     int currentPage = 0,
-    ui.Size? currentWritingArea,
     ExportCancellationToken? cancellation,
     void Function(int completed, int total)? onProgress,
   }) async {
@@ -237,14 +229,9 @@ class PdfExporter {
       pages: <_PreparedPage>[
         for (final int index in indices)
           _PreparedPage.of(
-            content.pages[index],
-            geometry: exportPageGeometry(
-              content.pages[index],
-              currentWritingArea: index == currentPage
-                  ? currentWritingArea
-                  : null,
-              config: config,
-            ),
+            // A whiteboard's ink, moved into the frame it is exported as.
+            content.pages[index].framed(),
+            geometry: exportPageGeometry(content.pages[index], config: config),
             pdfBackground: pdfBackgrounds[index],
           ),
       ],
@@ -262,7 +249,6 @@ class PdfExporter {
     required NoteRepository repository,
     PdfExportOptions options = const PdfExportOptions(),
     int currentPage = 0,
-    ui.Size? currentWritingArea,
     ExportCancellationToken? cancellation,
     void Function(int completed, int total)? onProgress,
     ui.Rect? sharePositionOrigin,
@@ -274,7 +260,6 @@ class PdfExporter {
       repository: repository,
       options: options,
       currentPage: currentPage,
-      currentWritingArea: currentWritingArea,
       cancellation: cancellation,
       onProgress: onProgress,
     );
@@ -428,11 +413,12 @@ class _PreparedSticky {
        ruleWidth = config.ruleWidth * note.scale,
        dotRadius = config.dotRadius * note.scale,
        outline = _outline(note, config),
-       lines = _lines(note, config),
-       dots = _dots(note, config),
+       lines = note.minimized ? Float64List(0) : _lines(note, config),
+       dots = note.minimized ? Float64List(0) : _dots(note, config),
        strokes = <_PreparedStroke>[
-         for (final Stroke stroke in note.strokes)
-           _prepareStroke(stroke, map: note.toPage, widthScale: note.scale),
+         if (!note.minimized)
+           for (final Stroke stroke in note.strokes)
+             _prepareStroke(stroke, map: note.toPage, widthScale: note.scale),
        ];
 
   final int paper;
@@ -452,7 +438,7 @@ class _PreparedSticky {
   final List<_PreparedStroke> strokes;
 
   static Float64List _outline(StickyNoteElement note, StickyNoteConfig config) {
-    final ui.Size local = note.localSize;
+    final ui.Size local = note.paperLocalSize;
     final double w = local.width;
     final double h = local.height;
     final double r = math.min(config.cornerRadius, math.min(w, h) / 2);

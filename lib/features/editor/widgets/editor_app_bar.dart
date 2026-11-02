@@ -20,6 +20,7 @@ class EditorAppBar extends StatelessWidget implements PreferredSizeWidget {
     this.leadingIsBack = false,
     this.onTitlePressed,
     this.onSettingsPressed,
+    this.onFullscreenPressed,
     this.tabs,
     this.audioPlayer,
     this.replayController,
@@ -38,6 +39,10 @@ class EditorAppBar extends StatelessWidget implements PreferredSizeWidget {
   final bool leadingIsBack;
   final VoidCallback? onTitlePressed;
   final VoidCallback? onSettingsPressed;
+
+  /// Puts the bar and its tabs away, leaving the page the whole screen.
+  /// Without it there is no fullscreen button.
+  final VoidCallback? onFullscreenPressed;
   final NoteAudioPlayer? audioPlayer;
   final StrokeReplayController? replayController;
   final VoidCallback? onCloseReplay;
@@ -103,6 +108,17 @@ class EditorAppBar extends StatelessWidget implements PreferredSizeWidget {
                                 onPressed: onSettingsPressed,
                                 icon: const Icon(AppIcons.settings),
                               ),
+                              // In the corner, where the page's own way back
+                              // out of fullscreen then sits.
+                              if (onFullscreenPressed != null)
+                                IconButton(
+                                  key: const ValueKey<String>(
+                                    'enter-fullscreen',
+                                  ),
+                                  tooltip: 'Full screen',
+                                  onPressed: onFullscreenPressed,
+                                  icon: const Icon(AppIcons.fullscreen),
+                                ),
                             ],
                           ),
                         ),

@@ -23,12 +23,24 @@ double _contrast(Color a, Color b) {
   return (light + 0.05) / (dark + 0.05);
 }
 
-/// How large the scene holding [text] is drawn.
-double _scaleOf(WidgetTester tester, String text) {
-  final Transform transform = tester.widget<Transform>(
-    find.ancestor(of: find.text(text), matching: find.byType(Transform)).first,
-  );
-  return transform.transform.getMaxScaleOnAxis();
+/// How opaque the scene holding [text] is drawn.
+double _opacityOf(WidgetTester tester, String text) => tester
+    .widget<Opacity>(
+      find.ancestor(of: find.text(text), matching: find.byType(Opacity)).first,
+    )
+    .opacity;
+
+/// Nothing in a scene switch moves or grows: it only fades.
+void _expectStill() {
+  for (final Type moving in <Type>[Transform, FractionalTranslation]) {
+    expect(
+      find.descendant(
+        of: find.byType(SceneCrossfade),
+        matching: find.byType(moving),
+      ),
+      findsNothing,
+    );
+  }
 }
 
 /// Counts taps, to tell a kept state from a new one.
@@ -207,35 +219,19 @@ void main() {
       _app(const SceneCrossfade(scope: 2, child: Text('two')), reduced: true),
     );
     await tester.pump(AppMotion.reduced ~/ 2);
-    // Both scenes are part faded, and neither has moved or grown.
+    // Both scenes are part faded, and neither moves or grows.
     for (final String text in <String>['one', 'two']) {
-      final Opacity opacity = tester.widget<Opacity>(
-        find
-            .ancestor(of: find.text(text), matching: find.byType(Opacity))
-            .first,
-      );
-      expect(opacity.opacity, inExclusiveRange(0, 1));
-      final FractionalTranslation shift = tester.widget<FractionalTranslation>(
-        find
-            .ancestor(
-              of: find.text(text),
-              matching: find.byType(FractionalTranslation),
-            )
-            .first,
-      );
-      expect(shift.translation, Offset.zero);
-      expect(_scaleOf(tester, text), 1);
+      expect(_opacityOf(tester, text), inExclusiveRange(0, 1));
     }
+    _expectStill();
     await tester.pump(AppMotion.reduced);
     expect(find.text('one'), findsNothing);
     expect(find.text('two'), findsOneWidget);
   });
 
-  testWidgets('entering a folder zooms in, leaving it zooms back out', (
+  testWidgets('a folder switch is a quick fade, without zoom or drift', (
     WidgetTester tester,
   ) async {
-    double scaleOf(String text) => _scaleOf(tester, text);
-
     await tester.pumpWidget(
       _app(
         const SceneCrossfade(scope: 1, child: Text('library')),
@@ -244,28 +240,22 @@ void main() {
     );
     await tester.pumpWidget(
       _app(
-        const SceneCrossfade(scope: 2, direction: 1, child: Text('folder')),
+        const SceneCrossfade(
+          scope: 2,
+          pace: MotionPace.first,
+          child: Text('folder'),
+        ),
         reduced: false,
       ),
     );
-    await tester.pump(AppMotion.zoom ~/ 4);
-    // The folder grows toward full size while the library passes the viewer.
-    expect(scaleOf('folder'), inInclusiveRange(AppMotion.zoomFar, 1));
-    expect(scaleOf('library'), inInclusiveRange(1, AppMotion.zoomNear));
-    await tester.pumpAndSettle();
+    await tester.pump(AppMotion.fadeOut ~/ 2);
+    expect(_opacityOf(tester, 'library'), inExclusiveRange(0, 1));
+    expect(_opacityOf(tester, 'folder'), inExclusiveRange(0, 1));
+    _expectStill();
+    // Quick: over within the content fade, even on a first visit.
+    await tester.pump(AppMotion.fadeIn);
     expect(find.text('library'), findsNothing);
-    expect(scaleOf('folder'), 1);
-
-    await tester.pumpWidget(
-      _app(
-        const SceneCrossfade(scope: 3, direction: -1, child: Text('library')),
-        reduced: false,
-      ),
-    );
-    await tester.pump(AppMotion.zoom ~/ 4);
-    expect(scaleOf('library'), inInclusiveRange(1, AppMotion.zoomNear));
-    expect(scaleOf('folder'), inInclusiveRange(AppMotion.zoomFar, 1));
-    await tester.pumpAndSettle();
+    expect(_opacityOf(tester, 'folder'), 1);
   });
 
   testWidgets('a scene keeps its state as it leaves', (
@@ -278,55 +268,22 @@ void main() {
     await tester.pump();
     expect(find.text('1'), findsOneWidget);
     await tester.pumpWidget(
-      _app(
-        const SceneCrossfade(scope: 2, direction: 1, child: Text('next')),
-        reduced: false,
-      ),
+      _app(const SceneCrossfade(scope: 2, child: Text('next')), reduced: false),
     );
-    await tester.pump(AppMotion.zoom ~/ 4);
+    await tester.pump(AppMotion.fadeOut ~/ 4);
     // Still the same counter, leaving, not a new one.
     expect(find.text('1'), findsOneWidget);
     await tester.pumpAndSettle();
   });
 
-  testWidgets('a first visit zooms slowly, a revisit only fades', (
-    WidgetTester tester,
-  ) async {
-    // How long the scene before [scope] takes to be gone.
-    Future<Duration> settleTime(MotionPace pace, int scope) async {
-      await tester.pumpWidget(
-        _app(
-          SceneCrossfade(
-            scope: scope,
-            direction: 1,
-            pace: pace,
-            child: Text('scene $scope'),
-          ),
-          reduced: false,
-        ),
-      );
-      Duration took = Duration.zero;
-      const Duration frame = Duration(milliseconds: 10);
-      while (find.text('scene ${scope - 1}').evaluate().isNotEmpty) {
-        await tester.pump(frame);
-        took += frame;
-      }
-      return took;
-    }
-
+  testWidgets('a revisit fades in with a glance', (WidgetTester tester) async {
     await tester.pumpWidget(
-      _app(const SceneCrossfade(scope: 0, child: Text('scene 0'))),
+      _app(const SceneCrossfade(scope: 1, child: Text('scene 1'))),
     );
-    await tester.pumpAndSettle();
-    final Duration first = await settleTime(MotionPace.first, 1);
-    expect(first, greaterThan(AppMotion.zoom));
-
-    // A revisit does not zoom: it only fades in slightly, where it is.
     await tester.pumpWidget(
       _app(
         const SceneCrossfade(
           scope: 2,
-          direction: 1,
           pace: MotionPace.revisit,
           child: Text('scene 2'),
         ),
@@ -334,14 +291,8 @@ void main() {
       ),
     );
     await tester.pump(AppMotion.glance ~/ 3);
-    expect(_scaleOf(tester, 'scene 2'), 1);
-    expect(_scaleOf(tester, 'scene 1'), 1);
-    final Opacity arriving = tester.widget<Opacity>(
-      find
-          .ancestor(of: find.text('scene 2'), matching: find.byType(Opacity))
-          .first,
-    );
-    expect(arriving.opacity, inExclusiveRange(0, 1));
+    expect(_opacityOf(tester, 'scene 2'), inExclusiveRange(0, 1));
+    _expectStill();
     await tester.pump(AppMotion.glance);
     expect(find.text('scene 1'), findsNothing);
   });

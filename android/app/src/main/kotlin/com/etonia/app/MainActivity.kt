@@ -1,8 +1,12 @@
 package com.etonia.app
 
 import android.content.Intent
+import android.os.Build
+import android.os.Bundle
+import android.view.KeyEvent
 import android.view.MotionEvent
 import android.view.View
+import android.view.WindowInsetsController
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
 
@@ -11,6 +15,19 @@ class MainActivity : FlutterActivity() {
     private var nativeInk: NativeInkChannel? = null
     private var sharedDocuments: SharedDocumentChannel? = null
     private var recordingTranscriber: RecordingTranscriberChannel? = null
+
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        // Flutter hides the status bar through the legacy visibility flags,
+        // which leave the bars' behavior at "default", and Android fades bars
+        // with that behavior in place. With transient behavior it slides them
+        // off the edge instead, as when a note opens. Setting it explicitly
+        // marks it as app-controlled, so later legacy flags don't reset it.
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            window.insetsController?.systemBarsBehavior =
+                WindowInsetsController.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+        }
+    }
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
@@ -36,11 +53,18 @@ class MainActivity : FlutterActivity() {
     override fun dispatchTouchEvent(event: MotionEvent): Boolean {
         // Observe first, but never consume: Flutter still owns fingers and all
         // non-writing UI gestures.
+        nativeInk?.observeStylusButtons(event)
         nativeInk?.observe(event)
         return super.dispatchTouchEvent(event)
     }
 
+    override fun dispatchKeyEvent(event: KeyEvent): Boolean {
+        if (nativeInk?.observeStylusKey(event) == true) return true
+        return super.dispatchKeyEvent(event)
+    }
+
     override fun dispatchGenericMotionEvent(event: MotionEvent): Boolean {
+        nativeInk?.observeStylusButtons(event)
         if (event.actionMasked == MotionEvent.ACTION_HOVER_EXIT && isPen(event)) {
             parkPenHover(event)
         }

@@ -9,6 +9,7 @@ import 'package:greatnote/features/editor/editor_screen.dart';
 import 'package:greatnote/features/editor/ink/eraser_settings.dart';
 import 'package:greatnote/features/editor/ink/ink_canvas.dart';
 import 'package:greatnote/features/editor/ink/ink_controller.dart';
+import 'package:greatnote/features/editor/ink/ink_painter.dart';
 import 'package:greatnote/features/editor/ink/ink_palette.dart';
 import 'package:greatnote/features/editor/ink/ink_sample.dart';
 import 'package:greatnote/features/editor/ink/stroke.dart';
@@ -111,6 +112,18 @@ Future<TestGesture> _write(
 List<Offset> _letter(Offset start) => <Offset>[
   for (int i = 0; i <= 12; i++) start + Offset(i * 2.0, 10 * math.sin(i / 2)),
 ];
+
+/// Whether the composer has the keyboard.
+bool _composing(WidgetTester tester) =>
+    FocusManager.instance.primaryFocus?.debugLabel == 'AI composer';
+
+/// Whether the selection's frame and handles are painted.
+bool _framed(WidgetTester tester) {
+  final CustomPaint layer = tester.widget<CustomPaint>(
+    find.byKey(const ValueKey<String>('selection-layer')).first,
+  );
+  return !((layer.painter! as SelectionPainter).frameHidden?.value ?? false);
+}
 
 Future<void> _turnOnAi(WidgetTester tester) async {
   await tester.tap(find.byTooltip('Turn on AI'));
@@ -229,6 +242,136 @@ void main() {
       expect(editor.ink.selection, isNotNull);
     });
 
+    testWidgets('asked about a selection, the composer takes the keyboard, '
+        'and the selection shows without its frame or actions', (
+      WidgetTester tester,
+    ) async {
+      final _Editor editor = await _pump(
+        tester,
+        strokes: <Stroke>[_mark(const Offset(200, 200))],
+      );
+      await tester.tap(find.byTooltip('Select'));
+      await tester.pump();
+      selectInk(editor.ink, const Rect.fromLTRB(150, 180, 250, 220));
+      await tester.pump();
+      expect(find.byTooltip('Copy'), findsOneWidget);
+      expect(_framed(tester), isTrue);
+      expect(_composing(tester), isFalse);
+
+      await tester.tap(find.byTooltip('AI assistant'));
+      await tester.pumpAndSettle();
+      await settleAi(tester);
+
+      expect(_composing(tester), isTrue);
+      expect(editor.ink.selection, isNotNull);
+      expect(find.byTooltip('Copy'), findsNothing);
+      expect(_framed(tester), isFalse);
+
+      // Another tool beside AI mode brings them back.
+      await tester.tap(find.byTooltip('Select'));
+      await tester.pumpAndSettle();
+      expect(editor.ink.selection, isNotNull);
+      expect(find.byTooltip('Copy'), findsOneWidget);
+      expect(_framed(tester), isTrue);
+    });
+
+    testWidgets('circled with the AI tool, the composer takes the keyboard', (
+      WidgetTester tester,
+    ) async {
+      final _Editor editor = await _pump(
+        tester,
+        strokes: <Stroke>[_mark(const Offset(200, 200))],
+      );
+      await _turnOnAi(tester);
+      FocusManager.instance.primaryFocus?.unfocus();
+      await tester.pump();
+      expect(_composing(tester), isFalse);
+
+      await _write(tester, <Offset>[
+        for (int i = 0; i <= 48; i++)
+          const Offset(200, 200) +
+              Offset(
+                    math.cos(i * 2 * math.pi / 48),
+                    math.sin(i * 2 * math.pi / 48),
+                  ) *
+                  80,
+      ]);
+      await tester.pumpAndSettle();
+      await settleAi(tester);
+
+      expect(editor.ink.selection, isNotNull);
+      expect(_assistant(tester).hasSelection, isTrue);
+      expect(_composing(tester), isTrue);
+      expect(find.byTooltip('Copy'), findsNothing);
+      expect(_framed(tester), isFalse);
+    });
+
+    testWidgets(
+      'a second circle waits for a context choice and contexts can be tapped away',
+      (WidgetTester tester) async {
+        final _Editor editor = await _pump(
+          tester,
+          strokes: <Stroke>[
+            _mark(const Offset(200, 200)),
+            _mark(const Offset(420, 420)),
+          ],
+        );
+        await _turnOnAi(tester);
+
+        List<Offset> circle(Offset center) => <Offset>[
+          for (int i = 0; i <= 48; i++)
+            center +
+                Offset(
+                      math.cos(i * 2 * math.pi / 48),
+                      math.sin(i * 2 * math.pi / 48),
+                    ) *
+                    70,
+        ];
+
+        await _write(tester, circle(const Offset(200, 200)));
+        await tester.pumpAndSettle();
+        await settleAi(tester);
+        final AiSelectionContext first = _assistant(tester).context!;
+        expect(first.snapshot.sourceStrokeCount, 1);
+        expect(_composing(tester), isTrue);
+
+        await _write(tester, circle(const Offset(420, 420)));
+        await tester.pumpAndSettle();
+
+        // The second selection is pending: it neither replaces nor silently
+        // joins the first context, and typing is not activated yet.
+        expect(find.text('New selection'), findsOneWidget);
+        expect(_assistant(tester).context, same(first));
+        expect(_assistant(tester).context!.snapshot.sourceStrokeCount, 1);
+        expect(_composing(tester), isFalse);
+
+        await tester.tap(find.widgetWithText(TextButton, 'Add to context'));
+        await tester.pump();
+        await settleAi(tester);
+        expect(find.text('New selection'), findsNothing);
+        expect(_assistant(tester).context!.groups, hasLength(2));
+        expect(_assistant(tester).context!.snapshot.sourceStrokeCount, 2);
+        expect(_composing(tester), isTrue);
+
+        // A tap inside a framed group removes just that group.
+        await tester.tapAt(_screen(tester, const Offset(200, 200)));
+        await tester.pump();
+        await settleAi(tester);
+        expect(_assistant(tester).context!.groups, hasLength(1));
+        expect(_assistant(tester).context!.snapshot.sourceStrokeCount, 1);
+        expect(
+          _assistant(tester).context!.groups.single.strokes.single,
+          same(editor.ink.strokes[1]),
+        );
+
+        // Removing the last group leaves the existing thread as a page chat.
+        await tester.tapAt(_screen(tester, const Offset(420, 420)));
+        await tester.pumpAndSettle();
+        expect(_assistant(tester).context!.isPage, isTrue);
+        expect(_assistant(tester).hasSelection, isFalse);
+      },
+    );
+
     testWidgets('closing the chat turns AI mode off', (
       WidgetTester tester,
     ) async {
@@ -315,33 +458,62 @@ void main() {
       expect(_tool(tester), EditorTool.ai);
     });
 
-    testWidgets('pressed while on, opens the AI settings', (
-      WidgetTester tester,
-    ) async {
+    testWidgets('on, its settings show beside the palette; pressed, they '
+        'hide and show', (WidgetTester tester) async {
       await _pump(tester);
       await _turnOnAi(tester);
-      expect(find.text('Enable notation'), findsNothing);
-
-      await tester.tap(find.byTooltip('AI settings'));
-      await tester.pumpAndSettle();
       expect(find.byType(AiOptions), findsOneWidget);
-      expect(find.text('Enable animation'), findsOneWidget);
-      expect(find.text('Show notes in chat'), findsOneWidget);
-      // AI mode stays on, and the chat open, while its settings change.
-      expect(_aiOn(tester), isTrue);
-      expect(find.byType(AiAssistantPanel), findsOneWidget);
+      // Each switch says in a word what it is.
+      for (final String word in <String>[
+        'Notation',
+        'Animation',
+        'Show notes',
+      ]) {
+        expect(
+          find.descendant(
+            of: find.byType(AiOptions),
+            matching: find.text(word),
+          ),
+          findsOneWidget,
+        );
+      }
 
       final AiAssistantController assistant = _assistant(tester);
       final bool notation = assistant.notationEnabled;
       final bool animation = assistant.animationEnabled;
       final bool inChat = assistant.showNotesInChat;
-      await tester.tap(find.text('Enable notation'));
-      await tester.tap(find.text('Enable animation'));
-      await tester.tap(find.text('Show notes in chat'));
+      await tester.tap(
+        find.byKey(const ValueKey<String>('ai-notation-toggle')),
+      );
+      await tester.tap(
+        find.byKey(const ValueKey<String>('ai-animation-toggle')),
+      );
+      await tester.tap(
+        find.byKey(const ValueKey<String>('ai-show-notes-toggle')),
+      );
       await tester.pump();
       expect(assistant.notationEnabled, !notation);
       expect(assistant.animationEnabled, !animation);
       expect(assistant.showNotesInChat, !inChat);
+      // AI mode stays on, and the chat open, while its settings change.
+      expect(_aiOn(tester), isTrue);
+      expect(find.byType(AiAssistantPanel), findsOneWidget);
+
+      await tester.tap(find.byTooltip('AI settings'));
+      await tester.pumpAndSettle();
+      expect(find.byType(AiOptions), findsNothing);
+      expect(_aiOn(tester), isTrue);
+
+      // With another tool beside AI mode, a press takes up the AI tool.
+      await tester.tap(find.byTooltip('Eraser'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byTooltip('AI settings'));
+      await tester.pumpAndSettle();
+      expect(_tool(tester), EditorTool.ai);
+      expect(find.byType(AiOptions), findsNothing);
+      await tester.tap(find.byTooltip('AI settings'));
+      await tester.pumpAndSettle();
+      expect(find.byType(AiOptions), findsOneWidget);
     });
   });
 }

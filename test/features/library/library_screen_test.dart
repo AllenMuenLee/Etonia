@@ -20,6 +20,7 @@ import 'package:greatnote/features/editor/document_io/document_platform.dart';
 import 'package:greatnote/features/library/cloud/google_drive_backup_service.dart';
 import 'package:greatnote/features/library/library_dialogs.dart';
 import 'package:greatnote/features/library/library_models.dart';
+import 'package:greatnote/features/editor/widgets/tool_palette.dart';
 import 'package:greatnote/features/library/library_screen.dart';
 import 'package:greatnote/features/library/note_content.dart';
 import 'package:greatnote/features/library/note_repository.dart';
@@ -288,9 +289,27 @@ void main() {
       beta.id,
     );
 
+    // One toolbar for the window, held by the note in front.
+    final Finder toolbar = find.byType(ToolPalette, skipOffstage: false);
+    expect(toolbar, findsOneWidget);
+    final Element betaToolbar = tester.element(toolbar);
+
     // Another tab shows its note, and keeps the other's editor.
     await tester.tap(find.text('Alpha'));
     await tester.pumpAndSettle();
+    // The same toolbar moved over to it, not one built anew.
+    expect(toolbar, findsOneWidget);
+    expect(tester.element(toolbar), same(betaToolbar));
+    expect(
+      find.ancestor(
+        of: toolbar,
+        matching: find.byWidgetPredicate(
+          (Widget widget) =>
+              widget is EditorScreen && widget.noteId == alpha.id,
+        ),
+      ),
+      findsOneWidget,
+    );
     expect(
       tester.widget<EditorScreen>(find.byType(EditorScreen)).noteId,
       alpha.id,
@@ -689,6 +708,31 @@ void main() {
     await tester.pumpAndSettle();
     expect(tester.getRect(dialog).bottom, raised);
     expect(tester.getRect(find.byTooltip('New note')), button);
+  });
+
+  testWidgets('the new note menu does not stay over the note it opened', (
+    WidgetTester tester,
+  ) async {
+    await _pumpLibrary(tester, _repository());
+    await tester.tap(find.byTooltip('New note'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Quick start'));
+    await tester.pumpAndSettle();
+    expect(find.byType(EditorScreen), findsOneWidget);
+    // The library is offstage now, but its menu floats in the navigator's
+    // overlay and would still be painted, so offstage has to count here.
+    expect(find.text('Quick start', skipOffstage: false), findsNothing);
+
+    // Back in the library, it opens and closes as ever.
+    await tester.tap(find.byTooltip('Back to library'));
+    await tester.pumpAndSettle();
+    expect(find.text('Quick start'), findsNothing);
+    await tester.tap(find.byTooltip('New note'));
+    await tester.pumpAndSettle();
+    expect(find.text('Quick start'), findsOneWidget);
+    await tester.tapAt(Offset.zero);
+    await tester.pumpAndSettle();
+    expect(find.text('Quick start'), findsNothing);
   });
 
   testWidgets('quick start makes a blank A4 note, then the last template', (
@@ -1506,7 +1550,7 @@ void main() {
     expect(find.text("Choose the AI's handwriting"), findsOneWidget);
   });
   group('folders visited before', () {
-    testWidgets('come back at once from what they held', (
+    testWidgets('open at once, the first visit too, with nothing to wait for', (
       WidgetTester tester,
     ) async {
       final _HeldReadsRepository repository = _HeldReadsRepository();
@@ -1515,11 +1559,12 @@ void main() {
       await repository.createNote(title: 'Old', folderId: archive.id);
       await _pumpLibrary(tester, repository);
 
-      // The first visit waits for the folder to be read.
+      // Not visited yet, and its read held back: already there on the
+      // frame it is opened, read with the library.
       repository.held = Completer<void>();
       await tester.tap(_items(find.text('Archive')));
-      await tester.pumpAndSettle();
-      expect(_items(find.text('Old')), findsNothing);
+      await tester.pump();
+      expect(_items(find.text('Old')), findsOneWidget);
       repository.held!.complete();
       await tester.pumpAndSettle();
       expect(_items(find.text('Old')), findsOneWidget);
@@ -1527,7 +1572,7 @@ void main() {
       await tester.tap(find.byKey(const ValueKey<String>('sidebar-library')));
       await tester.pumpAndSettle();
 
-      // The second does not: it is shown from what it held.
+      // And again on the way back.
       repository.held = Completer<void>();
       await tester.tap(_items(find.text('Archive')));
       await tester.pumpAndSettle();

@@ -2,23 +2,25 @@ import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
 
-import '../../../app/theme/app_tokens.dart';
-import '../../../shared/widgets/app_controls.dart';
+import '../../../app/theme/app_icons.dart';
 import '../ink/eraser_settings.dart';
+import 'tool_options_bar.dart';
 
-/// The eraser's mode switch and, for area mode, a size slider with a live
-/// preview of the eraser at true size.
+/// The eraser's options, along a [ToolOptionsBar]: its mode, and for area
+/// mode its size, between dots of the smallest and largest.
 class EraserOptions extends StatelessWidget {
   const EraserOptions({
     super.key,
     required this.settings,
     required this.onChanged,
     this.config = const EraserConfig(),
+    this.axis = Axis.horizontal,
   });
 
   final EraserSettings settings;
   final ValueChanged<EraserSettings> onChanged;
   final EraserConfig config;
+  final Axis axis;
 
   static String describeSize(double size) => '${size.round()} px';
 
@@ -33,108 +35,44 @@ class EraserOptions extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final AppColors colors = AppColors.of(context);
     final bool sizeApplies = settings.mode == EraserMode.area;
-
-    return Column(
-      mainAxisSize: MainAxisSize.min,
-      crossAxisAlignment: CrossAxisAlignment.stretch,
+    return ToolOptionsBar(
+      key: const ValueKey<String>('eraser-options-bar'),
+      axis: axis,
       children: <Widget>[
-        const SectionLabel('Eraser'),
-        SegmentedChoice<EraserMode>(
-          options: EraserMode.values,
-          selected: settings.mode,
-          labelOf: (EraserMode mode) => mode.label,
-          keyOf: (EraserMode mode) =>
-              ValueKey<String>('eraser-mode-${mode.name}'),
-          onSelected: (EraserMode mode) =>
-              onChanged(settings.copyWith(mode: mode)),
-        ),
-        const SizedBox(height: AppSpacing.md),
-        // The size is kept, but has no effect, in stroke mode.
-        Opacity(
-          opacity: sizeApplies ? 1 : 0.38,
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.stretch,
-            children: <Widget>[
-              SectionLabel(
-                'Size',
-                trailing: ValuePill(
-                  describeSize(settings.size),
-                  muted: !sizeApplies,
-                ),
-              ),
-              ExcludeSemantics(
-                child: SizedBox(
-                  height: config.maxSize + AppSpacing.xs,
-                  child: CustomPaint(
-                    key: const ValueKey<String>('eraser-size-preview'),
-                    painter: EraserPreviewPainter(
-                      color: colors.textSecondary,
-                      fill: colors.surfaceMuted,
-                      size: settings.size,
-                    ),
-                  ),
-                ),
-              ),
-            ],
+        for (final EraserMode mode in EraserMode.values)
+          OptionsButton(
+            key: ValueKey<String>('eraser-mode-${mode.name}'),
+            tooltip: switch (mode) {
+              EraserMode.area => 'Erase area',
+              EraserMode.stroke => 'Erase whole strokes',
+            },
+            semanticLabel: mode.label,
+            selected: settings.mode == mode,
+            onPressed: () => onChanged(settings.copyWith(mode: mode)),
+            child: Icon(switch (mode) {
+              EraserMode.area => AppIcons.eraseArea,
+              EraserMode.stroke => AppIcons.eraseStroke,
+            }),
           ),
-        ),
-        AppSlider(
-          value: settings.size.clamp(config.minSize, config.maxSize),
+        OptionsDivider(axis: axis),
+        // The size is kept, but has no effect, in stroke mode.
+        OptionsSlider(
+          key: const ValueKey<String>('eraser-size-slider'),
+          axis: axis,
+          value: settings.size,
           min: config.minSize,
           max: config.maxSize,
           divisions: math.max(1, (config.maxSize - config.minSize).round()),
           semanticFormatterCallback: describeSize,
+          start: const OptionsDot(diameter: 4),
+          end: const OptionsDot(diameter: 14),
           onChanged: sizeApplies
               ? (double size) => onChanged(settings.copyWith(size: size))
               : null,
         ),
       ],
     );
-  }
-}
-
-/// Draws the eraser at its true size, centered: a light disc, outlined.
-class EraserPreviewPainter extends CustomPainter {
-  const EraserPreviewPainter({
-    required this.color,
-    required this.size,
-    this.fill,
-  });
-
-  final Color color;
-  final Color? fill;
-
-  /// Eraser diameter in logical pixels.
-  final double size;
-
-  @override
-  void paint(Canvas canvas, Size canvasSize) {
-    if (fill != null) {
-      canvas.drawCircle(
-        canvasSize.center(Offset.zero),
-        size / 2,
-        Paint()..color = fill!,
-      );
-    }
-    canvas.drawCircle(
-      canvasSize.center(Offset.zero),
-      size / 2,
-      Paint()
-        ..color = color
-        ..style = PaintingStyle.stroke
-        ..strokeWidth = AppSizes.hairline
-        ..isAntiAlias = true,
-    );
-  }
-
-  @override
-  bool shouldRepaint(EraserPreviewPainter oldDelegate) {
-    return oldDelegate.color != color ||
-        oldDelegate.fill != fill ||
-        oldDelegate.size != size;
   }
 }
 

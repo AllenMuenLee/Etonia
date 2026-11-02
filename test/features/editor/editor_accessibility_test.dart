@@ -61,6 +61,7 @@ void main() {
       'Turn on AI',
       'Sticky note',
       'Expand toolbar',
+      'Customize toolbar',
       'Add',
       'Page settings',
     ];

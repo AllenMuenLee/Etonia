@@ -60,4 +60,8 @@ dependencies {
     // bundled, reads a picture of them.
     implementation("com.google.mlkit:digital-ink-recognition:18.1.0")
     implementation("com.google.mlkit:text-recognition:16.0.1")
+
+    // NativeInkModelTest checks the wet-ink port of the pen model against
+    // Flutter's own output in test/fixtures/native_ink_parity.txt.
+    testImplementation("junit:junit:4.13.2")
 }

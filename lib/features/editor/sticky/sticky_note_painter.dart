@@ -88,6 +88,9 @@ class StickyPattern {
 /// The paper is always light, so the note's ink is resolved for light
 /// paper whatever the app's theme; a highlighter's opacity is applied
 /// once, by [StrokeStyle.resolve].
+///
+/// A minimized note is only its top-left corner of paper. [showToggle] adds
+/// its minimize button, which belongs on the editor's page and nowhere else.
 void paintStickyNote(
   Canvas canvas,
   StickyNoteElement note, {
@@ -95,6 +98,7 @@ void paintStickyNote(
   bool shadow = true,
   Color shadowColor = const Color(0xFF000000),
   void Function(Canvas canvas)? paintAboveInk,
+  bool showToggle = false,
 }) {
   if (!note.isValid) {
     return;
@@ -120,20 +124,25 @@ void paintStickyNote(
     ..drawRRect(paper, Paint()..color = color.paper)
     ..save()
     ..clipRRect(paper);
-  _paintPattern(canvas, note, config, color.pattern);
-  for (final Stroke stroke in note.strokes) {
-    paintInkStroke(
-      canvas,
-      color: stroke.style.resolve(Brightness.light),
-      width: stroke.style.width,
-      path: stroke.path,
-      origin: stroke.points.first,
-      isDot: stroke.isDot,
-      outline: stroke.outline,
-      writing: stroke.style.writing,
-    );
+  if (!note.minimized) {
+    _paintPattern(canvas, note, config, color.pattern);
+    for (final Stroke stroke in note.strokes) {
+      paintInkStroke(
+        canvas,
+        color: stroke.style.resolve(Brightness.light),
+        width: stroke.style.width,
+        path: stroke.path,
+        origin: stroke.points.first,
+        isDot: stroke.isDot,
+        outline: stroke.outline,
+        writing: stroke.style.writing,
+      );
+    }
   }
   paintAboveInk?.call(canvas);
+  if (showToggle) {
+    _paintToggle(canvas, note, config, color);
+  }
   canvas.restore();
   canvas
     ..drawRRect(
@@ -149,12 +158,51 @@ void paintStickyNote(
 
 /// The paper's rounded rectangle, in the note's own coordinates.
 RRect stickyPaperRect(StickyNoteElement note, StickyNoteConfig config) {
-  final Size local = note.localSize;
+  final Size local = note.paperLocalSize;
   final double radius = math.min(
     config.cornerRadius,
     math.min(local.width, local.height) / 2,
   );
   return RRect.fromRectAndRadius(Offset.zero & local, Radius.circular(radius));
+}
+
+/// The minimize button, in the note's own coordinates: a dash on an open
+/// note, a small square on a minimized one.
+void _paintToggle(
+  Canvas canvas,
+  StickyNoteElement note,
+  StickyNoteConfig config,
+  StickyPaperColor color,
+) {
+  final Offset middle = Offset(config.toggleCenter, config.toggleCenter);
+  final Paint glyph = Paint()
+    ..color = color.control
+    ..style = PaintingStyle.stroke
+    ..strokeWidth = 1.6
+    ..strokeCap = StrokeCap.round
+    ..isAntiAlias = true;
+  canvas.drawCircle(
+    middle,
+    config.toggleRadius,
+    Paint()
+      ..color = color.control.withValues(alpha: 0.14)
+      ..isAntiAlias = true,
+  );
+  if (note.minimized) {
+    canvas.drawRRect(
+      RRect.fromRectAndRadius(
+        Rect.fromCenter(center: middle, width: 10, height: 10),
+        const Radius.circular(2),
+      ),
+      glyph,
+    );
+  } else {
+    canvas.drawLine(
+      middle - const Offset(5, 0),
+      middle + const Offset(5, 0),
+      glyph,
+    );
+  }
 }
 
 void _paintPattern(

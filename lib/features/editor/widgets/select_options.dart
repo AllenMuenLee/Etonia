@@ -1,11 +1,11 @@
-﻿import 'package:flutter/material.dart';
+import 'package:flutter/material.dart';
 
 import '../../../app/theme/app_icons.dart';
-import '../../../app/theme/app_tokens.dart';
+import 'tool_options_bar.dart';
 
-/// The Select tool's options: Select PDF. While it is on, a lasso on a PDF
-/// page takes the paper inside it along with the ink, to copy, cut,
-/// delete, or move; while off, it takes the ink alone.
+/// The Select tool's options, along a [ToolOptionsBar]: Select PDF. While
+/// it is on, a lasso on a PDF page takes the paper inside it along with the
+/// ink, to copy, cut, delete, or move; while off, it takes the ink alone.
 ///
 /// Paste is not here: holding a pointer still on the page offers it.
 class SelectOptions extends StatelessWidget {
@@ -13,43 +13,30 @@ class SelectOptions extends StatelessWidget {
     super.key,
     required this.selectPdf,
     required this.onSelectPdfChanged,
+    this.axis = Axis.horizontal,
   });
 
   final bool selectPdf;
   final ValueChanged<bool> onSelectPdfChanged;
+  final Axis axis;
 
   @override
   Widget build(BuildContext context) {
-    final AppColors colors = AppColors.of(context);
-    const BorderRadius radius = AppBorderRadius.medium;
-
-    return MergeSemantics(
-      child: InkWell(
-        onTap: () => onSelectPdfChanged(!selectPdf),
-        borderRadius: radius,
-        hoverColor: colors.textPrimary.withValues(alpha: 0.06),
-        focusColor: colors.textPrimary.withValues(alpha: 0.10),
-        highlightColor: colors.textPrimary.withValues(alpha: 0.12),
-        child: SizedBox(
-          height: AppSizes.minTouchTarget,
-          child: Row(
-            children: <Widget>[
-              const SizedBox(width: AppSpacing.xs),
-              Icon(AppIcons.pdf, size: 20, color: colors.textSecondary),
-              const SizedBox(width: AppSpacing.sm),
-              Expanded(
-                child: Text(
-                  'Select PDF',
-                  style: Theme.of(context).textTheme.labelLarge,
-                  overflow: TextOverflow.ellipsis,
-                ),
-              ),
-              const SizedBox(width: AppSpacing.xs),
-              Switch(value: selectPdf, onChanged: onSelectPdfChanged),
-            ],
-          ),
+    return ToolOptionsBar(
+      key: const ValueKey<String>('select-options-bar'),
+      axis: axis,
+      children: <Widget>[
+        OptionsButton(
+          key: const ValueKey<String>('select-pdf-toggle'),
+          tooltip: selectPdf ? 'Select ink only' : 'Select PDF too',
+          semanticLabel: 'Select PDF',
+          label: 'Select PDF',
+          selected: selectPdf,
+          toggled: selectPdf,
+          onPressed: () => onSelectPdfChanged(!selectPdf),
+          child: const Icon(AppIcons.pdf),
         ),
-      ),
+      ],
     );
   }
 }

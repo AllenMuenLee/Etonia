@@ -54,6 +54,10 @@ class PageTransform {
 /// The page that holds the middle of the area, after a scroll, and the page
 /// a pointer goes down on, are reported; when [currentPage] changes for any
 /// other reason, the column scrolls to show that page's top.
+///
+/// With [infinite], the one page is a whiteboard: it fills the area edge to
+/// edge, with no desk, sheet edge, or overscroll round it, pans freely in
+/// every direction, and zooms far out. It opens on [boardFocus].
 class PageViewport extends StatefulWidget {
   const PageViewport({
     super.key,
@@ -67,6 +71,7 @@ class PageViewport extends StatefulWidget {
     this.onVisiblePageChanged,
     this.onScrollStart,
     this.onScrollEnd,
+    this.onScrollSpeed,
     this.fingersNavigate,
     this.pointerClaims,
     this.onPullToAddPage,
@@ -75,7 +80,10 @@ class PageViewport extends StatefulWidget {
     this.minZoom = 0.5,
     this.maxZoom = 4,
     this.initialZoom = 1,
+    this.infinite = false,
+    this.boardFocus,
   }) : assert(pages.length == pageKeys.length),
+       assert(!infinite || pages.length == 1),
        assert(pageGap >= 0),
        assert(pullToAddDistance > 0),
        assert(minZoom > 0 && minZoom <= initialZoom && initialZoom <= maxZoom);
@@ -110,6 +118,21 @@ class PageViewport extends StatefulWidget {
 
   /// The zoom used when this viewport is first opened.
   final double initialZoom;
+
+  /// Whether the one page is a whiteboard.
+  final bool infinite;
+
+  /// The part of a whiteboard, in page units, first brought into view:
+  /// centered when it fits, else from its top-left corner. Without it, the
+  /// middle of the board.
+  final Rect? boardFocus;
+
+  /// How many screen pixels one page unit of the page being built takes,
+  /// as it changes with the zoom, so what is painted on that page can stay
+  /// legible. Null outside a [PageViewport].
+  static ValueListenable<double>? scaleOf(BuildContext context) {
+    return context.dependOnInheritedWidgetOfExactType<_PageScaleScope>()?.scale;
+  }
 
   final List<PageGeometry> pages;
 
@@ -146,6 +169,10 @@ class PageViewport extends StatefulWidget {
   final ValueChanged<Set<int>>? onScrollStart;
   final VoidCallback? onScrollEnd;
 
+  /// How fast a drag or its coast is moving the column, in viewport pixels
+  /// a second, as it changes.
+  final ValueChanged<double>? onScrollSpeed;
+
   @override
   State<PageViewport> createState() => PageViewportState();
 }
@@ -153,6 +180,11 @@ class PageViewport extends StatefulWidget {
 class PageViewportState extends State<PageViewport>
     with SingleTickerProviderStateMixin {
   final Map<Key, ValueNotifier<Rect>> _visible = <Key, ValueNotifier<Rect>>{};
+  final Map<Key, ValueNotifier<double>> _scales =
+      <Key, ValueNotifier<double>>{};
+
+  /// Whether a whiteboard has been brought to its [PageViewport.boardFocus].
+  bool _boardPlaced = false;
 
   /// What [PageViewport.pageBuilder] made for each page on screen. Scrolling
   /// rebuilds this viewport on every frame, but a page's layers do not
@@ -195,6 +227,15 @@ class PageViewportState extends State<PageViewport>
   /// means a jump.
   late int _shownPage;
   bool _jumpPending = false;
+
+  /// Pages reported as touched or scrolled to since the parent last built
+  /// this viewport. The parent makes a reported page current only when it
+  /// next builds, and more pointer events may have moved the column on by
+  /// then: a finger set down on the page below the middle reports that
+  /// page, and the first move of the scroll it starts reports the middle
+  /// one. A current page among these is the column's own report coming
+  /// back, not a jump.
+  final Set<int> _reported = <int>{};
 
   _ColumnLayout? _layout;
 
@@ -243,6 +284,8 @@ class PageViewportState extends State<PageViewport>
     super.initState();
     _zoom = widget.initialZoom;
     _shownPage = widget.currentPage;
+    // Opened on a page other than the first, the column starts there.
+    _jumpPending = widget.currentPage > 0;
     _inertiaTicker = createTicker(_tickInertia);
   }
 
@@ -254,11 +297,14 @@ class PageViewportState extends State<PageViewport>
     // keeps its state.
     _zoom = _zoom.clamp(widget.minZoom, widget.maxZoom).toDouble();
     _builtPages.clear();
+    final bool reported = _reported.contains(widget.currentPage);
+    _reported.clear();
     if (widget.currentPage != oldWidget.currentPage &&
-        widget.currentPage != _shownPage) {
+        widget.currentPage != _shownPage &&
+        !reported) {
       _shownPage = widget.currentPage;
       _jumpPending = true;
-    } else {
+    } else if (!reported) {
       _shownPage = widget.currentPage;
     }
   }
@@ -268,6 +314,9 @@ class PageViewportState extends State<PageViewport>
     _inertiaTicker.dispose();
     for (final ValueNotifier<Rect> visible in _visible.values) {
       visible.dispose();
+    }
+    for (final ValueNotifier<double> scale in _scales.values) {
+      scale.dispose();
     }
     _pull.dispose();
     super.dispose();
@@ -280,6 +329,7 @@ class PageViewportState extends State<PageViewport>
       return;
     }
     _shownPage = index;
+    _reported.add(index);
     widget.onPageTouched?.call(index);
   }
 
@@ -299,6 +349,7 @@ class PageViewportState extends State<PageViewport>
     );
     if (visible != _shownPage) {
       _shownPage = visible;
+      _reported.add(visible);
       widget.onVisiblePageChanged?.call(visible);
     }
   }
@@ -350,6 +401,7 @@ class PageViewportState extends State<PageViewport>
       final int? page = layout.pageContaining(content);
       if (page != null) {
         _shownPage = page;
+        _reported.add(page);
         widget.onPageTouched?.call(page);
       }
     }
@@ -619,6 +671,7 @@ class PageViewportState extends State<PageViewport>
     } else {
       _dragVelocity = Offset.lerp(_dragVelocity, sample, 0.55)!;
     }
+    widget.onScrollSpeed?.call(_dragVelocity.distance);
   }
 
   bool _startInertia(Duration releasedAt) {
@@ -682,6 +735,22 @@ class PageViewportState extends State<PageViewport>
     _dragVelocity = Offset.zero;
   }
 
+  /// A pen set down while the column only coasts on, or waits for the last
+  /// finger of a pinch to lift, stops it where it is and ends the scroll,
+  /// so the pen can write at once. The page's own handlers see the press
+  /// before this viewport does, and a native stylus stroke before either,
+  /// so they ask here first. Returns false while fingers are still moving
+  /// the column: the pen waits for them.
+  bool yieldToPen() {
+    if (_scrolling || (_navigating && _touches.isNotEmpty)) {
+      return false;
+    }
+    _waitingForTouchRelease = false;
+    _stopInertia();
+    _completeScroll();
+    return true;
+  }
+
   void _completeScroll() {
     if (!_scrollEndPending) return;
     _scrollEndPending = false;
@@ -716,6 +785,7 @@ class PageViewportState extends State<PageViewport>
     final double vx = _inertiaX?.dx(_inertiaTime) ?? 0;
     final double vy = _inertiaY?.dx(_inertiaTime) ?? 0;
     _dragVelocity = Offset(vx, vy);
+    widget.onScrollSpeed?.call(_dragVelocity.distance);
     if ((_inertiaX == null || _inertiaX!.isDone(_inertiaTime)) &&
         (_inertiaY == null || _inertiaY!.isDone(_inertiaTime))) {
       _stopInertia();
@@ -725,6 +795,42 @@ class PageViewportState extends State<PageViewport>
 
   ValueNotifier<Rect> _visibleFor(Key key) {
     return _visible.putIfAbsent(key, () => ValueNotifier<Rect>(Rect.zero));
+  }
+
+  ValueNotifier<double> _scaleFor(Key key) {
+    return _scales.putIfAbsent(key, () => ValueNotifier<double>(1));
+  }
+
+  /// The scroll offset that brings [PageViewport.boardFocus] into view on
+  /// the whiteboard laid out in [layout]: centered when it fits, else with
+  /// its top-left corner [_overscroll] in from the area's.
+  Offset _boardOffset(_ColumnLayout layout) {
+    final Size viewport = layout.viewport;
+    final double scale = widget.pages.single.scale * _zoom;
+    final Rect page = layout.rects.single;
+    final Rect focus =
+        widget.boardFocus ??
+        Rect.fromCenter(
+          center: Offset(page.width / scale / 2, page.height / scale / 2),
+          width: 0,
+          height: 0,
+        );
+    final Rect shown = Rect.fromLTRB(
+      focus.left * scale,
+      focus.top * scale,
+      focus.right * scale,
+      focus.bottom * scale,
+    ).shift(page.topLeft + Offset(0, layout.top));
+    double along(double start, double end, double extent) {
+      return end - start <= extent
+          ? (start + end) / 2 - extent / 2
+          : start - _overscroll;
+    }
+
+    return Offset(
+      along(shown.left, shown.right, viewport.width),
+      along(shown.top, shown.bottom, viewport.height),
+    );
   }
 
   @override
@@ -737,13 +843,23 @@ class PageViewportState extends State<PageViewport>
             (previous != null && previous.viewport != viewport)) {
           _lead = 0;
         }
-        _ColumnLayout layout = _ColumnLayout(
-          widget.pages,
-          viewport,
-          widget.pageGap,
-          _zoom,
-          lead: _lead,
-        );
+        _ColumnLayout layout =
+            previous?.matches(
+                  widget.pages,
+                  viewport,
+                  widget.pageGap,
+                  _zoom,
+                  _lead,
+                ) ??
+                false
+            ? previous!
+            : _ColumnLayout(
+                widget.pages,
+                viewport,
+                widget.pageGap,
+                _zoom,
+                lead: _lead,
+              );
         // The room past the column's edges is the reader's to scroll into:
         // a resize, such as the AI panel opening, that keeps the same place
         // in view lands there only if the column was already past an edge.
@@ -786,7 +902,13 @@ class PageViewportState extends State<PageViewport>
           _offset = Offset(_offset.dx, offset);
         }
         _adoptLayout(layout);
-        if (_jumpPending && widget.currentPage < widget.pages.length) {
+        if (widget.infinite) {
+          _jumpPending = false;
+          if (!_boardPlaced) {
+            _boardPlaced = true;
+            _offset = _boardOffset(layout);
+          }
+        } else if (_jumpPending && widget.currentPage < widget.pages.length) {
           _jumpPending = false;
           _offset = Offset(0, layout.rects[widget.currentPage].top);
         }
@@ -807,6 +929,13 @@ class PageViewportState extends State<PageViewport>
           }
           return gone;
         });
+        _scales.removeWhere((Key key, ValueNotifier<double> scale) {
+          final bool gone = !keys.contains(key);
+          if (gone) {
+            scale.dispose();
+          }
+          return gone;
+        });
 
         final Rect area = Offset.zero & viewport;
         // Pages within a screen of the visible area are built.
@@ -820,8 +949,8 @@ class PageViewportState extends State<PageViewport>
         // A lone page that fills the area is the writing surface itself;
         // otherwise, or scrolled past an edge, each page is a sheet of its
         // own on the background.
-        bool coversArea = false;
-        if (widget.pages.length == 1) {
+        bool coversArea = widget.infinite;
+        if (!coversArea && widget.pages.length == 1) {
           final Rect onScreen = layout.rects.single.shift(
             Offset(-_offset.dx, layout.top - _offset.dy),
           );
@@ -857,7 +986,10 @@ class PageViewportState extends State<PageViewport>
         final List<Widget> sheets = <Widget>[];
         final List<Widget> pages = <Widget>[];
         final List<Widget> edges = <Widget>[];
-        for (int i = 0; i < widget.pages.length; i++) {
+        final double columnTop = layout.top - _offset.dy;
+        final int firstBuilt = layout.pageAt(builtArea.top - columnTop);
+        final int lastBuilt = layout.pageAt(builtArea.bottom - columnTop);
+        for (int i = firstBuilt; i <= lastBuilt; i++) {
           final PageTransform transform = _transformOf(layout, i);
           final Rect onScreen = layout.rects[i].shift(
             transform.origin - layout.rects[i].topLeft,
@@ -902,6 +1034,8 @@ class PageViewportState extends State<PageViewport>
               transform.invert(Offset.zero),
               transform.invert(viewport.bottomRight(Offset.zero)),
             );
+          final ValueNotifier<double> scale = _scaleFor(widget.pageKeys[i])
+            ..value = transform.scale;
           pages.add(
             Positioned(
               key: widget.pageKeys[i],
@@ -914,10 +1048,10 @@ class PageViewportState extends State<PageViewport>
                 alignment: Alignment.topLeft,
                 child: ColoredBox(
                   color: colors.writingSurface,
-                  child: _builtPages[widget.pageKeys[i]] ??= widget.pageBuilder(
-                    context,
-                    i,
-                    visible,
+                  child: _PageScaleScope(
+                    scale: scale,
+                    child: _builtPages[widget.pageKeys[i]] ??= widget
+                        .pageBuilder(context, i, visible),
                   ),
                 ),
               ),
@@ -958,7 +1092,7 @@ class PageViewportState extends State<PageViewport>
                     context,
                     _transformOf(layout, widget.currentPage),
                   ),
-                if (_canScroll)
+                if (_canScroll && !widget.infinite)
                   IgnorePointer(
                     child: CustomPaint(
                       key: const ValueKey<String>('page-scroll-indicators'),
@@ -995,12 +1129,15 @@ class PageViewportState extends State<PageViewport>
       math.max(0, layout.size.width - viewport.width),
       math.max(0, layout.size.height + layout.top - viewport.height),
     );
-    _room = Offset(
-      layout.rects.any((Rect rect) => rect.width >= viewport.width - 0.5)
-          ? _overscroll
-          : 0,
-      layout.size.height >= viewport.height - 0.5 ? _overscroll : 0,
-    );
+    // A whiteboard has no edge to bring in from the screen's.
+    _room = widget.infinite
+        ? Offset.zero
+        : Offset(
+            layout.rects.any((Rect rect) => rect.width >= viewport.width - 0.5)
+                ? _overscroll
+                : 0,
+            layout.size.height >= viewport.height - 0.5 ? _overscroll : 0,
+          );
   }
 
   /// The scroll offset in [next] that keeps the middle of the area at the
@@ -1034,6 +1171,18 @@ class PageViewportState extends State<PageViewport>
         rect.top + layout.top - _offset.dy,
       ),
     );
+  }
+}
+
+/// Hands the pages below it how far they are scaled on screen.
+class _PageScaleScope extends InheritedWidget {
+  const _PageScaleScope({required this.scale, required super.child});
+
+  final ValueListenable<double> scale;
+
+  @override
+  bool updateShouldNotify(_PageScaleScope oldWidget) {
+    return !identical(oldWidget.scale, scale);
   }
 }
 
@@ -1114,11 +1263,11 @@ class _PullToAddIndicator extends StatelessWidget {
 /// top at zero, before scrolling.
 class _ColumnLayout {
   _ColumnLayout(
-    List<PageGeometry> pages,
+    this.pages,
     this.viewport,
-    double gap,
-    double zoom, {
-    double lead = 0,
+    this.gap,
+    this.zoom, {
+    this.lead = 0,
   }) {
     double y = 0;
     double right = viewport.width;
@@ -1136,7 +1285,11 @@ class _ColumnLayout {
     top = math.max(y < viewport.height ? (viewport.height - y) / 2 : 0, lead);
   }
 
+  final List<PageGeometry> pages;
   final Size viewport;
+  final double gap;
+  final double zoom;
+  final double lead;
   final List<Rect> rects = <Rect>[];
   late final Size size;
 
@@ -1144,25 +1297,40 @@ class _ColumnLayout {
   /// or the lead kept above the first page, whichever is more.
   late final double top;
 
+  bool matches(
+    List<PageGeometry> pages,
+    Size viewport,
+    double gap,
+    double zoom,
+    double lead,
+  ) =>
+      identical(this.pages, pages) &&
+      this.viewport == viewport &&
+      this.gap == gap &&
+      this.zoom == zoom &&
+      this.lead == lead;
+
   /// The page at height [y] in the column, clamped to the first and last.
   /// A gap belongs to the page below it.
   int pageAt(double y) {
-    for (int i = 0; i < rects.length; i++) {
-      if (y < rects[i].bottom) {
-        return i;
+    int low = 0;
+    int high = rects.length;
+    while (low < high) {
+      final int middle = low + ((high - low) >> 1);
+      if (y < rects[middle].bottom) {
+        high = middle;
+      } else {
+        low = middle + 1;
       }
     }
-    return rects.length - 1;
+    return low.clamp(0, rects.length - 1);
   }
 
   /// The page under [point] in the column, if any.
   int? pageContaining(Offset point) {
-    for (int i = 0; i < rects.length; i++) {
-      if (rects[i].contains(point)) {
-        return i;
-      }
-    }
-    return null;
+    if (rects.isEmpty) return null;
+    final int candidate = pageAt(point.dy);
+    return rects[candidate].contains(point) ? candidate : null;
   }
 }
 

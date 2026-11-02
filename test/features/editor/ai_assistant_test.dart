@@ -110,7 +110,9 @@ Rect _surfaceRect(WidgetTester tester) {
 }
 
 Rect _paletteRect(WidgetTester tester) {
-  return tester.getRect(find.byType(ToolPalette));
+  return tester.getRect(
+    find.byKey(const ValueKey<String>('tool-palette-card')),
+  );
 }
 
 Finder _sendButton() => find.widgetWithIcon(IconButton, AppIcons.send);
@@ -376,7 +378,7 @@ void main() {
       // What the chat is about is framed on the page, not pictured in it.
       final AiSelectionContext context = _assistant(tester).context!;
       expect(context.snapshot.isOf(selection), isTrue);
-      expect(find.byType(AiContextGlow), findsWidgets);
+      expect(find.byType(AiContextSelection), findsWidgets);
       expect(find.byType(Image), findsNothing);
       expect(tester.takeException(), isNull);
     });
@@ -472,16 +474,19 @@ void main() {
       await _pumpOpen(tester);
       final AiAssistantController assistant = _assistant(tester);
 
-      await tester.tap(find.byTooltip('AI settings'));
-      await tester.pumpAndSettle();
+      // The AI tool is chosen, its options beside the palette.
       expect(find.byType(AiOptions), findsOneWidget);
       // The harness opens the editor with Notation off.
       expect(assistant.notationEnabled, isFalse);
       // On at every launch.
       expect(assistant.animationEnabled, isTrue);
 
-      await tester.tap(find.text('Enable notation'));
-      await tester.tap(find.text('Enable animation'));
+      await tester.tap(
+        find.byKey(const ValueKey<String>('ai-notation-toggle')),
+      );
+      await tester.tap(
+        find.byKey(const ValueKey<String>('ai-animation-toggle')),
+      );
       await tester.pump();
       expect(assistant.notationEnabled, isTrue);
       expect(assistant.animationEnabled, isFalse);

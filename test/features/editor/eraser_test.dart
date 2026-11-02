@@ -1,7 +1,6 @@
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
-import 'package:greatnote/shared/widgets/app_controls.dart';
 import 'package:greatnote/app/theme/app_tokens.dart';
 import 'package:greatnote/features/editor/ink/eraser_settings.dart';
 import 'package:greatnote/features/editor/ink/ink_controller.dart';
@@ -43,28 +42,21 @@ Future<void> _selectEraser(WidgetTester tester) async {
   await tester.pumpAndSettle();
 }
 
-/// Selects the eraser if needed, then opens its options.
+/// Selects the eraser, whose options bar shows beside the palette.
 Future<void> _openEraserOptions(WidgetTester tester) async {
-  if (find.byType(EraserOptions).evaluate().isEmpty) {
-    await _selectEraser(tester);
-  }
   if (find.byType(EraserOptions).evaluate().isEmpty) {
     await _selectEraser(tester);
   }
   expect(find.byType(EraserOptions), findsOneWidget);
 }
 
-/// Dismisses an open popover by tapping the app bar background.
-Future<void> _dismiss(WidgetTester tester) async {
-  await tester.tapAt(const Offset(150, 4));
-  await tester.pumpAndSettle();
-}
+Finder _mode(EraserMode mode) =>
+    find.byKey(ValueKey<String>('eraser-mode-${mode.name}'));
 
 Future<void> _setMode(WidgetTester tester, EraserMode mode) async {
   await _openEraserOptions(tester);
-  await tester.tap(find.text(mode.label));
+  await tester.tap(_mode(mode));
   await tester.pumpAndSettle();
-  await _dismiss(tester);
 }
 
 Slider _slider(WidgetTester tester) {
@@ -74,7 +66,8 @@ Slider _slider(WidgetTester tester) {
 /// The selected state of a palette button, as assistive technology sees it.
 bool _isSelected(WidgetTester tester, String label) {
   return isSemantics(isSelected: true).matches(
-    tester.getSemantics(find.bySemanticsLabel(RegExp('^$label'))),
+    // The palette's button: its label, or its label and its settings.
+    tester.getSemantics(find.bySemanticsLabel(RegExp('^$label(,|\$)'))),
     <dynamic, dynamic>{},
   );
 }
@@ -111,8 +104,8 @@ void main() {
 
         expect(_isSelected(tester, 'Pen'), isFalse);
         expect(_isSelected(tester, 'Eraser'), isTrue);
-        // The first press only selects; it does not open the options.
-        expect(find.byType(EraserOptions), findsNothing);
+        // Its options take the pen's place beside the palette.
+        expect(find.byType(EraserOptions), findsOneWidget);
 
         await tester.tap(find.byTooltip('Pen'));
         await tester.pumpAndSettle();
@@ -123,7 +116,7 @@ void main() {
         handle.dispose();
       });
 
-      testWidgets('the options popover switches mode and changes size', (
+      testWidgets('the options bar switches mode and changes size', (
         WidgetTester tester,
       ) async {
         final SemanticsHandle handle = tester.ensureSemantics();
@@ -139,19 +132,7 @@ void main() {
         expect(slider.min, 8);
         expect(slider.max, 80);
         expect(slider.value, 24);
-        // The current mode is under the sliding thumb and has a selected
-        // state, not only a color.
-        expect(
-          tester
-              .widget<SelectionCapsule>(
-                find.descendant(
-                  of: find.byType(EraserOptions),
-                  matching: find.byType(SelectionCapsule),
-                ),
-              )
-              .index,
-          EraserMode.values.indexOf(EraserMode.area),
-        );
+        // The current mode has a selected state, not only a color.
         expect(
           tester.getSemantics(find.bySemanticsLabel('Area')),
           isSemantics(label: 'Area', isButton: true, isSelected: true),
@@ -161,44 +142,21 @@ void main() {
           isSemantics(label: 'Stroke', isButton: true, isSelected: false),
         );
 
-        EraserPreviewPainter preview() {
-          final CustomPaint paint = tester.widget<CustomPaint>(
-            find.byKey(const ValueKey<String>('eraser-size-preview')),
-          );
-          return paint.painter! as EraserPreviewPainter;
-        }
-
-        expect(preview().size, 24);
-
-        // Drag the thumb to the far end of the track.
-        final Rect track = tester.getRect(find.byType(Slider));
-        await tester.dragFrom(
-          Offset(track.left + 30, track.center.dy),
-          Offset(track.width, 0),
-        );
+        _slider(tester).onChanged!(80);
         await tester.pumpAndSettle();
 
         expect(_slider(tester).value, 80);
-        expect(preview().size, 80);
-        expect(find.text('80 px'), findsOneWidget);
         expect(find.bySemanticsLabel('Eraser, Area, 80 px'), findsOneWidget);
 
-        await tester.tap(find.text('Stroke'));
+        await tester.tap(_mode(EraserMode.stroke));
         await tester.pumpAndSettle();
 
         expect(
-          tester
-              .widget<SelectionCapsule>(
-                find.descendant(
-                  of: find.byType(EraserOptions),
-                  matching: find.byType(SelectionCapsule),
-                ),
-              )
-              .index,
-          EraserMode.values.indexOf(EraserMode.stroke),
+          tester.getSemantics(find.bySemanticsLabel('Stroke')),
+          isSemantics(label: 'Stroke', isButton: true, isSelected: true),
         );
         expect(find.bySemanticsLabel('Eraser, Stroke'), findsOneWidget);
-        // The popover stays open so the size can be set after the mode.
+        // The bar stays so the size can be set after the mode.
         expect(find.byType(EraserOptions), findsOneWidget);
         expect(tester.takeException(), isNull);
         handle.dispose();
@@ -214,14 +172,13 @@ void main() {
       _slider(tester).onChanged!(40);
       await tester.pumpAndSettle();
 
-      await tester.tap(find.text('Stroke'));
+      await tester.tap(_mode(EraserMode.stroke));
       await tester.pumpAndSettle();
 
       expect(_slider(tester).onChanged, isNull);
       expect(_slider(tester).value, 40);
-      expect(find.text('40 px'), findsOneWidget);
 
-      await tester.tap(find.text('Area'));
+      await tester.tap(_mode(EraserMode.area));
       await tester.pumpAndSettle();
 
       expect(_slider(tester).onChanged, isNotNull);
@@ -306,11 +263,12 @@ void main() {
     );
     await _selectEraser(tester);
 
-    // Two samples, 300 px apart, on either side of the stroke.
+    // Two samples, 300 px apart, on either side of the stroke. Upward, so
+    // the flick starts on the page, not under the palette across the top.
     await _drag(
       tester,
-      origin + const Offset(250, 50),
       origin + const Offset(250, 350),
+      origin + const Offset(250, 50),
       steps: 1,
     );
 
@@ -382,14 +340,11 @@ void main() {
     final InkColor blue = InkPalette.colors.firstWhere(
       (InkColor ink) => ink.id == 'blue',
     );
-    // The pen starts selected, so one press opens its options.
-    await tester.tap(find.byTooltip('Pen'));
-    await tester.pumpAndSettle();
-    await tester.tap(find.byKey(const ValueKey<String>('ink-swatch-blue')));
+    // The pen starts selected, its options beside the palette.
+    await tester.tap(find.byKey(const ValueKey<String>('ink-swatch-1')));
     await tester.pumpAndSettle();
     _slider(tester).onChanged!(10);
     await tester.pumpAndSettle();
-    await _dismiss(tester);
     await _drag(
       tester,
       origin + const Offset(100, 200),
@@ -400,7 +355,6 @@ void main() {
     await _openEraserOptions(tester);
     _slider(tester).onChanged!(60);
     await tester.pumpAndSettle();
-    await _dismiss(tester);
     await _drag(
       tester,
       origin + const Offset(250, 100),
@@ -432,25 +386,23 @@ void main() {
     await pumpEditor(tester);
     await _selectEraser(tester);
 
-    // Pressing the pen while the eraser is selected selects the pen; the
-    // pen's options open on the next press, and leave the eraser alone.
+    // Pressing the pen while the eraser is selected selects the pen, and
+    // its options take the eraser's place, leaving the eraser alone.
     await tester.tap(find.byTooltip('Pen'));
     await tester.pumpAndSettle();
     expect(_isSelected(tester, 'Pen'), isTrue);
-    await tester.tap(find.byTooltip('Pen'));
-    await tester.pumpAndSettle();
-    await tester.tap(find.byKey(const ValueKey<String>('ink-swatch-red')));
+    expect(find.byType(EraserOptions), findsNothing);
+    await tester.tap(find.byKey(const ValueKey<String>('ink-swatch-2')));
     await tester.pumpAndSettle();
     _slider(tester).onChanged!(7);
     await tester.pumpAndSettle();
-    await _dismiss(tester);
 
     expect(find.bySemanticsLabel('Pen, Red, 7 px'), findsOneWidget);
     expect(find.bySemanticsLabel('Eraser, Area, 24 px'), findsOneWidget);
     handle.dispose();
   });
 
-  testWidgets('the tap that dismisses the eraser options erases nothing', (
+  testWidgets('with the eraser options showing, the first touch erases', (
     WidgetTester tester,
   ) async {
     final InkController controller = await pumpEditor(tester);
@@ -460,26 +412,17 @@ void main() {
       canvas.center - const Offset(100, 0),
       canvas.center + const Offset(100, 0),
     );
-    final Stroke stroke = controller.strokes.single;
     await _openEraserOptions(tester);
     final ToolPaletteController palette = tester
         .widget<ToolPalette>(find.byType(ToolPalette))
         .controller!;
-    expect(palette.hasOpenPopover, isTrue);
-
-    // Right on the stroke.
-    await tester.tapAt(canvas.center);
-    await tester.pumpAndSettle();
-
-    expect(find.byType(EraserOptions), findsNothing);
     expect(palette.hasOpenPopover, isFalse);
-    expect(controller.strokes.single, same(stroke));
-    expect(controller.activeErase, isNull);
 
-    // The next touch does erase.
+    // Right on the stroke: it is cut in two, and the bar stays.
     await tester.tapAt(canvas.center);
     await tester.pump();
     expect(controller.strokes.length, 2);
+    expect(find.byType(EraserOptions), findsOneWidget);
   });
 
   testWidgets('an inverted stylus erases while the pen stays selected', (
@@ -527,7 +470,6 @@ void main() {
     await _openEraserOptions(tester);
     _slider(tester).onChanged!(40);
     await tester.pumpAndSettle();
-    await _dismiss(tester);
     final Matcher paper = isSameColorAs(AppColors.light.writingSurface);
     const List<Offset> directions = <Offset>[
       Offset(1, 0),
@@ -790,7 +732,6 @@ void main() {
     await _openEraserOptions(tester);
     _slider(tester).onChanged!(52);
     await tester.pumpAndSettle();
-    await _dismiss(tester);
 
     const List<Size> sizes = <Size>[
       Size(1280, 800),
@@ -826,7 +767,6 @@ void main() {
     // The size came through stroke mode and the rebuilds intact.
     await _openEraserOptions(tester);
     expect(_slider(tester).value, 52);
-    await _dismiss(tester);
     final Offset position = canvasRect(tester).center;
     final TestGesture gesture = await tester.startGesture(position);
     expect(controller.activeErase!.mode, EraserMode.stroke);

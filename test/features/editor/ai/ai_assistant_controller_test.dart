@@ -668,6 +668,34 @@ void main() {
     expect(rig.assistant.context, same(merged));
   });
 
+  test('removing a context group narrows the next model request', () async {
+    await rig.open();
+    final AiContextGroup first = rig.assistant.context!.groups.single;
+    final InkSelection second = selectInk(rig.ink, _bottom);
+
+    rig.assistant.addToContext(second);
+    await pumpEventQueue();
+    expect(rig.assistant.context!.snapshot.sourceStrokeCount, 2);
+
+    rig.assistant.removeContext(first);
+    await pumpEventQueue();
+
+    final AiSelectionContext narrowed = rig.assistant.context!;
+    expect(narrowed.groups, hasLength(1));
+    expect(narrowed.snapshot.isOf(second), isTrue);
+    expect(narrowed.snapshot.sourceStrokeCount, 1);
+    expect(rig.assistant.send('Use only the remaining context'), isTrue);
+    expect(rig.client.requests.single.imagePng, same(narrowed.image!.png));
+
+    rig.assistant.removeContext(narrowed.groups.single);
+    expect(rig.assistant.context!.isPage, isTrue);
+    expect(rig.assistant.hasSelection, isFalse);
+    expect(
+      rig.assistant.messages.single.text,
+      'Use only the remaining context',
+    );
+  });
+
   test('a selection with a remembered chat is flagged as such', () async {
     await rig.open(_bottom);
     await rig.open(_top);

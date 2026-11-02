@@ -1,19 +1,22 @@
 ﻿import 'dart:async';
 import 'dart:math' as math;
-import 'dart:typed_data';
 import 'dart:ui' as ui;
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 
 import '../../app/theme/app_tokens.dart';
 import '../../shared/layout/breakpoints.dart';
+import '../../shared/memory/note_cache_pool.dart';
 import '../../shared/widgets/processing.dart';
 import '../editor/ai/ai_assistant_controller.dart';
 import '../editor/ai/ai_client.dart';
 import '../editor/editor_screen.dart';
 import '../editor/handwriting/handwriting_calibration.dart';
 import '../editor/ink/pen_settings.dart';
+import '../editor/ink/stylus_actions.dart';
 import '../editor/widgets/tool_palette.dart';
+import '../editor/widgets/toolbar_layout.dart';
 import '../editor/document_io/document_io_config.dart';
 import '../editor/document_io/document_models.dart';
 import '../editor/document_io/document_platform.dart';
@@ -52,21 +55,27 @@ class NoteEditorPage extends StatefulWidget {
     this.pdfPreviewStore,
     this.exportSink = const SystemExportSink(),
     this.documentIoConfig = const DocumentIoConfig(),
+    this.cachePool,
     this.sharedClipboard,
     this.stylusOnly,
     this.penSettings,
     this.palettePlacement,
+    this.toolOptionsShown,
+    this.toolbarShown,
+    this.toolbarLayout,
+    this.stylusActions,
     this.initialNotationEnabled = true,
     this.tabsBuilder,
     this.onRenamed,
     this.onBack,
     this.onSaved,
-    this.entrance,
+    this.arrived,
   });
 
-  /// How long the note takes to come into view, its heavy content held
-  /// back until then; [noteEntrance] by default.
-  final Duration? entrance;
+  /// Whether the move bringing the note into view has ended. Its heavy
+  /// content is held back until then, so building it never costs a frame of
+  /// the move. Without it, the content waits [noteEntrance].
+  final ValueListenable<bool>? arrived;
 
   /// Called after each save, the last on the way out included, with the
   /// entry as saved and what was saved, while those pages are still in
@@ -111,6 +120,10 @@ class NoteEditorPage extends StatefulWidget {
   final PdfPreviewStore? pdfPreviewStore;
   final ExportSink exportSink;
   final DocumentIoConfig documentIoConfig;
+
+  /// The memory all open notes keep things in; this note has a share of it
+  /// for as long as it is open.
+  final NoteCachePool? cachePool;
   final SharedNoteClipboard? sharedClipboard;
 
   /// Passed to the editor, so the choice carries from note to note.
@@ -120,6 +133,19 @@ class NoteEditorPage extends StatefulWidget {
   /// from note to note.
   final ValueNotifier<PenSettings>? penSettings;
   final ValueNotifier<PalettePlacement>? palettePlacement;
+
+  /// Passed to the editor, so showing or hiding the tool options bar
+  /// carries from note to note.
+  final ValueNotifier<bool>? toolOptionsShown;
+
+  /// Passed to the editor so toolbar visibility and hardware shortcuts
+  /// carry from note to note.
+  final ValueNotifier<bool>? toolbarShown;
+
+  /// Passed to the editor so the palette's arrangement carries from note
+  /// to note.
+  final ValueNotifier<ToolbarLayout>? toolbarLayout;
+  final ValueNotifier<StylusActionBindings>? stylusActions;
 
   /// Passed to the editor.
   final bool initialNotationEnabled;
@@ -137,12 +163,49 @@ class _NoteEditorPageState extends State<NoteEditorPage> {
   final GlobalKey<EditorScreenState> _editor = GlobalKey<EditorScreenState>();
   NoteTabLease? _lease;
   bool _hydrating = true;
+  late final NoteCacheScope? _cacheScope = widget.cachePool?.scope();
+
+  /// Asked to be put away, the note said no. It can be asked again once it
+  /// has saved.
+  bool _putAwayRefused = false;
+
+  /// Charges the note's document to its share of the pool: it is the last
+  /// of the note to go, once the tab can do without it.
+  void _chargeDocument() {
+    final NoteDocument? document = _document;
+    if (document == null) return;
+    _cacheScope?.setDocument(
+      bytes: document.memoryBytes,
+      canPutAway: () =>
+          !_hydrating &&
+          !_putAwayRefused &&
+          _lease?.putAway != null &&
+          !(_editor.currentState?.requiresRetention ?? true),
+      putAway: () async {
+        final bool done = await _lease?.putAway?.call() ?? false;
+        if (done || !mounted) return;
+        _putAwayRefused = true;
+        _chargeDocument();
+      },
+    );
+  }
 
   /// The note's content, read but held back until the page has slid in:
   /// building the editor mid-slide would stall the slide.
   NoteContent? _pending;
   bool _entered = false;
   Timer? _enter;
+  bool _waitingToArrive = false;
+
+  /// The move has ended: the content is built now, at rest.
+  void _onArrived() {
+    final ValueListenable<bool>? arrived = widget.arrived;
+    if (arrived == null || !arrived.value || _entered) return;
+    arrived.removeListener(_onArrived);
+    _waitingToArrive = false;
+    _entered = true;
+    _showPending();
+  }
 
   /// Whether the picture of the page still lies over the editor, until
   /// the editor's own page is on screen, and whether it is fading out.
@@ -153,11 +216,16 @@ class _NoteEditorPageState extends State<NoteEditorPage> {
   @override
   void didChangeDependencies() {
     super.didChangeDependencies();
-    if (!_entered && _enter == null) {
-      final Duration slide = AppMotion.resolve(
-        context,
-        widget.entrance ?? noteEntrance(),
-      );
+    final ValueListenable<bool>? arrived = widget.arrived;
+    if (!_entered && arrived != null) {
+      if (arrived.value) {
+        _entered = true;
+      } else if (!_waitingToArrive) {
+        _waitingToArrive = true;
+        arrived.addListener(_onArrived);
+      }
+    } else if (!_entered && _enter == null) {
+      final Duration slide = AppMotion.resolve(context, noteEntrance());
       if (slide == Duration.zero) {
         _entered = true;
       } else {
@@ -295,9 +363,14 @@ class _NoteEditorPageState extends State<NoteEditorPage> {
           content,
         );
         widget.onSaved?.call(saved, content);
+        if (mounted) {
+          _putAwayRefused = false;
+          _chargeDocument();
+        }
       },
       onError: _onSaveFailed,
     );
+    _chargeDocument();
   }
 
   /// Materialize the shared clipboard after the first frame. Do not clean
@@ -378,6 +451,7 @@ class _NoteEditorPageState extends State<NoteEditorPage> {
     _lease?.prepareToEvict = null;
     _lease?.prepareToClose = null;
     _enter?.cancel();
+    if (_waitingToArrive) widget.arrived?.removeListener(_onArrived);
     _uncoverLimit?.cancel();
     _preview?.dispose();
     // Read the pages before they go; the save finishes on its own.
@@ -396,6 +470,7 @@ class _NoteEditorPageState extends State<NoteEditorPage> {
       widget.repository.cleanupAssets(widget.note.id, referenced);
       document.dispose();
     }
+    _cacheScope?.close();
     super.dispose();
   }
 
@@ -432,9 +507,14 @@ class _NoteEditorPageState extends State<NoteEditorPage> {
         pdfPreviewStore: widget.pdfPreviewStore,
         exportSink: widget.exportSink,
         documentIoConfig: widget.documentIoConfig,
+        cacheScope: _cacheScope,
         stylusOnly: widget.stylusOnly,
         penSettings: widget.penSettings,
         palettePlacement: widget.palettePlacement,
+        toolOptionsShown: widget.toolOptionsShown,
+        toolbarShown: widget.toolbarShown,
+        toolbarLayout: widget.toolbarLayout,
+        stylusActions: widget.stylusActions,
         initialNotationEnabled: widget.initialNotationEnabled,
         assetReader: _readAsset,
         onPageShown: _uncover,
@@ -573,8 +653,9 @@ class _NoteEditorPageState extends State<NoteEditorPage> {
   }
 }
 
-/// The shared visual duration for opening a note.
-Duration noteEntrance() => AppMotion.smooth.duration;
+/// The shared visual duration for opening a note: the same move as going
+/// into a folder.
+Duration noteEntrance() => AppMotion.zoom;
 
 /// Stretches [image], a note's pictured page, over the whole canvas.
 class PagePicturePainter extends CustomPainter {

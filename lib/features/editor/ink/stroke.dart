@@ -2,6 +2,8 @@ import 'dart:collection';
 import 'dart:math' as math;
 import 'dart:ui';
 
+import 'package:flutter/foundation.dart' show visibleForTesting;
+
 import 'ink_palette.dart';
 import 'ink_sample.dart';
 import 'one_euro_smoother.dart';
@@ -150,7 +152,7 @@ class Stroke {
     required this.source,
     required this.rawSamples,
     required this.points,
-    required this.path,
+    this._path,
     required this.isDot,
     required this.bounds,
     this.widths,
@@ -160,8 +162,7 @@ class Stroke {
   });
 
   /// A stroke through [points], which are used as given: they are never
-  /// smoothed. The path is built here, once. [widths], when given, holds a
-  /// width factor for each point.
+  /// smoothed. [widths], when given, holds a width factor for each point.
   factory Stroke.fromPoints({
     required StrokeStyle style,
     required List<InkVector> points,
@@ -174,12 +175,9 @@ class Stroke {
     assert(points.isNotEmpty);
     assert(widths == null || widths.length == points.length);
     final InkVector origin = points.first;
-    final Path path = Path()..moveTo(origin.x, origin.y);
     final _Extent extent = _Extent(origin);
     for (int i = 1; i < points.length; i++) {
-      final InkVector point = points[i];
-      path.lineTo(point.x, point.y);
-      extent.add(point);
+      extent.add(points[i]);
     }
     return Stroke._(
       id: id ?? _newStrokeId(),
@@ -187,7 +185,6 @@ class Stroke {
       source: StrokeSource.derived,
       rawSamples: const <RawInkSample>[],
       points: List<InkVector>.unmodifiable(points),
-      path: path,
       isDot: extent.isDot,
       bounds: extent.bounds(style.width * _widest(widths)),
       widths: widths == null ? null : List<double>.unmodifiable(widths),
@@ -218,8 +215,12 @@ class Stroke {
   /// The filtered polyline that is rendered.
   final List<InkVector> points;
 
-  /// [points] as a path, built once when the stroke was created.
-  final Path path;
+  /// [points] as a path, built when first painted and kept until
+  /// [releaseGeometry].
+  Path get path => _path ??= _pathThrough(points);
+  Path? _path;
+
+  static Path _pathThrough(List<InkVector> points) => buildInkPath(points);
 
   /// True when the stroke has no extent and renders as a round dot.
   final bool isDot;
@@ -240,11 +241,64 @@ class Stroke {
   /// Milliseconds between accepted input samples, for organic replay.
   final List<int>? sampleDeltasMs;
 
+  /// This stroke moved by [delta], and nothing else: the same id, source,
+  /// timing, and widths. Its path is made again when it is next painted.
+  Stroke translated(InkVector delta) {
+    if (delta.x == 0 && delta.y == 0) return this;
+    return Stroke._(
+      id: id,
+      style: style,
+      source: source,
+      rawSamples: rawSamples.isEmpty
+          ? rawSamples
+          : List<RawInkSample>.unmodifiable(<RawInkSample>[
+              for (final RawInkSample sample in rawSamples)
+                RawInkSample(
+                  position: sample.position + delta,
+                  timestamp: sample.timestamp,
+                  deviceKind: sample.deviceKind,
+                  pressure: sample.pressure,
+                ),
+            ]),
+      points: List<InkVector>.unmodifiable(<InkVector>[
+        for (final InkVector point in points) point + delta,
+      ]),
+      isDot: isDot,
+      bounds: bounds.shift(Offset(delta.x, delta.y)),
+      widths: widths,
+      completedAtMs: completedAtMs,
+      recordingId: recordingId,
+      sampleDeltasMs: sampleDeltasMs,
+    );
+  }
+
   /// The filled outline of a stroke of varying width; null for an even
-  /// one, which is drawn by stroking [path]. Built when first painted.
-  late final Path? outline = widths == null
-      ? null
-      : buildInkOutline(points, widths!, style.width);
+  /// one, which is drawn by stroking [path]. Built when first painted and
+  /// kept until [releaseGeometry].
+  Path? get outline {
+    final List<double>? widths = this.widths;
+    if (widths == null) return null;
+    return _outline ??= buildInkOutline(points, widths, style.width);
+  }
+
+  Path? _outline;
+
+  /// Lets go of the paths, which are made again from [points] when next
+  /// painted. A page out of view can do without them.
+  void releaseGeometry() {
+    _path = null;
+    _outline = null;
+  }
+
+  /// About what the paths take in memory once built.
+  int get geometryBytes => 64 + points.length * (widths == null ? 16 : 112);
+
+  /// About what the stroke takes in memory apart from its paths.
+  int get dataBytes =>
+      160 +
+      points.length * (widths == null ? 32 : 40) +
+      rawSamples.length * 64 +
+      (sampleDeltasMs?.length ?? 0) * 8;
 
   /// Width factors for [piece], a run of points lying along this stroke in
   /// order, such as a piece left by an erase; null for an even stroke.
@@ -280,10 +334,43 @@ class Stroke {
   }
 }
 
-/// The filled outline of a polyline whose width changes along it: a disc
-/// at each end and at each sharp turn, joined by a quadrilateral along
-/// each segment, with the wedges between two segments at a gentler turn
-/// filled, so no sliver of paper shows through however far it is zoomed.
+/// A scale-independent, continuously tangent path through [points].
+///
+/// The filtered input remains the canonical data for erasing, selection, and
+/// persistence. Rendering uses quadratic curves between its midpoints so a
+/// high zoom reveals a curve rather than the corners of the sampled polyline.
+/// The curve stays inside the input's convex hull and reaches both endpoints.
+Path buildInkPath(List<InkVector> points) {
+  final Path path = Path();
+  if (points.isEmpty) {
+    return path;
+  }
+  final InkVector first = points.first;
+  path.moveTo(first.x, first.y);
+  if (points.length == 1) {
+    return path;
+  }
+  if (points.length == 2) {
+    final InkVector last = points.last;
+    path.lineTo(last.x, last.y);
+    return path;
+  }
+  for (int i = 1; i < points.length - 1; i++) {
+    final InkVector control = points[i];
+    final InkVector next = points[i + 1];
+    final InkVector end = (control + next) * 0.5;
+    path.quadraticBezierTo(control.x, control.y, end.x, end.y);
+  }
+  final InkVector last = points.last;
+  path.lineTo(last.x, last.y);
+  return path;
+}
+
+/// The filled outline of a smooth centerline whose width changes along it: a
+/// disc at each sampled point, joined by a quadrilateral along each segment.
+/// The quadratic centerline is adaptively flattened to less than half a
+/// physical pixel at the editor's maximum 4x zoom, so pressure-sensitive ink
+/// remains visually smooth at every supported scale.
 /// Every part winds the same way, so the union fills without holes under
 /// the nonzero rule.
 Path buildInkOutline(
@@ -295,6 +382,10 @@ Path buildInkOutline(
   if (points.isEmpty) {
     return path;
   }
+  assert(points.length == widths.length);
+  final _SmoothInkSamples smooth = _smoothInkSamples(points, widths);
+  points = smooth.points;
+  widths = smooth.widths;
   double radius(int i) => width * widths[i] / 2;
   void disc(int i) {
     final InkVector p = points[i];
@@ -359,6 +450,127 @@ Path buildInkOutline(
   }
   disc(points.length - 1);
   return path;
+}
+
+/// The flattened centerline [buildInkOutline] fills around, with a width
+/// factor at each point. The native wet ink (NativeInkModel.kt and
+/// NativeInkChannel.swift) reproduces it point for point; this is exposed
+/// so test/fixtures/native_ink_parity.txt can hold Flutter's answer.
+@visibleForTesting
+({List<InkVector> points, List<double> widths}) flattenInkSamples(
+  List<InkVector> points,
+  List<double> widths,
+) {
+  final _SmoothInkSamples smooth = _smoothInkSamples(points, widths);
+  return (points: smooth.points, widths: smooth.widths);
+}
+
+class _SmoothInkSamples {
+  const _SmoothInkSamples(this.points, this.widths);
+
+  final List<InkVector> points;
+  final List<double> widths;
+}
+
+/// Flattens the same quadratic curve used by [buildInkPath]. Straight runs
+/// retain their original compact representation; only visible bends gain
+/// intermediate points.
+_SmoothInkSamples _smoothInkSamples(
+  List<InkVector> points,
+  List<double> widths,
+) {
+  if (points.length < 3) {
+    return _SmoothInkSamples(points, widths);
+  }
+  final List<InkVector> outputPoints = <InkVector>[points.first];
+  final List<double> outputWidths = <double>[widths.first];
+  InkVector start = points.first;
+  double startWidth = widths.first;
+  for (int i = 1; i < points.length - 1; i++) {
+    final InkVector control = points[i];
+    final InkVector next = points[i + 1];
+    final InkVector end = (control + next) * 0.5;
+    final double endWidth = (widths[i] + widths[i + 1]) * 0.5;
+    _flattenInkQuadratic(
+      start,
+      startWidth,
+      control,
+      widths[i],
+      end,
+      endWidth,
+      outputPoints,
+      outputWidths,
+    );
+    start = end;
+    startWidth = endWidth;
+  }
+  if (outputPoints.last != points.last) {
+    outputPoints.add(points.last);
+    outputWidths.add(widths.last);
+  }
+  return _SmoothInkSamples(outputPoints, outputWidths);
+}
+
+void _flattenInkQuadratic(
+  InkVector start,
+  double startWidth,
+  InkVector control,
+  double controlWidth,
+  InkVector end,
+  double endWidth,
+  List<InkVector> points,
+  List<double> widths, [
+  int depth = 0,
+]) {
+  const double maxCenterlineError = 0.125;
+  const double maxWidthFactorError = 0.005;
+  const int maxDepth = 7;
+  final InkVector chord = end - start;
+  final double chordLength = chord.length;
+  final double centerlineError = chordLength == 0
+      ? (control - start).length
+      : ((control - start).x * chord.y - (control - start).y * chord.x).abs() /
+            chordLength;
+  final double widthError = (controlWidth - (startWidth + endWidth) * 0.5)
+      .abs();
+  if (depth >= maxDepth ||
+      (centerlineError <= maxCenterlineError &&
+          widthError <= maxWidthFactorError)) {
+    if (points.last != end) {
+      points.add(end);
+      widths.add(endWidth);
+    }
+    return;
+  }
+
+  final InkVector startControl = (start + control) * 0.5;
+  final InkVector controlEnd = (control + end) * 0.5;
+  final InkVector middle = (startControl + controlEnd) * 0.5;
+  final double startControlWidth = (startWidth + controlWidth) * 0.5;
+  final double controlEndWidth = (controlWidth + endWidth) * 0.5;
+  final double middleWidth = (startControlWidth + controlEndWidth) * 0.5;
+  _flattenInkQuadratic(
+    start,
+    startWidth,
+    startControl,
+    startControlWidth,
+    middle,
+    middleWidth,
+    points,
+    widths,
+    depth + 1,
+  );
+  _flattenInkQuadratic(
+    middle,
+    middleWidth,
+    controlEnd,
+    controlEndWidth,
+    end,
+    endWidth,
+    points,
+    widths,
+    depth + 1,
+  );
 }
 
 /// The stroke being drawn. It only ever grows: samples are appended and each
@@ -481,7 +693,7 @@ class ActiveStroke {
       source: StrokeSource.input,
       rawSamples: List<RawInkSample>.unmodifiable(_rawSamples),
       points: List<InkVector>.unmodifiable(_points),
-      path: _path,
+      path: buildInkPath(_points),
       isDot: isDot,
       bounds: _extent.bounds(style.width * Stroke._widest(widths)),
       widths: widths == null ? null : List<double>.unmodifiable(widths),

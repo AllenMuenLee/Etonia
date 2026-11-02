@@ -6,12 +6,14 @@ import 'package:flutter/widgets.dart';
 
 import '../../../app/theme/app_tokens.dart';
 import 'page_setup.dart';
+import 'page_viewport.dart';
 
 /// The paper's printed rules, under the ink, in page coordinates. Never
 /// part of the ink and never in semantics.
 ///
 /// Only the rules inside [visible], the part of the page on screen, are
-/// painted, so a large infinite page costs no more than a small one.
+/// painted, so a whiteboard costs no more than a small page. Zoomed far
+/// out, rules are thinned to stay [PageConfig.minRuleGap] apart on screen.
 class PageBackgroundLayer extends StatelessWidget {
   const PageBackgroundLayer({
     super.key,
@@ -39,6 +41,7 @@ class PageBackgroundLayer extends StatelessWidget {
             rule: colors.pageRule,
             marginRule: colors.pageMarginRule,
             visible: visible,
+            scale: PageViewport.scaleOf(context),
             config: config,
           ),
           size: Size.infinite,
@@ -54,13 +57,17 @@ class PageBackgroundPainter extends CustomPainter {
     required this.rule,
     required this.marginRule,
     this.visible,
+    this.scale,
     this.config = const PageConfig(),
-  }) : super(repaint: visible);
+  }) : super(repaint: Listenable.merge(<Listenable?>[visible, scale]));
 
   final PageBackground background;
   final Color rule;
   final Color marginRule;
   final ValueListenable<Rect>? visible;
+
+  /// Screen pixels per page unit; without it, one.
+  final ValueListenable<double>? scale;
   final PageConfig config;
 
   @override
@@ -77,17 +84,32 @@ class PageBackgroundPainter extends CustomPainter {
       return first + math.max(0, ((from - first) / spacing).ceil()) * spacing;
     }
 
+    final double screen = scale?.value ?? 1;
+    // Every second rule left out, as often as it takes to keep them apart
+    // on screen: what is kept is always on the full lattice.
+    double thinned(double spacing) {
+      if (!screen.isFinite || screen <= 0) return spacing;
+      double kept = spacing;
+      while (kept * screen < config.minRuleGap) {
+        kept *= 2;
+      }
+      return kept;
+    }
+
+    // Never thinner than half a pixel on screen, however far out; as before
+    // at any zoom a paper page is shown at.
+    final double hairline = math.max(1, 0.5 / screen);
     final Paint paint = Paint()
       ..color = rule
-      ..strokeWidth = 1
+      ..strokeWidth = hairline
       ..isAntiAlias = true;
     switch (background) {
       case PageBackground.blank:
         return;
       case PageBackground.lined:
-        final double spacing = config.lineSpacing;
+        final double spacing = thinned(config.lineSpacing);
         for (
-          double y = start(area.top, spacing * 2, spacing);
+          double y = start(area.top, config.lineSpacing * 2, spacing);
           y <= area.bottom;
           y += spacing
         ) {
@@ -100,11 +122,11 @@ class PageBackgroundPainter extends CustomPainter {
             Offset(x, area.bottom),
             Paint()
               ..color = marginRule
-              ..strokeWidth = 1,
+              ..strokeWidth = hairline,
           );
         }
       case PageBackground.grid:
-        final double spacing = config.gridSpacing;
+        final double spacing = thinned(config.gridSpacing);
         for (
           double y = start(area.top, spacing, spacing);
           y <= area.bottom;
@@ -120,7 +142,7 @@ class PageBackgroundPainter extends CustomPainter {
           canvas.drawLine(Offset(x, area.top), Offset(x, area.bottom), paint);
         }
       case PageBackground.dotted:
-        final double spacing = config.dotSpacing;
+        final double spacing = thinned(config.dotSpacing);
         final List<Offset> dots = <Offset>[
           for (
             double y = start(area.top, spacing, spacing);
@@ -139,7 +161,7 @@ class PageBackgroundPainter extends CustomPainter {
           dots,
           Paint()
             ..color = rule
-            ..strokeWidth = 3
+            ..strokeWidth = math.max(3, 1.5 / screen)
             ..strokeCap = StrokeCap.round,
         );
     }
@@ -151,6 +173,7 @@ class PageBackgroundPainter extends CustomPainter {
         oldDelegate.rule != rule ||
         oldDelegate.marginRule != marginRule ||
         oldDelegate.visible != visible ||
+        oldDelegate.scale != scale ||
         oldDelegate.config != config;
   }
 }

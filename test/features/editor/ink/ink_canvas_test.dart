@@ -238,20 +238,18 @@ void main() {
       tester,
       penConfig: const PenConfig(strokeWidthScale: 1),
     );
-    final Offset origin = canvasRect(tester).topLeft + const Offset(100, 100);
+    // Below the toolbar and the options bar beside it.
+    final Offset origin = canvasRect(tester).topLeft + const Offset(100, 250);
     final InkColor blue = InkPalette.colors.firstWhere(
       (InkColor ink) => ink.id == 'blue',
     );
 
     await _drawLine(tester, origin, origin + const Offset(200, 0));
 
-    await tester.tap(find.byTooltip('Pen'));
-    await tester.pumpAndSettle();
-    await tester.tap(find.byKey(const ValueKey<String>('ink-swatch-blue')));
+    // The pen is chosen, its options beside the palette.
+    await tester.tap(find.byKey(const ValueKey<String>('ink-swatch-1')));
     await tester.pumpAndSettle();
     tester.widget<Slider>(find.byType(Slider)).onChanged!(10);
-    await tester.pumpAndSettle();
-    await tester.tapAt(const Offset(150, 4));
     await tester.pumpAndSettle();
 
     final Offset second = origin + const Offset(0, 100);
@@ -346,7 +344,8 @@ void main() {
     WidgetTester tester,
   ) async {
     await pumpEditor(tester);
-    final Offset origin = canvasRect(tester).topLeft + const Offset(100, 100);
+    // Below the toolbar and the options bar beside it.
+    final Offset origin = canvasRect(tester).topLeft + const Offset(100, 250);
     final TestGesture gesture = await tester.startGesture(
       origin,
       kind: PointerDeviceKind.stylus,
@@ -374,7 +373,8 @@ void main() {
       themeMode: ThemeMode.dark,
       penConfig: const PenConfig(strokeWidthScale: 1),
     );
-    final Offset origin = canvasRect(tester).topLeft + const Offset(100, 100);
+    // Below the toolbar and the options bar beside it.
+    final Offset origin = canvasRect(tester).topLeft + const Offset(100, 250);
 
     await _drawLine(tester, origin, origin + const Offset(200, 0));
 

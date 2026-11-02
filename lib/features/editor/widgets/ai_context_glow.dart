@@ -4,20 +4,21 @@ import '../../../app/theme/app_tokens.dart';
 import '../ai/ai_assistant_controller.dart';
 import '../ink/ink_controller.dart';
 
-/// A glowing frame around everything on [page] that the open chat has been
-/// given as context, one frame for each thing chosen. It takes no presses.
-class AiContextGlow extends StatelessWidget {
-  const AiContextGlow({super.key, required this.assistant, required this.page});
+/// A selection frame around everything on [page] that the open chat has been
+/// given as context, one frame for each thing chosen.
+class AiContextSelection extends StatelessWidget {
+  const AiContextSelection({
+    super.key,
+    required this.assistant,
+    required this.page,
+  });
 
   final AiAssistantController assistant;
   final InkController page;
 
-  /// How far a frame stands off what it surrounds.
-  static const double _inset = 8;
-
   @override
   Widget build(BuildContext context) {
-    final Color color = AppColors.of(context).accent;
+    final AppColors colors = AppColors.of(context);
     return IgnorePointer(
       child: ExcludeSemantics(
         child: ListenableBuilder(
@@ -33,12 +34,16 @@ class AiContextGlow extends StatelessWidget {
             final List<Rect> frames = <Rect>[
               for (final AiContextGroup group in chosen.groups)
                 if (_isOnPage(group))
-                  if (group.bounds case final Rect bounds)
-                    bounds.inflate(_inset),
+                  if (group.bounds case final Rect bounds) bounds,
             ];
             if (frames.isEmpty) return const SizedBox.expand();
             return CustomPaint(
-              painter: _GlowPainter(frames: frames, color: color),
+              key: const ValueKey<String>('ai-context-selection-layer'),
+              painter: _ContextSelectionPainter(
+                frames: frames,
+                color: colors.accent,
+                handleColor: colors.writingSurface,
+              ),
               size: Size.infinite,
             );
           },
@@ -62,37 +67,51 @@ class AiContextGlow extends StatelessWidget {
   }
 }
 
-class _GlowPainter extends CustomPainter {
-  _GlowPainter({required this.frames, required this.color});
+class _ContextSelectionPainter extends CustomPainter {
+  _ContextSelectionPainter({
+    required this.frames,
+    required this.color,
+    required this.handleColor,
+  });
 
   final List<Rect> frames;
   final Color color;
+  final Color handleColor;
 
   @override
   void paint(Canvas canvas, Size size) {
-    final Paint halo = Paint()
+    final Paint outline = Paint()
       ..style = PaintingStyle.stroke
-      ..strokeWidth = 7
-      ..color = color.withValues(alpha: 0.4)
-      ..maskFilter = const MaskFilter.blur(BlurStyle.normal, 7);
-    final Paint edge = Paint()
+      ..strokeWidth = AppSizes.hairline
+      ..color = color
+      ..isAntiAlias = true;
+    final Paint fill = Paint()
+      ..color = handleColor
+      ..isAntiAlias = true;
+    final Paint handleOutline = Paint()
       ..style = PaintingStyle.stroke
-      ..strokeWidth = 1.5
-      ..color = color.withValues(alpha: 0.9);
+      ..strokeWidth = AppSizes.focusRingWidth
+      ..color = color
+      ..isAntiAlias = true;
     for (final Rect frame in frames) {
-      final RRect shape = RRect.fromRectAndRadius(
-        frame,
-        const Radius.circular(12),
-      );
-      canvas
-        ..drawRRect(shape, halo)
-        ..drawRRect(shape, edge);
+      canvas.drawRect(frame, outline);
+      for (final Offset corner in <Offset>[
+        frame.topLeft,
+        frame.topRight,
+        frame.bottomRight,
+        frame.bottomLeft,
+      ]) {
+        canvas
+          ..drawCircle(corner, 6, fill)
+          ..drawCircle(corner, 6, handleOutline);
+      }
     }
   }
 
   @override
-  bool shouldRepaint(_GlowPainter oldDelegate) {
+  bool shouldRepaint(_ContextSelectionPainter oldDelegate) {
     return oldDelegate.color != color ||
+        oldDelegate.handleColor != handleColor ||
         oldDelegate.frames.length != frames.length ||
         !_sameFrames(oldDelegate.frames);
   }

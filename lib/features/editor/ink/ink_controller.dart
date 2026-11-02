@@ -618,8 +618,9 @@ class InkController {
     _textEditInserted = false;
     _textEditSteps = 0;
     _selection = null;
-    // A note open for writing that went away is closed.
-    if (_editingStickyId != null && _stickyById(_editingStickyId) == null) {
+    // A note open for writing that went away or came back minimized is closed.
+    if (_editingStickyId != null &&
+        (_stickyById(_editingStickyId)?.minimized ?? true)) {
       _setEditingSticky(null);
     }
     // Strokes that came back are ordinary ink; those that left are let go.
@@ -628,6 +629,82 @@ class InkController {
     _completedChanged.notify();
     _selectionChanged.notify();
     _textEditChanged.notify();
+  }
+
+  /// Moves everything on the page by [delta], and every step of its history
+  /// with it, as when the page turns into a whiteboard or back: undo and
+  /// redo go on finding the ink where it now is. Not itself a step of
+  /// history. Returns false, and changes nothing, while a gesture is in
+  /// progress.
+  bool shiftContent(InkVector delta) {
+    if (_disposed || _isBusy || !delta.isFinite) return false;
+    if (delta.x == 0 && delta.y == 0) return true;
+    final InkTransform move = InkTransform.translation(delta);
+    final Offset offset = Offset(delta.x, delta.y);
+    // Snapshots share their strokes and elements; so do their copies.
+    final Map<Stroke, Stroke> strokes = Map<Stroke, Stroke>.identity();
+    final Map<Object, Object> elements = Map<Object, Object>.identity();
+    Stroke stroke(Stroke s) => strokes[s] ??= s.translated(delta);
+    T element<T extends Object>(T e, T Function(T) shift) =>
+        (elements[e] ??= shift(e)) as T;
+    _InkSnapshot snapshot(_InkSnapshot s) => _InkSnapshot(
+      List<Stroke>.unmodifiable(s.strokes.map(stroke)),
+      List<NoteImageElement>.unmodifiable(
+        s.images.map(
+          (NoteImageElement e) => element(e, (e) => e.transformed(move)),
+        ),
+      ),
+      List<StickyNoteElement>.unmodifiable(
+        s.stickies.map(
+          (StickyNoteElement e) => element(e, (e) => e.transformed(move)),
+        ),
+      ),
+      List<NoteTextElement>.unmodifiable(
+        s.texts.map(
+          (NoteTextElement e) =>
+              element(e, (e) => e.copyWith(position: e.position + delta)),
+        ),
+      ),
+      List<Rect>.unmodifiable(s.pdfMasks.map((Rect r) => r.shift(offset))),
+    );
+
+    _history._mapSnapshots(this, snapshot);
+    final _InkSnapshot now = snapshot(_snapshot());
+    _committed = snapshot(_committed);
+    _strokes = List<Stroke>.of(now.strokes);
+    _images = List<NoteImageElement>.of(now.images);
+    _stickies = List<StickyNoteElement>.of(now.stickies);
+    _texts = List<NoteTextElement>.of(now.texts);
+    _pdfMasks = List<Rect>.of(now.pdfMasks);
+    final List<ErasedStrokeRecord> erased = <ErasedStrokeRecord>[
+      for (final ErasedStrokeRecord record in _erasedStrokeRecords)
+        ErasedStrokeRecord(
+          stroke: stroke(record.stroke),
+          erasedAtMs: record.erasedAtMs,
+          recordingId: record.recordingId,
+        ),
+    ];
+    _erasedStrokeRecords
+      ..clear()
+      ..addAll(erased);
+    final List<Stroke> hidden = <Stroke>[
+      for (final Stroke s in _hidden) stroke(s),
+    ];
+    _hidden
+      ..clear()
+      ..addAll(hidden);
+    _selection = null;
+    _syncPlaybacks(strokes);
+    for (final ValueChanged<Map<Stroke, Stroke>> listener
+        in List<ValueChanged<Map<Stroke, Stroke>>>.of(_replacementListeners)) {
+      listener(strokes);
+    }
+    _revisionBumped();
+    _completedChanged.notify();
+    _selectionChanged.notify();
+    _textEditChanged.notify();
+    _hiddenChanged.notify();
+    return true;
   }
 
   /// Starts a stroke for [pointer]. Returns false, and changes nothing, when
@@ -1753,6 +1830,46 @@ class InkController {
     if (next.colorId == note.colorId && next.paper == note.paper) {
       return false;
     }
+    _replaceSticky(index, next);
+    return true;
+  }
+
+  /// Minimizes the sticky note [id] to its top-left corner, or opens it
+  /// again, as one change; its ink is kept. A minimized note is not open for
+  /// writing. Opening, it is kept within [pageBounds] (or only its top and
+  /// left edges, with [growsDown]). Returns false when another pointer owns
+  /// the page or there is no such note.
+  bool toggleStickyMinimized(
+    String id, {
+    Rect? pageBounds,
+    bool growsDown = false,
+  }) {
+    final int index = _stickyIndex(id);
+    if (_disposed || _isBusy || index < 0) {
+      return false;
+    }
+    StickyNoteElement next = _stickies[index].copyWith(
+      minimized: !_stickies[index].minimized,
+    );
+    if (!next.minimized && pageBounds != null) {
+      next = next.copyWith(
+        center: StickyPlacementGesture._clamp(
+          next.center,
+          next.bounds.size,
+          pageBounds,
+          growsDown,
+        ),
+      );
+    }
+    if (next.minimized && _editingStickyId == id) {
+      _setEditingSticky(null);
+    }
+    _replaceSticky(index, next);
+    return true;
+  }
+
+  /// Puts [next] in place of the sticky note at [index], as one change.
+  void _replaceSticky(int index, StickyNoteElement next) {
     _stickies = List<StickyNoteElement>.of(_stickies)..[index] = next;
     final InkSelection? selection = _selection;
     if (selection != null && selection.stickyIndices.contains(index)) {
@@ -1766,15 +1883,16 @@ class InkController {
     }
     _documentChanged();
     _completedChanged.notify();
-    return true;
   }
 
   /// Opens the sticky note [id] for writing: strokes and erasing that start
   /// on it then go to its own ink. With [removingTap], the dot the first
   /// tap of a double tap left on the note, when it is the latest change,
-  /// is taken back without a trace in the history.
+  /// is taken back without a trace in the history. A minimized note does
+  /// not open.
   bool enterStickyEditing(String id, {Stroke? removingTap}) {
-    if (_disposed || _isBusy || _stickyById(id) == null) {
+    final StickyNoteElement? note = _stickyById(id);
+    if (_disposed || _isBusy || note == null || note.minimized) {
       return false;
     }
     if (removingTap != null &&
@@ -1921,12 +2039,17 @@ class InkController {
       return;
     }
     final Rect bounds = drag.original.bounds;
-    final InkVector center = StickyPlacementGesture._clamp(
-      position - drag.grab,
-      bounds.size,
-      drag.pageBounds,
-      drag.growsDown,
-    );
+    // The paper showing is what stays on the page; a minimized note's frame
+    // reaches beyond it.
+    final InkVector toPaper = drag.original.paperCenter - drag.original.center;
+    final InkVector center =
+        StickyPlacementGesture._clamp(
+          position - drag.grab + toPaper,
+          bounds.size,
+          drag.pageBounds,
+          drag.growsDown,
+        ) -
+        toPaper;
     if (center == _stickies[index].center) {
       return;
     }
@@ -1952,8 +2075,11 @@ class InkController {
       _documentChanged();
     }
     _activeChanged.notify();
-    _setEditingSticky(drag.original.id);
-    return _stickyById(drag.original.id);
+    final StickyNoteElement? note = _stickyById(drag.original.id);
+    if (note != null && !note.minimized) {
+      _setEditingSticky(note.id);
+    }
+    return note;
   }
 
   /// Puts the note [pointer] holds back where it was taken from.
@@ -3642,6 +3768,23 @@ class InkHistory extends ChangeNotifier {
       oldest = _undoSteps.removeLast().snapshot;
     }
     return oldest;
+  }
+
+  /// Replaces each step's snapshot of [page] by what [map] makes of it.
+  void _mapSnapshots(
+    InkController page,
+    _InkSnapshot Function(_InkSnapshot) map,
+  ) {
+    for (final List<_HistoryStep> steps in <List<_HistoryStep>>[
+      _undoSteps,
+      _redoSteps,
+    ]) {
+      for (int i = 0; i < steps.length; i++) {
+        if (identical(steps[i].page, page)) {
+          steps[i] = _HistoryStep(page, map(steps[i].snapshot));
+        }
+      }
+    }
   }
 
   /// Forgets every step on [page], as when it is gone.

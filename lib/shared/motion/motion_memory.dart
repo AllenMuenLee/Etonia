@@ -11,10 +11,10 @@ import '../memory/memory_pressure.dart';
 /// quickly ([MotionPace.revisit]). A key is any value naming what is shown,
 /// such as `('folder', id)` or `('dialog', 'rename')`.
 ///
-/// Nothing is ever forgotten for being old or for there being many: keys
-/// are let go only when the system runs low on memory, the same moment the
-/// app's caches give back what they hold, so what must be read again is
-/// paced as a first showing again.
+/// Nothing is forgotten for being old or for there being many: keys are let
+/// go when what they name leaves its cache, see [forget], and all at once
+/// when the system runs low on memory, so what must be read again is paced as
+/// a first showing again.
 class MotionMemory {
   MotionMemory._();
 

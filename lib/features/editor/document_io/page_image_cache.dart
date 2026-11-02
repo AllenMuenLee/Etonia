@@ -1,6 +1,7 @@
 import 'dart:ui' as ui;
 import 'dart:typed_data';
 
+import '../../../shared/memory/note_cache_pool.dart';
 import 'asset_byte_cache.dart';
 
 /// Per-editor image ownership, independent of Flutter's global image cache.
@@ -8,15 +9,23 @@ import 'asset_byte_cache.dart';
 class PageImageCache {
   PageImageCache({
     required Future<Uint8List?> Function(String) readAsset,
-    this.maxBytes,
+    NoteCacheScope? cacheScope,
     int? sourceMaxBytes,
-  }) : _sources = AssetByteCache(read: readAsset, maxBytes: sourceMaxBytes);
+  }) : cacheScope =
+           cacheScope ??
+           NoteCachePool(maxBytes: const CacheBudget().notesBytes).scope() {
+    _sources = AssetByteCache(
+      read: readAsset,
+      maxBytes: sourceMaxBytes,
+      scope: this.cacheScope,
+    );
+  }
 
-  /// How many bytes of decoded pictures are kept, if limited. By default
-  /// every picture decoded is kept, to be shown at once when it is needed
-  /// again, until the system runs low on memory ([releaseMemory]).
-  final int? maxBytes;
-  final AssetByteCache _sources;
+  /// The note's share of the memory for caches, which says how many decoded
+  /// pictures are kept: each is shown at once when it is needed again, until
+  /// its page's turn to go comes.
+  final NoteCacheScope cacheScope;
+  late final AssetByteCache _sources;
   final Map<String, _ImageEntry> _entries = {};
   final Map<String, _ImageEntry> _pending = {};
   int _generation = 0;
@@ -25,11 +34,18 @@ class PageImageCache {
       _entries.values.fold(0, (sum, entry) => sum + entry.cost);
   int get sourceBytes => _sources.retainedBytes;
 
-  Future<ui.Image> image(String assetId, int width, int height) {
+  /// The picture [assetId] at [width] by [height], kept for [page] of the
+  /// note, or for all of its pages without one. The caller owns the clone.
+  Future<ui.Image> image(
+    String assetId,
+    int width,
+    int height, {
+    Object? page,
+  }) {
     final key = '$assetId:$width:$height';
-    var entry = _entries.remove(key);
+    var entry = _entries[key];
     if (entry != null) {
-      _entries[key] = entry;
+      if (page != null) entry.item?.moveTo(page);
     } else {
       entry = _pending[key];
       if (entry == null) {
@@ -41,24 +57,32 @@ class PageImageCache {
         _pending[key] = entry;
         final generation = _generation;
         final created = entry;
+        entry.item = cacheScope.add(
+          page: page,
+          bytes: entry.cost,
+          inUse: () => _pending.containsKey(key),
+          onPop: () {
+            if (identical(_entries[key], created)) _entries.remove(key);
+            created.evict();
+          },
+        );
         entry.loading.then<void>(
           (_) {
             if (generation != _generation) return;
             _pending.remove(key);
-            _trim();
+            created.item?.resize(created.cost);
           },
           onError: (Object _) {
             if (generation != _generation) return;
             _pending.remove(key);
             if (identical(_entries[key], created)) _entries.remove(key);
+            created.item?.remove();
             created.evict();
           },
         );
       }
     }
-    final borrowed = entry.borrow();
-    _trim();
-    return borrowed;
+    return entry.borrow();
   }
 
   Future<ui.Image> _decode(String id, int width, int height) async {
@@ -76,20 +100,13 @@ class PageImageCache {
     }
   }
 
-  void _trim() {
-    final int? maxBytes = this.maxBytes;
-    if (maxBytes == null) return;
-    while (_entries.isNotEmpty && retainedBytes > maxBytes) {
-      _entries.remove(_entries.keys.first)!.evict();
-    }
-  }
-
   /// Under memory pressure: lets go of every decoded picture not still
   /// being decoded, and of the bytes kept to decode again. Pictures on
   /// screen hold clones of their own, so none goes blank.
   void releaseMemory() {
     _entries.removeWhere((String key, _ImageEntry entry) {
       if (_pending.containsKey(key)) return false;
+      entry.item?.remove();
       entry.evict();
       return true;
     });
@@ -99,6 +116,7 @@ class PageImageCache {
   void clear() {
     _generation++;
     for (final entry in _entries.values) {
+      entry.item?.remove();
       entry.evict();
     }
     _entries.clear();
@@ -118,6 +136,7 @@ class _ImageEntry {
   }
   late final Future<ui.Image> loading;
   ui.Image? _image;
+  NoteCacheItem? item;
   int cost;
   int _borrowers = 0;
   bool _evicted = false;

@@ -16,6 +16,7 @@ import 'package:greatnote/features/editor/page/note_document.dart';
 import 'package:greatnote/features/editor/widgets/palette_button.dart';
 import 'package:greatnote/features/editor/widgets/recording_options.dart';
 import 'package:greatnote/features/editor/widgets/tool_palette.dart';
+import 'package:greatnote/features/editor/widgets/toolbar_layout.dart';
 
 class _IdleRecorder extends NoteAudioRecorder {
   @override
@@ -45,7 +46,8 @@ class _Palette {
       controller = ToolPaletteController(),
       recorder = _IdleRecorder(),
       document = NoteDocument(),
-      replay = StrokeReplayController();
+      replay = StrokeReplayController(),
+      layout = ValueNotifier<ToolbarLayout>(ToolbarLayout.standard);
 
   final ValueNotifier<EditorTool> tool;
   final ValueNotifier<PenSettings> pen;
@@ -57,6 +59,7 @@ class _Palette {
   final _IdleRecorder recorder;
   final NoteDocument document;
   final StrokeReplayController replay;
+  final ValueNotifier<ToolbarLayout> layout;
   final List<NoteRecordingTrack> opened = <NoteRecordingTrack>[];
 
   void dispose() {
@@ -70,6 +73,7 @@ class _Palette {
     recorder.dispose();
     document.dispose();
     replay.dispose();
+    layout.dispose();
   }
 }
 
@@ -112,6 +116,7 @@ Future<_Palette> _pump(
             stickySettings: palette.sticky,
             onStickySettingsChanged: (StickyNoteSettings next) =>
                 palette.sticky.value = next,
+            layout: palette.layout,
           ),
         ),
       ),
@@ -133,13 +138,13 @@ void main() {
       expect(wide.height, row.height);
       expect(tall.height - column.height, 3 * 44);
       expect(tall.width, column.width);
-      // Six tools and the arrow.
-      expect(row.width, 6 * 44 + AppSizes.minTouchTarget + 2 * AppSpacing.xxs);
+      // Six tools, the arrow, and the button that customizes them.
+      expect(row.width, 7 * 44 + AppSizes.minTouchTarget + 2 * AppSpacing.xxs);
       expect(column, Size(row.height, row.width));
     });
 
     test('keeps an expanded palette inside the page where it docks', () {
-      const Rect region = Rect.fromLTWH(0, 0, 500, 700);
+      const Rect region = Rect.fromLTWH(0, 0, 540, 700);
       final Size size = ToolPalette.sizeFor(Axis.horizontal, expanded: true);
 
       for (final double along in <double>[0, 0.5, 1]) {
@@ -177,7 +182,8 @@ void main() {
     ) async {
       await _pump(tester);
 
-      expect(find.byType(PaletteButton), findsNWidgets(7));
+      // The six tools, the arrow, and the customize button.
+      expect(find.byType(PaletteButton), findsNWidgets(8));
       expect(find.byTooltip('Expand toolbar'), findsOneWidget);
       expect(find.byTooltip('Collapse toolbar'), findsNothing);
       expect(find.byIcon(CupertinoIcons.chevron_right), findsOneWidget);
@@ -193,7 +199,7 @@ void main() {
       expect(arrow.top, ai.top);
       // Compact size.
       expect(
-        tester.getSize(find.byType(ToolPalette)),
+        tester.getSize(find.byKey(const ValueKey<String>('tool-palette-card'))),
         ToolPalette.sizeFor(Axis.horizontal),
       );
     });
@@ -207,7 +213,7 @@ void main() {
       await tester.pumpAndSettle();
 
       expect(palette.controller.expanded.value, isTrue);
-      expect(find.byType(PaletteButton), findsNWidgets(10));
+      expect(find.byType(PaletteButton), findsNWidgets(11));
       expect(find.byTooltip('Recordings'), findsOneWidget);
       expect(find.byTooltip('Text'), findsOneWidget);
       expect(find.byTooltip('Show ruler'), findsOneWidget);
@@ -215,7 +221,7 @@ void main() {
       expect(find.byIcon(CupertinoIcons.chevron_left), findsOneWidget);
       expect(find.byIcon(CupertinoIcons.chevron_right), findsNothing);
       expect(
-        tester.getSize(find.byType(ToolPalette)),
+        tester.getSize(find.byKey(const ValueKey<String>('tool-palette-card'))),
         ToolPalette.sizeFor(Axis.horizontal, expanded: true),
       );
       // The arrow is still the last of them.
@@ -241,7 +247,7 @@ void main() {
       expect(find.byTooltip('Show ruler'), findsNothing);
       expect(find.byTooltip('Expand toolbar'), findsOneWidget);
       expect(
-        tester.getSize(find.byType(ToolPalette)),
+        tester.getSize(find.byKey(const ValueKey<String>('tool-palette-card'))),
         ToolPalette.sizeFor(Axis.horizontal),
       );
     });
@@ -250,12 +256,16 @@ void main() {
       WidgetTester tester,
     ) async {
       await _pump(tester);
-      final double folded = tester.getSize(find.byType(ToolPalette)).width;
+      final double folded = tester
+          .getSize(find.byKey(const ValueKey<String>('tool-palette-card')))
+          .width;
 
       await tester.tap(find.byTooltip('Expand toolbar'));
       await tester.pump();
       await tester.pump(ToolPalette.unfoldDuration * 0.4);
-      final double halfway = tester.getSize(find.byType(ToolPalette)).width;
+      final double halfway = tester
+          .getSize(find.byKey(const ValueKey<String>('tool-palette-card')))
+          .width;
       expect(halfway, greaterThan(folded));
       expect(
         halfway,
@@ -264,7 +274,9 @@ void main() {
 
       await tester.pump(ToolPalette.unfoldDuration * 0.7);
       expect(
-        tester.getSize(find.byType(ToolPalette)).width,
+        tester
+            .getSize(find.byKey(const ValueKey<String>('tool-palette-card')))
+            .width,
         ToolPalette.sizeFor(Axis.horizontal, expanded: true).width,
       );
     });
@@ -280,7 +292,7 @@ void main() {
 
       expect(find.byIcon(CupertinoIcons.chevron_up), findsOneWidget);
       expect(
-        tester.getSize(find.byType(ToolPalette)),
+        tester.getSize(find.byKey(const ValueKey<String>('tool-palette-card'))),
         ToolPalette.sizeFor(Axis.vertical, expanded: true),
       );
       // The secondary tools lie below the primary ones.
@@ -422,6 +434,22 @@ void main() {
             )
             .selected,
         isTrue,
+      );
+      final BoxDecoration selectedDecoration =
+          tester
+                  .widget<AnimatedContainer>(
+                    find.descendant(
+                      of: find.byKey(const ValueKey<String>('ruler-toggle')),
+                      matching: find.byType(AnimatedContainer),
+                    ),
+                  )
+                  .decoration!
+              as BoxDecoration;
+      expect(
+        selectedDecoration.color,
+        AppColors.of(
+          tester.element(find.byKey(const ValueKey<String>('ruler-toggle'))),
+        ).accent,
       );
 
       await tester.tap(find.byTooltip('Hide ruler'));

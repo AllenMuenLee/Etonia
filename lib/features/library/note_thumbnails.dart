@@ -6,6 +6,7 @@ import 'dart:ui' as ui;
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 
+import '../../shared/motion/motion_memory.dart';
 import '../editor/document_io/document_models.dart';
 import '../editor/document_io/document_platform.dart';
 import '../editor/ink/ink_painter.dart';
@@ -90,17 +91,25 @@ class ThumbnailCache {
   final int pixelWidth;
 
   /// How many notes' pictures are kept, the least recently shown dropped
-  /// first. By default there is no limit: every picture drawn is kept, to
-  /// be shown at once when its note is shown again, until the system runs
-  /// low on memory ([releaseMemory]).
+  /// first, if limited. What is let go is read back from disk when its note
+  /// is shown again.
   final int? capacity;
 
   /// How many pictures are drawn at once.
   final int concurrency;
 
-  /// How many bytes of pictures are kept, if limited; like [capacity],
-  /// unlimited by default.
+  /// How many bytes of pictures are kept, if limited; like [capacity], the
+  /// least recently shown are dropped first.
   final int? maxBytes;
+
+  /// What the folder pages keep apart from the pictures, out of [maxBytes].
+  /// It never takes more than half: the pictures on screen need the room.
+  set reservedBytes(int bytes) {
+    _reservedBytes = bytes;
+    _evict();
+  }
+
+  int _reservedBytes = 0;
 
   /// How many of a folder's notes [prefetch] draws ahead: about a screen
   /// and a half of cards.
@@ -224,6 +233,24 @@ class ThumbnailCache {
     }
   }
 
+  /// Like [prefetch], for pictures likely wanted next rather than now, such
+  /// as the first cards of the folders shown: queued behind everything
+  /// else, and with no limit of their own beyond [notes].
+  void prefetchBehind(Iterable<NoteEntry> notes, ThumbnailStyle style) {
+    for (final NoteEntry note in notes) {
+      // What was shown is not pushed out for what may be.
+      final int? maxBytes = this.maxBytes;
+      if (maxBytes != null && _heldBytes(maxBytes) >= maxBytes) return;
+      final _Entry? kept = _entries[note.id];
+      // Drawn already, or on its way: nothing to do, and its place in the
+      // order of what was shown last is kept.
+      if (kept != null && kept.key == _keyOf(note) && kept.style == style) {
+        continue;
+      }
+      _request(note, style, background: true);
+    }
+  }
+
   /// What [note]'s picture is named for: the pages it shows, as saved.
   /// Its title and dates do not change it, and it reads back exactly.
   static String _keyOf(NoteEntry note) => 'r${note.revision}';
@@ -306,15 +333,20 @@ class ThumbnailCache {
     }
   }
 
+  int _heldBytes(int maxBytes) =>
+      retainedBytes + math.min(_reservedBytes, maxBytes ~/ 2);
+
   void _evict() {
     final int? capacity = this.capacity;
     final int? maxBytes = this.maxBytes;
     if (capacity == null && maxBytes == null) return;
     while (_entries.isNotEmpty &&
         ((capacity != null && _entries.length > capacity) ||
-            (maxBytes != null && retainedBytes > maxBytes))) {
+            (maxBytes != null && _heldBytes(maxBytes) > maxBytes))) {
       final String oldest = _entries.keys.first;
       _entries.remove(oldest)!.dispose();
+      // Read back when next shown, at a first showing's pace.
+      MotionMemory.instance.forget(('thumbnail', oldest));
     }
   }
 
@@ -399,7 +431,9 @@ class ThumbnailCache {
       }
     }
     if (cancelled()) return null;
-    final StoredPage? page = fresh ?? await repository.loadFirstPage(noteId);
+    // A whiteboard is shown by the part with its ink, not the whole board.
+    final StoredPage? page = (fresh ?? await repository.loadFirstPage(noteId))
+        ?.framed();
     if (page == null || cancelled()) return null;
     final Size paper = NoteThumbnailPainter.pageSizeOf(page);
     final double aspect = (paper.width / paper.height).clamp(0.6, 1.5);
@@ -726,8 +760,8 @@ class NoteThumbnailPainter extends CustomPainter {
     this.paintInk = true,
   });
 
-  /// The smallest page a fit or infinite page is shown as, so a few lines
-  /// of ink do not fill the card.
+  /// The smallest page a fit page is shown as, so a few lines of ink do not
+  /// fill the card. A whiteboard is given its [StoredPage.framed] size.
   static const Size _minimumPage = Size(640, 480);
 
   final StoredPage page;

@@ -53,6 +53,12 @@ class StickyPaperColor {
   /// from white page paper.
   Color get edge => Color.lerp(paper, const Color(0xFF1F2937), 0.12)!;
 
+  /// The minimize button's glyph: dark on the curated papers, and white on
+  /// a custom paper too dark for that to show.
+  Color get control => paper.computeLuminance() > 0.35
+      ? Color.lerp(paper, const Color(0xFF1F2937), 0.75)!
+      : const Color(0xFFFFFFFF);
+
   @override
   bool operator ==(Object other) =>
       identical(this, other) ||
@@ -142,6 +148,10 @@ class StickyNoteConfig {
     this.maxPatternMarks = 4000,
     this.doubleTapTimeout = const Duration(milliseconds: 350),
     this.doubleTapSlop = 24,
+    this.toggleCenter = 22,
+    this.toggleRadius = 13,
+    this.toggleStylusHitRadius = 16,
+    this.toggleTouchHitRadius = 22,
   });
 
   final Size defaultSize;
@@ -171,6 +181,19 @@ class StickyNoteConfig {
   /// Two taps on a note this close in time and space open it for writing.
   final Duration doubleTapTimeout;
   final double doubleTapSlop;
+
+  /// How far the minimize button's middle is from the note's top and left
+  /// edges, in the note's own units. It is in the same place open and
+  /// minimized, so a second tap finds it under the pen.
+  final double toggleCenter;
+
+  /// The button as drawn.
+  final double toggleRadius;
+
+  /// How far from the button's middle a press counts: a pen is precise, and
+  /// writes close to it; a finger or mouse gets the full touch target.
+  final double toggleStylusHitRadius;
+  final double toggleTouchHitRadius;
 }
 
 /// The look a new sticky note gets, remembered for the session.
@@ -223,6 +246,7 @@ class StickyNoteElement {
     required this.colorId,
     this.paper = StickyPaperStyle.lined,
     List<Stroke> strokes = const <Stroke>[],
+    this.minimized = false,
   }) : strokes = List<Stroke>.unmodifiable(strokes);
 
   final String id;
@@ -244,10 +268,40 @@ class StickyNoteElement {
   /// The note's ink, in local coordinates, in paint order.
   final List<Stroke> strokes;
 
+  /// Whether only the note's top-left corner shows, without its pattern or
+  /// ink. Its frame and ink are kept, so it opens out just as it was.
+  final bool minimized;
+
+  /// A minimized note's width and height, in its own units.
+  static const double minimizedSide = 44;
+
   StickyPaperColor get color => StickyPalette.resolve(colorId);
 
   /// The note's extent in its own units.
   Size get localSize => Size(size.width / scale, size.height / scale);
+
+  /// The paper showing, in the note's own units, from its top-left corner.
+  Size get paperLocalSize {
+    final Size local = localSize;
+    return minimized
+        ? Size(
+            math.min(minimizedSide, local.width),
+            math.min(minimizedSide, local.height),
+          )
+        : local;
+  }
+
+  /// The paper showing, in page units.
+  Size get paperSize => minimized ? paperLocalSize * scale : size;
+
+  /// The middle of the paper showing, on the page.
+  InkVector get paperCenter {
+    if (!minimized) {
+      return center;
+    }
+    final Size local = paperLocalSize;
+    return toPage(InkVector(local.width / 2, local.height / 2));
+  }
 
   /// "Yellow lined sticky note", for assistive technology.
   String get label => '${color.label} ${paper.label.toLowerCase()} sticky note';
@@ -284,9 +338,9 @@ class StickyNoteElement {
     );
   }
 
-  /// The four corners on the page, clockwise from the top-left.
+  /// The paper's four corners on the page, clockwise from the top-left.
   List<InkVector> get corners {
-    final Size local = localSize;
+    final Size local = paperLocalSize;
     return <InkVector>[
       toPage(InkVector.zero),
       toPage(InkVector(local.width, 0)),
@@ -320,12 +374,13 @@ class StickyNoteElement {
   }) {
     final double c = math.cos(rotation);
     final double s = math.sin(rotation);
-    final InkVector d = point - center;
+    final InkVector d = point - paperCenter;
     // Distance from the middle, folded into one quadrant.
     final double x = (c * d.x + s * d.y).abs();
     final double y = (-s * d.x + c * d.y).abs();
-    final double hw = size.width / 2;
-    final double hh = size.height / 2;
+    final Size paper = paperSize;
+    final double hw = paper.width / 2;
+    final double hh = paper.height / 2;
     if (x > hw + tolerance || y > hh + tolerance) {
       return false;
     }
@@ -336,6 +391,24 @@ class StickyNoteElement {
     final double dx = x - (hw - r);
     final double dy = y - (hh - r);
     return math.sqrt(dx * dx + dy * dy) <= r + tolerance;
+  }
+
+  /// Whether [point] is on the minimize button, as far out as [hitRadius],
+  /// in the note's own units. A minimized note is all button.
+  bool toggleContains(
+    InkVector point, {
+    required StickyNoteConfig config,
+    required double hitRadius,
+  }) {
+    final InkVector local = toLocal(point);
+    if (minimized) {
+      return (Offset.zero & paperLocalSize)
+          .inflate(config.hitSlop / scale)
+          .contains(Offset(local.x, local.y));
+    }
+    return (local - InkVector(config.toggleCenter, config.toggleCenter))
+            .length <=
+        hitRadius;
   }
 
   /// This note carried along by [transform]: a similarity, so its ink,
@@ -359,6 +432,7 @@ class StickyNoteElement {
     String? colorId,
     StickyPaperStyle? paper,
     List<Stroke>? strokes,
+    bool? minimized,
   }) {
     return StickyNoteElement(
       id: id ?? this.id,
@@ -369,6 +443,7 @@ class StickyNoteElement {
       colorId: colorId ?? this.colorId,
       paper: paper ?? this.paper,
       strokes: strokes ?? this.strokes,
+      minimized: minimized ?? this.minimized,
     );
   }
 

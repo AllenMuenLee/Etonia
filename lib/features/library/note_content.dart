@@ -11,6 +11,8 @@ import '../editor/ink/ink_palette.dart';
 import '../editor/ink/ink_sample.dart';
 import '../editor/ink/notation_playback.dart';
 import '../editor/ink/stroke.dart';
+import '../editor/ink/selection_transform.dart';
+import '../editor/page/content_bounds.dart';
 import '../editor/page/note_document.dart';
 import '../editor/page/page_setup.dart';
 import '../editor/sticky/sticky_note.dart';
@@ -24,7 +26,9 @@ import 'note_recording_track.dart';
 /// Schema 5 adds searchable handwriting and its reusable normalized strokes.
 /// Schema 6 adds local audio tracks and synchronized stroke/erase timing.
 /// Schema 7 keeps editable SVG source inline with vector page elements.
-/// Schema 8 adds editable typed text boxes.
+/// Schema 8 adds editable typed text boxes. An infinite page written with a
+/// `boardOrigin` has its ink in [InfiniteBoard] coordinates; one without it
+/// is from before whiteboards, and its ink is moved onto the board as read.
 const int storageSchema = 8;
 
 /// A note's reading was dropped part way: no one waited for it any more.
@@ -297,7 +301,7 @@ class StoredPage {
     final List<StickyNoteElement> stickyNotes = _stickyNotesFromJson(
       json['stickyNotes'],
     );
-    return StoredPage(
+    final StoredPage page = StoredPage(
       setup: PageSetup(
         // Legacy `fit` pages become ordinary A4 paper.
         size: _byName(PageSize.values, json['size'], PageSize.a4Portrait),
@@ -354,6 +358,72 @@ class StoredPage {
             in (json['pdfMasks'] as List?) ?? const <Object?>[])
           ?_pdfMaskFromJson(raw),
       ],
+    );
+    if (!page.isBoard) return page;
+    // An infinite page from before whiteboards grew right and down from
+    // the top-left corner: that corner becomes the middle of the board.
+    final Object? origin = json['boardOrigin'];
+    final Offset stored = origin is List && origin.length == 2
+        ? Offset((origin[0]! as num).toDouble(), (origin[1]! as num).toDouble())
+        : Offset.zero;
+    final Offset shift = InfiniteBoard.origin - stored;
+    return shift == Offset.zero ? page : page.translated(shift);
+  }
+
+  /// Whether this page is a whiteboard: an infinite page, its ink in
+  /// [InfiniteBoard] coordinates.
+  bool get isBoard => setup.size == PageSize.infinite && pdfSource == null;
+
+  /// The box round everything on the page, or null when it is empty.
+  Rect? get contentBounds => pageContentBounds(
+    strokes: strokes,
+    images: images,
+    stickies: stickyNotes,
+    texts: textElements,
+  );
+
+  /// The page as it is shown away from the editor, in thumbnails and
+  /// exports: a whiteboard cut down to [InfiniteBoard.frameOf] its ink,
+  /// moved to the top-left corner, with that frame as its [extent]. Any
+  /// other page is itself.
+  StoredPage framed() {
+    if (!isBoard) return this;
+    final Rect frame = InfiniteBoard.frameOf(contentBounds);
+    return translated(-frame.topLeft, extent: frame.size);
+  }
+
+  /// This page with everything on it moved by [delta]. Its [extent], which
+  /// only an infinite page uses, becomes [extent].
+  StoredPage translated(Offset delta, {Size? extent}) {
+    final InkVector by = InkVector(delta.dx, delta.dy);
+    final InkTransform move = InkTransform.translation(by);
+    return StoredPage(
+      setup: setup,
+      strokes: <Stroke>[for (final Stroke s in strokes) s.translated(by)],
+      extent: extent,
+      lastFitSize: lastFitSize,
+      pdfSource: pdfSource,
+      images: <NoteImageElement>[
+        for (final NoteImageElement e in images) e.transformed(move),
+      ],
+      playbacks: playbacks,
+      stickyNotes: <StickyNoteElement>[
+        for (final StickyNoteElement e in stickyNotes) e.transformed(move),
+      ],
+      textElements: <NoteTextElement>[
+        for (final NoteTextElement e in textElements)
+          e.copyWith(position: e.position + by),
+      ],
+      recognizedWords: recognizedWords,
+      erasedStrokeRecords: <ErasedStrokeRecord>[
+        for (final ErasedStrokeRecord r in erasedStrokeRecords)
+          ErasedStrokeRecord(
+            stroke: r.stroke.translated(by),
+            erasedAtMs: r.erasedAtMs,
+            recordingId: r.recordingId,
+          ),
+      ],
+      pdfMasks: <Rect>[for (final Rect r in pdfMasks) r.shift(delta)],
     );
   }
 
@@ -562,6 +632,7 @@ class StoredPage {
           : StickyPalette.yellow.id,
       paper: StickyPaperStyle.byName(json['paper']),
       strokes: strokes,
+      minimized: json['minimized'] == true,
     );
   }
 
@@ -577,6 +648,7 @@ class StoredPage {
         'strokes': <Object?>[
           for (final Stroke stroke in note.strokes) strokeToJson(stroke),
         ],
+        if (note.minimized) 'minimized': true,
       };
 
   Map<String, Object?> toJson() => <String, Object?>{
@@ -587,6 +659,8 @@ class StoredPage {
     'background': setup.background.name,
     'customSize': _sizeJson(setup.customSize),
     'extent': _sizeJson(extent),
+    if (isBoard)
+      'boardOrigin': <double>[InfiniteBoard.origin.dx, InfiniteBoard.origin.dy],
     'lastFitSize': _sizeJson(lastFitSize),
     'pdfSource': pdfSource == null
         ? null

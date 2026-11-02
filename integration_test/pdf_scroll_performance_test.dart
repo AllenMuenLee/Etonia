@@ -437,8 +437,7 @@ void main() {
     final viewport = tester.state<PageViewportState>(find.byType(PageViewport));
     final budgetMs = 1000 / tester.view.display.refreshRate;
 
-    final Size screen =
-        tester.view.physicalSize / tester.view.devicePixelRatio;
+    final Size screen = tester.view.physicalSize / tester.view.devicePixelRatio;
 
     /// PDF pages on screen showing no paper yet, as in a fling outrunning
     /// the renderer.
@@ -557,6 +556,8 @@ void main() {
             ? 0
             : rasterizer.renderMs.reduce((a, b) => a + b) /
                   rasterizer.renderMs.length,
+        'render_ms_p50': _pct(rasterizer.renderMs, .5),
+        'render_ms_p95': _pct(rasterizer.renderMs, .95),
         'render_ms_max': _pct(rasterizer.renderMs, 1),
         'render_mpx_max': rasterizer.renderPixels.isEmpty
             ? 0

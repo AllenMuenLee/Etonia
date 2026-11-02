@@ -53,6 +53,7 @@ void main() {
       color: Color(0xFF000000),
       width: 2.0,
       pressureSensitivity: 0.5,
+      taper: 0.7,
       stabilization: 0.35,
       writingStyle: 'pen',
       exclusionRects: <Rect>[
@@ -65,6 +66,7 @@ void main() {
     expect(map['surfaceId'], 3);
     expect(map['enabled'], true);
     expect(map['previewEnabled'], true);
+    expect(map['taper'], 0.7);
     expect(map['stabilization'], 0.35);
     expect(map['writingStyle'], 'pen');
     expect(map['exclusionRects'], <double>[0, 0, 50, 40, 10, 15, 40, 40]);

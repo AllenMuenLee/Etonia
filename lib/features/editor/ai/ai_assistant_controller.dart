@@ -595,7 +595,27 @@ class AiAssistantController extends ChangeNotifier {
     if (_disposed) {
       return;
     }
+    _composerRequested = false;
     _placement.value = AiPanelPlacement(isOpen: false, side: side);
+  }
+
+  bool _composerRequested = false;
+
+  /// Asks the panel to put the caret in its composer, bringing up the
+  /// keyboard, as soon as it shows: for typing about what was just chosen.
+  void requestComposer() {
+    if (_disposed) {
+      return;
+    }
+    _composerRequested = true;
+    notifyListeners();
+  }
+
+  /// Whether [requestComposer] has been asked since this was last called.
+  bool takeComposerRequest() {
+    final bool requested = _composerRequested;
+    _composerRequested = false;
+    return requested;
   }
 
   void setSide(AiPanelSide side) {
@@ -711,6 +731,86 @@ class AiAssistantController extends ChangeNotifier {
     notifyListeners();
   }
 
+  /// Removes one chosen group from the open conversation. Messages stay in
+  /// their thread, while subsequent requests use only the groups left on the
+  /// note. Removing the last group turns the thread into a page-level chat.
+  void removeContext(AiContextGroup group) {
+    final _AiConversation? conversation = _conversation;
+    if (_disposed || conversation == null || conversation.context.isPage) {
+      return;
+    }
+    final AiSelectionContext previous = conversation.context;
+    final List<AiContextGroup> groups = previous.groups;
+    final int removed = groups.indexWhere(
+      (AiContextGroup candidate) =>
+          identical(candidate, group) || _sameContextGroup(candidate, group),
+    );
+    if (removed < 0) return;
+
+    final List<AiContextGroup> remaining = <AiContextGroup>[
+      for (int i = 0; i < groups.length; i++)
+        if (i != removed) groups[i],
+    ];
+    final AiSelectionContext next;
+    if (remaining.isEmpty) {
+      next = AiSelectionContext._page(
+        _emptySnapshot(
+          brightness: previous.snapshot.brightness,
+          background: previous.snapshot.background,
+        ),
+      );
+    } else {
+      Rect? pdfBounds;
+      for (final AiContextGroup kept in remaining) {
+        if (kept.pdfBounds case final Rect bounds) {
+          pdfBounds = pdfBounds?.expandToInclude(bounds) ?? bounds;
+        }
+      }
+      next = AiSelectionContext._(
+        previous.snapshot.retaining(
+          sourceStrokes: <Stroke>[
+            for (final AiContextGroup kept in remaining) ...kept.strokes,
+          ],
+          sourceImages: <NoteImageElement>[
+            for (final AiContextGroup kept in remaining) ...kept.images,
+          ],
+          stickies: <StickyNoteElement>[
+            for (final AiContextGroup kept in remaining) ...kept.stickies,
+          ],
+          explicitBounds: pdfBounds,
+        ),
+        groups: remaining,
+      );
+      _notePresent(next);
+    }
+    conversation
+      ..context = next
+      ..lastUsed = ++_conversationClock;
+    _selectionChanged = false;
+    _selectionHasChat = false;
+    if (!next.isPage) {
+      unawaited(_render(next).then((void _) => _refresh(conversation)));
+    }
+    _session.notify();
+    notifyListeners();
+  }
+
+  static bool _sameContextGroup(AiContextGroup a, AiContextGroup b) {
+    bool sameIdentities<T>(List<T> left, List<T> right) {
+      if (left.length != right.length) return false;
+      for (int i = 0; i < left.length; i++) {
+        if (!identical(left[i], right[i])) return false;
+      }
+      return true;
+    }
+
+    return identical(a.page, b.page) &&
+        a.pdfBounds == b.pdfBounds &&
+        sameIdentities(a.strokes, b.strokes) &&
+        sameIdentities(a.images, b.images) &&
+        sameIdentities(a.stickies, b.stickies);
+  }
+
   /// Draws the open conversation's image again over the ink that has been
   /// added, or taken away, where its ink lies since it was last drawn. Not
   /// while a message is being sent: sending drew it afresh itself.
@@ -782,11 +882,14 @@ class AiAssistantController extends ChangeNotifier {
 
   /// No ink. Its theme only colours the assistant's notes in a later image,
   /// should the conversation take ink in.
-  static SelectionInkSnapshot _emptySnapshot() {
+  static SelectionInkSnapshot _emptySnapshot({
+    Brightness brightness = Brightness.light,
+    Color background = const Color(0xFFFFFFFF),
+  }) {
     return SelectionInkSnapshot.restored(
       strokes: const <SnapshotStroke>[],
-      brightness: Brightness.light,
-      background: const Color(0xFFFFFFFF),
+      brightness: brightness,
+      background: background,
     );
   }
 

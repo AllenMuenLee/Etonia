@@ -602,6 +602,7 @@ void main() {
     await tester.tap(find.byTooltip('Insert image'));
     await tester.pumpAndSettle();
     expect(find.text('Choose from gallery'), findsOneWidget);
+    expect(find.text('Import editable SVG'), findsNothing);
     expect(find.text('Take photo'), findsOneWidget);
 
     await tester.tap(find.text('Choose from gallery'));

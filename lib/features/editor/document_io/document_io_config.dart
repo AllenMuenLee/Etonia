@@ -7,22 +7,18 @@ class DocumentIoConfig {
     this.maxStoredImageDimension = 4096,
     this.insertedImageMaxFraction = 0.6,
     this.maxPdfRenderDimension = 4096,
-    this.pdfRenderCacheSize = 7,
-    this.pdfRenderCacheBytes = 160 * 1024 * 1024,
     this.pdfSourceCacheBytes = 16 * 1024 * 1024,
     this.pdfPreloadDistance = 2,
     this.pdfSharpPreloadDistance = 1,
     this.pdfPreviewDimension = 640,
-    this.pdfPreviewCacheBytes = 32 * 1024 * 1024,
     this.pdfSettleDelay = const Duration(milliseconds: 120),
     this.pdfScrollSettleDelay = const Duration(milliseconds: 360),
+    this.pdfSlowScrollFraction = 0.3,
     this.exportPdfRasterDpi = 200,
     this.maxPdfPagePoints = 14400,
   }) : assert(maxStoredImageDimension > 0),
        assert(insertedImageMaxFraction > 0 && insertedImageMaxFraction <= 1),
        assert(maxPdfRenderDimension > 0),
-       assert(pdfRenderCacheSize > 2 * pdfPreloadDistance),
-       assert(pdfRenderCacheBytes > 0),
        assert(pdfSourceCacheBytes >= 0),
        assert(pdfPreloadDistance >= 0),
        assert(
@@ -30,18 +26,13 @@ class DocumentIoConfig {
              pdfSharpPreloadDistance <= pdfPreloadDistance,
        ),
        assert(pdfPreviewDimension > 0),
-       assert(pdfPreviewCacheBytes >= 0),
+       assert(pdfSlowScrollFraction >= 0 && pdfSlowScrollFraction <= 1),
        assert(exportPdfRasterDpi > 0),
        assert(maxPdfPagePoints > 0);
 
   final int maxStoredImageDimension;
   final double insertedImageMaxFraction;
   final int maxPdfRenderDimension;
-  final int pdfRenderCacheSize;
-
-  /// Decoded pixels, including reservations for pending renders. Visible
-  /// layer-owned clones may outlive eviction and are not cache-owned bytes.
-  final int pdfRenderCacheBytes;
   final int pdfSourceCacheBytes;
 
   /// How many pages before and after the current one have their PDF
@@ -55,7 +46,6 @@ class DocumentIoConfig {
   /// The longest side, in pixels, of the quick render a PDF page shows
   /// while its sharp one is on the way.
   final int pdfPreviewDimension;
-  final int pdfPreviewCacheBytes;
 
   /// How long the page in view must stay the same before the view counts as
   /// focused and sharp renders may start.
@@ -65,6 +55,11 @@ class DocumentIoConfig {
   /// until then only quick previews render. Longer than [pdfSettleDelay] so
   /// repeated flicks do not start expensive work in the pauses between them.
   final Duration pdfScrollSettleDelay;
+
+  /// A scroll slowed to this fraction of its fastest, as a fling coasting
+  /// out, counts as settled: sharp renders start without waiting for it to
+  /// stop.
+  final double pdfSlowScrollFraction;
   final double exportPdfRasterDpi;
   final double maxPdfPagePoints;
 }

@@ -6,17 +6,30 @@ import android.graphics.Matrix
 import android.graphics.RectF
 import android.os.Handler
 import android.os.Looper
+import android.view.InputDevice
+import android.view.KeyEvent
 import android.view.MotionEvent
 import android.view.View
 import android.view.ViewGroup
+import android.view.ViewConfiguration
 import android.widget.FrameLayout
 import androidx.ink.authoring.InProgressStrokeId
 import androidx.ink.authoring.InProgressStrokesFinishedListener
 import androidx.ink.authoring.InProgressStrokesView
 import androidx.ink.brush.Brush
+import androidx.ink.brush.BrushBehavior
+import androidx.ink.brush.BrushCoat
 import androidx.ink.brush.BrushFamily
-import androidx.ink.brush.StockBrushes
+import androidx.ink.brush.BrushPaint
+import androidx.ink.brush.BrushTip
+import androidx.ink.brush.ExperimentalInkCustomBrushApi
+import androidx.ink.brush.InputToolType
+import androidx.ink.brush.behavior.OutOfRange
+import androidx.ink.brush.behavior.SourceNode
+import androidx.ink.brush.behavior.TargetNode
+import androidx.ink.strokes.MutableStrokeInputBatch
 import androidx.ink.strokes.Stroke
+import androidx.ink.strokes.StrokeInput
 import androidx.input.motionprediction.MotionEventPredictor
 import io.flutter.embedding.android.FlutterView
 import io.flutter.plugin.common.BinaryMessenger
@@ -35,7 +48,7 @@ class NativeInkChannel(
 ) : MethodChannel.MethodCallHandler {
     companion object {
         private const val CHANNEL = "com.etonia.app/native_ink"
-        private const val PREVIEW_TIMEOUT_MS = 160L
+        private val PEN_DEVICE_NAME = Regex("""\b(pen|stylus)\b""", RegexOption.IGNORE_CASE)
     }
 
     private val channel = MethodChannel(messenger, CHANNEL)
@@ -45,6 +58,10 @@ class NativeInkChannel(
     private var overlay: NativeInkOverlay? = null
     private var active: ActiveStroke? = null
     private var predictor: MotionEventPredictor? = null
+    private var primaryButtonDown = false
+    private var secondaryButtonDown = false
+    private var lastPrimaryPressTime = 0L
+    private var pendingSinglePress: Runnable? = null
 
     init {
         channel.setMethodCallHandler(this)
@@ -122,8 +139,81 @@ class NativeInkChannel(
         }
     }
 
+    /** Observes stylus barrel buttons from touch and generic-motion paths. */
+    fun observeStylusButtons(event: MotionEvent) {
+        if (event.pointerCount == 0) return
+        val index = event.actionIndex.coerceIn(0, event.pointerCount - 1)
+        val tool = event.getToolType(index)
+        if (tool != MotionEvent.TOOL_TYPE_STYLUS && tool != MotionEvent.TOOL_TYPE_ERASER) {
+            return
+        }
+
+        val primaryDown = event.buttonState and MotionEvent.BUTTON_STYLUS_PRIMARY != 0
+        val secondaryDown = event.buttonState and MotionEvent.BUTTON_STYLUS_SECONDARY != 0
+        val primaryPressed =
+            (event.actionMasked == MotionEvent.ACTION_BUTTON_PRESS &&
+                event.actionButton == MotionEvent.BUTTON_STYLUS_PRIMARY) ||
+                (primaryDown && !primaryButtonDown)
+        val secondaryPressed =
+            (event.actionMasked == MotionEvent.ACTION_BUTTON_PRESS &&
+                event.actionButton == MotionEvent.BUTTON_STYLUS_SECONDARY) ||
+                (secondaryDown && !secondaryButtonDown)
+        primaryButtonDown = primaryDown
+        secondaryButtonDown = secondaryDown
+
+        if (primaryPressed) handlePrimaryPress(event.eventTime)
+        if (secondaryPressed) emitStylusGesture("secondaryPress")
+    }
+
+    /**
+     * Observes pens that send their buttons over Bluetooth as key events, with
+     * no button state on their MotionEvents: a Xiaomi Focus Pen sends
+     * KEYCODE_BUTTON_7 to 10. Gamepads use these keycodes too, so only a pen's
+     * count. Returns whether the key was a pen's, for the caller to consume.
+     */
+    fun observeStylusKey(event: KeyEvent): Boolean {
+        if (event.keyCode !in KeyEvent.KEYCODE_BUTTON_7..KeyEvent.KEYCODE_BUTTON_10) return false
+        val device = InputDevice.getDevice(event.deviceId)?.name ?: return false
+        if (!PEN_DEVICE_NAME.containsMatchIn(device)) return false
+        if (event.action == KeyEvent.ACTION_DOWN && event.repeatCount == 0) {
+            if (event.keyCode == KeyEvent.KEYCODE_BUTTON_7) {
+                handlePrimaryPress(event.eventTime)
+            } else {
+                emitStylusGesture("secondaryPress")
+            }
+        }
+        return true
+    }
+
+    private fun handlePrimaryPress(eventTime: Long) {
+        val timeout = ViewConfiguration.getDoubleTapTimeout().toLong()
+        val pending = pendingSinglePress
+        if (pending != null && eventTime - lastPrimaryPressTime <= timeout) {
+            handler.removeCallbacks(pending)
+            pendingSinglePress = null
+            lastPrimaryPressTime = 0L
+            emitStylusGesture("doubleTap")
+            return
+        }
+        pending?.let(handler::removeCallbacks)
+        lastPrimaryPressTime = eventTime
+        val single = Runnable {
+            pendingSinglePress = null
+            lastPrimaryPressTime = 0L
+            emitStylusGesture("singlePress")
+        }
+        pendingSinglePress = single
+        handler.postDelayed(single, timeout)
+    }
+
+    private fun emitStylusGesture(gesture: String) {
+        channel.invokeMethod("stylusGesture", mapOf("gesture" to gesture))
+    }
+
     fun dispose() {
         cancelActive(sendPacket = false)
+        pendingSinglePress?.let(handler::removeCallbacks)
+        pendingSinglePress = null
         channel.setMethodCallHandler(null)
         overlay?.let { (it.parent as? ViewGroup)?.removeView(it) }
         overlay = null
@@ -144,12 +234,22 @@ class NativeInkChannel(
             ?: return
         val pointer = event.getPointerId(index)
         val inverted = tool == MotionEvent.TOOL_TYPE_ERASER
-        active = ActiveStroke(surface, pointer, inverted)
         view.requestUnbufferedDispatch(event)
         val samples = samples(event, index, surface, includeHistory = false)
-        if (surface.previewEnabled && !inverted) {
-            overlay?.begin(pointer, event, surface, view)
+        // The preview follows the very samples Dart receives, through the
+        // same pen model, so it draws the stroke Flutter will commit.
+        val model = if (surface.previewEnabled && !inverted && samples.size >= 4) {
+            InkStrokeModel(
+                surface.strokeWidth,
+                surface.taper,
+                surface.pressureSensitivity,
+                surface.smoothing,
+            ).also { feed(it, samples, started = false) }
+        } else {
+            null
         }
+        active = ActiveStroke(surface, pointer, inverted, model)
+        if (model != null) overlay?.begin(pointer, surface, model)
         emit(surface.id, pointer, "down", inverted, samples)
     }
 
@@ -163,12 +263,16 @@ class NativeInkChannel(
         view.requestUnbufferedDispatch(event)
         val samples = samples(event, index, stroke.surface, includeHistory = true)
         if (samples.isEmpty()) return
-        if (stroke.surface.previewEnabled && !stroke.inverted && !stroke.previewSuppressed) {
-            val predicted = predictor?.predict()
-            try {
-                overlay?.append(stroke.pointer, event, predicted)
-            } finally {
-                predicted?.recycle()
+        val model = stroke.model
+        if (model != null) {
+            feed(model, samples, started = true)
+            if (!stroke.previewSuppressed) {
+                val predicted = predictor?.predict()
+                try {
+                    overlay?.append(stroke.pointer, model, predictedSamples(predicted, stroke, view))
+                } finally {
+                    predicted?.recycle()
+                }
             }
         }
         emit(stroke.surface.id, stroke.pointer, "move", stroke.inverted, samples)
@@ -179,13 +283,17 @@ class NativeInkChannel(
         val index = event.actionIndex
         if (event.getPointerId(index) != stroke.pointer) return
         val samples = samples(event, index, stroke.surface, includeHistory = true)
-        var strokeId: InProgressStrokeId? = null
-        if (stroke.surface.previewEnabled && !stroke.inverted && !stroke.previewSuppressed) {
-            strokeId = overlay?.end(stroke.pointer, event)
+        val model = stroke.model
+        if (model != null) {
+            feed(model, samples, started = true)
+            val final = model.finish()
+            if (!stroke.previewSuppressed) overlay?.end(stroke.pointer, model, final)
         }
         emit(stroke.surface.id, stroke.pointer, "up", stroke.inverted, samples)
         active = null
-        handler.postDelayed({ overlay?.finish(stroke.pointer, strokeId) }, PREVIEW_TIMEOUT_MS)
+        // Keep Jetpack Ink's finished stroke until Flutter explicitly confirms
+        // that its durable rendering has crossed a frame boundary. Starting a
+        // new stroke also clears it, so no timeout can expose a blank frame.
     }
 
     private fun cancelActive(sendPacket: Boolean) {
@@ -229,6 +337,58 @@ class NativeInkChannel(
             output.add(event.eventTime * 1000L)
             output.add(event.getPressure(pointerIndex).toDouble().coerceIn(0.0, 1.0))
         }
+        return output
+    }
+
+    /** Runs flat x, y, time-us, pressure samples through [model]. */
+    private fun feed(model: InkStrokeModel, samples: List<Any?>, started: Boolean) {
+        var index = 0
+        var first = !started
+        while (index + 3 < samples.size) {
+            val x = (samples[index] as Number).toDouble()
+            val y = (samples[index + 1] as Number).toDouble()
+            val micros = (samples[index + 2] as Number).toLong()
+            val pressure = (samples[index + 3] as? Number)?.toDouble()
+            if (first) {
+                model.start(x, y, micros, pressure)
+                first = false
+            } else {
+                model.add(x, y, micros, pressure)
+            }
+            index += 4
+        }
+    }
+
+    /** The predictor's guesses for [stroke]'s pointer, in its page's canvas pixels. */
+    private fun predictedSamples(
+        predicted: MotionEvent?,
+        stroke: ActiveStroke,
+        view: FlutterView,
+    ): List<DoubleArray> {
+        if (predicted == null) return emptyList()
+        val index = predicted.findPointerIndex(stroke.pointer)
+        if (index < 0) return emptyList()
+        val output = ArrayList<DoubleArray>(predicted.historySize + 1)
+        fun add(x: Float, y: Float, millis: Long, pressure: Float) {
+            val point = stroke.surface.localFromEvent(x, y, view) ?: return
+            output.add(
+                doubleArrayOf(
+                    point.first,
+                    point.second,
+                    (millis * 1000L).toDouble(),
+                    pressure.toDouble().coerceIn(0.0, 1.0),
+                ),
+            )
+        }
+        for (history in 0 until predicted.historySize) {
+            add(
+                predicted.getHistoricalX(index, history),
+                predicted.getHistoricalY(index, history),
+                predicted.getHistoricalEventTime(history),
+                predicted.getHistoricalPressure(index, history),
+            )
+        }
+        add(predicted.getX(index), predicted.getY(index), predicted.eventTime, predicted.getPressure(index))
         return output
     }
 
@@ -291,10 +451,12 @@ class NativeInkChannel(
     private fun argumentInt(arguments: Any?, key: String): Int? =
         ((arguments as? Map<*, *>)?.get(key) as? Number)?.toInt()
 
-    private data class ActiveStroke(
+    private class ActiveStroke(
         val surface: InkSurface,
         val pointer: Int,
         val inverted: Boolean,
+        /** The pen model behind the wet ink; null when there is no preview. */
+        val model: InkStrokeModel?,
         var previewSuppressed: Boolean = false,
     )
 
@@ -313,7 +475,10 @@ class NativeInkChannel(
         val color: Int,
         val strokeWidth: Double,
         val pressureSensitivity: Double,
+        val taper: Double,
         val stabilization: Double,
+        /** The stroke's One Euro tuning, stabilization applied, from Dart. */
+        val smoothing: InkSmoothing,
         val writingStyle: String,
         val exclusionRects: List<RectF> = emptyList(),
     ) {
@@ -377,8 +542,10 @@ class NativeInkChannel(
                     previewEnabled = arguments["previewEnabled"] as? Boolean ?: false,
                     color = (arguments["color"] as? Number)?.toLong()?.toInt() ?: Color.BLACK,
                     strokeWidth = number("strokeWidth") ?: 1.0,
-                    pressureSensitivity = number("pressureSensitivity") ?: 0.0,
+                    pressureSensitivity = number("pressureSensitivity")?.coerceIn(0.0, 1.0) ?: 0.0,
+                    taper = number("taper")?.coerceIn(0.0, 1.0) ?: 0.0,
                     stabilization = number("stabilization")?.coerceIn(0.0, 1.0) ?: 0.0,
+                    smoothing = InkSmoothing.from(arguments["smoothing"]),
                     writingStyle = arguments["writingStyle"] as? String ?: "pen",
                     exclusionRects = exclusion,
                 )
@@ -386,14 +553,50 @@ class NativeInkChannel(
         }
     }
 
-    /** Jetpack Ink's authoring view owns wet-ink modeling and low-latency rendering. */
+    /**
+     * Jetpack Ink's authoring view owns the low-latency rendering. It is fed
+     * the points of [InkStrokeModel], Flutter's own pen model, rather than
+     * raw MotionEvents: the same smoothing, pressure and taper, and the same
+     * flattened curve, so the wet ink is the stroke Flutter will commit.
+     */
     private class NativeInkOverlay(context: android.content.Context) : FrameLayout(context) {
         private val ink = InProgressStrokesView(context)
         private var pointer: Int? = null
         private var strokeId: InProgressStrokeId? = null
         private var strokeEnded = false
         private val removeWhenFinished = HashSet<InProgressStrokeId>()
-        private val families = HashMap<FamilyKey, BrushFamily>()
+        private var brush: Brush? = null
+        private val strokeToView = Matrix()
+        private var startMicros = 0L
+        private var sent = 0
+        private var lastInput: StrokeInput? = null
+        private var reportedFailure = false
+
+        /**
+         * Each point's width factor travels as its pressure, halved to fit
+         * 0..1, and the brush maps pressure straight back to 0..2 times its
+         * size, so the widths are exactly the model's.
+         */
+        @OptIn(ExperimentalInkCustomBrushApi::class)
+        private val family: BrushFamily by lazy {
+            val width = BrushBehavior(
+                TargetNode(
+                    TargetNode.Target.SIZE_MULTIPLIER,
+                    0f,
+                    2f,
+                    SourceNode(
+                        SourceNode.Source.NORMALIZED_PRESSURE,
+                        0f,
+                        1f,
+                        OutOfRange.CLAMP,
+                    ),
+                ),
+            )
+            BrushFamily.Builder()
+                .setCoat(BrushCoat(BrushTip.Builder().setBehaviors(listOf(width)).build(), BrushPaint()))
+                .setInputModel(BrushFamily.InputModel.PASSTHROUGH_MODEL)
+                .build()
+        }
 
         init {
             isClickable = false
@@ -423,48 +626,105 @@ class NativeInkChannel(
             ink.eagerInit()
         }
 
-        fun begin(pointer: Int, event: MotionEvent, surface: InkSurface, source: View) {
+        fun begin(pointer: Int, surface: InkSurface, model: InkStrokeModel) {
             clear()
-            this.pointer = pointer
-            val location = IntArray(2)
-            source.getLocationInWindow(location)
-            val motionToWorld = Matrix().apply {
-                setTranslate(-location[0].toFloat(), -location[1].toFloat())
-            }
-            strokeId = ink.startStroke(
-                event,
-                pointer,
-                brushFor(surface),
-                motionToWorld,
-                Matrix(),
+            val points = model.stable
+            if (points.size == 0) return
+            val density = resources.displayMetrics.density.toDouble()
+            // Stroke coordinates are the page's canvas pixels, as in Dart;
+            // the overlay fills the FlutterView, in physical pixels.
+            strokeToView.setValues(
+                floatArrayOf(
+                    (surface.xx * density).toFloat(),
+                    (surface.yx * density).toFloat(),
+                    (surface.originX * density).toFloat(),
+                    (surface.xy * density).toFloat(),
+                    (surface.yy * density).toFloat(),
+                    (surface.originY * density).toFloat(),
+                    0f,
+                    0f,
+                    1f,
+                ),
             )
+            val physicalPerUnit = (surface.scale * density).coerceAtLeast(1e-3)
+            val created = Brush.createWithColorIntArgb(
+                family,
+                surface.color,
+                surface.strokeWidth.toFloat().coerceAtLeast(0.01f),
+                (EPSILON_PX / physicalPerUnit).toFloat(),
+            )
+            brush = created
+            this.pointer = pointer
+            startMicros = points.micros[0]
+            strokeId = guarded {
+                val first = input(points, 0)
+                lastInput = first
+                ink.startStroke(first, created, strokeToView)
+            }
+            sent = 1
         }
 
-        fun append(pointer: Int, event: MotionEvent, prediction: MotionEvent?) {
+        fun append(pointer: Int, model: InkStrokeModel, predicted: List<DoubleArray>) {
             val id = strokeId ?: return
-            if (this.pointer != pointer) return
-            ink.addToStroke(event, pointer, id, prediction)
-        }
-
-        /** Returns the id of the stroke that was finished, for a targeted [finish]. */
-        fun end(pointer: Int, event: MotionEvent): InProgressStrokeId? {
-            val id = strokeId ?: return null
-            if (this.pointer != pointer) return null
-            ink.finishStroke(event, pointer, id)
-            strokeEnded = true
-            return id
+            if (this.pointer != pointer || strokeEnded) return
+            guarded {
+                val stable = model.stable
+                val real = batch(stable, sent, stable.size, lastInput)
+                sent = stable.size
+                if (real.size > 0) lastInput = real.get(real.size - 1)
+                val tail = model.liveTail(predicted)
+                ink.addToStroke(real, id, batch(tail, 0, tail.size, lastInput))
+            }
         }
 
         /**
-         * Hides the stroke. [only] pins the call to one stroke so a delayed
-         * finish cannot hit a newer stroke that reuses the same pointer id.
+         * Ends the wet stroke as [final], the stroke as Flutter commits it,
+         * and keeps it until [finish]. Usually that only adds the last
+         * stretch, so the stroke finishes in place; only a tapered stroke or
+         * a pressure dot, whose drawn points change, is redrawn whole.
          */
-        fun finish(pointer: Int, only: InProgressStrokeId? = null) {
-            if (only != null && only != strokeId) {
-                release(only)
+        fun end(pointer: Int, model: InkStrokeModel, final: InkPoints) {
+            val id = strokeId ?: return
+            val brush = brush ?: return
+            if (this.pointer != pointer || strokeEnded || final.size == 0) return
+            strokeEnded = true
+            guarded {
+                if (!model.finishReshapes) {
+                    val stable = model.stable
+                    val rest = batch(stable, sent, stable.size, lastInput)
+                    val tail = model.liveTail()
+                    batch(tail, 0, tail.size, lastInput, rest)
+                    sent = stable.size
+                    finishWith(rest, input(stable, stable.size - 1, 1), id)
+                    return@guarded
+                }
+                ink.cancelStroke(id)
+                val first = input(final, 0)
+                val next = ink.startStroke(first, brush, strokeToView)
+                strokeId = next
+                finishWith(batch(final, 1, final.size, first), input(final, 0, 1), next)
+            }
+        }
+
+        /** Adds [rest] and ends on its last input; with nothing new, ends on [still]. */
+        private fun finishWith(
+            rest: MutableStrokeInputBatch,
+            still: StrokeInput,
+            id: InProgressStrokeId,
+        ) {
+            if (rest.size == 0) {
+                ink.finishStroke(still, id)
                 return
             }
-            if (only == null && this.pointer != null && this.pointer != pointer) return
+            val leading = MutableStrokeInputBatch()
+            for (index in 0 until rest.size - 1) leading.add(rest.get(index))
+            if (leading.size > 0) ink.addToStroke(leading, id)
+            ink.finishStroke(rest.get(rest.size - 1), id)
+        }
+
+        /** Hides the stroke drawn by [pointer]. */
+        fun finish(pointer: Int) {
+            if (this.pointer != null && this.pointer != pointer) return
             val id = strokeId
             if (id != null) {
                 // A stroke that never got finishStroke would stay on screen
@@ -494,45 +754,70 @@ class NativeInkChannel(
             strokeEnded = false
         }
 
-        private fun brushFor(surface: InkSurface): Brush {
-            val windowMillis = if (surface.stabilization <= 0.001) {
-                0
-            } else {
-                // 0-32 ms keeps the low end nearly raw while making the top
-                // of the existing meter visibly steady. Prediction masks most
-                // of the added visual lag.
-                kotlin.math.ceil(surface.stabilization * 32.0).toInt()
-            }
-            val pressure = surface.pressureSensitivity > 0.001
-            val key = FamilyKey(surface.writingStyle, pressure, windowMillis)
-            val family = families.getOrPut(key) {
-                val stock = when {
-                    surface.writingStyle == "highlighter" -> StockBrushes.highlighter()
-                    pressure -> StockBrushes.pressurePen()
-                    else -> StockBrushes.marker()
-                }
-                val inputModel = if (windowMillis == 0) {
-                    BrushFamily.InputModel.PASSTHROUGH_MODEL
-                } else {
-                    BrushFamily.InputModel.SlidingWindowModel(windowMillis.toLong(), 240)
-                }
-                stock.toBuilder().setInputModel(inputModel).build()
-            }
-            val physicalWidth = (
-                surface.strokeWidth * surface.scale * resources.displayMetrics.density
-            ).toFloat().coerceAtLeast(0.5f)
-            return Brush.createWithColorIntArgb(
-                family,
-                surface.color,
-                physicalWidth,
-                0.1f,
+        private fun input(points: InkPoints, index: Int, extraMillis: Long = 0): StrokeInput =
+            StrokeInput.create(
+                points.xs[index].toFloat(),
+                points.ys[index].toFloat(),
+                elapsedMillis(points.micros[index]) + extraMillis,
+                InputToolType.STYLUS,
+                StrokeInput.NO_STROKE_UNIT_LENGTH,
+                pressureOf(points.widths[index]),
+                StrokeInput.NO_TILT,
+                StrokeInput.NO_ORIENTATION,
             )
+
+        /**
+         * Adds the points to [into], continuing from its last input or else
+         * [after]. Jetpack Ink throws on an input that repeats the one before
+         * it, and it sees float positions and whole milliseconds: a resting
+         * pen's smoothed points differ by less than that, so those are skipped.
+         */
+        private fun batch(
+            points: InkPoints,
+            from: Int,
+            until: Int,
+            after: StrokeInput?,
+            into: MutableStrokeInputBatch = MutableStrokeInputBatch(),
+        ): MutableStrokeInputBatch {
+            var previous = if (into.size > 0) into.get(into.size - 1) else after
+            for (index in from until until) {
+                val next = input(points, index)
+                if (previous != null &&
+                    next.x == previous.x &&
+                    next.y == previous.y &&
+                    next.elapsedTimeMillis == previous.elapsedTimeMillis
+                ) {
+                    continue
+                }
+                into.add(next)
+                previous = next
+            }
+            return into
         }
 
-        private data class FamilyKey(
-            val writingStyle: String,
-            val pressure: Boolean,
-            val windowMillis: Int,
-        )
+        private fun elapsedMillis(micros: Long) = ((micros - startMicros) / 1000L).coerceAtLeast(0L)
+
+        private fun pressureOf(widthFactor: Double) = (widthFactor / 2).toFloat().coerceIn(0f, 1f)
+
+        /**
+         * The wet ink is only a preview, so a rejected input must not take
+         * down the app: the stroke is dropped, and Flutter still draws it.
+         */
+        private inline fun <T> guarded(block: () -> T): T? = try {
+            block()
+        } catch (error: RuntimeException) {
+            if (!reportedFailure) {
+                reportedFailure = true
+                android.util.Log.w("NativeInk", "Wet ink preview failed", error)
+            }
+            ink.cancelUnfinishedStrokes()
+            strokeId = null
+            null
+        }
+
+        private companion object {
+            /** Mesh tolerance in physical pixels: finer than the eye can see. */
+            const val EPSILON_PX = 0.1
+        }
     }
 }

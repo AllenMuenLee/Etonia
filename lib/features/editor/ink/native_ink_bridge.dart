@@ -1,6 +1,9 @@
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 
+import 'smoothing_config.dart';
+import 'stylus_actions.dart';
+
 /// A full-rate packet captured before Flutter's pointer-event pipeline.
 ///
 /// Actual (including coalesced/historical) samples are sent to Dart. Predicted
@@ -83,7 +86,9 @@ class NativeInkSurface {
     required this.color,
     required this.width,
     required this.pressureSensitivity,
+    this.taper = 0,
     required this.stabilization,
+    this.smoothing = const SmoothingConfig(),
     required this.writingStyle,
     this.exclusionRects = const <Rect>[],
   });
@@ -98,7 +103,15 @@ class NativeInkSurface {
   final Color color;
   final double width;
   final double pressureSensitivity;
+
+  /// How sharply the start of a stroke narrows, as the pen's `StrokeDynamics.taper`.
+  final double taper;
   final double stabilization;
+
+  /// The One Euro tuning the next stroke is smoothed with, [stabilization]
+  /// already applied. The native preview runs the same filter, so its wet
+  /// ink follows the line Flutter commits.
+  final SmoothingConfig smoothing;
   final String writingStyle;
   final List<Rect> exclusionRects;
 
@@ -118,7 +131,21 @@ class NativeInkSurface {
       'color': color.toARGB32(),
       'strokeWidth': width,
       'pressureSensitivity': pressureSensitivity,
+      'taper': taper,
       'stabilization': stabilization,
+      'smoothing': <String, Object>{
+        'minCutoff': smoothing.minCutoff,
+        'beta': smoothing.beta,
+        'derivativeCutoff': smoothing.derivativeCutoff,
+        'minDtSeconds': smoothing.minDtSeconds,
+        'maxDtSeconds': smoothing.maxDtSeconds,
+        'maxFinalizationPoints': smoothing.maxFinalizationPoints,
+        'finalizationSpacing': smoothing.finalizationSpacing,
+        'endpointTolerance': smoothing.endpointTolerance,
+        'slowSpeed': smoothing.slowSpeed,
+        'fastSpeed': smoothing.fastSpeed,
+        'slowCutoffScale': smoothing.slowCutoffScale,
+      },
       'writingStyle': writingStyle,
     };
     if (exclusionRects.isNotEmpty) {
@@ -133,6 +160,7 @@ class NativeInkSurface {
 }
 
 typedef NativeInkPacketHandler = void Function(NativeInkPacket packet);
+typedef StylusGestureHandler = void Function(StylusGesture gesture);
 
 /// Process-wide bridge for the native Android and iOS stylus observers.
 ///
@@ -153,6 +181,21 @@ class NativeInkBridge {
       <int, NativeInkPacketHandler>{};
   int _nextSurfaceId = 1;
   bool _platformMissing = false;
+  StylusGestureHandler? _stylusGestureHandler;
+
+  /// Makes [handler] the recipient of hardware stylus gestures.
+  ///
+  /// Editors call this again when their page is touched, so a visible split
+  /// or tab naturally becomes the target of button actions.
+  void claimStylusGestures(StylusGestureHandler handler) {
+    _stylusGestureHandler = handler;
+  }
+
+  void releaseStylusGestures(StylusGestureHandler handler) {
+    if (_stylusGestureHandler == handler) {
+      _stylusGestureHandler = null;
+    }
+  }
 
   int allocateSurfaceId() => _nextSurfaceId++;
 
@@ -247,6 +290,18 @@ class NativeInkBridge {
   }
 
   Future<void> _handleMethodCall(MethodCall call) async {
+    if (call.method == 'stylusGesture' && call.arguments is Map) {
+      final Object? encoded = (call.arguments as Map)['gesture'];
+      if (encoded is String) {
+        for (final StylusGesture gesture in StylusGesture.values) {
+          if (gesture.name == encoded) {
+            _stylusGestureHandler?.call(gesture);
+            break;
+          }
+        }
+      }
+      return;
+    }
     if (call.method != 'inkPacket' || call.arguments is! Map) {
       return;
     }

@@ -114,6 +114,16 @@ class _AiAssistantPanelState extends State<AiAssistantPanel> {
     _shownMessages = widget.controller.messages.length;
     _shownState = widget.controller.requestState;
     _scrollToEnd();
+    _takeComposerRequest();
+  }
+
+  /// Puts the caret in the composer, after the frame that lays it out, if
+  /// the editor has asked for it.
+  void _takeComposerRequest() {
+    if (!widget.controller.takeComposerRequest()) return;
+    WidgetsBinding.instance.addPostFrameCallback((Duration _) {
+      if (mounted) _composerFocus.requestFocus();
+    });
   }
 
   @override
@@ -168,6 +178,7 @@ class _AiAssistantPanelState extends State<AiAssistantPanel> {
 
   void _onControllerChanged() {
     final AiAssistantController controller = widget.controller;
+    _takeComposerRequest();
     // Words written on the page arrive in the draft; the caret follows them.
     if (controller.draft != _text.text) {
       _text.value = TextEditingValue(

@@ -15,8 +15,8 @@ enum PageSize {
   /// added after it. The dimensions live in [PageSetup.customSize].
   custom('Custom'),
 
-  /// Starts at the size of the writing area and grows when ink reaches its
-  /// right or bottom edge.
+  /// A whiteboard: an [InfiniteBoard] that reaches far past the screen in
+  /// every direction, with no paper edge in view.
   infinite('Infinite');
 
   const PageSize(this.label, [this.fixedSize]);
@@ -83,27 +83,20 @@ class PageSetup {
   int get hashCode => Object.hash(size, background, customSize);
 }
 
-/// Background rule spacings and infinite-page growth, in logical page
-/// units.
+/// Background rule spacings, in logical page units.
 class PageConfig {
   const PageConfig({
     this.lineSpacing = 32,
     this.gridSpacing = 24,
     this.dotSpacing = 24,
     this.marginRuleInset = 72,
-    this.edgeMargin = 96,
-    this.growthFraction = 0.5,
-    this.minGrowthStep = 256,
-    this.maxExtent = 20000,
     this.appendPageAt = 0.75,
+    this.minRuleGap = 10,
   }) : assert(lineSpacing > 0),
        assert(appendPageAt > 0 && appendPageAt <= 1),
        assert(gridSpacing > 0),
        assert(dotSpacing > 0),
-       assert(edgeMargin >= 0),
-       assert(growthFraction >= 0),
-       assert(minGrowthStep > 0),
-       assert(maxExtent > 0);
+       assert(minRuleGap >= 0);
 
   final double lineSpacing;
   final double gridSpacing;
@@ -112,21 +105,74 @@ class PageConfig {
   /// Distance of lined paper's margin rule from the left edge.
   final double marginRuleInset;
 
-  /// An infinite page grows when ink comes this close to its right or
-  /// bottom edge.
-  final double edgeMargin;
-
-  /// Each growth adds this fraction of the writing area's extent in that
-  /// direction, and at least [minGrowthStep].
-  final double growthFraction;
-  final double minGrowthStep;
-
-  /// An infinite page never grows past this in either direction.
-  final double maxExtent;
-
   /// Once ink on the last page of a fixed size reaches this fraction of
   /// its height, an empty page is added after it, ready to scroll onto.
   final double appendPageAt;
+
+  /// The closest, in screen pixels, that rules are drawn to each other.
+  /// Zoomed far out, as a whiteboard can be, every second rule is left out,
+  /// and again, until they are at least this far apart.
+  final double minRuleGap;
+}
+
+/// The writing surface of an infinite page: one fixed square of page
+/// units, so large that it reads as endless. Its ink starts at [origin],
+/// the middle, so there is as much room above and to the left of the first
+/// stroke as below and to the right of it.
+///
+/// Its size is a power of two, kept small enough that page coordinates
+/// stay finer than a hundredth of a unit in single precision.
+abstract final class InfiniteBoard {
+  static const double extent = 131072;
+  static const Size size = Size(extent, extent);
+
+  /// The middle of the board, on the rules' lattice, so ink moved here from
+  /// a fixed page, or back, keeps its place on the lines.
+  static const Offset origin = Offset(683 * frameSnap, 683 * frameSnap);
+
+  /// The smallest frame [frameOf] gives, so a few lines of ink do not fill
+  /// a whole thumbnail or exported page.
+  static const Size minFrame = Size(640, 480);
+
+  /// The blank border [frameOf] leaves round the ink.
+  static const double frameMargin = 48;
+
+  /// The part of a board worth showing away from the editor, in thumbnails,
+  /// the page overview, and exports: [ink] with a margin, at least
+  /// [minFrame], or a [minFrame] at [origin] when there is no ink.
+  static Rect frameOf(Rect? ink) {
+    if (ink == null || !ink.isFinite) {
+      return origin & minFrame;
+    }
+    final Rect padded = ink.inflate(frameMargin);
+    // On the rules' lattice, so lines and dots shown from the frame's
+    // corner fall where they were under the ink.
+    final Offset corner = Offset(
+      (padded.left / frameSnap).floorToDouble() * frameSnap,
+      (padded.top / frameSnap).floorToDouble() * frameSnap,
+    );
+    return corner &
+        Size(
+          math.max(padded.right - corner.dx, minFrame.width),
+          math.max(padded.bottom - corner.dy, minFrame.height),
+        );
+  }
+
+  /// A multiple of every default rule spacing.
+  static const double frameSnap = 96;
+
+  /// The shift that brings a board's [ink] onto a fixed page: back by
+  /// [origin], and then far enough down and right that none of it is
+  /// left above or to the left of the paper.
+  static Offset toPage(Rect? ink) {
+    double dx = -origin.dx;
+    double dy = -origin.dy;
+    if (ink != null && ink.isFinite) {
+      if (ink.left + dx < 0) dx = frameMargin - ink.left;
+      if (ink.top + dy < 0) dy = frameMargin - ink.top;
+    }
+    return Offset(dx, dy);
+  }
 }
 
 /// Where a page sits in the writing area: its size in page units, and the
@@ -135,8 +181,8 @@ class PageConfig {
 class PageGeometry {
   const PageGeometry(this.pageSize, this.scale);
 
-  /// A fixed page is scaled to the area's width; an infinite page is shown at
-  /// scale 1 and is never smaller than the area.
+  /// A fixed page is scaled to the area's width; an infinite page is the
+  /// whole [InfiniteBoard], at scale 1.
   factory PageGeometry.of(
     PageSetup setup,
     Size? extent,
@@ -151,13 +197,7 @@ class PageGeometry {
     }
     switch (setup.size) {
       case PageSize.infinite:
-        return PageGeometry(
-          Size(
-            math.max(extent?.width ?? 0, viewport.width),
-            math.max(extent?.height ?? 0, viewport.height),
-          ),
-          1,
-        );
+        return const PageGeometry(InfiniteBoard.size, 1);
       case PageSize.a4Portrait:
       case PageSize.a4Landscape:
       case PageSize.letterPortrait:
@@ -189,41 +229,4 @@ class PageGeometry {
 
   @override
   int get hashCode => Object.hash(pageSize, scale);
-}
-
-/// The extent an infinite page should grow to so that [ink] keeps at least
-/// [PageConfig.edgeMargin] from its right and bottom edges, or null when
-/// it need not grow. [current] is the page's present size and [viewport]
-/// the writing area, which sets the step.
-Size? grownPageExtent({
-  required Size current,
-  required Size viewport,
-  required Rect ink,
-  PageConfig config = const PageConfig(),
-}) {
-  if (!ink.isFinite) {
-    return null;
-  }
-  double width = current.width;
-  double height = current.height;
-  if (ink.right > width - config.edgeMargin) {
-    final double step = math.max(
-      config.minGrowthStep,
-      viewport.width * config.growthFraction,
-    );
-    width = math.max(width + step, ink.right + config.edgeMargin);
-  }
-  if (ink.bottom > height - config.edgeMargin) {
-    final double step = math.max(
-      config.minGrowthStep,
-      viewport.height * config.growthFraction,
-    );
-    height = math.max(height + step, ink.bottom + config.edgeMargin);
-  }
-  width = math.min(width, math.max(current.width, config.maxExtent));
-  height = math.min(height, math.max(current.height, config.maxExtent));
-  if (width == current.width && height == current.height) {
-    return null;
-  }
-  return Size(width, height);
 }

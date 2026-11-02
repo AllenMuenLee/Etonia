@@ -396,6 +396,7 @@ class ToggleSetting extends StatefulWidget {
     required this.onChanged,
     this.hint,
     this.icon,
+    this.padding = const EdgeInsets.symmetric(vertical: AppSpacing.xs),
   });
 
   final String label;
@@ -405,6 +406,9 @@ class ToggleSetting extends StatefulWidget {
 
   /// Leads the row, in the secondary text color.
   final IconData? icon;
+
+  /// Inside the row's touch highlight, for a row that fills a grouped list.
+  final EdgeInsetsGeometry padding;
 
   @override
   State<ToggleSetting> createState() => _ToggleSettingState();
@@ -450,7 +454,7 @@ class _ToggleSettingState extends State<ToggleSetting> {
               minHeight: AppSizes.minTouchTarget + AppSpacing.xs,
             ),
             child: Padding(
-              padding: const EdgeInsets.symmetric(vertical: AppSpacing.xs),
+              padding: widget.padding,
               child: Row(
                 children: <Widget>[
                   if (icon != null) ...<Widget>[

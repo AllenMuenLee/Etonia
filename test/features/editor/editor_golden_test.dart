@@ -99,9 +99,7 @@ void main() {
       ]) {
     testWidgets('eraser options: $name', (WidgetTester tester) async {
       await pumpApp(tester, viewport: viewport, themeMode: themeMode);
-      // The first press selects the eraser, the second opens its options.
-      await tester.tap(find.byTooltip('Eraser'));
-      await tester.pumpAndSettle();
+      // Chosen, the eraser shows its options beside the palette.
       await tester.tap(find.byTooltip('Eraser'));
       await tester.pumpAndSettle();
 
@@ -257,10 +255,7 @@ void main() {
       ]) {
     testWidgets('select options: $name', (WidgetTester tester) async {
       await pumpApp(tester, viewport: viewport, themeMode: themeMode);
-      // The first press selects the tool, the second opens its options.
-      // Nothing has been copied, so Paste is disabled.
-      await tester.tap(find.byTooltip('Select'));
-      await tester.pumpAndSettle();
+      // Chosen, the tool shows its options beside the palette.
       await tester.tap(find.byTooltip('Select'));
       await tester.pumpAndSettle();
 
@@ -432,9 +427,8 @@ void main() {
     await tester.tap(find.byTooltip('AI assistant'));
     await tester.pumpAndSettle();
     await settleAi(tester);
-    await tester.tap(find.byTooltip('AI settings'));
-    await tester.pumpAndSettle();
-    await tester.tap(find.text('Enable notation'));
+    // The AI tool is chosen, its options beside the palette.
+    await tester.tap(find.byKey(const ValueKey<String>('ai-notation-toggle')));
     await tester.pumpAndSettle();
 
     await expectLater(

@@ -1,3 +1,5 @@
+import 'dart:ui';
+
 import 'package:flutter_test/flutter_test.dart';
 import 'package:greatnote/features/editor/ink/eraser_settings.dart';
 import 'package:greatnote/features/editor/ink/ink_controller.dart';
@@ -485,6 +487,25 @@ void main() {
   });
 
   group('Stroke.fromPoints', () {
+    test('lets go of its paths and makes the same ones again', () {
+      final Stroke stroke = Stroke.fromPoints(
+        style: StrokeStyle(ink: _blue, width: 6),
+        points: <InkVector>[_v(0, 0), _v(100, 50)],
+        widths: const <double>[1, 2],
+      );
+      final Path path = stroke.path;
+      final Path outline = stroke.outline!;
+      final Rect pathBounds = path.getBounds();
+      final Rect outlineBounds = outline.getBounds();
+
+      stroke.releaseGeometry();
+
+      expect(stroke.path, isNot(same(path)));
+      expect(stroke.path.getBounds(), pathBounds);
+      expect(stroke.outline, isNot(same(outline)));
+      expect(stroke.outline!.getBounds(), outlineBounds);
+    });
+
     test('builds the path and bounds once and treats one point as a dot', () {
       final Stroke line = _line(50, style: StrokeStyle(ink: _blue, width: 6));
       expect(line.isDot, isFalse);

@@ -23,8 +23,12 @@ class PageImageLayer extends StatefulWidget {
     this.readAsset,
     this.maxDecodeDimension = 4096,
     this.cache,
+    this.cachePage,
     this.carry,
   });
+
+  /// The page the pictures are kept for, in [cache].
+  final Object? cachePage;
 
   final InkController controller;
   final NoteAssetReader? readAsset;
@@ -93,6 +97,7 @@ class _PageImageLayerState extends State<PageImageLayer> {
                     : widget.controller.images[i],
                 selected: selected.contains(i),
                 cache: _cache,
+                cachePage: widget.cachePage,
                 maxDecodeDimension: widget.maxDecodeDimension,
                 animateSvg: widget.controller.svgAnimationsEnabled,
               ),
@@ -102,6 +107,7 @@ class _PageImageLayerState extends State<PageImageLayer> {
                 element: element,
                 selected: true,
                 cache: _cache,
+                cachePage: widget.cachePage,
                 maxDecodeDimension: widget.maxDecodeDimension,
                 animateSvg: widget.controller.svgAnimationsEnabled,
               ),
@@ -118,6 +124,7 @@ class _PlacedImage extends StatelessWidget {
     required this.element,
     required this.selected,
     required this.cache,
+    required this.cachePage,
     required this.maxDecodeDimension,
     required this.animateSvg,
   });
@@ -125,6 +132,7 @@ class _PlacedImage extends StatelessWidget {
   final NoteImageElement element;
   final bool selected;
   final PageImageCache? cache;
+  final Object? cachePage;
   final int maxDecodeDimension;
   final bool animateSvg;
 
@@ -155,6 +163,7 @@ class _PlacedImage extends StatelessWidget {
                   assetId: element.assetId,
                   size: element.size,
                   cache: cache!,
+                  cachePage: cachePage,
                   maxDimension: maxDecodeDimension,
                 ),
         ),
@@ -264,11 +273,13 @@ class _ImageContents extends StatefulWidget {
     required this.assetId,
     required this.size,
     required this.cache,
+    required this.cachePage,
     required this.maxDimension,
   });
   final String assetId;
   final Size size;
   final PageImageCache cache;
+  final Object? cachePage;
   final int maxDimension;
   @override
   State<_ImageContents> createState() => _ImageContentsState();
@@ -311,7 +322,7 @@ class _ImageContentsState extends State<_ImageContents> {
     _failed = false;
     final request = _request = Object();
     widget.cache
-        .image(widget.assetId, width, height)
+        .image(widget.assetId, width, height, page: widget.cachePage)
         .then(
           (image) {
             if (!mounted || request != _request) {

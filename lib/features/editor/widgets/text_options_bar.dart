@@ -6,159 +6,127 @@ import '../../../app/theme/app_theme.dart';
 import '../../../app/theme/app_tokens.dart';
 import '../ink/ink_palette.dart';
 import '../text/note_text.dart';
+import 'tool_options_bar.dart';
 
-/// The contextual controls shown beneath the toolbar while Text is active,
-/// in groups: size, color and emphasis, alignment, and lists. The bar is as
-/// wide as its controls and scrolls when the window is narrower.
+/// The contextual controls shown beside the toolbar while Text is active,
+/// in groups: size, color and emphasis, alignment, and lists. The bar lies
+/// along [axis], as the toolbar does, is as long as its controls, and
+/// scrolls when the window, or its parent, is shorter.
 class TextOptionsBar extends StatelessWidget {
   const TextOptionsBar({
     super.key,
     required this.settings,
     required this.onChanged,
+    this.axis = Axis.horizontal,
   });
 
   final TextSettings settings;
   final ValueChanged<TextSettings> onChanged;
 
+  /// A row beside a toolbar across the top or bottom, a column beside one
+  /// down a side.
+  final Axis axis;
+
   static const List<double> fontSizes = <double>[12, 16, 20, 24, 32, 40, 56];
 
-  /// As thick as the tool palette above it.
-  static const double height = AppSizes.minTouchTarget + 2 * AppSpacing.xxs;
+  /// As thick as the tool palette beside it.
+  static const double height = ToolOptionsBar.thickness;
 
   @override
   Widget build(BuildContext context) {
-    final AppColors colors = AppColors.of(context);
-    final double maxWidth =
-        MediaQuery.sizeOf(context).width - 2 * AppSpacing.xs;
-    return Material(
+    return ToolOptionsBar(
       key: const ValueKey<String>('text-options-bar'),
-      type: MaterialType.transparency,
-      child: ConstrainedBox(
-        constraints: BoxConstraints(maxWidth: maxWidth),
-        child: Container(
-          height: height,
-          decoration: BoxDecoration(
-            color: AppGlass.surface(colors),
-            borderRadius: AppBorderRadius.large,
-            border: Border.fromBorderSide(AppGlass.border(colors)),
-            boxShadow: AppShadows.floating(colors),
+      axis: axis,
+      children: <Widget>[
+        _FontSizeControl(settings: settings, onChanged: onChanged, axis: axis),
+        OptionsDivider(axis: axis),
+        _ColorControl(settings: settings, onChanged: onChanged),
+        OptionsButton(
+          key: const ValueKey<String>('text-bold'),
+          tooltip: 'Bold',
+          selected: settings.bold,
+          onPressed: () => onChanged(settings.copyWith(bold: !settings.bold)),
+          child: const Text(
+            'B',
+            style: TextStyle(fontWeight: FontWeight.w800, fontSize: 17),
           ),
-          child: ClipRRect(
-            borderRadius: AppBorderRadius.large,
-            child: SingleChildScrollView(
-              scrollDirection: Axis.horizontal,
-              padding: const EdgeInsets.symmetric(horizontal: AppSpacing.xxs),
-              child: Row(
-                mainAxisSize: MainAxisSize.min,
-                children: <Widget>[
-                  _FontSizeControl(settings: settings, onChanged: onChanged),
-                  const _GroupDivider(),
-                  _ColorControl(settings: settings, onChanged: onChanged),
-                  _FormatButton(
-                    key: const ValueKey<String>('text-bold'),
-                    tooltip: 'Bold',
-                    selected: settings.bold,
-                    onPressed: () =>
-                        onChanged(settings.copyWith(bold: !settings.bold)),
-                    child: const Text(
-                      'B',
-                      style: TextStyle(
-                        fontWeight: FontWeight.w800,
-                        fontSize: 17,
-                      ),
-                    ),
-                  ),
-                  _FormatButton(
-                    key: const ValueKey<String>('text-italic'),
-                    tooltip: 'Italic',
-                    selected: settings.italic,
-                    onPressed: () =>
-                        onChanged(settings.copyWith(italic: !settings.italic)),
-                    child: const Text(
-                      'I',
-                      style: TextStyle(
-                        fontStyle: FontStyle.italic,
-                        fontWeight: FontWeight.w600,
-                        fontSize: 17,
-                      ),
-                    ),
-                  ),
-                  _FormatButton(
-                    key: const ValueKey<String>('text-underline'),
-                    tooltip: 'Underline',
-                    selected: settings.underline,
-                    onPressed: () => onChanged(
-                      settings.copyWith(underline: !settings.underline),
-                    ),
-                    child: const Text(
-                      'U',
-                      style: TextStyle(
-                        decoration: TextDecoration.underline,
-                        fontWeight: FontWeight.w600,
-                        fontSize: 17,
-                      ),
-                    ),
-                  ),
-                  const _GroupDivider(),
-                  _AlignmentControl(settings: settings, onChanged: onChanged),
-                  const _GroupDivider(),
-                  _FormatButton(
-                    key: const ValueKey<String>('text-bullets'),
-                    tooltip: 'Bulleted list',
-                    selected: settings.listStyle == TextListStyle.bullets,
-                    onPressed: () => onChanged(
-                      settings.copyWith(
-                        listStyle: settings.listStyle == TextListStyle.bullets
-                            ? TextListStyle.none
-                            : TextListStyle.bullets,
-                      ),
-                    ),
-                    child: const Icon(Icons.format_list_bulleted_rounded),
-                  ),
-                  _FormatButton(
-                    key: const ValueKey<String>('text-numbers'),
-                    tooltip: 'Numbered list',
-                    selected: settings.listStyle == TextListStyle.numbers,
-                    onPressed: () => onChanged(
-                      settings.copyWith(
-                        listStyle: settings.listStyle == TextListStyle.numbers
-                            ? TextListStyle.none
-                            : TextListStyle.numbers,
-                      ),
-                    ),
-                    child: const Icon(Icons.format_list_numbered_rounded),
-                  ),
-                ],
-              ),
+        ),
+        OptionsButton(
+          key: const ValueKey<String>('text-italic'),
+          tooltip: 'Italic',
+          selected: settings.italic,
+          onPressed: () =>
+              onChanged(settings.copyWith(italic: !settings.italic)),
+          child: const Text(
+            'I',
+            style: TextStyle(
+              fontStyle: FontStyle.italic,
+              fontWeight: FontWeight.w600,
+              fontSize: 17,
             ),
           ),
         ),
-      ),
+        OptionsButton(
+          key: const ValueKey<String>('text-underline'),
+          tooltip: 'Underline',
+          selected: settings.underline,
+          onPressed: () =>
+              onChanged(settings.copyWith(underline: !settings.underline)),
+          child: const Text(
+            'U',
+            style: TextStyle(
+              decoration: TextDecoration.underline,
+              fontWeight: FontWeight.w600,
+              fontSize: 17,
+            ),
+          ),
+        ),
+        OptionsDivider(axis: axis),
+        _AlignmentControl(settings: settings, onChanged: onChanged, axis: axis),
+        OptionsDivider(axis: axis),
+        OptionsButton(
+          key: const ValueKey<String>('text-bullets'),
+          tooltip: 'Bulleted list',
+          selected: settings.listStyle == TextListStyle.bullets,
+          onPressed: () => onChanged(
+            settings.copyWith(
+              listStyle: settings.listStyle == TextListStyle.bullets
+                  ? TextListStyle.none
+                  : TextListStyle.bullets,
+            ),
+          ),
+          child: const Icon(Icons.format_list_bulleted_rounded),
+        ),
+        OptionsButton(
+          key: const ValueKey<String>('text-numbers'),
+          tooltip: 'Numbered list',
+          selected: settings.listStyle == TextListStyle.numbers,
+          onPressed: () => onChanged(
+            settings.copyWith(
+              listStyle: settings.listStyle == TextListStyle.numbers
+                  ? TextListStyle.none
+                  : TextListStyle.numbers,
+            ),
+          ),
+          child: const Icon(Icons.format_list_numbered_rounded),
+        ),
+      ],
     );
   }
-}
-
-/// The gap between groups: a short rule with room on both sides, so each
-/// group reads as one.
-class _GroupDivider extends StatelessWidget {
-  const _GroupDivider();
-
-  @override
-  Widget build(BuildContext context) => Container(
-    width: AppSizes.hairline,
-    height: AppSpacing.lg,
-    margin: const EdgeInsets.symmetric(horizontal: AppSpacing.xs),
-    color: AppColors.of(context).divider,
-  );
 }
 
 /// Smaller and larger step through the preset sizes; the size between them
 /// opens the full list.
 class _FontSizeControl extends StatelessWidget {
-  const _FontSizeControl({required this.settings, required this.onChanged});
+  const _FontSizeControl({
+    required this.settings,
+    required this.onChanged,
+    required this.axis,
+  });
 
   final TextSettings settings;
   final ValueChanged<TextSettings> onChanged;
+  final Axis axis;
 
   static const List<double> _sizes = TextOptionsBar.fontSizes;
 
@@ -184,10 +152,11 @@ class _FontSizeControl extends StatelessWidget {
     final TextTheme text = Theme.of(context).textTheme;
     final double? smaller = _smaller;
     final double? larger = _larger;
-    return Row(
+    return Flex(
+      direction: axis,
       mainAxisSize: MainAxisSize.min,
       children: <Widget>[
-        _FormatButton(
+        OptionsButton(
           tooltip: 'Smaller text',
           selected: false,
           onPressed: smaller == null ? null : () => _set(smaller),
@@ -264,7 +233,7 @@ class _FontSizeControl extends StatelessWidget {
             );
           },
         ),
-        _FormatButton(
+        OptionsButton(
           tooltip: 'Larger text',
           selected: false,
           onPressed: larger == null ? null : () => _set(larger),
@@ -308,7 +277,7 @@ class _ColorControl extends StatelessWidget {
         button: true,
         label: 'Text color, ${settings.ink.label}',
         child: SizedBox(
-          width: _FormatButton.slot,
+          width: OptionsButton.slot,
           height: AppSizes.minTouchTarget,
           child: Center(
             child: _ColorDot(
@@ -357,13 +326,19 @@ class _ColorDot extends StatelessWidget {
 }
 
 class _AlignmentControl extends StatelessWidget {
-  const _AlignmentControl({required this.settings, required this.onChanged});
+  const _AlignmentControl({
+    required this.settings,
+    required this.onChanged,
+    required this.axis,
+  });
 
   final TextSettings settings;
   final ValueChanged<TextSettings> onChanged;
+  final Axis axis;
 
   @override
-  Widget build(BuildContext context) => Row(
+  Widget build(BuildContext context) => Flex(
+    direction: axis,
     mainAxisSize: MainAxisSize.min,
     children: <Widget>[
       for (final (TextAlign alignment, IconData icon, String label)
@@ -376,7 +351,7 @@ class _AlignmentControl extends StatelessWidget {
             ),
             (TextAlign.right, Icons.format_align_right_rounded, 'Align right'),
           ])
-        _FormatButton(
+        OptionsButton(
           tooltip: label,
           selected: settings.alignment == alignment,
           onPressed: () => onChanged(settings.copyWith(alignment: alignment)),
@@ -384,77 +359,6 @@ class _AlignmentControl extends StatelessWidget {
         ),
     ],
   );
-}
-
-/// A control in a full-height touch slot, its visible capsule narrower so
-/// neighbours sit a small, even gap apart.
-class _FormatButton extends StatelessWidget {
-  const _FormatButton({
-    super.key,
-    required this.tooltip,
-    required this.selected,
-    required this.onPressed,
-    required this.child,
-  });
-
-  /// The width each control takes in the bar.
-  static const double slot = 44;
-
-  final String tooltip;
-  final bool selected;
-
-  /// Null disables the control.
-  final VoidCallback? onPressed;
-  final Widget child;
-
-  @override
-  Widget build(BuildContext context) {
-    final AppColors colors = AppColors.of(context);
-    final bool enabled = onPressed != null;
-    final Color foreground = selected
-        ? colors.accent
-        : enabled
-        ? colors.textPrimary
-        : colors.textSecondary.withValues(alpha: 0.5);
-    return Tooltip(
-      message: tooltip,
-      excludeFromSemantics: true,
-      child: Semantics(
-        button: true,
-        enabled: enabled,
-        selected: selected,
-        label: tooltip,
-        excludeSemantics: true,
-        child: InkWell(
-          onTap: onPressed,
-          borderRadius: AppBorderRadius.medium,
-          child: SizedBox(
-            width: slot,
-            height: AppSizes.minTouchTarget,
-            child: Center(
-              child: AnimatedContainer(
-                duration: AppMotion.resolve(context, AppMotion.stateFade),
-                width: AppSizes.paletteButtonVisual,
-                height: AppSizes.paletteButtonVisual,
-                alignment: Alignment.center,
-                decoration: BoxDecoration(
-                  color: selected ? colors.selected : Colors.transparent,
-                  borderRadius: AppBorderRadius.medium,
-                ),
-                child: IconTheme(
-                  data: IconThemeData(size: 20, color: foreground),
-                  child: DefaultTextStyle.merge(
-                    style: TextStyle(color: foreground),
-                    child: child,
-                  ),
-                ),
-              ),
-            ),
-          ),
-        ),
-      ),
-    );
-  }
 }
 
 @Preview(name: 'Text formatting bar', size: Size(700, 90))

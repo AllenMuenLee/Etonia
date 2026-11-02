@@ -53,8 +53,10 @@ the system text scaler. Selection changes colour, never font weight, so labels
 do not jitter.
 
 Symbols use one medium, rounded visual weight. Selected icon controls use the
-filled symbol in a solid ink capsule with paper-coloured foreground. Text rows
-use the neutral `selected` capsule. Section headings have no decorative mark.
+filled symbol in a solid ink capsule with paper-coloured foreground. Controls in
+a tool's options bar, one level below, are framed instead: a hairline ink outline
+around an ink symbol, with no fill. Text rows use the neutral `selected` capsule.
+Section headings have no decorative mark.
 
 ## Motion
 
@@ -73,14 +75,48 @@ and `press` (instant in, 220 ms out). Reduced motion replaces travel and scale
 with a 120 ms linear cross-fade. Feature code does not introduce raw animation
 durations or curves.
 
-Pages use Flutter's Cupertino transition on every platform, including its
-interactive leading-edge pop gesture. Full-screen modals rise from the bottom;
-alerts fade from 1.08 scale; popovers originate at their anchor. Opening a note zooms the editor out of its
-card's thumbnail on a `smooth` spring while the library recedes to 0.96, and
-closing shrinks it back into the card's current position; the spring keeps its
-velocity if reversed mid-flight. Library detail
-columns and note tabs cross-fade rather than slide. Navigation never staggers
-list items. Direct manipulation tracks the pointer 1:1 and springs only after
+Every transition is paced by `MotionMemory` before it plays: the first time
+something is shown (a folder, a note, a dialog, a page, a loaded picture) it
+plays its movement slowly and smoothly (`AppMotion.firstLookScale`); when it
+has been shown before and is still in memory, the movement is dropped and it
+only fades in slightly where it is (`AppMotion.glance`, 180 ms ease-out).
+A revisit is never a sped-up version of the long animation. Sheets and menus,
+which must rise or unfold, keep their standard timing on a revisit. Feature
+code asks with `MotionMemory.instance.recall(key)` (or passes a `motionKey` /
+`memoryKey` to `showAppDialog`, `showAppSheet`, `AppPageRoute` and
+`LoadingReveal`). What may be shown again is kept within one `CacheBudget`: a
+tenth for the folder pages (listings and thumbnails, least recently shown going
+first), and the rest for one `NoteCachePool` shared by every open tab. Over its
+limit the pool lets go of the pages of the note used longest ago, each page with
+its PDF paper, pictures and ink paths, then what that note's pages share, then
+its editor; pages on screen and unsaved work always stay. What leaves its cache
+is forgotten by `MotionMemory`, and the system's low-memory signal
+(`MemoryPressure`) lets go of more on top and resets `MotionMemory`.
+
+The home page never zooms. Switching folders (`SceneCrossfade`) is a quick
+cross-fade where the scenes are: the folder left fades out (`AppMotion.fadeOut`),
+drawn once into a picture (`scenePicture`), and the folder's cards fade in one
+after another (`StaggeredReveal`/`StaggerItem`: `staggerStep` apart after
+`staggerLead`, each over `fadeIn`; a revisit runs `staggerRevisitStep` apart
+with a `glance`, reduced motion fades all together). The cards fade only:
+no slide or scale. Startup is the same: the wordmark fades in, the library
+fades over it, then its cards one by one. Opening a note still zooms: the
+note grows from 0.9 and fades in while the library grows past the viewer to
+1.1 and fades out (`AppMotion.zoom`, `zoomInCurve`/`zoomOutCurve`); closing
+it is the same move reversed. While it runs each scene is drawn once into a
+picture (`scenePicture`) and only the pictures move; a note's heavy content
+is built after the move ends, never during it. `MotionWarmUp` draws this move once out
+of sight at startup so the Skia renderer has its GPU programs ready before
+the first tap. Every folder's contents are read with the library, so any
+folder opens on the frame it is tapped. Going fullscreen slides the top bar and
+the page up together on the `smooth` spring, and leaving slides them back down;
+the page is laid out once for the move, never on its frames. Pages use
+Flutter's Cupertino transition on every platform, including its interactive leading-edge pop
+gesture. Full-screen modals rise from the bottom; alerts fade from 1.08
+scale; popovers originate at their anchor. Note tabs share one toolbar
+element, handed to the tab in front; each tab keeps only its tool and fold
+state (`ToolbarMemo`). Library detail columns and note tabs cross-fade rather
+than slide. Only the library's cards stagger, and only by fading. Direct manipulation tracks the pointer 1:1 and springs only after
 release, seeded with signed release velocity.
 
 The plans and the account are full-screen modals (`StorePageShell`): a quiet
@@ -89,6 +125,12 @@ gathers profile, subscription and backup as three headed sections. On the
 plans page the recommended plan is drawn in ink (accent fill, paper-coloured
 text) and the others as glass; no brand colour is used, and a breadcrumb or
 selection is never wrapped in a grey capsule.
+
+The editor's settings are a popover of headed groups, each a list of rows on
+one quiet surface with hairlines between them: the stylus, the assistant, then
+export. A row's name is on the leading side and its value or chevron on the
+trailing side. The stylus group is named for, and offers only the gestures of,
+the stylus the platform pairs with (`StylusFamily`).
 
 Only transform and opacity animate on large subtrees. Moving layers use a
 `RepaintBoundary`; controllers use a ticker and are disposed. No interaction

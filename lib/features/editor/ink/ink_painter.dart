@@ -128,7 +128,7 @@ class StickyNotesPainter extends CustomPainter {
       if (viewport != null && !note.bounds.overlaps(viewport)) {
         continue;
       }
-      paintStickyNote(canvas, note, config: config);
+      paintStickyNote(canvas, note, config: config, showToggle: true);
       if (note.id == editing) {
         paintStickyEditingOutline(canvas, note, accent, config);
       }
@@ -254,10 +254,7 @@ class CompletedStrokesPainter extends CustomPainter {
         1,
         stroke.points.length,
       );
-      path = Path()..moveTo(stroke.points.first.x, stroke.points.first.y);
-      for (int i = 1; i < count; i++) {
-        path.lineTo(stroke.points[i].x, stroke.points[i].y);
-      }
+      path = buildInkPath(stroke.points.take(count).toList(growable: false));
       isDot = count == 1;
       outline = null;
     }
@@ -467,11 +464,26 @@ class EraserIndicatorPainter extends CustomPainter {
 
 /// Paints the stroke in progress. Repaints on every accepted sample.
 class ActiveStrokePainter extends CustomPainter {
-  ActiveStrokePainter({required this.controller, required this.brightness})
-    : super(repaint: controller.activeStrokeListenable);
+  ActiveStrokePainter({
+    required this.controller,
+    required this.brightness,
+    this.inkHidden,
+  }) : super(
+         repaint: Listenable.merge(<Listenable>[
+           controller.activeStrokeListenable,
+           ?inkHidden,
+         ]),
+       );
 
   final InkController controller;
   final Brightness brightness;
+
+  /// Whether native wet ink currently owns the live stroke's pixels.
+  ///
+  /// Painting the independently smoothed Flutter path underneath a predicted
+  /// native path makes fast strokes look like the union of two nearby lines,
+  /// then visibly shrink when the native preview is removed.
+  final ValueListenable<bool>? inkHidden;
 
   @override
   void paint(Canvas canvas, Size size) {
@@ -501,6 +513,9 @@ class ActiveStrokePainter extends CustomPainter {
     }
     final ActiveStroke? stroke = controller.activeStroke;
     if (stroke == null) {
+      return;
+    }
+    if (inkHidden?.value ?? false) {
       return;
     }
     final StickyNoteElement? sticky = controller.activeStrokeSticky;
@@ -541,7 +556,8 @@ class ActiveStrokePainter extends CustomPainter {
   @override
   bool shouldRepaint(ActiveStrokePainter oldDelegate) {
     return oldDelegate.controller != controller ||
-        oldDelegate.brightness != brightness;
+        oldDelegate.brightness != brightness ||
+        oldDelegate.inkHidden != inkHidden;
   }
 }
 
@@ -589,13 +605,13 @@ class SelectionPainter extends CustomPainter {
     this.crossPageOverlay,
     this.scale = 1,
     this.scaleProvider,
+    this.frameHidden,
   }) : super(
-         repaint: crossPageListenable == null
-             ? controller.selectionListenable
-             : Listenable.merge(<Listenable>[
-                 controller.selectionListenable,
-                 crossPageListenable,
-               ]),
+         repaint: Listenable.merge(<Listenable>[
+           controller.selectionListenable,
+           ?crossPageListenable,
+           ?frameHidden,
+         ]),
        );
 
   final InkController controller;
@@ -619,6 +635,10 @@ class SelectionPainter extends CustomPainter {
 
   /// Optional dynamic provider for the latest screen scale.
   final double Function()? scaleProvider;
+
+  /// While true, the selection's strokes are painted without their frame
+  /// and handles.
+  final ValueListenable<bool>? frameHidden;
 
   double get _screenScale {
     final double? dynamicScale = scaleProvider?.call();
@@ -652,8 +672,15 @@ class SelectionPainter extends CustomPainter {
         );
       }
       // Selected sticky notes above the selected ink, as on the page.
+      // The frame owns a selected note, so only a minimized one, which
+      // would otherwise be blank, shows its button.
       for (final StickyNoteElement note in selection.stickies) {
-        paintStickyNote(canvas, note, config: controller.stickyConfig);
+        paintStickyNote(
+          canvas,
+          note,
+          config: controller.stickyConfig,
+          showToggle: note.minimized,
+        );
       }
       canvas.restore();
     }
@@ -674,7 +701,12 @@ class SelectionPainter extends CustomPainter {
           );
         }
         for (final StickyNoteElement note in part.stickies) {
-          paintStickyNote(canvas, note, config: controller.stickyConfig);
+          paintStickyNote(
+            canvas,
+            note,
+            config: controller.stickyConfig,
+            showToggle: note.minimized,
+          );
         }
         canvas.restore();
       }
@@ -682,7 +714,7 @@ class SelectionPainter extends CustomPainter {
     final SelectionFrame? frame =
         extra?.frame ??
         (selection == null ? null : (gesture?.frame ?? selection.frame));
-    if (frame != null) {
+    if (frame != null && !(frameHidden?.value ?? false)) {
       _paintFrame(
         canvas,
         frame,
@@ -833,6 +865,7 @@ class SelectionPainter extends CustomPainter {
         oldDelegate.crossPageListenable != crossPageListenable ||
         oldDelegate.crossPageOverlay != crossPageOverlay ||
         oldDelegate.scale != scale ||
-        oldDelegate.scaleProvider != scaleProvider;
+        oldDelegate.scaleProvider != scaleProvider ||
+        oldDelegate.frameHidden != frameHidden;
   }
 }

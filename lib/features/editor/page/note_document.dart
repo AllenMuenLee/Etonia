@@ -5,10 +5,12 @@ import 'package:flutter/foundation.dart';
 
 import '../handwriting/recognized_handwriting.dart';
 import '../ink/ink_controller.dart';
+import '../ink/ink_sample.dart';
 import '../ink/stroke.dart';
 import '../sticky/sticky_note.dart';
 import '../document_io/document_models.dart';
 import '../../library/note_recording_track.dart';
+import 'content_bounds.dart';
 import 'page_setup.dart';
 
 /// One page of a note: its ink and its setup.
@@ -27,8 +29,8 @@ class NotePage {
 
   PageSetup setup;
 
-  /// How far an infinite page has grown, in page units. Null until it first
-  /// grows; until then it is the size of the writing area.
+  /// How far an infinite page had grown, from before infinite pages were
+  /// boards. Kept as read, and no longer used.
   Size? extent;
 
   /// Legacy Fit-page size, retained when old notes are read and rewritten.
@@ -43,6 +45,51 @@ class NotePage {
   /// Searchable handwriting and the high-confidence vector samples learned
   /// from it. Mutated only through [NoteDocument].
   final List<RecognizedInkWord> recognizedWords;
+
+  /// What the page goes by among what the note keeps in memory: a page of a
+  /// PDF by that page, so that its paper goes with the rest of it.
+  Object get cacheKey => pdfSource ?? this;
+
+  /// The box round everything on the page, or null when it is empty.
+  Rect? get contentBounds => pageContentBounds(
+    strokes: ink.strokes,
+    images: ink.images,
+    stickies: ink.stickyNotes,
+    texts: ink.textElements,
+  );
+
+  /// The part of the page worth showing away from the editor: a fixed
+  /// page's paper, or the [InfiniteBoard.frameOf] a board's ink.
+  /// [writingArea] stands in for a page with no size of its own.
+  Rect frame(Size writingArea) {
+    final PdfPageSource? pdf = pdfSource;
+    if (pdf != null) return Offset.zero & pdf.pageSize;
+    if (setup.size == PageSize.infinite) {
+      return InfiniteBoard.frameOf(contentBounds);
+    }
+    if (setup.size == PageSize.custom) return Offset.zero & setup.customSize!;
+    return Offset.zero & (setup.size.fixedSize ?? writingArea);
+  }
+
+  Iterable<Stroke> get _allStrokes sync* {
+    yield* ink.strokes;
+    for (final StickyNoteElement sticky in ink.stickyNotes) {
+      yield* sticky.strokes;
+    }
+  }
+
+  /// About what the paths of the page's ink take in memory once painted.
+  int get inkGeometryBytes => _allStrokes.fold(
+    0,
+    (int total, Stroke stroke) => total + stroke.geometryBytes,
+  );
+
+  /// Lets go of the paths of the page's ink, made again when next painted.
+  void releaseInkGeometry() {
+    for (final Stroke stroke in _allStrokes) {
+      stroke.releaseGeometry();
+    }
+  }
 }
 
 /// The pages of one note, and which one is shown.
@@ -131,6 +178,18 @@ class NoteDocument extends ChangeNotifier {
     final NoteRecordingTrack removed = _recordings.removeAt(index);
     _changed();
     return removed;
+  }
+
+  /// About what the note's ink takes in memory, apart from its paths.
+  int get memoryBytes {
+    int total = 0;
+    for (final NotePage page in _pages) {
+      total += page._allStrokes.fold(
+        0,
+        (int sum, Stroke stroke) => sum + stroke.dataBytes,
+      );
+    }
+    return total;
   }
 
   /// Whether this document was imported from a PDF or contains PDF-backed pages.
@@ -322,7 +381,10 @@ class NoteDocument extends ChangeNotifier {
     return true;
   }
 
-  /// Gives the current page [setup]. Its ink keeps its page coordinates.
+  /// Gives the current page [setup]. Its ink keeps its page coordinates,
+  /// except when the page becomes a whiteboard, or stops being one: then
+  /// the ink moves to the middle of the board, or back onto the paper.
+  /// Nothing changes while a pointer is busy on the page.
   void setSetup(PageSetup setup) {
     if (isImportedPdf && setup.size == PageSize.infinite) {
       return;
@@ -331,16 +393,16 @@ class NoteDocument extends ChangeNotifier {
     if (page.setup == setup) {
       return;
     }
-    page.setup = setup;
-    _changed();
-  }
-
-  /// Records how far [page] has grown.
-  void setExtent(NotePage page, Size extent) {
-    if (page.extent == extent || !_pages.contains(page)) {
-      return;
+    final bool wasBoard = page.setup.size == PageSize.infinite;
+    final bool isBoard = setup.size == PageSize.infinite;
+    if (wasBoard != isBoard && page.pdfSource == null) {
+      final Offset shift = isBoard
+          ? InfiniteBoard.origin
+          : InfiniteBoard.toPage(page.contentBounds);
+      if (!page.ink.shiftContent(InkVector(shift.dx, shift.dy))) return;
+      page.extent = null;
     }
-    page.extent = extent;
+    page.setup = setup;
     _changed();
   }
 

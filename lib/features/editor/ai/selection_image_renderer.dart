@@ -213,6 +213,64 @@ class SelectionInkSnapshot {
     );
   }
 
+  /// This snapshot narrowed to the chosen source objects that remain after
+  /// one or more context groups are removed. The copied stroke geometry stays
+  /// paired with its original stroke, and raster assets that belonged only to
+  /// removed images are left out of the next model image.
+  SelectionInkSnapshot retaining({
+    required Iterable<Stroke> sourceStrokes,
+    required Iterable<NoteImageElement> sourceImages,
+    required Iterable<StickyNoteElement> stickies,
+    ui.Rect? explicitBounds,
+  }) {
+    final Set<Stroke> keptStrokes = Set<Stroke>.identity()
+      ..addAll(sourceStrokes);
+    final Set<NoteImageElement> keptImages = Set<NoteImageElement>.identity()
+      ..addAll(sourceImages);
+    final Set<StickyNoteElement> keptStickies =
+        Set<StickyNoteElement>.identity()..addAll(stickies);
+    final Set<String> removedImageAssets = <String>{
+      for (final NoteImageElement image in _sourceImages)
+        if (!keptImages.contains(image)) image.assetId,
+    };
+    final Set<String> keptImageAssets = <String>{
+      for (final NoteImageElement image in _sourceImages)
+        if (keptImages.contains(image)) image.assetId,
+    };
+    final List<SnapshotStroke> keptSnapshots = <SnapshotStroke>[];
+    final List<Stroke> keptSources = <Stroke>[];
+    for (int i = 0; i < _source.length && i < strokes.length; i++) {
+      final Stroke source = _source[i];
+      if (keptStrokes.contains(source)) {
+        keptSources.add(source);
+        keptSnapshots.add(strokes[i]);
+      }
+    }
+    return SelectionInkSnapshot._(
+      strokes: List<SnapshotStroke>.unmodifiable(keptSnapshots),
+      bitmaps: List<SnapshotBitmap>.unmodifiable(<SnapshotBitmap>[
+        for (final SnapshotBitmap bitmap in bitmaps)
+          if (bitmap.source == null ||
+              bitmap.source!.pdfPageIndex != null ||
+              !removedImageAssets.contains(bitmap.source!.assetId) ||
+              keptImageAssets.contains(bitmap.source!.assetId))
+            bitmap,
+      ]),
+      brightness: brightness,
+      background: background,
+      source: List<Stroke>.unmodifiable(keptSources),
+      sourceImages: List<NoteImageElement>.unmodifiable(<NoteImageElement>[
+        for (final NoteImageElement image in _sourceImages)
+          if (keptImages.contains(image)) image,
+      ]),
+      explicitBounds: explicitBounds,
+      stickies: <StickyNoteElement>[
+        for (final StickyNoteElement sticky in this.stickies)
+          if (keptStickies.contains(sticky)) sticky,
+      ],
+    );
+  }
+
   /// A snapshot saved with the note, read back: [sourceStrokes] and
   /// [sourceImages] are the note's ink it was taken from, as far as it is
   /// still there.

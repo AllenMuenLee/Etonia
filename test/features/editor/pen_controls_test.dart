@@ -1,33 +1,32 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:greatnote/app/theme/app_icons.dart';
-import 'package:greatnote/features/editor/ink/ink_controller.dart';
+import 'package:greatnote/app/theme/app_tokens.dart';
 import 'package:greatnote/features/editor/ink/ink_palette.dart';
 import 'package:greatnote/features/editor/ink/pen_settings.dart';
 import 'package:greatnote/features/editor/ink/stroke.dart';
 import 'package:greatnote/features/editor/widgets/eraser_options.dart';
-import 'package:greatnote/features/editor/widgets/ink_color_picker.dart';
-import 'package:greatnote/features/editor/widgets/stroke_width_picker.dart';
+import 'package:greatnote/features/editor/widgets/tool_palette.dart';
+import 'package:greatnote/shared/widgets/app_controls.dart';
 
 import '../../helpers/editor_harness.dart';
 import '../../helpers/pump_app.dart';
 
-Finder _swatch(String id) => find.byKey(ValueKey<String>('ink-swatch-$id'));
+Finder _swatch(int index) => find.byKey(ValueKey<String>('ink-swatch-$index'));
 
-/// Opens the pen's options: the pen starts selected, so one press does it.
-Future<void> _openPen(WidgetTester tester) async {
-  await tester.tap(find.byTooltip('Pen'));
-  await tester.pumpAndSettle();
-}
+final Finder _penBar = find.byKey(const ValueKey<String>('pen-options-bar'));
 
 Future<void> _setWidth(WidgetTester tester, double width) async {
   tester.widget<Slider>(find.byType(Slider)).onChanged!(width);
   await tester.pumpAndSettle();
 }
 
-/// Dismisses an open popover by tapping the app bar background.
-Future<void> _dismiss(WidgetTester tester) async {
-  await tester.tapAt(const Offset(150, 4));
+/// Taps [target], scrolled into the bar's view first: a narrow window
+/// shows only part of it.
+Future<void> _tapInBar(WidgetTester tester, Finder target) async {
+  await tester.ensureVisible(target);
+  await tester.pumpAndSettle();
+  await tester.tap(target);
   await tester.pumpAndSettle();
 }
 
@@ -43,45 +42,71 @@ void main() {
     expect(settings.strokeStyle(config).width, 1.5);
   });
 
+  test('the pen and highlighter keep three inks at hand each', () {
+    final PenSettings settings = PenSettings.defaults();
+    expect(settings.activeSwatches, <InkColor>[
+      InkPalette.ink,
+      InkPalette.blue,
+      InkPalette.red,
+    ]);
+    final PenSettings highlighter = settings.copyWith(
+      style: WritingStyle.highlighter,
+    );
+    expect(highlighter.activeSwatches, <InkColor>[
+      InkPalette.highlighterYellow,
+      InkPalette.highlighterGreen,
+      InkPalette.highlighterPink,
+    ]);
+
+    const InkColor teal = InkColor(
+      id: 'custom-ff0f7c82',
+      label: 'Custom',
+      onLightPaper: Color(0xFF0F7C82),
+      onDarkPaper: Color(0xFF0F7C82),
+    );
+    final PenSettings changed = settings.withActiveSwatch(2, teal);
+    expect(changed.ink, teal);
+    expect(changed.swatches, <InkColor>[InkPalette.ink, InkPalette.blue, teal]);
+    // The highlighter's are its own.
+    expect(changed.highlighterSwatches, PenSettings.defaultHighlighterSwatches);
+  });
+
   for (final TestViewport viewport in <TestViewport>[
     TestViewport.tabletLandscape,
     TestViewport.tabletPortrait,
     TestViewport.compact,
   ]) {
     group(viewport.name, () {
-      testWidgets('the pen panel opens on screen and selects an ink', (
+      testWidgets('the pen bar lies along the palette with three inks', (
         WidgetTester tester,
       ) async {
         final SemanticsHandle handle = tester.ensureSemantics();
         await pumpEditor(tester, viewport: viewport);
 
-        await _openPen(tester);
-
+        // The pen is chosen from the start, and its bar shows with it.
         final Rect screen = Offset.zero & viewport.size;
-        final Rect picker = tester.getRect(find.byType(InkColorPicker));
-        expect(screen.contains(picker.topLeft), isTrue);
-        expect(screen.contains(picker.bottomRight), isTrue);
-        expect(
-          find.descendant(
-            of: find.byType(InkColorPicker),
-            matching: find.byType(InkWell),
-          ),
-          findsNWidgets(InkPalette.colors.length),
+        final Rect bar = tester.getRect(_penBar);
+        final Rect palette = tester.getRect(
+          find.byKey(const ValueKey<String>('palette-surface')),
         );
+        expect(screen.contains(bar.topLeft), isTrue);
+        expect(screen.contains(bar.bottomRight), isTrue);
+        expect(bar.top, greaterThan(palette.bottom));
+        expect(bar.height, moreOrLessEquals(palette.height));
+
+        expect(_swatch(2), findsOneWidget);
+        expect(_swatch(3), findsNothing);
         // The current ink has a checkmark and a selected state, not only a
         // color.
         expect(
           find.descendant(
-            of: _swatch('ink'),
+            of: _swatch(0),
             matching: find.byIcon(AppIcons.check),
           ),
           findsOneWidget,
         );
         expect(
-          find.descendant(
-            of: find.byType(InkColorPicker),
-            matching: find.byIcon(AppIcons.check),
-          ),
+          find.descendant(of: _penBar, matching: find.byIcon(AppIcons.check)),
           findsOneWidget,
         );
         expect(
@@ -93,139 +118,125 @@ void main() {
           isSemantics(label: 'Blue', isButton: true, isSelected: false),
         );
 
-        await tester.tap(_swatch('blue'));
-        await tester.pumpAndSettle();
+        await _tapInBar(tester, _swatch(1));
 
-        // The panel stays open for the width, and the pen shows the ink.
-        expect(find.byType(InkColorPicker), findsOneWidget);
+        expect(_penBar, findsOneWidget);
         expect(find.bySemanticsLabel('Pen, Blue, 3 px'), findsOneWidget);
         expect(tester.takeException(), isNull);
         handle.dispose();
       });
 
-      testWidgets('the pen panel has a width slider and a live preview', (
+      testWidgets('the pen bar has a width slider', (
         WidgetTester tester,
       ) async {
         await pumpEditor(tester, viewport: viewport);
 
-        await _openPen(tester);
-
-        final Rect screen = Offset.zero & viewport.size;
-        final Rect picker = tester.getRect(find.byType(StrokeWidthPicker));
-        expect(screen.contains(picker.topLeft), isTrue);
-        expect(screen.contains(picker.bottomRight), isTrue);
         final Slider slider = tester.widget<Slider>(find.byType(Slider));
         expect(slider.min, 1);
         expect(slider.max, 20);
         expect(slider.value, 3);
 
-        StrokePreviewPainter preview() {
-          final CustomPaint paint = tester.widget<CustomPaint>(
-            find.byKey(const ValueKey<String>('stroke-width-preview')),
-          );
-          return paint.painter! as StrokePreviewPainter;
-        }
-
-        expect(preview().width, 1.5);
-
-        // Drag the thumb to the far end of the track.
-        final Rect track = tester.getRect(find.byType(Slider));
-        await tester.dragFrom(
-          Offset(track.left + 30, track.center.dy),
-          Offset(track.width, 0),
-        );
-        await tester.pumpAndSettle();
+        await _setWidth(tester, 20);
 
         expect(tester.widget<Slider>(find.byType(Slider)).value, 20);
-        expect(preview().width, 10);
-        expect(find.text('20 px'), findsOneWidget);
         expect(find.bySemanticsLabel('Pen, Black, 20 px'), findsOneWidget);
         expect(tester.takeException(), isNull);
       });
     });
   }
 
-  testWidgets('the preview uses the current ink color', (
+  testWidgets('a tap on the chosen ink opens the palette to change it', (
     WidgetTester tester,
   ) async {
     await pumpEditor(tester);
-    await _openPen(tester);
-    await tester.tap(_swatch('red'));
+    await tester.tap(_swatch(0));
+    await tester.pumpAndSettle();
+    await tester.enterText(
+      find.byKey(const ValueKey<String>('color-hex-input')),
+      '0F7C82',
+    );
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const ValueKey<String>('color-select-button')));
     await tester.pumpAndSettle();
 
-    final CustomPaint paint = tester.widget<CustomPaint>(
-      find.byKey(const ValueKey<String>('stroke-width-preview')),
-    );
-    final InkColor red = InkPalette.colors.firstWhere(
-      (InkColor ink) => ink.id == 'red',
-    );
-    expect((paint.painter! as StrokePreviewPainter).color, red.onLightPaper);
+    final PenSettings pen = tester
+        .widget<ToolPalette>(find.byType(ToolPalette))
+        .penSettings
+        .value;
+    expect(pen.ink.id, 'custom-ff0f7c82');
+    expect(pen.swatches.first, pen.ink);
+    expect(pen.swatches.skip(1), <InkColor>[InkPalette.blue, InkPalette.red]);
   });
 
-  testWidgets('pen styles use icons and pencil texture is available', (
+  testWidgets('pen styles use icons; the highlighter has inks of its own', (
     WidgetTester tester,
   ) async {
     await pumpEditor(tester);
-    await _openPen(tester);
 
     expect(find.text('Pen'), findsNothing);
     expect(find.text('Pencil'), findsNothing);
     expect(find.text('Highlighter'), findsNothing);
-    expect(
-      find.byKey(const ValueKey<String>('writing-style-tip-pen')),
-      findsOneWidget,
-    );
-    expect(
-      find.byKey(const ValueKey<String>('writing-style-tip-pencil')),
-      findsOneWidget,
-    );
-    expect(
-      find.byKey(const ValueKey<String>('writing-style-tip-highlighter')),
-      findsOneWidget,
-    );
 
     await tester.tap(
       find.byKey(const ValueKey<String>('writing-style-pencil')),
     );
     await tester.pumpAndSettle();
-
     expect(find.bySemanticsLabel('Pencil, Black, 3 px'), findsOneWidget);
-    final CustomPaint preview = tester.widget<CustomPaint>(
-      find.byKey(const ValueKey<String>('stroke-width-preview')),
+
+    await tester.tap(
+      find.byKey(const ValueKey<String>('writing-style-highlighter')),
     );
+    await tester.pumpAndSettle();
+    expect(find.bySemanticsLabel('Highlighter, Yellow, 12 px'), findsOneWidget);
+    expect(find.byTooltip('Change Yellow'), findsOneWidget);
+    expect(find.byTooltip('Pink'), findsOneWidget);
+    // Taper and pressure belong to the pen.
     expect(
-      (preview.painter! as StrokePreviewPainter).writing,
-      WritingStyle.pencil,
+      find.byKey(const ValueKey<String>('pen-advanced-toggle')),
+      findsNothing,
     );
   });
 
-  testWidgets('dismissing a popover does not draw on the page', (
+  testWidgets('the chosen tool is filled; the chosen option is framed', (
     WidgetTester tester,
   ) async {
-    final InkController controller = await pumpEditor(tester);
-    await _openPen(tester);
-
-    // Clear of the panel, which opens below the palette across the top, on
-    // the part of the page that is on screen.
-    final Rect shown = canvasRect(tester).intersect(
-      tester.getRect(find.byKey(const ValueKey<String>('page-viewport'))),
+    await pumpEditor(tester);
+    final AppColors colors = AppColors.of(
+      tester.element(find.byType(ToolPalette)),
     );
-    await tester.tapAt(shown.bottomRight - const Offset(40, 40));
-    await tester.pumpAndSettle();
 
-    expect(find.byType(InkColorPicker), findsNothing);
-    expect(controller.strokes, isEmpty);
+    final DecoratedBox capsule = tester.widget<DecoratedBox>(
+      find.descendant(
+        of: find.byType(SelectionCapsule),
+        matching: find.byType(DecoratedBox),
+      ),
+    );
+    expect((capsule.decoration as ShapeDecoration).color, colors.accent);
+
+    BoxDecoration option(String style) {
+      return tester
+              .widget<AnimatedContainer>(
+                find.descendant(
+                  of: find.byKey(ValueKey<String>('writing-style-$style')),
+                  matching: find.byType(AnimatedContainer),
+                ),
+              )
+              .decoration!
+          as BoxDecoration;
+    }
+
+    expect(option('pen').color, isNull);
+    expect((option('pen').border! as Border).top.color, colors.accent);
+    expect(option('pencil').color, isNull);
+    expect((option('pencil').border! as Border).top.color.a, 0);
   });
 
   testWidgets('color and width survive rotation and breakpoint changes', (
     WidgetTester tester,
   ) async {
     await pumpEditor(tester, viewport: TestViewport.tabletPortrait);
-    await _openPen(tester);
-    await tester.tap(_swatch('green'));
-    await tester.pumpAndSettle();
+    await _tapInBar(tester, _swatch(2));
     await _setWidth(tester, 12);
-    await _dismiss(tester);
 
     for (final Size size in <Size>[
       TestViewport.tabletPortrait.size.flipped,
@@ -236,7 +247,7 @@ void main() {
       await tester.pumpAndSettle();
 
       expect(
-        find.bySemanticsLabel('Pen, Green, 12 px'),
+        find.bySemanticsLabel('Pen, Red, 12 px'),
         findsOneWidget,
         reason: '$size',
       );
@@ -244,40 +255,38 @@ void main() {
     }
   });
 
-  testWidgets('pressing the selected pen toggles its panel and keeps it '
-      'selected', (WidgetTester tester) async {
+  testWidgets('pressing the chosen tool hides its bar, for every tool after, '
+      'until pressed again', (WidgetTester tester) async {
     final SemanticsHandle handle = tester.ensureSemantics();
     await pumpEditor(tester);
 
-    await _openPen(tester);
-    expect(find.byType(InkColorPicker), findsOneWidget);
-    expect(find.byType(StrokeWidthPicker), findsOneWidget);
+    expect(_penBar, findsOneWidget);
     expect(find.byType(EraserOptions), findsNothing);
     await tester.tap(find.byTooltip('Pen'));
     await tester.pumpAndSettle();
-    expect(find.byType(InkColorPicker), findsNothing);
-
+    expect(_penBar, findsNothing);
     expect(
       tester.getSemantics(find.bySemanticsLabel('Pen, Black, 3 px')),
       isSemantics(isSelected: true),
     );
-    expect(
-      tester.getSemantics(find.bySemanticsLabel('Eraser, Area, 24 px')),
-      isSemantics(isSelected: false),
-    );
-    handle.dispose();
-  });
 
-  testWidgets('with another tool selected, the pen selects first', (
-    WidgetTester tester,
-  ) async {
-    await pumpEditor(tester);
+    // Another tool, chosen, keeps its bar hidden too.
     await tester.tap(find.byTooltip('Eraser'));
     await tester.pumpAndSettle();
+    expect(find.byType(EraserOptions), findsNothing);
+    expect(
+      tester.getSemantics(find.bySemanticsLabel('Eraser, Area, 24 px')),
+      isSemantics(isSelected: true),
+    );
+
+    // Pressed again, it shows, and stays shown for the next.
+    await tester.tap(find.byTooltip('Eraser'));
+    await tester.pumpAndSettle();
+    expect(find.byType(EraserOptions), findsOneWidget);
     await tester.tap(find.byTooltip('Pen'));
     await tester.pumpAndSettle();
-    expect(find.byType(InkColorPicker), findsNothing);
-    await _openPen(tester);
-    expect(find.byType(InkColorPicker), findsOneWidget);
+    expect(_penBar, findsOneWidget);
+    expect(find.byType(EraserOptions), findsNothing);
+    handle.dispose();
   });
 }

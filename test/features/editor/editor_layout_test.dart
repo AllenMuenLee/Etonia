@@ -16,7 +16,9 @@ import 'package:greatnote/features/editor/widgets/writing_surface_frame.dart';
 import '../../helpers/pump_app.dart';
 
 Rect _paletteRect(WidgetTester tester) {
-  return tester.getRect(find.byType(ToolPalette));
+  return tester.getRect(
+    find.byKey(const ValueKey<String>('tool-palette-card')),
+  );
 }
 
 Rect _surfaceRect(WidgetTester tester) {
@@ -25,6 +27,19 @@ Rect _surfaceRect(WidgetTester tester) {
 
 ToolPalette _palette(WidgetTester tester) {
   return tester.widget<ToolPalette>(find.byType(ToolPalette));
+}
+
+/// Holds the palette and drags it [distance] along its edge.
+Future<void> _dragPaletteAlong(WidgetTester tester, double distance) async {
+  final bool across = _palette(tester).axis == Axis.horizontal;
+  final TestGesture gesture = await tester.startGesture(
+    tester.getCenter(find.byKey(const ValueKey<String>('tool-palette-card'))),
+  );
+  await tester.pump(ToolPalette.liftDelay + const Duration(milliseconds: 50));
+  await gesture.moveBy(across ? Offset(distance, 0) : Offset(0, distance));
+  await tester.pump();
+  await gesture.up();
+  await tester.pumpAndSettle();
 }
 
 void main() {
@@ -227,6 +242,56 @@ void main() {
         );
         // The palette floats above the page, inside it.
         expect(surface.intersect(_paletteRect(tester)), _paletteRect(tester));
+      });
+    }
+
+    for (final (PaletteEdge edge, double off) in const <(PaletteEdge, double)>[
+      (PaletteEdge.top, 0),
+      (PaletteEdge.top, -400),
+      (PaletteEdge.top, 400),
+      (PaletteEdge.bottom, 300),
+      (PaletteEdge.left, -200),
+      (PaletteEdge.right, 0),
+    ]) {
+      testWidgets('the options bar stays put as the palette folds and unfolds: '
+          '${edge.label}, $off off its middle', (WidgetTester tester) async {
+        await pumpApp(tester, size: const Size(1400, 1000));
+        final Finder bar = find.byType(PenOptions);
+        final Finder card = find.byKey(
+          const ValueKey<String>('tool-palette-card'),
+        );
+        if (edge != PaletteEdge.top) {
+          _palette(tester).onMoveTo!(edge);
+          await tester.pumpAndSettle();
+        }
+        if (off != 0) await _dragPaletteAlong(tester, off);
+        expect(_palette(tester).edge, edge);
+        final ValueNotifier<bool> expanded = _palette(
+          tester,
+        ).controller!.expanded;
+        final Rect folded = tester.getRect(card);
+        final Rect resting = tester.getRect(bar);
+
+        for (final bool unfold in <bool>[true, false]) {
+          expanded.value = unfold;
+          for (int frame = 0; frame < 15; frame++) {
+            await tester.pump(const Duration(milliseconds: 40));
+            expect(tester.getRect(bar), resting);
+          }
+          await tester.pumpAndSettle();
+          expect(tester.getRect(bar), resting);
+          expect(
+            tester.getSize(card),
+            ToolPalette.sizeFor(edge.axis, expanded: unfold),
+          );
+          // Where the screen lays it out, and all of it inside the page.
+          expect(
+            _surfaceRect(tester).intersect(tester.getRect(card)),
+            tester.getRect(card),
+          );
+        }
+        expect(tester.getRect(card), folded);
+        expect(tester.takeException(), isNull);
       });
     }
 
@@ -625,8 +690,10 @@ void main() {
     ) async {
       await pumpApp(tester);
 
-      // The six tools and the arrow that unfolds the recordings and the ruler.
-      expect(find.byType(PaletteButton), findsNWidgets(7));
+      // The six tools, the arrow that unfolds the recordings and the ruler,
+      // and the button that customizes them.
+      expect(find.byType(PaletteButton), findsNWidgets(8));
+      expect(find.byTooltip('Customize toolbar'), findsOneWidget);
       expect(find.byTooltip('Expand toolbar'), findsOneWidget);
       expect(find.byTooltip('Recordings'), findsNothing);
       expect(find.byTooltip('Show ruler'), findsNothing);

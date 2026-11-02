@@ -18,10 +18,14 @@ class SvgExporter {
 
   final ExportSink sink;
 
+  /// [pageSize] is the size of the page exported, and [origin] where its
+  /// top-left corner is in page units: not at zero for the part of a
+  /// whiteboard round its ink.
   String build({
     required String title,
     required Size pageSize,
     required InkController controller,
+    Offset origin = Offset.zero,
     Brightness brightness = Brightness.light,
   }) {
     if (!pageSize.isFinite || pageSize.isEmpty) {
@@ -32,7 +36,9 @@ class SvgExporter {
       'svg',
       attributes: <String, String>{
         'xmlns': 'http://www.w3.org/2000/svg',
-        'viewBox': '0 0 ${_n(pageSize.width)} ${_n(pageSize.height)}',
+        'viewBox':
+            '${_n(origin.dx)} ${_n(origin.dy)} '
+            '${_n(pageSize.width)} ${_n(pageSize.height)}',
         'width': _n(pageSize.width),
         'height': _n(pageSize.height),
         'data-etonia-version': '1',
@@ -97,6 +103,7 @@ class SvgExporter {
     required String title,
     required Size pageSize,
     required InkController controller,
+    Offset origin = Offset.zero,
     Brightness brightness = Brightness.light,
     Rect? sharePositionOrigin,
   }) async {
@@ -104,6 +111,7 @@ class SvgExporter {
       title: title,
       pageSize: pageSize,
       controller: controller,
+      origin: origin,
       brightness: brightness,
     );
     final Directory root = await getTemporaryDirectory();

@@ -34,7 +34,7 @@ class PaletteButton extends StatefulWidget {
   final bool dense;
 
   /// Whether a shared [SelectionCapsule] behind the buttons draws the selected
-  /// fill, gliding between them. The button then only recolors its glyph.
+  /// fill. The button then only recolors its glyph.
   final bool hostsSelection;
 
   final Widget child;

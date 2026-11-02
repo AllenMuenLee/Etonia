@@ -2,10 +2,13 @@ import 'dart:async';
 import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
+import 'package:flutter/physics.dart';
 
+import '../../app/system_bars.dart';
 import '../../app/theme/app_icons.dart';
 import '../../app/theme/app_tokens.dart';
 import '../../shared/memory/memory_pressure.dart';
+import '../../shared/motion/motion_memory.dart';
 import '../../shared/widgets/ignore_keyboard.dart';
 import '../editor/widgets/editor_app_bar.dart';
 import '../editor/widgets/editor_chrome.dart';
@@ -19,6 +22,9 @@ class NoteTabLease {
   Future<bool> Function()? prepareToEvict;
   Future<bool> Function()? prepareToClose;
   VoidCallback? onReady;
+
+  /// Puts the note's editor away if it safely can be, leaving a cold tab.
+  Future<bool> Function()? putAway;
 }
 
 class NoteTabScope extends InheritedWidget {
@@ -42,8 +48,10 @@ typedef NoteTabBuilder =
       ValueChanged<NoteEntry> onRenamed,
     );
 
-/// A small LRU of warm editors. Cold tabs keep only cheap restoration data;
-/// sessions with non-persisted state are safety-pinned until closed.
+/// The editors of open notes. A tab goes cold when the memory for notes runs
+/// out with nothing else of its note left to let go of, or the system runs
+/// low; cold tabs keep only cheap restoration data, and sessions with
+/// non-persisted state are safety-pinned until closed.
 /// Draws the one top bar every pane shares, and shows two notes side by side
 /// once a tab is dropped on the left or right of the window.
 class NoteTabsPage extends StatefulWidget {
@@ -52,6 +60,7 @@ class NoteTabsPage extends StatefulWidget {
     required this.notes,
     required this.builder,
     this.onBack,
+    this.showing = true,
     this.warmCapacity,
   }) : assert(warmCapacity == null || warmCapacity > 0);
 
@@ -59,26 +68,37 @@ class NoteTabsPage extends StatefulWidget {
   final NoteTabBuilder builder;
   final VoidCallback? onBack;
 
+  /// Whether the notes are in front. While they are, the status bar is put
+  /// away; behind the library, the window leaves fullscreen and the library
+  /// has every system bar back.
+  final bool showing;
+
   /// Recent editors kept in memory, plus sessions that cannot safely be evicted
   /// (failed saves or non-persisted editing state).
   /// Safety pins and all visible panes take precedence over this soft budget.
-  /// By default there is none: every open note's editor stays warm, to be
-  /// shown at once, until the system runs low on memory.
+  /// By default there is none: the note's share of the pool of what open
+  /// notes keep in memory decides, and the system when it runs low.
   final int? warmCapacity;
 
   @override
   State<NoteTabsPage> createState() => _NoteTabsPageState();
 }
 
-class _NoteTabsPageState extends State<NoteTabsPage> {
+class _NoteTabsPageState extends State<NoteTabsPage>
+    with SingleTickerProviderStateMixin {
   String? _activeId;
   final Map<String, NoteTabLease> _leases = {};
   final List<String> _warm = [];
   final Map<String, (NoteEntry, Widget)> _children = {};
   bool _trimming = false;
 
-  /// What each open editor offers the shared top bar.
+  /// What each open editor offers the shared top bar, and what each tab
+  /// keeps of the toolbar.
   final EditorChromeHost _chrome = EditorChromeHost();
+
+  /// The window's one toolbar. The editor in front holds it; switching or
+  /// opening a tab moves the same element over instead of building another.
+  final GlobalKey _toolbarKey = GlobalKey(debugLabel: 'Shared toolbar');
 
   /// How each open note is renamed, as its editor page has told us.
   final Map<String, VoidCallback> _renames = {};
@@ -86,9 +106,26 @@ class _NoteTabsPageState extends State<NoteTabsPage> {
   /// How much of a split window the left pane takes.
   double _split = 0.5;
 
+  /// Whether the top bar and its tabs are put away, and the navigation bar
+  /// with them, leaving the page the whole screen.
+  bool _fullscreen = false;
+
+  /// How far the top bar has gone for fullscreen: 0 in its place, 1 away.
+  late final AnimationController _barAway;
+
+  /// Whether the bar and the page are on their way, one above the other. The
+  /// page is then as tall as it is in fullscreen, whichever way they go, so
+  /// the editors are laid out once for the move and not on each of its frames.
+  bool _sliding = false;
+
+  /// Counts the moves that have ended, for the editors: the page has then
+  /// come to rest somewhere new without being laid out.
+  final ValueNotifier<int> _barSettled = ValueNotifier<int>(0);
+
   @override
   void initState() {
     super.initState();
+    _barAway = AnimationController.unbounded(vsync: this);
     _activeId = widget.notes.active?.id;
     if (_activeId != null) _warm.add(_activeId!);
     for (final String id in widget.notes.visibleNoteIds) {
@@ -96,6 +133,7 @@ class _NoteTabsPageState extends State<NoteTabsPage> {
     }
     widget.notes.addListener(_onNotesChanged);
     MemoryPressure.instance.addListener(_releaseMemory);
+    if (widget.showing) SystemBars.showNavigation();
   }
 
   @override
@@ -103,6 +141,9 @@ class _NoteTabsPageState extends State<NoteTabsPage> {
     MemoryPressure.instance.removeListener(_releaseMemory);
     widget.notes.removeListener(_onNotesChanged);
     _chrome.dispose();
+    _barAway.dispose();
+    _barSettled.dispose();
+    if (widget.showing) SystemBars.showAll();
     super.dispose();
   }
 
@@ -110,6 +151,66 @@ class _NoteTabsPageState extends State<NoteTabsPage> {
   void didUpdateWidget(NoteTabsPage oldWidget) {
     super.didUpdateWidget(oldWidget);
     if (oldWidget.builder != widget.builder) _children.clear();
+    if (widget.showing != oldWidget.showing) {
+      if (widget.showing) {
+        SystemBars.showNavigation();
+      } else {
+        _bringBarBackAtOnce();
+        SystemBars.showAll();
+      }
+    }
+  }
+
+  void _enterFullscreen() {
+    if (_fullscreen) return;
+    setState(() => _fullscreen = true);
+    _slideBar(away: true);
+    SystemBars.hideAll();
+  }
+
+  /// A method, not a closure, so each build hands the editors an equal
+  /// callback and none is rebuilt for it.
+  void _exitFullscreen() {
+    if (!_fullscreen) return;
+    setState(() => _fullscreen = false);
+    _slideBar(away: false);
+    if (widget.showing) SystemBars.showNavigation();
+  }
+
+  /// Moves the bar and the page together, keeping the speed of a move that
+  /// is turned back halfway. With motion reduced they are simply there.
+  void _slideBar({required bool away}) {
+    final double target = away ? 1 : 0;
+    if (MediaQuery.disableAnimationsOf(context)) {
+      _sliding = false;
+      _barAway.value = target;
+      return;
+    }
+    _sliding = true;
+    _barAway
+        .animateWith(
+          SpringSimulation(
+            AppMotion.smooth,
+            _barAway.value,
+            target,
+            _barAway.velocity,
+          ),
+        )
+        .then((_) {
+          if (!mounted) return;
+          // A spring stops just short of its end; the page rests on it.
+          _barAway.value = target;
+          setState(() => _sliding = false);
+          _barSettled.value++;
+        });
+  }
+
+  /// Out of fullscreen with no move, for the page going out of view anyway.
+  void _bringBarBackAtOnce() {
+    _fullscreen = false;
+    _sliding = false;
+    _barAway.stop();
+    _barAway.value = 0;
   }
 
   Widget _editorFor(NoteEntry note) {
@@ -164,6 +265,7 @@ class _NoteTabsPageState extends State<NoteTabsPage> {
     _renames.removeWhere((id, _) => !ids.contains(id));
     _leases.removeWhere((id, _) => !ids.contains(id));
     _children.removeWhere((id, _) => !ids.contains(id));
+    _chrome.retainToolbars(ids);
 
     // Ensure all visible pane notes are in warm cache.
     for (final String id in widget.notes.visibleNoteIds) {
@@ -200,28 +302,33 @@ class _NoteTabsPageState extends State<NoteTabsPage> {
 
       for (final id in List<String>.of(_warm)) {
         if (_warm.length <= effectiveCapacity) break;
-        if (id == _activeId || visibleIds.contains(id)) {
-          continue;
-        }
-        final lease = _leases[id];
-        final prepare = lease?.prepareToEvict;
-        // Missing registration means the editor has not mounted yet.
-        if (prepare == null || !await prepare()) continue;
+        await _putAway(id);
         if (!mounted) return;
-        // Saving is asynchronous: activation/close can happen meanwhile.
-        if (id == _activeId ||
-            visibleIds.contains(id) ||
-            _leases[id] != lease) {
-          continue;
-        }
-        setState(() {
-          _warm.remove(id);
-          _children.remove(id);
-        });
       }
     } finally {
       _trimming = false;
     }
+  }
+
+  /// Takes the editor of the note [id] out of memory, if it is out of view
+  /// and has nothing unsaved. Its tab stays, and reads the note again when
+  /// it is shown.
+  Future<bool> _putAway(String id) async {
+    bool inView() =>
+        id == _activeId || widget.notes.visibleNoteIds.contains(id);
+    if (inView()) return false;
+    final lease = _leases[id];
+    final prepare = lease?.prepareToEvict;
+    // Missing registration means the editor has not mounted yet.
+    if (prepare == null || !await prepare()) return false;
+    // Saving is asynchronous: activation/close can happen meanwhile.
+    if (!mounted || inView() || _leases[id] != lease) return false;
+    MotionMemory.instance.forget(('note', id));
+    setState(() {
+      _warm.remove(id);
+      _children.remove(id);
+    });
+    return true;
   }
 
   void _queueTrim() {
@@ -231,6 +338,10 @@ class _NoteTabsPageState extends State<NoteTabsPage> {
   }
 
   void _back() {
+    if (_fullscreen) {
+      setState(_bringBarBackAtOnce);
+      if (widget.showing) SystemBars.showNavigation();
+    }
     if (widget.onBack != null) {
       widget.onBack!();
     } else {
@@ -255,6 +366,7 @@ class _NoteTabsPageState extends State<NoteTabsPage> {
           onMenuPressed: _leave,
           leadingIsBack: true,
           onSettingsPressed: entry?.onSettings,
+          onFullscreenPressed: _enterFullscreen,
           audioPlayer: entry?.audioPlayer,
           replayController: entry?.replayController,
           onCloseReplay: entry?.onCloseReplay,
@@ -281,6 +393,8 @@ class _NoteTabsPageState extends State<NoteTabsPage> {
     Size size, {
     Widget? header,
     double headerHeight = 0,
+    bool showsToolbar = true,
+    bool ownsToolbar = false,
   }) {
     return Listener(
       behavior: HitTestBehavior.translucent,
@@ -305,12 +419,22 @@ class _NoteTabsPageState extends State<NoteTabsPage> {
                   child: NoteTabScope(
                     lease: _leases.putIfAbsent(
                       note.id,
-                      () => NoteTabLease()..onReady = _queueTrim,
+                      () => NoteTabLease()
+                        ..onReady = _queueTrim
+                        ..putAway = () => _putAway(note.id),
                     ),
                     child: EditorChromeScope(
                       host: _chrome,
                       noteId: note.id,
-                      child: _editorFor(note),
+                      child: EditorFullscreenScope(
+                        onExit: _fullscreen ? _exitFullscreen : null,
+                        settled: _barSettled,
+                        child: EditorToolbarScope(
+                          toolbarKey: ownsToolbar ? _toolbarKey : null,
+                          showsToolbar: showsToolbar,
+                          child: _editorFor(note),
+                        ),
+                      ),
                     ),
                   ),
                 );
@@ -322,16 +446,22 @@ class _NoteTabsPageState extends State<NoteTabsPage> {
     );
   }
 
+  /// In a split each half carries its own bar, so it reaches the top; in
+  /// fullscreen neither does, once they have slid away.
+  double _paneHeaderHeight(BuildContext context) {
+    return widget.notes.isSplit && (!_fullscreen || _sliding)
+        ? AppSizes.appBarHeight + MediaQuery.paddingOf(context).top
+        : 0;
+  }
+
   Widget _buildPanes(BuildContext context, List<NoteEntry> notes) {
     final OpenNotes open = widget.notes;
     return LayoutBuilder(
       builder: (BuildContext context, BoxConstraints constraints) {
         final Size size = constraints.biggest;
         final bool split = open.isSplit;
-        // In a split each half carries its own bar, so it reaches the top.
-        final double headerHeight = split
-            ? AppSizes.appBarHeight + MediaQuery.paddingOf(context).top
-            : 0;
+        final double headerHeight = _paneHeaderHeight(context);
+        final bool headers = headerHeight > 0;
         final Rect full = Offset.zero & size;
         final double dividerX = (size.width * _split).roundToDouble();
         final Rect left = Rect.fromLTRB(0, 0, dividerX, size.height);
@@ -396,9 +526,15 @@ class _NoteTabsPageState extends State<NoteTabsPage> {
                           rectOf(notes[i].id).height - headerHeight,
                         ),
                         headerHeight: headerHeight,
-                        header: split && open.paneOf(notes[i].id) != null
+                        header: headers && open.paneOf(notes[i].id) != null
                             ? _buildBar(context, pane: open.paneOf(notes[i].id))
                             : null,
+                        showsToolbar: split
+                            ? open.isNoteInPane(notes[i].id)
+                            : notes[i].id == _activeId,
+                        ownsToolbar: split
+                            ? open.paneOf(notes[i].id) == open.focusedPane
+                            : notes[i].id == _activeId,
                       ),
                     ),
                   ),
@@ -477,17 +613,81 @@ class _NoteTabsPageState extends State<NoteTabsPage> {
     }
     return Material(
       color: AppColors.of(context).background,
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
+      child: CustomMultiChildLayout(
+        delegate: _BarOverPanes(
+          away: _barAway,
+          sliding: _sliding,
+          statusBar: MediaQuery.paddingOf(context).top,
+          paneHeader: _paneHeaderHeight(context),
+        ),
         children: <Widget>[
-          // A split has a bar over each half instead; the slot stays so the
-          // editors below are not rebuilt when the window splits.
-          widget.notes.isSplit ? const SizedBox.shrink() : _buildBar(context),
-          Expanded(child: _buildPanes(context, notes)),
+          // A split has a bar over each half instead, and fullscreen none;
+          // the slot stays so the editors below are not rebuilt when the
+          // window splits or goes fullscreen.
+          LayoutId(
+            id: _BarOverPanes.bar,
+            child: widget.notes.isSplit || (_fullscreen && !_sliding)
+                ? const SizedBox.shrink()
+                : _buildBar(context),
+          ),
+          LayoutId(id: _BarOverPanes.panes, child: _buildPanes(context, notes)),
         ],
       ),
     );
   }
+}
+
+/// The top bar and the panes below it, slid up by [away] as one sheet until
+/// the bar has left the screen. Only their places change on each frame: the
+/// panes keep their size, and their editors are not laid out again.
+class _BarOverPanes extends MultiChildLayoutDelegate {
+  _BarOverPanes({
+    required this.away,
+    required this.sliding,
+    required this.statusBar,
+    required this.paneHeader,
+  }) : super(relayout: away);
+
+  static const String bar = 'bar';
+  static const String panes = 'panes';
+
+  /// 0 with the bar in its place, 1 with it gone.
+  final Animation<double> away;
+  final bool sliding;
+
+  /// Where the system keeps its status bar showing in fullscreen, the page
+  /// stays clear of it.
+  final double statusBar;
+
+  /// The bar each pane of a split has of its own, which goes up with it.
+  final double paneHeader;
+
+  @override
+  void performLayout(Size size) {
+    final double barHeight = layoutChild(
+      bar,
+      BoxConstraints.tightFor(width: size.width),
+    ).height;
+    final double gone = away.value.clamp(0.0, 1.0);
+    final double top = barHeight + (statusBar - paneHeader - barHeight) * gone;
+    layoutChild(
+      panes,
+      BoxConstraints.tightFor(
+        width: size.width,
+        height: sliding
+            ? size.height - statusBar + paneHeader
+            : size.height - top,
+      ),
+    );
+    positionChild(bar, Offset(0, -gone * barHeight));
+    positionChild(panes, Offset(0, top));
+  }
+
+  @override
+  bool shouldRelayout(_BarOverPanes oldDelegate) =>
+      sliding != oldDelegate.sliding ||
+      statusBar != oldDelegate.statusBar ||
+      paneHeader != oldDelegate.paneHeader;
 }
 
 /// A pane in a split window. The one in use is raised: a soft shadow and full

@@ -43,6 +43,20 @@ abstract final class InkPalette {
     onDarkPaper: Color(0xFFE2E8F0),
   );
 
+  static const InkColor blue = InkColor(
+    id: 'blue',
+    label: 'Blue',
+    onLightPaper: Color(0xFF1F5FD1),
+    onDarkPaper: Color(0xFF7FA8FF),
+  );
+
+  static const InkColor red = InkColor(
+    id: 'red',
+    label: 'Red',
+    onLightPaper: Color(0xFFC62F2F),
+    onDarkPaper: Color(0xFFFF8A80),
+  );
+
   static const List<InkColor> colors = <InkColor>[
     ink,
     InkColor(
@@ -51,18 +65,8 @@ abstract final class InkPalette {
       onLightPaper: Color(0xFF5F6368),
       onDarkPaper: Color(0xFFA8ADB3),
     ),
-    InkColor(
-      id: 'blue',
-      label: 'Blue',
-      onLightPaper: Color(0xFF1F5FD1),
-      onDarkPaper: Color(0xFF7FA8FF),
-    ),
-    InkColor(
-      id: 'red',
-      label: 'Red',
-      onLightPaper: Color(0xFFC62F2F),
-      onDarkPaper: Color(0xFFFF8A80),
-    ),
+    blue,
+    red,
     InkColor(
       id: 'green',
       label: 'Green',
@@ -96,23 +100,27 @@ abstract final class InkPalette {
     onDarkPaper: Color(0xFFFFE04D),
   );
 
+  static const InkColor highlighterGreen = InkColor(
+    id: 'hl-green',
+    label: 'Green',
+    onLightPaper: Color(0xFF34C759),
+    onDarkPaper: Color(0xFF5EE07F),
+  );
+
+  static const InkColor highlighterPink = InkColor(
+    id: 'hl-pink',
+    label: 'Pink',
+    onLightPaper: Color(0xFFFF4F9A),
+    onDarkPaper: Color(0xFFFF7AB4),
+  );
+
   /// The highlighter's inks: bright, opaque bases drawn translucent by the
   /// stroke's opacity, so one mark stays see-through on any paper, light,
   /// dark, or imported.
   static const List<InkColor> highlighterColors = <InkColor>[
     highlighterYellow,
-    InkColor(
-      id: 'hl-green',
-      label: 'Green',
-      onLightPaper: Color(0xFF34C759),
-      onDarkPaper: Color(0xFF5EE07F),
-    ),
-    InkColor(
-      id: 'hl-pink',
-      label: 'Pink',
-      onLightPaper: Color(0xFFFF4F9A),
-      onDarkPaper: Color(0xFFFF7AB4),
-    ),
+    highlighterGreen,
+    highlighterPink,
     InkColor(
       id: 'hl-blue',
       label: 'Blue',

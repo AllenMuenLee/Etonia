@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 
 import '../features/library/library_screen.dart';
 import '../features/library/note_repository.dart';
+import '../shared/widgets/motion_warm_up.dart';
 import 'theme/app_theme.dart';
 import 'theme/app_tokens.dart';
 
@@ -32,8 +33,9 @@ class GreatnoteApp extends StatelessWidget {
       theme: AppTheme.light(),
       darkTheme: AppTheme.dark(),
       themeMode: themeMode,
-      builder: (BuildContext context, Widget? child) =>
-          GlassBackdrop(child: child ?? const SizedBox.shrink()),
+      builder: (BuildContext context, Widget? child) => MotionWarmUp(
+        child: GlassBackdrop(child: child ?? const SizedBox.shrink()),
+      ),
       home: home ?? LibraryHome(repository: repository),
     );
   }

@@ -6,6 +6,7 @@ import 'package:greatnote/features/editor/document_io/document_models.dart';
 import 'package:greatnote/features/editor/editor_screen.dart';
 import 'package:greatnote/features/editor/ink/ink_canvas.dart';
 import 'package:greatnote/features/editor/ink/ink_controller.dart';
+import 'package:greatnote/features/editor/ink/ink_palette.dart';
 import 'package:greatnote/features/editor/ink/ink_sample.dart';
 import 'package:greatnote/features/editor/ink/stroke.dart';
 import 'package:greatnote/features/editor/page/note_document.dart';
@@ -96,6 +97,36 @@ Future<void> _stepPage(WidgetTester tester, String tooltip) async {
   await tester.pumpAndSettle();
 }
 
+/// Turns on Only write with stylus, so fingers pan and zoom.
+Future<void> _onlyStylusWrites(WidgetTester tester) async {
+  await tester.tap(find.byTooltip('Settings'));
+  await tester.pumpAndSettle();
+  await tester.tap(find.text('Only write with stylus'));
+  await tester.pumpAndSettle();
+  await tester.tapAt(const Offset(10, 10));
+  await tester.pumpAndSettle();
+}
+
+const StrokeStyle _pen = StrokeStyle(ink: InkPalette.ink, width: 4);
+
+/// A stroke drawn on [ink] as a pen would, one step of history.
+void _write(InkController ink, double x, double y) {
+  ink.startStroke(
+    pointer: 1,
+    sample: RawInkSample(position: InkVector(x, y), timestamp: Duration.zero),
+    style: _pen,
+  );
+  for (int i = 1; i <= 5; i++) {
+    ink.addSamples(1, <RawInkSample>[
+      RawInkSample(
+        position: InkVector(x + i * 10, y),
+        timestamp: _sampleInterval * i,
+      ),
+    ]);
+  }
+  ink.endStroke(1);
+}
+
 Future<void> _closePanel(WidgetTester tester) async {
   await tester.tapAt(const Offset(10, 10));
   await tester.pumpAndSettle();
@@ -129,23 +160,16 @@ void main() {
       expect(geometry.displaySize.height, greaterThan(700));
     });
 
-    test('an infinite page is at least the area, at scale 1', () {
-      expect(
-        PageGeometry.of(
+    test('an infinite page is the whole board, at scale 1', () {
+      for (final Size? extent in <Size?>[null, const Size(1600, 500)]) {
+        final PageGeometry geometry = PageGeometry.of(
           const PageSetup(size: PageSize.infinite),
-          null,
+          extent,
           viewport,
-        ).pageSize,
-        viewport,
-      );
-      expect(
-        PageGeometry.of(
-          const PageSetup(size: PageSize.infinite),
-          const Size(1600, 500),
-          viewport,
-        ).pageSize,
-        const Size(1600, 700),
-      );
+        );
+        expect(geometry.pageSize, InfiniteBoard.size);
+        expect(geometry.scale, 1);
+      }
     });
   });
 
@@ -160,53 +184,123 @@ void main() {
     expect(viewport.zoom, 0.7);
   });
 
-  group('grownPageExtent', () {
-    const Size page = Size(1000, 700);
+  group('InfiniteBoard', () {
+    test('its origin is in the middle, on the rules\' lattice', () {
+      expect(InfiniteBoard.origin.dx, closeTo(InfiniteBoard.extent / 2, 96));
+      expect(InfiniteBoard.origin.dy, InfiniteBoard.origin.dx);
+      const PageConfig config = PageConfig();
+      for (final double spacing in <double>[
+        config.lineSpacing,
+        config.gridSpacing,
+        config.dotSpacing,
+      ]) {
+        expect(InfiniteBoard.origin.dx % spacing, 0);
+      }
+    });
 
-    test('does not grow for ink away from the edges', () {
+    test('an empty board is framed at its origin', () {
       expect(
-        grownPageExtent(
-          current: page,
-          viewport: page,
-          ink: const Rect.fromLTWH(100, 100, 600, 400),
-        ),
-        isNull,
+        InfiniteBoard.frameOf(null),
+        InfiniteBoard.origin & InfiniteBoard.minFrame,
       );
     });
 
-    test('grows right and down by a step when ink nears an edge', () {
-      final Size? right = grownPageExtent(
-        current: page,
-        viewport: page,
-        ink: const Rect.fromLTWH(800, 100, 120, 50),
+    test('ink is framed with a margin, from a corner on the lattice', () {
+      final Rect ink = Rect.fromLTWH(
+        InfiniteBoard.origin.dx - 1000,
+        InfiniteBoard.origin.dy + 30,
+        2000,
+        900,
       );
-      expect(right, const Size(1500, 700));
-      final Size? down = grownPageExtent(
-        current: page,
-        viewport: page,
-        ink: const Rect.fromLTWH(100, 640, 50, 30),
+      final Rect frame = InfiniteBoard.frameOf(ink);
+      expect(frame.left % InfiniteBoard.frameSnap, 0);
+      expect(frame.top % InfiniteBoard.frameSnap, 0);
+      expect(
+        frame.contains(ink.inflate(InfiniteBoard.frameMargin).topLeft),
+        isTrue,
       );
-      expect(down, const Size(1000, 1050));
+      expect(frame.right, ink.right + InfiniteBoard.frameMargin);
+      expect(frame.bottom, ink.bottom + InfiniteBoard.frameMargin);
+      // A dot still makes a frame of the smallest size.
+      expect(
+        InfiniteBoard.frameOf(
+          Rect.fromCenter(center: InfiniteBoard.origin, width: 4, height: 4),
+        ).size,
+        InfiniteBoard.minFrame,
+      );
     });
 
-    test('grows far enough for ink past the edge, up to the limit', () {
+    test('ink leaving the board for paper lands on the paper', () {
+      const Offset o = InfiniteBoard.origin;
+      // Written right of and below the origin: straight back.
       expect(
-        grownPageExtent(
-          current: page,
-          viewport: page,
-          ink: const Rect.fromLTWH(0, 0, 3000, 10),
-        ),
-        const Size(3096, 700),
+        InfiniteBoard.toPage(Rect.fromLTWH(o.dx + 10, o.dy + 20, 100, 100)),
+        -o,
       );
+      // Written above and left of it: brought just inside the paper.
+      final Rect above = Rect.fromLTWH(o.dx - 500, o.dy - 300, 100, 100);
+      final Rect landed = above.shift(InfiniteBoard.toPage(above));
+      expect(landed.left, InfiniteBoard.frameMargin);
+      expect(landed.top, InfiniteBoard.frameMargin);
+    });
+  });
+
+  group('whiteboard conversion', () {
+    test('ink moves onto the board and back, its history with it', () {
+      final InkController ink = InkController();
+      final NoteDocument document = NoteDocument(
+        pages: <NotePage>[NotePage(ink: ink)],
+      );
+      addTearDown(document.dispose);
+      _write(ink, 100, 100);
+      _write(ink, 100, 200);
+      final Stroke first = ink.strokes.first;
+      final InkVector o = InkVector(
+        InfiniteBoard.origin.dx,
+        InfiniteBoard.origin.dy,
+      );
+
+      document.setSetup(const PageSetup(size: PageSize.infinite));
+      expect(ink.strokes.first.points.first, first.points.first + o);
       expect(
-        grownPageExtent(
-          current: page,
-          viewport: page,
-          ink: const Rect.fromLTWH(0, 0, 1e9, 10),
-          config: const PageConfig(maxExtent: 5000),
-        ),
-        const Size(5000, 700),
+        ink.strokes.first.rawSamples.first.position,
+        first.rawSamples.first.position + o,
       );
+      expect(ink.strokes.first.id, first.id);
+      expect(ink.strokes.first.source, StrokeSource.input);
+
+      // Undo finds the earlier ink on the board too, not on the old paper.
+      expect(document.undo(), isTrue);
+      expect(ink.strokes.single.points.first, first.points.first + o);
+      expect(document.redo(), isTrue);
+      expect(ink.strokes, hasLength(2));
+
+      document.setSetup(const PageSetup());
+      expect(ink.strokes.first.points.first, first.points.first);
+      expect(document.undo(), isTrue);
+      expect(ink.strokes.single.points.first, first.points.first);
+    });
+
+    test('a background change leaves the board\'s ink where it is', () {
+      final InkController ink = InkController();
+      final NoteDocument document = NoteDocument(
+        pages: <NotePage>[
+          NotePage(
+            ink: ink,
+            setup: const PageSetup(size: PageSize.infinite),
+          ),
+        ],
+      );
+      addTearDown(document.dispose);
+      _write(ink, 70000, 70000);
+      final InkVector before = ink.strokes.single.points.first;
+      document.setSetup(
+        const PageSetup(
+          size: PageSize.infinite,
+          background: PageBackground.grid,
+        ),
+      );
+      expect(ink.strokes.single.points.first, before);
     });
   });
 
@@ -756,39 +850,123 @@ void main() {
     expect(canvasRect(tester).top, closeTo(top - 120, 0.5));
   });
 
-  testWidgets('an infinite page grows only when ink reaches its edge', (
+  testWidgets('a whiteboard fills the area and pans past where it opened', (
     WidgetTester tester,
   ) async {
     final NoteDocument document = await _pumpDocument(
       tester,
       setup: const PageSetup(size: PageSize.infinite),
     );
-    final Rect start = canvasRect(tester);
-    // The page's own size, before the zoom.
-    final Size page = start.size / _scale(tester);
-    await _drawLine(
-      tester,
-      pageToGlobal(tester, const Offset(100, 100)),
-      pageToGlobal(tester, const Offset(400, 100)),
-    );
-    expect(canvasRect(tester).size, start.size);
-    expect(document.current.extent, isNull);
-
-    final InkVector before = document.current.ink.strokes.single.points.first;
-    await _drawLine(
-      tester,
-      pageToGlobal(tester, Offset(page.width - 300, 300)),
-      pageToGlobal(tester, Offset(page.width - 20, 300)),
-    );
-    await tester.pump();
-    expect(document.current.extent!.width, greaterThan(page.width));
-    expect(document.current.extent!.height, closeTo(page.height, 1e-6));
+    await _onlyStylusWrites(tester);
+    final Finder surface = find.byType(PageViewport);
+    final Rect area = tester.getRect(surface);
+    // Edge to edge: no desk round it, wherever it is panned.
+    expect(canvasRect(tester).contains(area.topLeft), isTrue);
     expect(
-      canvasRect(tester).width / _scale(tester),
-      closeTo(document.current.extent!.width, 1e-6),
+      canvasRect(tester).contains(area.bottomRight - const Offset(1, 1)),
+      isTrue,
     );
-    // Nothing already drawn moved.
-    expect(document.current.ink.strokes.first.points.first, before);
+    expect(
+      find.byKey(const ValueKey<String>('page-scroll-indicators')),
+      findsNothing,
+    );
+    // An empty board opens on its middle.
+    const Offset o = InfiniteBoard.origin;
+    expect(pageToGlobal(tester, o).dx, closeTo(area.center.dx, 1));
+    expect(pageToGlobal(tester, o).dy, closeTo(area.center.dy, 1));
+
+    // Fingers pan up and to the left of where it opened, far past it.
+    for (int i = 0; i < 4; i++) {
+      await tester.dragFrom(
+        area.center,
+        const Offset(400, 300),
+        kind: PointerDeviceKind.touch,
+      );
+      await tester.pumpAndSettle();
+    }
+    expect(pageToGlobal(tester, o).dx, greaterThan(area.right + 500));
+    expect(pageToGlobal(tester, o).dy, greaterThan(area.bottom + 300));
+    expect(canvasRect(tester).contains(area.topLeft), isTrue);
+
+    // Ink written there is on the board, above and left of its origin.
+    await _drawLine(tester, area.center, area.center + const Offset(200, 0));
+    final Stroke stroke = document.current.ink.strokes.single;
+    expect(stroke.bounds.right, lessThan(o.dx));
+    expect(stroke.bounds.bottom, lessThan(o.dy));
+    expect(document.current.extent, isNull);
+  });
+
+  testWidgets('a whiteboard opens on its ink', (WidgetTester tester) async {
+    const Offset o = InfiniteBoard.origin;
+    final InkController ink = InkController(
+      strokes: <Stroke>[
+        Stroke.fromPoints(
+          style: _pen,
+          points: <InkVector>[
+            InkVector(o.dx - 3000, o.dy - 2000),
+            InkVector(o.dx - 2800, o.dy - 1900),
+          ],
+        ),
+      ],
+    );
+    final NoteDocument document = NoteDocument(
+      pages: <NotePage>[
+        NotePage(
+          ink: ink,
+          setup: const PageSetup(size: PageSize.infinite),
+        ),
+      ],
+    );
+    addTearDown(document.dispose);
+    await pumpApp(
+      tester,
+      viewport: TestViewport.tabletLandscape,
+      home: EditorScreen(document: document),
+    );
+    final Rect area = tester.getRect(find.byType(PageViewport));
+    final Offset middle = pageToGlobal(
+      tester,
+      ink.strokes.single.bounds.center,
+    );
+    expect(middle.dx, closeTo(area.center.dx, 1));
+    expect(middle.dy, closeTo(area.center.dy, 1));
+  });
+
+  testWidgets('a whiteboard zooms far out, its rules thinned', (
+    WidgetTester tester,
+  ) async {
+    await _pumpDocument(
+      tester,
+      setup: const PageSetup(
+        size: PageSize.infinite,
+        background: PageBackground.dotted,
+      ),
+    );
+    await _onlyStylusWrites(tester);
+    final Finder surface = find.byType(PageViewport);
+    final Offset middle = tester.getCenter(surface);
+    final TestGesture a = await tester.startGesture(
+      middle - const Offset(300, 0),
+      kind: PointerDeviceKind.touch,
+    );
+    final TestGesture b = await tester.startGesture(
+      middle + const Offset(300, 0),
+      kind: PointerDeviceKind.touch,
+    );
+    for (int i = 0; i < 10; i++) {
+      await a.moveBy(const Offset(29, 0));
+      await b.moveBy(const Offset(-29, 0));
+      await tester.pump();
+    }
+    await a.up();
+    await b.up();
+    await tester.pump();
+    final PageViewportState viewport = tester.state<PageViewportState>(surface);
+    expect(viewport.zoom, lessThan(0.1 + 1e-9));
+    expect(viewport.zoom, greaterThanOrEqualTo(EditorScreen.boardMinZoom));
+    final Rect area = tester.getRect(surface);
+    expect(canvasRect(tester).contains(area.topLeft), isTrue);
+    expect(tester.takeException(), isNull);
   });
 
   testWidgets('each background paints its rules', (WidgetTester tester) async {
@@ -1209,15 +1387,6 @@ void main() {
     expect(document.current.ink.strokes, hasLength(2));
   });
 
-  Future<void> onlyStylusWrites(WidgetTester tester) async {
-    await tester.tap(find.byTooltip('Settings'));
-    await tester.pumpAndSettle();
-    await tester.tap(find.text('Only write with stylus'));
-    await tester.pumpAndSettle();
-    await tester.tapAt(const Offset(10, 10));
-    await tester.pumpAndSettle();
-  }
-
   testWidgets('with only stylus writing, one finger scrolls the page', (
     WidgetTester tester,
   ) async {
@@ -1225,7 +1394,7 @@ void main() {
       tester,
       setup: const PageSetup(size: PageSize.a4Portrait),
     );
-    await onlyStylusWrites(tester);
+    await _onlyStylusWrites(tester);
     final double top = canvasRect(tester).top;
     final Offset middle = tester.getCenter(find.byType(PageViewport));
     final TestGesture finger = await tester.startGesture(
@@ -1247,7 +1416,7 @@ void main() {
       tester,
       setup: _shortPage,
     );
-    await onlyStylusWrites(tester);
+    await _onlyStylusWrites(tester);
     final double width = canvasRect(tester).width;
     final Offset middle = tester.getCenter(find.byType(PageViewport));
     final TestGesture a = await tester.startGesture(
@@ -1280,7 +1449,7 @@ void main() {
     WidgetTester tester,
   ) async {
     await _pumpDocument(tester, setup: _shortPage);
-    await onlyStylusWrites(tester);
+    await _onlyStylusWrites(tester);
     final Offset focal = canvasRect(tester).center;
     final TestGesture a = await tester.startGesture(
       focal - const Offset(50, 0),
@@ -1305,17 +1474,24 @@ void main() {
     await b.up();
   });
 
-  testWidgets('infinite canvas stays edge to edge when pinched out', (
+  testWidgets('a whiteboard stays edge to edge when pinched out', (
     WidgetTester tester,
   ) async {
     await _pumpDocument(
       tester,
       setup: const PageSetup(size: PageSize.infinite),
     );
-    await onlyStylusWrites(tester);
+    await _onlyStylusWrites(tester);
 
     final Finder surface = find.byType(PageViewport);
-    expect(canvasRect(tester), tester.getRect(surface));
+    bool covers() {
+      final Rect area = tester.getRect(surface);
+      final Rect canvas = canvasRect(tester);
+      return canvas.contains(area.topLeft) &&
+          canvas.contains(area.bottomRight - const Offset(1, 1));
+    }
+
+    expect(covers(), isTrue);
 
     final Offset middle = tester.getCenter(surface);
     final TestGesture a = await tester.startGesture(
@@ -1333,8 +1509,8 @@ void main() {
     await tester.pump();
 
     final PageViewportState viewport = tester.state<PageViewportState>(surface);
-    expect(viewport.zoom, 1);
-    expect(canvasRect(tester), tester.getRect(surface));
+    expect(viewport.zoom, lessThan(1));
+    expect(covers(), isTrue);
   });
 
   testWidgets('compact layouts reach page editing through settings', (
@@ -1499,19 +1675,19 @@ void _appendTests() {
     expect(firstPage(tester), before);
   });
 
-  testWidgets('an infinite page grows instead of adding a page', (
+  testWidgets('writing low on a whiteboard adds no page', (
     WidgetTester tester,
   ) async {
     final NoteDocument document = await _pumpDocument(
       tester,
       setup: const PageSetup(size: PageSize.infinite),
     );
-    final Rect page = firstPage(tester);
-    final double y = page.top + page.height * 0.9;
+    final Rect area = tester.getRect(find.byType(PageViewport));
+    final double y = area.top + area.height * 0.9;
     await _drawLine(
       tester,
-      Offset(page.left + 100, y),
-      Offset(page.left + 300, y),
+      Offset(area.left + 100, y),
+      Offset(area.left + 300, y),
     );
     await tester.pumpAndSettle();
     expect(document.pageCount, 1);

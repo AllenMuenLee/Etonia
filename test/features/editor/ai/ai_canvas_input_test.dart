@@ -165,7 +165,7 @@ void main() {
     setUp(() => page = InkController());
     tearDown(() => page.dispose());
 
-    test('hands a loop to onCircle and clears the glow', () {
+    test('hands a loop to onCircle and clears the selection line', () {
       final List<(List<InkVector>, Object)> circled =
           <(List<InkVector>, Object)>[];
       final AiCanvasInputController input = AiCanvasInputController(

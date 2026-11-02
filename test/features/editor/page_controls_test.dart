@@ -37,9 +37,7 @@ void main() {
   });
 
   group('AddMenuButton', () {
-    testWidgets('initial tap opens menu when no action is remembered', (
-      WidgetTester tester,
-    ) async {
+    testWidgets('initial tap opens menu', (WidgetTester tester) async {
       int addPageCount = 0;
       int insertPdfCount = 0;
 
@@ -68,18 +66,16 @@ void main() {
     });
 
     testWidgets(
-      'choosing Add blank page remembers action; subsequent taps invoke directly',
+      'choosing Add blank page adds blank page and does not set button default; next tap opens menu again',
       (WidgetTester tester) async {
         int addPageCount = 0;
         int insertPdfCount = 0;
-        AddPageAction? lastReportedAction;
 
         await tester.pumpWidget(
           _wrap(
             AddMenuButton(
               onAddPage: () => addPageCount++,
               onInsertPdf: () => insertPdfCount++,
-              onActionChanged: (AddPageAction a) => lastReportedAction = a,
             ),
           ),
         );
@@ -93,31 +89,30 @@ void main() {
         await tester.pumpAndSettle();
 
         expect(addPageCount, 1);
-        expect(lastReportedAction, AddPageAction.addPage);
+        expect(insertPdfCount, 0);
+        expect(find.text('Add blank page'), findsNothing);
 
-        // Now tap Add button again - it should NOT open menu or dialog, but directly add page.
+        // Tap Add button again - it should open menu again, NOT default to adding a page directly.
         await tester.tap(find.byTooltip('Add'));
         await tester.pumpAndSettle();
 
-        expect(addPageCount, 2);
-        expect(find.text('Insert PDF'), findsNothing);
-        expect(find.text('Add blank page'), findsNothing);
+        expect(addPageCount, 1);
+        expect(find.text('Insert PDF'), findsOneWidget);
+        expect(find.text('Add blank page'), findsOneWidget);
       },
     );
 
     testWidgets(
-      'choosing Insert PDF remembers action; subsequent taps invoke directly',
+      'choosing Insert PDF triggers onInsertPdf and does not set button default; next tap opens menu again',
       (WidgetTester tester) async {
         int addPageCount = 0;
         int insertPdfCount = 0;
-        AddPageAction? lastReportedAction;
 
         await tester.pumpWidget(
           _wrap(
             AddMenuButton(
               onAddPage: () => addPageCount++,
               onInsertPdf: () => insertPdfCount++,
-              onActionChanged: (AddPageAction a) => lastReportedAction = a,
             ),
           ),
         );
@@ -131,69 +126,40 @@ void main() {
         await tester.pumpAndSettle();
 
         expect(insertPdfCount, 1);
-        expect(lastReportedAction, AddPageAction.insertPdf);
+        expect(addPageCount, 0);
+        expect(find.text('Insert PDF'), findsNothing);
 
-        // Next tap directly triggers insertPdf.
+        // Next tap opens the menu again, NOT directly inserting PDF.
         await tester.tap(find.byTooltip('Add'));
         await tester.pumpAndSettle();
 
-        expect(insertPdfCount, 2);
-        expect(addPageCount, 0);
-        expect(find.text('Insert PDF'), findsNothing);
+        expect(insertPdfCount, 1);
+        expect(find.text('Insert PDF'), findsOneWidget);
+        expect(find.text('Add blank page'), findsOneWidget);
       },
     );
 
-    testWidgets('long press reopens menu allowing user to change action', (
+    testWidgets('tapping Add button toggles menu open and closed', (
       WidgetTester tester,
     ) async {
-      int addPageCount = 0;
-      int insertPdfCount = 0;
-      AddPageAction? currentAction = AddPageAction.addPage;
-
       await tester.pumpWidget(
-        StatefulBuilder(
-          builder: (BuildContext context, StateSetter setState) {
-            return _wrap(
-              AddMenuButton(
-                lastAction: currentAction,
-                onAddPage: () => addPageCount++,
-                onInsertPdf: () => insertPdfCount++,
-                onActionChanged: (AddPageAction a) {
-                  setState(() {
-                    currentAction = a;
-                  });
-                },
-              ),
-            );
-          },
+        _wrap(
+          AddMenuButton(
+            onAddPage: () {},
+            onInsertPdf: () {},
+          ),
         ),
       );
 
-      // Normal tap does addPage directly.
+      // Open menu.
       await tester.tap(find.byTooltip('Add'));
       await tester.pumpAndSettle();
-      expect(addPageCount, 1);
-      expect(insertPdfCount, 0);
-
-      // Long press opens menu.
-      await tester.longPress(find.byTooltip('Add'));
-      await tester.pumpAndSettle();
-
       expect(find.text('Insert PDF'), findsOneWidget);
 
-      // Switch to Insert PDF.
-      await tester.tap(find.text('Insert PDF'));
-      await tester.pumpAndSettle();
-
-      expect(insertPdfCount, 1);
-      expect(currentAction, AddPageAction.insertPdf);
-
-      // Next tap directly invokes Insert PDF.
+      // Tap again closes menu.
       await tester.tap(find.byTooltip('Add'));
       await tester.pumpAndSettle();
-
-      expect(insertPdfCount, 2);
-      expect(addPageCount, 1);
+      expect(find.text('Insert PDF'), findsNothing);
     });
   });
 

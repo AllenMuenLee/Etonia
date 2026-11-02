@@ -99,6 +99,83 @@ void main() {
       );
     },
   );
+  group('whiteboards', () {
+    Map<String, Object?> pageJson(StoredPage page) =>
+        jsonDecode(jsonEncode(page.toJson())) as Map<String, Object?>;
+
+    test('an infinite page from before whiteboards moves onto the board '
+        'once', () {
+      final Map<String, Object?> old = pageJson(
+        StoredPage(
+          setup: const PageSetup(size: PageSize.infinite),
+          extent: const Size(2400, 1800),
+          strokes: <Stroke>[
+            _stroke(InkPalette.ink, 2, const <InkVector>[
+              InkVector(100, 50),
+              InkVector(2000, 1700),
+            ]),
+          ],
+        ),
+      )..remove('boardOrigin');
+      final StoredPage read = StoredPage.fromJson(old);
+      final Offset o = InfiniteBoard.origin;
+      expect(read.strokes.single.points, <InkVector>[
+        InkVector(o.dx + 100, o.dy + 50),
+        InkVector(o.dx + 2000, o.dy + 1700),
+      ]);
+      // The board needs no extent; how far the page grew is let go.
+      expect(read.extent, isNull);
+
+      // Written again, it says where its origin is, and is not moved twice.
+      final StoredPage again = StoredPage.fromJson(pageJson(read));
+      expect(again.strokes.single.points, read.strokes.single.points);
+    });
+
+    test('a paper page is never moved', () {
+      final StoredPage read = StoredPage.fromJson(
+        pageJson(
+          StoredPage(
+            setup: const PageSetup(),
+            strokes: <Stroke>[
+              _stroke(InkPalette.ink, 2, const <InkVector>[InkVector(5, 6)]),
+            ],
+          ),
+        ),
+      );
+      expect(read.strokes.single.points.single, const InkVector(5, 6));
+      expect(pageJson(read).containsKey('boardOrigin'), isFalse);
+    });
+
+    test('a whiteboard is shown as the frame round its ink', () {
+      final Offset o = InfiniteBoard.origin;
+      final StoredPage board = StoredPage(
+        setup: const PageSetup(size: PageSize.infinite),
+        strokes: <Stroke>[
+          _stroke(InkPalette.ink, 2, <InkVector>[
+            InkVector(o.dx - 700, o.dy - 300),
+            InkVector(o.dx + 900, o.dy + 400),
+          ]),
+        ],
+      );
+      final StoredPage framed = board.framed();
+      final Rect frame = InfiniteBoard.frameOf(board.contentBounds);
+      expect(framed.extent, frame.size);
+      expect(
+        framed.strokes.single.points.first,
+        InkVector(o.dx - 700 - frame.left, o.dy - 300 - frame.top),
+      );
+      final Rect paper = Offset.zero & framed.extent!;
+      expect(paper.contains(framed.strokes.single.bounds.topLeft), isTrue);
+      expect(paper.contains(framed.strokes.single.bounds.bottomRight), isTrue);
+      // Paper pages are shown whole, as they are.
+      final StoredPage page = StoredPage(
+        setup: const PageSetup(),
+        strokes: const <Stroke>[],
+      );
+      expect(identical(page.framed(), page), isTrue);
+    });
+  });
+
   group('NoteContent', () {
     test('round-trips through JSON text exactly', () {
       final NoteContent content = _sample();

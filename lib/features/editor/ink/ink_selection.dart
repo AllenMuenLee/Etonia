@@ -1,5 +1,5 @@
 import 'dart:math' as math;
-import 'dart:ui' show Offset, Rect;
+import 'dart:ui' show Offset, Rect, Size;
 
 import 'ink_sample.dart';
 import 'selection_geometry.dart';
@@ -154,10 +154,11 @@ SelectionFrame frameAroundContent(
       pdfBounds == null &&
       stickies.length == 1) {
     final StickyNoteElement note = stickies.first;
+    final Size paper = note.paperSize;
     return SelectionFrame(
-      center: note.center,
-      halfWidth: note.size.width / 2,
-      halfHeight: note.size.height / 2,
+      center: note.paperCenter,
+      halfWidth: paper.width / 2,
+      halfHeight: paper.height / 2,
       angle: note.rotation,
     );
   }

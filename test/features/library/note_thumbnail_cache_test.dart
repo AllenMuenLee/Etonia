@@ -230,6 +230,56 @@ void main() {
     repository.dispose();
   });
 
+  testWidgets('what the folder pages keep beside the pictures leaves them less '
+      'room, and pictures fetched ahead push nothing out', (tester) async {
+    await tester.runAsync(() async {
+      final repository = InMemoryNoteRepository();
+      final a = await repository.createNote();
+      final b = await repository.createNote();
+      const style = ThumbnailStyle(
+        brightness: Brightness.light,
+        paper: Colors.white,
+        rule: Colors.grey,
+        marginRule: Colors.red,
+      );
+      Future<NoteThumbnailImage> drawn(ThumbnailCache cache) async {
+        final picture = cache.watch(a, style);
+        for (var i = 0; i < 100 && picture.value == null; i++) {
+          await Future<void>.delayed(const Duration(milliseconds: 10));
+        }
+        return picture.value!;
+      }
+
+      final measure = ThumbnailCache(
+        repository: repository,
+        rasterizer: const PdfrxRasterizer(),
+        pixelWidth: 40,
+      );
+      final measured = await drawn(measure);
+      final int one = measured.image.width * measured.image.height * 4;
+      measure.dispose();
+
+      final cache = ThumbnailCache(
+        repository: repository,
+        rasterizer: const PdfrxRasterizer(),
+        pixelWidth: 40,
+        maxBytes: one,
+      );
+      final shown = await drawn(cache);
+      cache.prefetchBehind(<NoteEntry>[b], style);
+      await Future<void>.delayed(const Duration(milliseconds: 100));
+      expect(cache.peek(a, Brightness.light), same(shown));
+      expect(cache.peek(b, Brightness.light), isNull);
+      expect(cache.retainedBytes, one);
+
+      cache.reservedBytes = 1;
+      expect(cache.peek(a, Brightness.light), isNull);
+      expect(cache.retainedBytes, 0);
+      cache.dispose();
+      repository.dispose();
+    });
+  });
+
   testWidgets(
     'thumbnail byte eviction releases owners and preserves visible clones',
     (tester) async {

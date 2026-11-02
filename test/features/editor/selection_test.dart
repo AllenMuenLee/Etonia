@@ -174,7 +174,8 @@ Future<void> _chord(
 /// The selected state of a palette button, as assistive technology sees it.
 bool _isSelected(WidgetTester tester, String label) {
   return isSemantics(isSelected: true).matches(
-    tester.getSemantics(find.bySemanticsLabel(RegExp('^$label'))),
+    // The palette's button: its label, or its label and its settings.
+    tester.getSemantics(find.bySemanticsLabel(RegExp('^$label(,|\$)'))),
     <dynamic, dynamic>{},
   );
 }
@@ -193,12 +194,6 @@ Rect _actionBarRect(WidgetTester tester) {
         )
         .first,
   );
-}
-
-/// Dismisses an open popover by tapping the app bar background.
-Future<void> _dismiss(WidgetTester tester) async {
-  await tester.tapAt(const Offset(150, 4));
-  await tester.pumpAndSettle();
 }
 
 void main() {
@@ -220,8 +215,8 @@ void main() {
 
         await _selectTool(tester);
         expect(selected(), <bool>[false, false, true]);
-        // The first press only selects; it does not open the options.
-        expect(find.byType(SelectOptions), findsNothing);
+        // Its options show beside the palette, in place of the pen's.
+        expect(find.byType(SelectOptions), findsOneWidget);
 
         await tester.tap(find.byTooltip('Eraser'));
         await tester.pumpAndSettle();
@@ -276,15 +271,21 @@ void main() {
         await tester.tap(find.byTooltip('Copy'));
         await tester.pumpAndSettle();
 
-        // Select is already selected: this press opens its options.
-        await _selectTool(tester);
-
+        // Select is already selected, its options beside the palette.
         final Rect screen = Offset.zero & viewport.size;
         final Rect options = tester.getRect(find.byType(SelectOptions));
         expect(screen.contains(options.topLeft), isTrue);
         expect(screen.contains(options.bottomRight), isTrue);
         // Paste is offered by holding on the page instead.
         expect(find.text('Paste'), findsNothing);
+        // The switch says what it is, in words.
+        expect(
+          find.descendant(
+            of: find.byType(SelectOptions),
+            matching: find.text('Select PDF'),
+          ),
+          findsOneWidget,
+        );
         final ToolPalette palette = tester.widget<ToolPalette>(
           find.byType(ToolPalette),
         );
@@ -293,6 +294,7 @@ void main() {
           tester.getSemantics(find.bySemanticsLabel('Select PDF')),
           isSemantics(
             label: 'Select PDF',
+            isButton: true,
             hasToggledState: true,
             isToggled: false,
             hasEnabledState: true,
@@ -302,12 +304,18 @@ void main() {
           ),
         );
 
-        await tester.tap(find.text('Select PDF'));
+        final Finder toggle = find.byKey(
+          const ValueKey<String>('select-pdf-toggle'),
+        );
+        await tester.tap(toggle);
         await tester.pumpAndSettle();
         expect(palette.selectPdf.value, isTrue);
-        expect(tester.widget<Switch>(find.byType(Switch)).value, isTrue);
+        expect(
+          tester.getSemantics(find.bySemanticsLabel('Select PDF')),
+          isSemantics(hasToggledState: true, isToggled: true),
+        );
 
-        await tester.tap(find.byType(Switch));
+        await tester.tap(toggle);
         await tester.pumpAndSettle();
         expect(palette.selectPdf.value, isFalse);
         expect(tester.takeException(), isNull);
@@ -1045,40 +1053,6 @@ void main() {
     },
   );
 
-  testWidgets('the tap that dismisses the options starts no lasso or move', (
-    WidgetTester tester,
-  ) async {
-    final InkController controller = await pumpEditor(tester, strokes: _page());
-    final List<Stroke> before = List<Stroke>.of(controller.strokes);
-    await _selectPair(tester, controller);
-    final InkSelection selection = controller.selection!;
-    await _selectTool(tester);
-    final ToolPaletteController palette = tester
-        .widget<ToolPalette>(find.byType(ToolPalette))
-        .controller!;
-    expect(palette.selectMenu.isOpen, isTrue);
-    expect(palette.hasOpenPopover, isTrue);
-
-    // Once inside the frame, which would move it, and once on empty paper,
-    // which would clear it.
-    await _drag(tester, _center, _center + const Offset(80, 80));
-
-    expect(find.byType(SelectOptions), findsNothing);
-    expect(palette.hasOpenPopover, isFalse);
-    expect(controller.selection, same(selection));
-    expect(controller.strokes, before);
-
-    await _selectTool(tester);
-    await tester.tapAt(_at(tester, const Offset(300, 600)));
-    await tester.pumpAndSettle();
-    expect(controller.selection, same(selection));
-
-    // The next touch does act.
-    await tester.tapAt(_at(tester, const Offset(300, 600)));
-    await tester.pumpAndSettle();
-    expect(controller.selection, isNull);
-  });
-
   group('keyboard shortcuts', () {
     testWidgets('Ctrl and Meta with C, X, and V copy, cut, and paste', (
       WidgetTester tester,
@@ -1609,7 +1583,9 @@ void main() {
       );
       await _selectPair(tester, controller);
 
-      final Rect palette = tester.getRect(find.byType(ToolPalette));
+      final Rect palette = tester.getRect(
+        find.byKey(const ValueKey<String>('tool-palette-card')),
+      );
       // Ending level with the outside of the frame's right-hand handles;
       // the palette floats across the top, clear of it.
       double expectedRight(Rect bar) =>

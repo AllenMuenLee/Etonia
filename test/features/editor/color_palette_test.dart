@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:greatnote/app/theme/app_tokens.dart';
 import 'package:greatnote/features/editor/ink/ink_palette.dart';
+import 'package:greatnote/features/editor/ink/pen_settings.dart';
 import 'package:greatnote/features/editor/sticky/sticky_note.dart';
 import 'package:greatnote/features/editor/widgets/color_palette_dialog.dart';
 import 'package:greatnote/features/editor/widgets/ink_color_picker.dart';
@@ -116,12 +117,15 @@ void main() {
     });
   });
 
-  group('InkColorPicker 色盤 integration', () {
-    testWidgets('shows color-palette-button and picks a custom ink', (
+  group('InkSwatches 色盤 integration', () {
+    Future<void> pumpSwatches(
       WidgetTester tester,
-    ) async {
-      InkColor selected = InkPalette.ink;
-      await tester.pumpWidget(
+      List<InkColor> swatches,
+      ValueGetter<InkColor> selected,
+      ValueChanged<int> onSelected,
+      void Function(int, InkColor) onReplaced,
+    ) {
+      return tester.pumpWidget(
         MaterialApp(
           theme: ThemeData.light().copyWith(
             extensions: <ThemeExtension<dynamic>>[AppColors.light],
@@ -129,96 +133,51 @@ void main() {
           home: Scaffold(
             body: StatefulBuilder(
               builder: (BuildContext context, StateSetter setState) {
-                return InkColorPicker(
-                  selected: selected,
-                  onSelected: (InkColor next) {
-                    setState(() => selected = next);
-                  },
+                return InkSwatches(
+                  swatches: swatches,
+                  selected: selected(),
+                  onSelected: (int i) => setState(() => onSelected(i)),
+                  onReplaced: (int i, InkColor ink) =>
+                      setState(() => onReplaced(i, ink)),
                 );
               },
             ),
           ),
         ),
       );
+    }
 
-      // The color palette button is present.
-      expect(
-        find.byKey(const ValueKey<String>('color-palette-button')),
-        findsOneWidget,
+    testWidgets('a first tap picks a swatch; a second, on the one picked, '
+        'puts a custom ink in its place', (WidgetTester tester) async {
+      final List<InkColor> swatches = List<InkColor>.of(
+        PenSettings.defaultSwatches,
       );
+      InkColor selected = swatches.first;
+      await pumpSwatches(
+        tester,
+        swatches,
+        () => selected,
+        (int i) => selected = swatches[i],
+        (int i, InkColor ink) {
+          swatches[i] = ink;
+          selected = ink;
+        },
+      );
+      expect(find.byKey(const ValueKey<String>('ink-swatch-3')), findsNothing);
 
-      // Tap the palette button to open the dialog.
-      await tester.tap(
-        find.byKey(const ValueKey<String>('color-palette-button')),
-      );
+      // The first tap only picks the ink.
+      await tester.tap(find.byKey(const ValueKey<String>('ink-swatch-1')));
       await tester.pumpAndSettle();
-
-      // Enter hex #E91E63 (Pink).
-      await tester.enterText(
-        find.byKey(const ValueKey<String>('color-hex-input')),
-        'E91E63',
-      );
-      await tester.pumpAndSettle();
-
-      // Select it.
-      await tester.tap(
-        find.byKey(const ValueKey<String>('color-select-button')),
-      );
-      await tester.pumpAndSettle();
-
-      expect(selected.id, 'custom-ffe91e63');
-      expect(
-        selected.onLightPaper.toARGB32(),
-        const Color(0xFFE91E63).toARGB32(),
-      );
-
-      // The custom swatch is now visible in the picker.
-      expect(
-        find.byKey(const ValueKey<String>('ink-swatch-custom-ffe91e63')),
-        findsOneWidget,
-      );
-    });
-
-    testWidgets('a second tap on the chosen swatch opens the palette', (
-      WidgetTester tester,
-    ) async {
-      InkColor selected = InkPalette.ink;
-      await tester.pumpWidget(
-        MaterialApp(
-          theme: ThemeData.light().copyWith(
-            extensions: <ThemeExtension<dynamic>>[AppColors.light],
-          ),
-          home: Scaffold(
-            body: StatefulBuilder(
-              builder: (BuildContext context, StateSetter setState) {
-                return InkColorPicker(
-                  selected: selected,
-                  onSelected: (InkColor next) {
-                    setState(() => selected = next);
-                  },
-                );
-              },
-            ),
-          ),
-        ),
-      );
-
-      // The first tap only chooses the ink.
-      await tester.tap(find.byKey(const ValueKey<String>('ink-swatch-blue')));
-      await tester.pumpAndSettle();
-      expect(selected.id, 'blue');
+      expect(selected, InkPalette.blue);
       expect(
         find.byKey(const ValueKey<String>('color-hex-input')),
         findsNothing,
       );
 
-      // The second opens the palette, starting from that ink.
-      await tester.tap(find.byKey(const ValueKey<String>('ink-swatch-blue')));
+      // The second opens the palette, and what is chosen there takes the
+      // swatch's place.
+      await tester.tap(find.byKey(const ValueKey<String>('ink-swatch-1')));
       await tester.pumpAndSettle();
-      expect(
-        find.byKey(const ValueKey<String>('color-hex-input')),
-        findsOneWidget,
-      );
       await tester.enterText(
         find.byKey(const ValueKey<String>('color-hex-input')),
         'E91E63',
@@ -230,6 +189,7 @@ void main() {
       await tester.pumpAndSettle();
 
       expect(selected.id, 'custom-ffe91e63');
+      expect(swatches, <InkColor>[InkPalette.ink, selected, InkPalette.red]);
     });
   });
 
