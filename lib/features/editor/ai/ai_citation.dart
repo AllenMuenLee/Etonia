@@ -1,6 +1,7 @@
 import 'dart:math' as math;
 import 'dart:ui' show Rect;
 
+import '../ink/ink_sample.dart';
 import '../ink/stroke.dart';
 import 'selection_svg_renderer.dart';
 
@@ -17,13 +18,27 @@ const String _circlePattern =
     r'\[\[\s*C\s*(\d+(?:\.\d+)?)[\s,]+(\d+(?:\.\d+)?)[\s,]+'
     r'(\d+(?:\.\d+)?)[\s,]+(\d+(?:\.\d+)?)\s*\]\]';
 
+/// Cites a page of one of several notes, numbered per request: its lines
+/// `[[N1:P2:L4-L7]]`, a chunk `[[N1:P2:C3]]`, a detail of what was shown
+/// `[[N1:P2:C 100 200 300 400]]` or `[[N1:P2:C3 100 200 300 400]]`, or the page
+/// itself `[[N1:P2]]`.
+const String _notePattern =
+    r'\[\[\s*N\s*\d+\s*:\s*P\s*\d+(?:\s*:[^\[\]]*)?\]\]';
+
 final RegExp _linesCitation = RegExp(_linesPattern, caseSensitive: false);
 final RegExp _circleCitation = RegExp(_circlePattern, caseSensitive: false);
-
-final RegExp _citation = RegExp(
-  '[ \\t]*(?:$_linesPattern|$_circlePattern)',
+final RegExp _noteCitation = RegExp(
+  r'\[\[\s*N\s*(\d+)\s*:\s*P\s*(\d+)(?:\s*:([^\[\]]*))?\]\]',
   caseSensitive: false,
 );
+
+final RegExp _citation = RegExp(
+  '[ \\t]*(?:$_linesPattern|$_circlePattern|$_notePattern)',
+  caseSensitive: false,
+);
+
+/// A citation still being written, at the end of a streaming answer.
+final RegExp _openCitation = RegExp(r'[ \t]*(?:\[\[[^\[\]]*\]?|\[)$');
 
 /// Lines [first] through [last] of the selection SVG, one-based.
 class AiLineRange {
@@ -85,6 +100,167 @@ class AiPictureBox {
 
 /// [text] with every citation taken out: what a reader, or a later turn, gets.
 String stripAiCitations(String text) => text.replaceAll(_citation, '');
+
+/// [text] as far as a stream has written it, with no citation showing, not even
+/// one that has only begun.
+String stripPartialAiCitations(String text) =>
+    stripAiCitations(text).replaceFirst(_openCitation, '');
+
+/// What one `[[N..:P..]]` citation names, as the model wrote it: [note] and
+/// [page] are from one, and [note] means something only to its own request.
+class AiNoteCitation {
+  const AiNoteCitation({
+    required this.note,
+    required this.page,
+    this.ranges = const <AiLineRange>[],
+    this.chunk,
+    this.box,
+  });
+
+  final int note;
+  final int page;
+
+  /// The lines cited. A line is a stroke, counted from one down the page.
+  final List<AiLineRange> ranges;
+
+  /// The chunk cited, or the one [box] is measured on.
+  final int? chunk;
+
+  /// A detail to ring: on [chunk]'s picture, or else on what was shown of the
+  /// page.
+  final AiPictureBox? box;
+}
+
+final RegExp _chunkBody = RegExp(
+  r'^C\s*(?:(\d+)\s+)?(\d+(?:\.\d+)?)[\s,]+(\d+(?:\.\d+)?)[\s,]+'
+  r'(\d+(?:\.\d+)?)[\s,]+(\d+(?:\.\d+)?)$',
+  caseSensitive: false,
+);
+final RegExp _chunkOnlyBody = RegExp(r'^C\s*(\d+)$', caseSensitive: false);
+
+/// Every `[[N..:P..]]` citation in [text], in order. What follows the page, if
+/// it cannot be read, leaves a citation of the page: the model meant at least
+/// that.
+List<AiNoteCitation> parseAiNoteCitations(String text) {
+  return <AiNoteCitation>[
+    for (final Match match in _noteCitation.allMatches(text))
+      _noteCitationOf(
+        int.parse(match[1]!),
+        int.parse(match[2]!),
+        (match[3] ?? '').trim(),
+      ),
+  ];
+}
+
+AiNoteCitation _noteCitationOf(int note, int page, String body) {
+  final Match? box = _chunkBody.firstMatch(body);
+  if (box != null) {
+    return AiNoteCitation(
+      note: note,
+      page: page,
+      chunk: box[1] == null ? null : int.parse(box[1]!),
+      box: AiPictureBox(
+        double.parse(box[2]!),
+        double.parse(box[3]!),
+        double.parse(box[4]!),
+        double.parse(box[5]!),
+      ),
+    );
+  }
+  final Match? chunk = _chunkOnlyBody.firstMatch(body);
+  if (chunk != null) {
+    return AiNoteCitation(note: note, page: page, chunk: int.parse(chunk[1]!));
+  }
+  return AiNoteCitation(note: note, page: page, ranges: _citedIn('[[$body]]'));
+}
+
+/// One paragraph of an answer: what to show, and the words as written, with
+/// the citations any block of nothing but citations after it added.
+class AiAnswerBlock {
+  const AiAnswerBlock(this.text, this.source);
+
+  final String text;
+  final String source;
+}
+
+/// The same paragraphs as [parseAiAnswer], each with its citations.
+List<AiAnswerBlock> parseAiAnswerBlocks(String markdown) {
+  final List<AiAnswerBlock> blocks = <AiAnswerBlock>[];
+  String pending = '';
+  for (final String block in _blocks(markdown)) {
+    final String text = stripAiCitations(block).trim();
+    if (text.isNotEmpty) {
+      blocks.add(AiAnswerBlock(text, '$pending$block'));
+      pending = '';
+    } else if (blocks.isEmpty) {
+      pending += block;
+    } else {
+      final AiAnswerBlock last = blocks.removeLast();
+      blocks.add(AiAnswerBlock(last.text, '${last.source}$block'));
+    }
+  }
+  return blocks;
+}
+
+final Expando<String> _strokeKeys = Expando<String>('aiStrokeKey');
+
+/// Names [stroke] by where it runs, the same on every load and every run, as
+/// most strokes are saved with no id of their own. A stroke left alone keeps its
+/// key through any edit of the page; one moved or redrawn is another stroke. Two
+/// strokes drawn exactly alike share one, which marks both.
+String aiStrokeKey(Stroke stroke) => _strokeKeys[stroke] ??= () {
+  // FNV-1a, as it is kept in files: the platform's hashes change between runs.
+  int hash = 0x811C9DC5;
+  void add(int value) {
+    hash = ((hash ^ (value & 0xFFFFFFFF)) * 0x01000193) & 0xFFFFFFFF;
+  }
+
+  for (final InkVector point in stroke.points) {
+    // A tenth of a point: what saving leaves of a coordinate stays the same.
+    add((point.x * 10).round());
+    add((point.y * 10).round());
+  }
+  add((stroke.style.width * 10).round());
+  return '${stroke.points.length}-${hash.toRadixString(36)}';
+}();
+
+/// What to mark on a page of a note opened from outside its own chat, by
+/// [aiStrokeKey], as the strokes in the editor are not the ones cited.
+class AiNoteMarks {
+  const AiNoteMarks({
+    required this.noteId,
+    required this.pageIndex,
+    this.strokeKeys = const <String>{},
+    this.strokeIndices = const <int>[],
+    this.rings = const <Rect>[],
+  });
+
+  final String noteId;
+
+  /// From zero.
+  final int pageIndex;
+  final Set<String> strokeKeys;
+
+  /// By place on the page, for when no key is found: given only while the note
+  /// has not changed since it was cited.
+  final List<int> strokeIndices;
+
+  /// Details to ring, in page coordinates.
+  final List<Rect> rings;
+
+  /// Which of [strokes], a page's in order, these are.
+  List<Stroke> strokesIn(List<Stroke> strokes) {
+    final List<Stroke> found = <Stroke>[
+      for (final Stroke stroke in strokes)
+        if (strokeKeys.contains(aiStrokeKey(stroke))) stroke,
+    ];
+    if (found.isNotEmpty) return found;
+    return <Stroke>[
+      for (final int index in strokeIndices)
+        if (index >= 0 && index < strokes.length) strokes[index],
+    ];
+  }
+}
 
 /// The paragraphs of [markdown] as Markdown to show, numbered from one by their
 /// place in the list. They are the blocks between blank lines, a fenced code

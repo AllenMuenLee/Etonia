@@ -1,5 +1,6 @@
 import 'dart:math' as math;
 
+import 'package:flutter/foundation.dart' show ValueListenable;
 import 'package:flutter/material.dart';
 
 import '../ai/ai_assistant_controller.dart';
@@ -41,6 +42,165 @@ Rect aiCitationRing(Rect detail) {
     width: math.max((wide ? reach : across) * 2, smallest),
     height: math.max((wide ? across : reach) * 2, smallest),
   );
+}
+
+/// Left before what is too big to fit in view.
+const double _revealMargin = 24;
+
+/// Scrolls the page viewport around [context], which is laid out in page
+/// coordinates, so that all of [bounds] is in view, or moves nothing if it
+/// already is. What is too big to fit shows from its start. Returns false when
+/// there is no viewport, or nothing is laid out yet.
+bool revealAiCitationBounds(BuildContext context, Rect bounds) {
+  final RenderObject? box = context.findRenderObject();
+  final PageViewportState? viewport = context
+      .findAncestorStateOfType<PageViewportState>();
+  final RenderObject? viewportBox = viewport?.context.findRenderObject();
+  if (box is! RenderBox ||
+      viewportBox is! RenderBox ||
+      !box.hasSize ||
+      !viewportBox.hasSize) {
+    return false;
+  }
+  final Rect marked = Rect.fromPoints(
+    box.localToGlobal(bounds.topLeft, ancestor: viewportBox),
+    box.localToGlobal(bounds.bottomRight, ancestor: viewportBox),
+  );
+  final Rect shown = Offset.zero & viewportBox.size;
+  if (marked.left >= shown.left &&
+      marked.top >= shown.top &&
+      marked.right <= shown.right &&
+      marked.bottom <= shown.bottom) {
+    return true;
+  }
+  double along(double start, double end, double extent) {
+    return end - start <= extent
+        ? (start + end - extent) / 2
+        : start - _revealMargin;
+  }
+
+  viewport!.scrollBy(
+    Offset(
+      along(marked.left, marked.right, shown.width),
+      along(marked.top, marked.bottom, shown.height),
+    ),
+  );
+  return true;
+}
+
+/// The marks themselves: a highlighter under [strokes], and a ring round each
+/// of [circles]. Goes under the ink, in page coordinates, and takes no touches.
+class AiCitationMarks extends StatelessWidget {
+  const AiCitationMarks({
+    super.key,
+    this.strokes = const <Stroke>[],
+    this.circles = const <Rect>[],
+  });
+
+  final List<Stroke> strokes;
+  final List<Rect> circles;
+
+  @override
+  Widget build(BuildContext context) {
+    return RepaintBoundary(
+      child: CustomPaint(
+        key: const ValueKey<String>('ai-citation-highlight-layer'),
+        painter: _CitationPainter(strokes: strokes, circles: circles),
+        size: Size.infinite,
+      ),
+    );
+  }
+}
+
+/// Marks on one page of an open note what was cited elsewhere, by [marks], and
+/// brings it into view each time [marks] names this page anew.
+class AiNoteMarksLayer extends StatefulWidget {
+  const AiNoteMarksLayer({
+    super.key,
+    required this.marks,
+    required this.pageIndex,
+    required this.page,
+  });
+
+  final ValueListenable<AiNoteMarks?> marks;
+  final int pageIndex;
+  final InkController page;
+
+  @override
+  State<AiNoteMarksLayer> createState() => _AiNoteMarksLayerState();
+}
+
+class _AiNoteMarksLayerState extends State<AiNoteMarksLayer> {
+  AiNoteMarks? _revealed;
+
+  AiNoteMarks? get _here {
+    final AiNoteMarks? marks = widget.marks.value;
+    return marks?.pageIndex == widget.pageIndex ? marks : null;
+  }
+
+  @override
+  void initState() {
+    super.initState();
+    widget.marks.addListener(_scheduleReveal);
+    _scheduleReveal();
+  }
+
+  @override
+  void didUpdateWidget(AiNoteMarksLayer oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (!identical(oldWidget.marks, widget.marks)) {
+      oldWidget.marks.removeListener(_scheduleReveal);
+      widget.marks.addListener(_scheduleReveal);
+    }
+    _scheduleReveal();
+  }
+
+  @override
+  void dispose() {
+    widget.marks.removeListener(_scheduleReveal);
+    super.dispose();
+  }
+
+  /// After the next layout, which is when the page is where it now is. Tried
+  /// again on later builds until the page can tell.
+  void _scheduleReveal() {
+    final AiNoteMarks? marks = _here;
+    if (marks == null || identical(marks, _revealed)) return;
+    WidgetsBinding.instance.addPostFrameCallback((Duration _) {
+      if (!mounted || !identical(_here, marks)) return;
+      Rect? bounds;
+      void include(Rect rect) => bounds = bounds?.expandToInclude(rect) ?? rect;
+      marks
+          .strokesIn(widget.page.strokes)
+          .forEach((Stroke stroke) => include(stroke.bounds));
+      marks.rings.map(aiCitationRing).forEach(include);
+      if (bounds == null || revealAiCitationBounds(context, bounds!)) {
+        _revealed = marks;
+      }
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return IgnorePointer(
+      child: ExcludeSemantics(
+        child: ListenableBuilder(
+          listenable: Listenable.merge(<Listenable>[
+            widget.marks,
+            widget.page.documentRevisionListenable,
+          ]),
+          builder: (BuildContext context, Widget? _) {
+            final AiNoteMarks? marks = _here;
+            if (marks == null) return const SizedBox.expand();
+            return AiCitationMarks(
+              strokes: marks.strokesIn(widget.page.strokes),
+              circles: marks.rings,
+            );
+          },
+        ),
+      ),
+    );
+  }
 }
 
 /// Marks on [page] what the paragraph last read in the chat is tied to:
@@ -108,9 +268,8 @@ class _AiCitationHighlightState extends State<AiCitationHighlight> {
     return anchor != null && widget.page.strokes.contains(anchor);
   }
 
-  /// Scrolls so that all that is marked here is in view, or moves nothing if
-  /// it already is. What is too big to fit shows from its start. Returns false
-  /// when this page cannot tell.
+  /// Scrolls so that all that is marked here is in view. Returns false when
+  /// this page cannot tell.
   bool _reveal() {
     final AiParagraphLinks? links =
         widget.assistant.paragraphFocus.value?.links;
@@ -126,45 +285,8 @@ class _AiCitationHighlightState extends State<AiCitationHighlight> {
     ]) {
       bounds = bounds?.expandToInclude(stroke.bounds) ?? stroke.bounds;
     }
-    final RenderObject? box = context.findRenderObject();
-    final PageViewportState? viewport = context
-        .findAncestorStateOfType<PageViewportState>();
-    final RenderObject? viewportBox = viewport?.context.findRenderObject();
-    if (bounds == null ||
-        box is! RenderBox ||
-        viewportBox is! RenderBox ||
-        !box.hasSize ||
-        !viewportBox.hasSize) {
-      return false;
-    }
-    final Rect marked = Rect.fromPoints(
-      box.localToGlobal(bounds.topLeft, ancestor: viewportBox),
-      box.localToGlobal(bounds.bottomRight, ancestor: viewportBox),
-    );
-    final Rect shown = Offset.zero & viewportBox.size;
-    if (marked.left >= shown.left &&
-        marked.top >= shown.top &&
-        marked.right <= shown.right &&
-        marked.bottom <= shown.bottom) {
-      return true;
-    }
-    double along(double start, double end, double extent) {
-      return end - start <= extent
-          ? (start + end - extent) / 2
-          : start - _revealMargin;
-    }
-
-    viewport!.scrollBy(
-      Offset(
-        along(marked.left, marked.right, shown.width),
-        along(marked.top, marked.bottom, shown.height),
-      ),
-    );
-    return true;
+    return bounds != null && revealAiCitationBounds(context, bounds);
   }
-
-  /// Left before what is too big to fit in view.
-  static const double _revealMargin = 24;
 
   @override
   Widget build(BuildContext context) {
@@ -190,13 +312,7 @@ class _AiCitationHighlightState extends State<AiCitationHighlight> {
             if (strokes.isEmpty && circles.isEmpty) {
               return const SizedBox.expand();
             }
-            return RepaintBoundary(
-              child: CustomPaint(
-                key: const ValueKey<String>('ai-citation-highlight-layer'),
-                painter: _CitationPainter(strokes: strokes, circles: circles),
-                size: Size.infinite,
-              ),
-            );
+            return AiCitationMarks(strokes: strokes, circles: circles);
           },
         ),
       ),

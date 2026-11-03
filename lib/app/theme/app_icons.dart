@@ -26,6 +26,7 @@ abstract final class AppIcons {
 
   // Library.
   static const IconData library = CupertinoIcons.book;
+  static const IconData studyDesk = CupertinoIcons.book_circle;
   static const IconData folder = CupertinoIcons.folder_fill;
   static const IconData folderOpen = CupertinoIcons.folder_open;
   static const IconData newFolder = CupertinoIcons.folder_badge_plus;

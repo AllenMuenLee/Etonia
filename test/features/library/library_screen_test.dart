@@ -1383,6 +1383,10 @@ void main() {
       find.byTooltip('Sort'),
       find.byTooltip('Show as list'),
       find.byTooltip('Select'),
+      find.descendant(
+        of: find.byKey(const ValueKey<String>('sidebar-study-desk')),
+        matching: find.byType(InkWell),
+      ),
       _sidebar(find.byTooltip('New folder')),
       find.descendant(
         of: find.byKey(const ValueKey<String>('sidebar-library')),

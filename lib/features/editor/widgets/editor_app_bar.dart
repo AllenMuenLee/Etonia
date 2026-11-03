@@ -18,6 +18,7 @@ class EditorAppBar extends StatelessWidget implements PreferredSizeWidget {
     required this.centerTitle,
     this.onMenuPressed,
     this.leadingIsBack = false,
+    this.backTooltip = 'Back to library',
     this.onTitlePressed,
     this.onSettingsPressed,
     this.onFullscreenPressed,
@@ -37,6 +38,9 @@ class EditorAppBar extends StatelessWidget implements PreferredSizeWidget {
   /// Shows the navigation control as a way back to the library instead of
   /// a menu.
   final bool leadingIsBack;
+
+  /// Says where the back button leads.
+  final String backTooltip;
   final VoidCallback? onTitlePressed;
   final VoidCallback? onSettingsPressed;
 
@@ -81,7 +85,7 @@ class EditorAppBar extends StatelessWidget implements PreferredSizeWidget {
                           order: const NumericFocusOrder(1),
                           child: IconButton(
                             tooltip: leadingIsBack
-                                ? 'Back to library'
+                                ? backTooltip
                                 : 'Open navigation menu',
                             onPressed: onMenuPressed,
                             icon: Icon(

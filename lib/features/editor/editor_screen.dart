@@ -127,6 +127,7 @@ class EditorScreen extends StatefulWidget {
     this.eraserConfig = const EraserConfig(),
     this.selectionConfig = const SelectionConfig(),
     this.aiClient,
+    this.citationMarks,
     this.aiApiConfig = const AiApiConfig.fromEnvironment(),
     this.aiLayoutConfig = const AiLayoutConfig(),
     this.selectionImageRenderer = const SelectionImageRenderer(),
@@ -223,6 +224,10 @@ class EditorScreen extends StatefulWidget {
 
   /// Answers the assistant's requests. Supplied by tests, and by a build
   /// that talks to its own backend; otherwise the screen makes a
+  /// What was cited of this note from outside it, to mark on its page and bring
+  /// into view. Null for a note opened any other way.
+  final ValueListenable<AiNoteMarks?>? citationMarks;
+
   /// [BackendAiClient], serving every model through the backend, and
   /// closes it when it goes.
   final AiClient? aiClient;
@@ -3739,6 +3744,14 @@ class EditorScreenState extends State<EditorScreen>
                                       assistant: _ai,
                                       page: page.ink,
                                     ),
+                                    if (widget.citationMarks
+                                        case final ValueListenable<AiNoteMarks?>
+                                            marks)
+                                      AiNoteMarksLayer(
+                                        marks: marks,
+                                        pageIndex: index,
+                                        page: page.ink,
+                                      ),
                                     InkCanvas(
                                       controller: page.ink,
                                       visible: visible,

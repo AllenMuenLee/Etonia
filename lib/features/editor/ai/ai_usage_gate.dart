@@ -22,6 +22,16 @@ enum AiModelAccess {
   bool get canSend => this == unlimited || this == metered;
 }
 
+/// What a model picker needs of whatever chat it sits in.
+abstract interface class AiModelChooser {
+  List<AiModelId> get models;
+  AiModelId? get selectedModel;
+  String get modelLabel;
+  AiModelAccess? accessFor(AiModelId model);
+  bool isModelConfigured(AiModelId model);
+  void selectModel(AiModelId model);
+}
+
 /// Decides which models the assistant may use, and is told what each
 /// answer cost. The editor depends on this alone, so tests, and builds that
 /// meter on a server, can supply their own.

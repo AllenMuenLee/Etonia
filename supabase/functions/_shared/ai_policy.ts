@@ -547,14 +547,14 @@ export function drawingRequest(
       : "\nThe ANSWER is final and settles what the task is. " +
         "Do not re-solve, doubt, or call it unverified, and never write that the task or " +
         "context is unclear. Set data-etonia-paragraph to the number of the paragraph each " +
-        "visible element illustrates (write 2 for [P2]). For each large paragraph, and any " +
-        'paragraph about particular ink, also add <desc data-etonia-role="citation" ' +
-        'data-etonia-paragraph="2">[[L12-L30]]</desc>, naming the data-etonia-line values of ' +
-        "the selected SVG elements it refers to: it is all the app highlights when that " +
-        "paragraph is read.") +
+        "visible element illustrates (write 2 for [P2]) to highlight the generated notation. " +
+        "To also highlight the user's own note for that paragraph, add " +
+        '<desc data-etonia-role="citation" data-etonia-paragraph="2">[[L12-L30]]</desc>, ' +
+        "naming the data-etonia-line values of the selected SVG elements it refers to: " +
+        "the app highlights the cited user strokes and your drawing when that paragraph is read.") +
     "\nInteract with the selected SVG: " +
     (visual === "static" ? "annotate the note" : "annotate the note or add animation to it") +
-    ", in whatever way best serves this request and the answer. You can annotate directly on " +
+    ", in whatever way best serves this request and the answer. Draw graphs, plots, diagrams, or visual curves whenever they help clarify concepts and aid understanding. You can annotate directly on " +
     "the user's strokes; do not redraw or replace their note.";
 }
 

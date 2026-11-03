@@ -973,7 +973,7 @@ class AiModelSelector extends StatelessWidget {
     this.onOpenPlans,
   });
 
-  final AiAssistantController controller;
+  final AiModelChooser controller;
   final VoidCallback? onOpenPlans;
 
   static bool _alwaysUnlimited(AiModelId model) =>
@@ -1349,14 +1349,7 @@ class _MessageBubble extends StatelessWidget {
   /// The answer's words: one block, or, once anything in it is tied to the
   /// note, a block for each paragraph with its citation after it.
   Widget _answer(BuildContext context, TextTheme text) {
-    Widget markdown(String source) => GptMarkdown(
-      delimitBareMath(normalizeInlineMath(source)),
-      style: text.bodyMedium,
-      textDirection: Directionality.of(context),
-      useDollarSignsForLatex: true,
-      // An answer never makes the app fetch anything.
-      imageBuilder: _imagePlaceholder,
-    );
+    Widget markdown(String source) => AiAnswerMarkdown(source);
 
     final _AnswerLinking? answer = this.answer;
     final AiAnswerLinks? links = answer?.links;
@@ -1376,16 +1369,6 @@ class _MessageBubble extends StatelessWidget {
           ),
       ],
     );
-  }
-
-  /// Stands in for an image the answer links to.
-  static Widget _imagePlaceholder(
-    BuildContext context,
-    String url,
-    double? width,
-    double? height,
-  ) {
-    return Text('[image]', style: Theme.of(context).textTheme.labelMedium);
   }
 
   @override
@@ -1434,6 +1417,35 @@ class _MessageBubble extends StatelessWidget {
           ),
         ],
       ),
+    );
+  }
+}
+
+/// An answer's Markdown, with its formulas, as every chat sets it.
+class AiAnswerMarkdown extends StatelessWidget {
+  const AiAnswerMarkdown(this.source, {super.key});
+
+  final String source;
+
+  /// Stands in for an image the answer links to.
+  static Widget _imagePlaceholder(
+    BuildContext context,
+    String url,
+    double? width,
+    double? height,
+  ) {
+    return Text('[image]', style: Theme.of(context).textTheme.labelMedium);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return GptMarkdown(
+      delimitBareMath(normalizeInlineMath(source)),
+      style: Theme.of(context).textTheme.bodyMedium,
+      textDirection: Directionality.of(context),
+      useDollarSignsForLatex: true,
+      // An answer never makes the app fetch anything.
+      imageBuilder: _imagePlaceholder,
     );
   }
 }

@@ -60,6 +60,7 @@ class NoteTabsPage extends StatefulWidget {
     required this.notes,
     required this.builder,
     this.onBack,
+    this.backTooltip = 'Back to library',
     this.showing = true,
     this.warmCapacity,
   }) : assert(warmCapacity == null || warmCapacity > 0);
@@ -67,6 +68,9 @@ class NoteTabsPage extends StatefulWidget {
   final OpenNotes notes;
   final NoteTabBuilder builder;
   final VoidCallback? onBack;
+
+  /// Says where [onBack] leads.
+  final String backTooltip;
 
   /// Whether the notes are in front. While they are, the status bar is put
   /// away; behind the library, the window leaves fullscreen and the library
@@ -365,6 +369,7 @@ class _NoteTabsPageState extends State<NoteTabsPage>
           centerTitle: false,
           onMenuPressed: _leave,
           leadingIsBack: true,
+          backTooltip: widget.backTooltip,
           onSettingsPressed: entry?.onSettings,
           onFullscreenPressed: _enterFullscreen,
           audioPlayer: entry?.audioPlayer,

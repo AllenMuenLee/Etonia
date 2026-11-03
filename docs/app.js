@@ -1,5 +1,5 @@
 /* ==========================================================================
-   Etonia Official Website — Waitlist & Scroll-Highlight Animation
+   Etonia Official Website — Waitlist & Screenshot Steppers
    ========================================================================== */
 
 (function () {
@@ -82,37 +82,32 @@
   }
 
   /* ------------------------------------------------------------------------
-     2. Scroll-to-Highlight Animation (Paragraph 1 -> 2 -> 3)
+     2. Steppers: buttons beside a screenshot that show its frames in turn,
+        by themselves while on screen unless the reader prefers less motion.
      ------------------------------------------------------------------------ */
-  function initScrollHighlightAnimation() {
-    const stepButtons = Array.from(
-      document.querySelectorAll('[data-scroll-step]')
-    );
-    const frames = Array.from(document.querySelectorAll('[data-scroll-frame]'));
+  function initStepper(root) {
+    const stepButtons = Array.from(root.querySelectorAll('[data-step]'));
+    const frames = Array.from(root.querySelectorAll('[data-frame]'));
     if (!stepButtons.length || !frames.length) return;
 
+    const interval = Number(root.getAttribute('data-interval')) || 2800;
+    const reduceMotion = window.matchMedia('(prefers-reduced-motion: reduce)');
     let currentStep = 1;
     let timerId = null;
+    let onScreen = false;
+    let held = false;
 
     function setStep(step) {
       currentStep = step;
       stepButtons.forEach((btn) => {
-        const match = Number(btn.getAttribute('data-scroll-step')) === step;
+        const match = Number(btn.getAttribute('data-step')) === step;
         btn.classList.toggle('is-active', match);
-        btn.setAttribute('aria-selected', match ? 'true' : 'false');
+        btn.setAttribute('aria-pressed', match ? 'true' : 'false');
       });
       frames.forEach((frame) => {
-        const match = Number(frame.getAttribute('data-scroll-frame')) === step;
+        const match = Number(frame.getAttribute('data-frame')) === step;
         frame.classList.toggle('is-active', match);
       });
-    }
-
-    function startAutoCycle() {
-      stopAutoCycle();
-      timerId = window.setInterval(() => {
-        const next = currentStep >= 3 ? 1 : currentStep + 1;
-        setStep(next);
-      }, 2800);
     }
 
     function stopAutoCycle() {
@@ -122,23 +117,38 @@
       }
     }
 
+    function updateAutoCycle() {
+      stopAutoCycle();
+      if (!onScreen || held || reduceMotion.matches) return;
+      timerId = window.setInterval(() => {
+        setStep(currentStep >= stepButtons.length ? 1 : currentStep + 1);
+      }, interval);
+    }
+
     stepButtons.forEach((btn) => {
+      const step = Number(btn.getAttribute('data-step')) || 1;
       btn.addEventListener('click', () => {
-        const step = Number(btn.getAttribute('data-scroll-step')) || 1;
         setStep(step);
-        startAutoCycle();
+        updateAutoCycle();
       });
       btn.addEventListener('mouseenter', () => {
-        const step = Number(btn.getAttribute('data-scroll-step')) || 1;
+        held = true;
         setStep(step);
-        stopAutoCycle();
+        updateAutoCycle();
       });
       btn.addEventListener('mouseleave', () => {
-        startAutoCycle();
+        held = false;
+        updateAutoCycle();
       });
     });
 
-    startAutoCycle();
+    new IntersectionObserver(
+      (entries) => {
+        onScreen = entries[entries.length - 1].isIntersecting;
+        updateAutoCycle();
+      },
+      { threshold: 0.4 }
+    ).observe(root);
   }
 
   /* ------------------------------------------------------------------------
@@ -193,7 +203,7 @@
 
   document.addEventListener('DOMContentLoaded', () => {
     initWaitlistForms();
-    initScrollHighlightAnimation();
+    document.querySelectorAll('[data-stepper]').forEach(initStepper);
     initLightbox();
   });
 })();

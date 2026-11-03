@@ -10,6 +10,7 @@ import '../../shared/layout/breakpoints.dart';
 import '../../shared/memory/note_cache_pool.dart';
 import '../../shared/widgets/processing.dart';
 import '../editor/ai/ai_assistant_controller.dart';
+import '../editor/ai/ai_citation.dart';
 import '../editor/ai/ai_client.dart';
 import '../editor/editor_screen.dart';
 import '../editor/handwriting/handwriting_calibration.dart';
@@ -70,7 +71,12 @@ class NoteEditorPage extends StatefulWidget {
     this.onBack,
     this.onSaved,
     this.arrived,
+    this.citationMarks,
   });
+
+  /// What was cited elsewhere, of whichever note. When it names this one, the
+  /// note goes to that page and marks what is cited there.
+  final ValueListenable<AiNoteMarks?>? citationMarks;
 
   /// Whether the move bringing the note into view has ended. Its heavy
   /// content is held back until then, so building it never costs a frame of
@@ -190,6 +196,22 @@ class _NoteEditorPageState extends State<NoteEditorPage> {
     );
   }
 
+  /// The marks, if they are for this note.
+  AiNoteMarks? get _marksHere {
+    final AiNoteMarks? marks = widget.citationMarks?.value;
+    return marks?.noteId == widget.note.id ? marks : null;
+  }
+
+  /// Only this note's, so another note open beside it marks nothing.
+  late final ValueNotifier<AiNoteMarks?> _ownMarks =
+      ValueNotifier<AiNoteMarks?>(_marksHere);
+
+  void _onCitationMarks() {
+    final AiNoteMarks? marks = _marksHere;
+    _ownMarks.value = marks;
+    if (marks != null) _document?.goTo(marks.pageIndex);
+  }
+
   /// The note's content, read but held back until the page has slid in:
   /// building the editor mid-slide would stall the slide.
   NoteContent? _pending;
@@ -242,7 +264,12 @@ class _NoteEditorPageState extends State<NoteEditorPage> {
       _lease = lease;
       lease?.prepareToEvict = _prepareToEvict;
       lease?.prepareToClose = _prepareToClose;
-      if (lease != null) _document?.goTo(lease.currentPage);
+      if (lease != null) {
+        if (_marksHere case final AiNoteMarks marks) {
+          lease.currentPage = marks.pageIndex;
+        }
+        _document?.goTo(lease.currentPage);
+      }
     }
   }
 
@@ -282,6 +309,7 @@ class _NoteEditorPageState extends State<NoteEditorPage> {
   @override
   void initState() {
     super.initState();
+    widget.citationMarks?.addListener(_onCitationMarks);
     _preview = widget.preview?.clone();
     final NoteContent? content = widget.initialContent;
     if (content != null) {
@@ -353,7 +381,7 @@ class _NoteEditorPageState extends State<NoteEditorPage> {
   void _show(NoteContent content) {
     final NoteDocument document = content.toDocument();
     _document = document;
-    document.goTo(_lease?.currentPage ?? 0);
+    document.goTo(_marksHere?.pageIndex ?? _lease?.currentPage ?? 0);
     _autosaver = NoteAutosaver(
       document: document,
       delay: widget.saveDelay,
@@ -444,6 +472,8 @@ class _NoteEditorPageState extends State<NoteEditorPage> {
 
   @override
   void dispose() {
+    widget.citationMarks?.removeListener(_onCitationMarks);
+    _ownMarks.dispose();
     // Left before the note was read: the rest of the reading is let go.
     if (_document == null && _pending == null && _error == null) {
       widget.repository.abandonLoad(widget.note.id);
@@ -498,6 +528,7 @@ class _NoteEditorPageState extends State<NoteEditorPage> {
         onTitlePressed: _rename,
         tabs: tabs,
         aiClient: widget.aiClient,
+        citationMarks: widget.citationMarks == null ? null : _ownMarks,
         subscription: widget.subscription,
         handwritingProfileStore: widget.handwritingProfileStore,
         repository: widget.repository,

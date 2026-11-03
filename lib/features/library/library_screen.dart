@@ -15,8 +15,10 @@ import '../../shared/layout/breakpoints.dart';
 import '../../shared/memory/memory_pressure.dart';
 import '../../shared/memory/note_cache_pool.dart';
 import '../../shared/motion/motion_memory.dart';
+import '../editor/ai/ai_citation.dart';
 import '../editor/ai/ai_client.dart';
 import '../editor/ai/ai_config.dart';
+import '../editor/ai/backend_ai_client.dart';
 import '../editor/handwriting/handwriting_calibration.dart';
 import '../editor/handwriting/handwriting_calibration_screen.dart';
 import '../editor/ink/input_defaults.dart';
@@ -53,6 +55,10 @@ import 'note_tabs_page.dart';
 import 'note_thumbnails.dart';
 import 'open_notes.dart';
 import 'shared_note_clipboard.dart';
+import 'study_desk/study_desk_controller.dart';
+import 'study_desk/study_desk_models.dart';
+import 'study_desk/study_desk_screen.dart';
+import 'study_desk/study_source_picker.dart';
 import 'toolbar_layout_store.dart';
 import '../editor/widgets/toolbar_layout.dart';
 import '../../shared/widgets/app_controls.dart';
@@ -462,6 +468,31 @@ class _LibraryScreenState extends State<LibraryScreen> {
   final List<PickedDocument> _pendingSharedImports = <PickedDocument>[];
   bool _importingShared = false;
 
+  /// Whether the Study Desk is shown in place of a folder.
+  bool _studyDeskOpen = false;
+
+  /// Whether the editor in front was opened by Edit on a citation, so that
+  /// coming back from it goes straight to the desk.
+  bool _openedFromStudyDesk = false;
+
+  /// What that citation marks, for the editor to show; null otherwise.
+  final ValueNotifier<AiNoteMarks?> _citationMarks =
+      ValueNotifier<AiNoteMarks?>(null);
+
+  AiClient? _ownedStudyClient;
+
+  /// Made on first use, and kept as long as the screen: it holds the chats, and
+  /// the sidebar shows how many notes are on it.
+  late StudyDeskController _studyDesk = _makeStudyDesk();
+
+  StudyDeskController _makeStudyDesk() => StudyDeskController(
+    repository: widget.repository,
+    client: widget.aiClient ?? (_ownedStudyClient ??= BackendAiClient()),
+    usageGate: _subscription,
+    pdfRasterizer: widget.pdfRasterizer,
+    clock: widget.clock,
+  )..load();
+
   /// Whether Recently Deleted is shown in place of a folder, and how many
   /// notes it holds.
   bool _inTrash = false;
@@ -673,6 +704,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
   void _releaseMemory() {
     _thumbnails.releaseMemory();
     _notesCache.releaseIdle();
+    _studyDesk.releaseMemory();
     // Read again when next opened, at a first visit's pace.
     final Object? shownKey = _shownListingKey;
     final FolderListing? shown = _listings[shownKey];
@@ -817,6 +849,9 @@ class _LibraryScreenState extends State<LibraryScreen> {
         maxBytes: widget.cacheBudget.homeBytes,
       );
       _handwritingProfileStore = handwritingProfileStoreFor(widget.repository);
+      _studyDesk.dispose();
+      _studyDesk = _makeStudyDesk();
+      _studyDeskOpen = false;
       _folderId = null;
       _listings.clear();
       _reload();
@@ -854,6 +889,9 @@ class _LibraryScreenState extends State<LibraryScreen> {
     _openNotes.dispose();
     _editorAtRest.dispose();
     _destinations.dispose();
+    _studyDesk.dispose();
+    _ownedStudyClient?.close();
+    _citationMarks.dispose();
     _ownedSubscription?.dispose();
     super.dispose();
   }
@@ -1059,7 +1097,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
   }
 
   void _openFolder(String? id) {
-    if (id == _folderId && _query.isEmpty && !_inTrash) {
+    if (id == _folderId && _query.isEmpty && !_inTrash && !_studyDeskOpen) {
       return;
     }
     // The pictures still on their way for the folder left are let go.
@@ -1075,6 +1113,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
         _listingKey(id, trash: false),
       ));
       _inTrash = false;
+      _studyDeskOpen = false;
       _clearSelection();
       _folderId = id;
       _listing = kept == null ? null : _sorted(kept, trash: false);
@@ -1115,7 +1154,17 @@ class _LibraryScreenState extends State<LibraryScreen> {
   void _showLibrary() {
     final bool zooming = _tabsShowing;
     _editorAtRest.value = false;
-    setState(() => _tabsShowing = false);
+    setState(() {
+      _tabsShowing = false;
+      // Whatever happened behind the editor, as a document arriving from
+      // another app and opening its folder, Back goes where Edit came from.
+      if (_openedFromStudyDesk) _studyDeskOpen = true;
+      _openedFromStudyDesk = false;
+    });
+    _citationMarks.value = null;
+    // The desk never left: its chat and scroll are as they were. All it lacks
+    // is what was just written, in the one note written in.
+    if (_studyDeskOpen) unawaited(_studyDesk.refreshSavedNotes());
     _backUpLeftNotes();
     // Pictures are drawn once the note has gone ([_onLibraryShown]): until
     // then the cards keep their old ones, and nothing redraws the library
@@ -1134,6 +1183,11 @@ class _LibraryScreenState extends State<LibraryScreen> {
   void _onNoteSaved(NoteEntry note, NoteContent content) {
     if (!mounted) return;
     _editedNotes.add(note.id);
+    _studyDesk.noteSaved(note.id);
+    // A note still saving as it was left: the desk is already back in front.
+    if (!_tabsShowing && _studyDeskOpen) {
+      unawaited(_studyDesk.refreshSavedNotes());
+    }
     _backUpLeftNotes();
     if (content.pages.isEmpty) return;
     _thumbnails.capture(note, content.pages.first);
@@ -1150,6 +1204,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
       note: note,
       arrived: _editorAtRest,
       preview: _thumbnails.peek(note, Theme.of(context).brightness),
+      citationMarks: _citationMarks,
       aiClient: widget.aiClient,
       subscription: _subscription,
       handwritingProfileStore: _handwritingProfileStore,
@@ -1173,6 +1228,56 @@ class _LibraryScreenState extends State<LibraryScreen> {
       onRenamed: onRenamed,
       onSaved: _onNoteSaved,
     );
+  }
+
+  /// Brings the Study Desk into the library's body.
+  void _openStudyDesk() {
+    if (_studyDeskOpen) return;
+    _thumbnails.cancelPending();
+    setState(() {
+      _scene++;
+      _scenePace = MotionMemory.instance.recall(('scene', 'study-desk'));
+      _clearSelection();
+      _studyDeskOpen = true;
+    });
+  }
+
+  void _addSources() =>
+      unawaited(showStudySourcePicker(context, controller: _studyDesk));
+
+  /// A note or folder dropped on the Study Desk joins its sources.
+  void _dropOnStudyDesk(_Dragged item) {
+    final Folder? folder = item.folder;
+    final int added = folder != null
+        ? _studyDesk.addFolder(folder.id)
+        : _studyDesk.addNotes(<String>[item.note!.id]);
+    final String what = folder == null
+        ? '"${item.title}"'
+        : added == 1
+        ? '1 note from "${item.title}"'
+        : '$added notes from "${item.title}"';
+    ScaffoldMessenger.of(context)
+      ..hideCurrentSnackBar()
+      ..showSnackBar(
+        SnackBar(
+          content: Text(
+            added == 0
+                ? '"${item.title}" is already on the ${StudyDesk.title}'
+                : 'Added $what to the ${StudyDesk.title}',
+          ),
+          behavior: SnackBarBehavior.floating,
+        ),
+      );
+  }
+
+  /// Edit on a citation: opens its note at the cited page with the citation
+  /// marked. Coming back from it returns straight here.
+  void _editCitation(StudyCitation citation) {
+    final NoteEntry? note = _studyDesk.noteOf(citation.noteId);
+    if (note == null) return;
+    _openedFromStudyDesk = true;
+    _citationMarks.value = citation.marks(_studyDesk.revisionOf(note.id));
+    unawaited(_openNote(note));
   }
 
   /// Asks for the new note's name, page size, and paper together.
@@ -1506,6 +1611,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
       _scenePace = MotionMemory.instance.recall(('folder', _trashListing));
       _clearSelection();
       _inTrash = true;
+      _studyDeskOpen = false;
       _listing = kept == null ? null : _sorted(kept, trash: true);
     });
     _search.clear();
@@ -1802,7 +1908,12 @@ class _LibraryScreenState extends State<LibraryScreen> {
     // One scope for both: with two, one back press both left the note and,
     // the library then in front, went up out of its folder.
     return PopScope(
-      canPop: !_tabsShowing && _folderId == null && !_selecting && !_inTrash,
+      canPop:
+          !_tabsShowing &&
+          _folderId == null &&
+          !_selecting &&
+          !_inTrash &&
+          !_studyDeskOpen,
       onPopInvokedWithResult: (bool didPop, Object? _) {
         if (didPop) {
           return;
@@ -1811,6 +1922,14 @@ class _LibraryScreenState extends State<LibraryScreen> {
           _showLibrary();
         } else if (_selecting) {
           _stopSelecting();
+        } else if (_studyDeskOpen && _studyDesk.paneOpen) {
+          _studyDesk.closePane();
+        } else if (_studyDeskOpen) {
+          // Back to whichever folder the desk was opened over.
+          setState(() {
+            _scene++;
+            _studyDeskOpen = false;
+          });
         } else if (_inTrash) {
           _openFolder(null);
         } else {
@@ -1827,6 +1946,9 @@ class _LibraryScreenState extends State<LibraryScreen> {
           notes: _openNotes,
           builder: _noteTab,
           onBack: _showLibrary,
+          backTooltip: _openedFromStudyDesk
+              ? 'Back to ${StudyDesk.title}'
+              : 'Back to library',
           showing: _tabsShowing,
         ),
       ),
@@ -1846,8 +1968,20 @@ class _LibraryScreenState extends State<LibraryScreen> {
     final Widget sidebar = _FolderSidebar(
       folders: _folders,
       counts: _counts,
-      openFolderId: _query.isEmpty && !_inTrash ? _folderId : null,
-      libraryOpen: _query.isEmpty && !_inTrash && _folderId == null,
+      openFolderId: _query.isEmpty && !_inTrash && !_studyDeskOpen
+          ? _folderId
+          : null,
+      libraryOpen:
+          _query.isEmpty && !_inTrash && _folderId == null && !_studyDeskOpen,
+      studyDesk: _studyDesk,
+      studyDeskOpen: _studyDeskOpen,
+      onOpenStudyDesk: () {
+        if (drawer) {
+          _scaffold.currentState?.closeDrawer();
+        }
+        _openStudyDesk();
+      },
+      onDropOnStudyDesk: _dropOnStudyDesk,
       trashOpen: _showingTrash,
       trashCount: _trashCount,
       subscription: _subscription,
@@ -1885,6 +2019,8 @@ class _LibraryScreenState extends State<LibraryScreen> {
     final _LibraryBar bar = _LibraryBar(
       path: _showingTrash ? const <Folder>[] : _path,
       compact: compact,
+      studyDesk: _studyDeskOpen ? _studyDesk : null,
+      onAddSources: _addSources,
       trash: _showingTrash,
       onLeaveTrash: () => _openFolder(null),
       onEmptyTrash: _showingTrash && (_listing?.notes.isNotEmpty ?? false)
@@ -1946,7 +2082,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
         // Beside the sidebar, the bar spans only the items, so the sidebar
         // runs the window's full height.
         appBar: drawer ? bar : null,
-        floatingActionButton: _selecting || _showingTrash
+        floatingActionButton: _selecting || _showingTrash || _studyDeskOpen
             ? null
             : _NewNoteButton(
                 onQuickNote: _quickNote,
@@ -2013,6 +2149,21 @@ class _LibraryScreenState extends State<LibraryScreen> {
   Widget _buildBody(BuildContext context, bool compact) {
     // The last folder's items fade out quickly as the next folder's fade
     // in where they are, one after another.
+    if (_studyDeskOpen) {
+      return SceneCrossfade(
+        scope: _scene,
+        pace: _scenePace,
+        child: StudyDeskScreen(
+          controller: _studyDesk,
+          thumbnail: (NoteEntry note) =>
+              _NoteThumbnail(note: note, cache: _thumbnails),
+          onEditCitation: _editCitation,
+          onAddSources: _addSources,
+          onOpenPlans: _openPlans,
+          pdfRasterizer: widget.pdfRasterizer,
+        ),
+      );
+    }
     return SceneCrossfade(
       scope: _scene,
       pace: _scenePace,
@@ -2426,7 +2577,13 @@ class _LibraryBar extends StatelessWidget implements PreferredSizeWidget {
     this.trash = false,
     this.onLeaveTrash,
     this.onEmptyTrash,
+    this.studyDesk,
+    this.onAddSources,
   });
+
+  /// The Study Desk, while it is shown: the bar is then its header.
+  final StudyDeskController? studyDesk;
+  final VoidCallback? onAddSources;
 
   /// Whether Recently Deleted is shown; the bar then names it, leads back
   /// to the library, and offers to empty it.
@@ -2483,8 +2640,119 @@ class _LibraryBar extends StatelessWidget implements PreferredSizeWidget {
   @override
   Size get preferredSize => Size.fromHeight(
     AppSizes.appBarHeight +
-        (compact ? AppSizes.minTouchTarget + AppSpacing.xs : 0),
+        (compact && studyDesk == null
+            ? AppSizes.minTouchTarget + AppSpacing.xs
+            : 0),
   );
+
+  /// The Study Desk's header: its name, how many notes are in context, and what
+  /// can be done from anywhere on it.
+  Widget _buildStudyDeskRow(BuildContext context, StudyDeskController desk) {
+    final AppColors colors = AppColors.of(context);
+    final TextTheme text = Theme.of(context).textTheme;
+    return ListenableBuilder(
+      listenable: desk,
+      builder: (BuildContext context, Widget? _) {
+        final int active = desk.activeCount;
+        final List<StudySession> history = desk.history;
+        return Row(
+          children: <Widget>[
+            if (onOpenSidebar != null)
+              IconButton(
+                tooltip: 'Folders',
+                onPressed: onOpenSidebar,
+                icon: const Icon(AppIcons.sidebar),
+              )
+            else
+              const SizedBox(width: AppSpacing.md),
+            Flexible(
+              child: Padding(
+                padding: const EdgeInsets.symmetric(horizontal: AppSpacing.xs),
+                child: Semantics(
+                  header: true,
+                  child: Text(
+                    StudyDesk.title,
+                    style: text.titleLarge?.copyWith(color: colors.textPrimary),
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                ),
+              ),
+            ),
+            Semantics(
+              label: active == 1 ? '1 source in use' : '$active sources in use',
+              excludeSemantics: true,
+              child: DecoratedBox(
+                key: const ValueKey<String>('study-source-count'),
+                decoration: ShapeDecoration(
+                  shape: const StadiumBorder(),
+                  color: colors.selected,
+                ),
+                child: Padding(
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: AppSpacing.xs,
+                    vertical: 2,
+                  ),
+                  child: Text(
+                    active == 1 ? '1 source' : '$active sources',
+                    style: text.labelMedium?.copyWith(
+                      color: colors.textPrimary,
+                    ),
+                  ),
+                ),
+              ),
+            ),
+            const Spacer(),
+            if (history.isNotEmpty)
+              PopupMenuButton<String>(
+                tooltip: 'Recent chats',
+                icon: const Icon(AppIcons.sort),
+                onSelected: desk.openSession,
+                itemBuilder: (BuildContext context) => <PopupMenuEntry<String>>[
+                  for (final StudySession session in history)
+                    PopupMenuItem<String>(
+                      value: session.id,
+                      child: Text(
+                        session.title,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                    ),
+                ],
+              ),
+            if (compact) ...<Widget>[
+              IconButton(
+                key: const ValueKey<String>('study-add-sources'),
+                tooltip: 'Add Sources',
+                onPressed: onAddSources,
+                icon: const Icon(AppIcons.add),
+              ),
+              IconButton(
+                key: const ValueKey<String>('study-new-chat'),
+                tooltip: 'New Chat',
+                onPressed: desk.newChat,
+                icon: const Icon(AppIcons.note),
+              ),
+            ] else ...<Widget>[
+              TextButton.icon(
+                key: const ValueKey<String>('study-add-sources'),
+                onPressed: onAddSources,
+                icon: const Icon(AppIcons.add, size: 18),
+                label: const Text('Add Sources'),
+              ),
+              const SizedBox(width: AppSpacing.xxs),
+              TextButton(
+                key: const ValueKey<String>('study-new-chat'),
+                onPressed: desk.newChat,
+                child: const Text('New Chat'),
+              ),
+            ],
+            const SizedBox(width: AppSpacing.xs),
+          ],
+        );
+      },
+    );
+  }
 
   Widget _buildSelectionRow(BuildContext context) {
     final TextTheme text = Theme.of(context).textTheme;
@@ -2556,7 +2824,9 @@ class _LibraryBar extends StatelessWidget implements PreferredSizeWidget {
                 children: <Widget>[
                   SizedBox(
                     height: AppSizes.appBarHeight,
-                    child: selecting
+                    child: studyDesk != null
+                        ? _buildStudyDeskRow(context, studyDesk!)
+                        : selecting
                         ? _buildSelectionRow(context)
                         : Row(
                             children: <Widget>[
@@ -2718,7 +2988,7 @@ class _LibraryBar extends StatelessWidget implements PreferredSizeWidget {
                             ],
                           ),
                   ),
-                  if (compact)
+                  if (compact && studyDesk == null)
                     Padding(
                       padding: const EdgeInsets.fromLTRB(
                         AppSpacing.sm,
@@ -3772,9 +4042,20 @@ class _FolderSidebar extends StatelessWidget {
     required this.onDropInTrash,
     required this.subscription,
     required this.onPlans,
+    required this.studyDesk,
+    required this.studyDeskOpen,
+    required this.onOpenStudyDesk,
+    required this.onDropOnStudyDesk,
   });
 
   static const double width = 280;
+
+  /// The Study Desk, at the top of the sidebar above every folder. Whatever is
+  /// dropped on it joins its sources.
+  final StudyDeskController studyDesk;
+  final bool studyDeskOpen;
+  final VoidCallback onOpenStudyDesk;
+  final ValueChanged<_Dragged> onDropOnStudyDesk;
 
   final SubscriptionController subscription;
   final VoidCallback onPlans;
@@ -3870,6 +4151,39 @@ class _FolderSidebar extends StatelessWidget {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: <Widget>[
+            Padding(
+              padding: const EdgeInsets.fromLTRB(
+                AppSpacing.xs,
+                AppSpacing.xs,
+                AppSpacing.xs,
+                0,
+              ),
+              child: _DropTarget(
+                canAccept: (_Dragged item) => true,
+                onAccept: onDropOnStudyDesk,
+                radius: AppRadii.medium,
+                child: ListenableBuilder(
+                  listenable: studyDesk,
+                  builder: (BuildContext context, Widget? _) => _SidebarRow(
+                    key: const ValueKey<String>('sidebar-study-desk'),
+                    depth: 0,
+                    label: StudyDesk.title,
+                    count: studyDesk.activeCount,
+                    selected: studyDeskOpen,
+                    expanded: null,
+                    icon: Icon(
+                      AppIcons.studyDesk,
+                      color: studyDeskOpen ? colors.accent : colors.textPrimary,
+                      size: AppSizes.icon,
+                    ),
+                    onTap: onOpenStudyDesk,
+                    onToggle: null,
+                    actions: const <_ItemAction>[],
+                    onAction: null,
+                  ),
+                ),
+              ),
+            ),
             // As tall as the bar beside it, so the two read as one line.
             Container(
               height: AppSizes.appBarHeight,

@@ -41,7 +41,8 @@
       <ul class="nav-links">
         <li><a href="#ai-plot" class="nav-pill">AI Plot</a></li>
         <li><a href="#scroll-highlight" class="nav-pill">Scroll Highlight</a></li>
-        <li><a href="#essentials" class="nav-pill">Free Essentials &amp; Goodnotes</a></li>
+        <li><a href="#essentials" class="nav-pill">Free Essentials</a></li>
+        <li><a href="#goodnotes" class="nav-pill">Goodnotes</a></li>
         <li><a href="legal/" class="nav-pill">Support</a></li>
       </ul>
 
@@ -107,197 +108,173 @@
     </section>
 
     <!-- ==================================================================
-         1. AI Plot: Before & After + Scroll-to-Highlight Animation
+         Features: one per row, each laid out the same way. Copy on the left,
+         its screenshot on the right; the steps in the copy drive the shot.
          ================================================================== -->
-    <section class="section" id="ai-plot">
-      <div class="container">
-        <div class="section-header">
-          <span class="kicker kicker-yellow">AI Plot &amp; Notation</span>
-          <h2 class="section-title">From a circled equation to a plotted graph on your page.</h2>
-          <p class="section-desc">
+    <section class="feature" id="ai-plot">
+      <div class="container feature-row" data-stepper data-interval="3600">
+        <div class="feature-copy">
+          <div class="feature-label">
+            <span class="feature-num" aria-hidden="true">01</span>
+            <span class="kicker kicker-yellow">AI Plot &amp; Notation</span>
+          </div>
+          <h2 class="feature-title">From a circled equation to a plotted graph on your page.</h2>
+          <p class="feature-desc">
             Select your handwritten math and ask Etonia. Instead of replying in a detached text box, Etonia draws coordinate axes, plots the curve with roots and extrema, and writes the steps in handwriting right beside your work.
           </p>
-        </div>
 
-        <!-- Before & After Comparison -->
-        <div class="compare-grid">
-          <div class="shot-card">
-            <div class="shot-card-header">
-              <span class="step-badge">Before</span>
-              <span class="shot-caption">1. Circle your handwritten problem</span>
-            </div>
-            <div class="shot-frame zoomable-shot" title="Click to enlarge Before screenshot">
-              <img
-                src="assets/screenshots/ai_before.png"
-                alt="Before AI Plot: Handwritten quadratic equation f(x) = x^2 - 4x + 3 selected on lined paper with the AI assistant ready."
-                width="2388"
-                height="1668"
-              />
-            </div>
-          </div>
-
-          <div class="shot-card">
-            <div class="shot-card-header">
-              <span class="step-badge is-after">After</span>
-              <span class="shot-caption">2. AI writes the steps &amp; plots the curve on the page</span>
-            </div>
-            <div class="shot-frame zoomable-shot" title="Click to enlarge After screenshot">
-              <img
-                src="assets/screenshots/ai_after.png"
-                alt="After AI Plot: Etonia writes the factoring and vertex steps in handwriting and plots the parabola y = x^2 - 4x + 3 with roots (1, 0), (3, 0) and minimum (2, -1) directly on the note."
-                width="2388"
-                height="1668"
-              />
-            </div>
+          <div class="step-list" role="group" aria-label="Before and after">
+            <button type="button" class="step-btn is-active" aria-pressed="true" data-step="1">
+              <span class="step-title">Before</span>
+              <span class="step-sub">1. Circle your handwritten problem</span>
+            </button>
+            <button type="button" class="step-btn" aria-pressed="false" data-step="2">
+              <span class="step-title">After</span>
+              <span class="step-sub">2. AI writes the steps &amp; plots the curve on the page</span>
+            </button>
           </div>
         </div>
 
-        <!-- Scroll-to-Highlight Animation -->
-        <div class="dog-ear-card scroll-demo-card" id="scroll-highlight">
-          <div class="scroll-demo-top">
-            <div>
-              <span class="kicker kicker-yellow">Linked Reading &amp; Canvas Highlight</span>
-              <h3 class="section-title" style="font-size: clamp(22px, 3vw, 30px); margin-bottom: 4px;">
-                Scroll the explanation to highlight related ink and plot points.
-              </h3>
-              <p class="section-desc" style="font-size: 16px;">
-                Every paragraph in the AI assistant is linked to the exact strokes and graph features on your note. As you scroll through the explanation, Etonia highlights the matching equation, handwritten step, and plotted coordinates in yellow.
-              </p>
-            </div>
-          </div>
-
-          <div class="scroll-steps-bar" role="tablist" aria-label="Scroll highlight steps">
-            <button
-              type="button"
-              role="tab"
-              aria-selected="true"
-              class="scroll-step-btn is-active"
-              data-scroll-step="1"
-            >
-              <span class="scroll-step-title">Paragraph 1 &middot; Factoring &amp; Roots</span>
-              <span class="scroll-step-sub">Highlights (x &minus; 1)(x &minus; 3) = 0 and roots (1, 0), (3, 0) on the graph</span>
-            </button>
-
-            <button
-              type="button"
-              role="tab"
-              aria-selected="false"
-              class="scroll-step-btn"
-              data-scroll-step="2"
-            >
-              <span class="scroll-step-title">Paragraph 2 &middot; Vertex &amp; Minimum</span>
-              <span class="scroll-step-sub">Highlights (x &minus; 2)&sup2; &minus; 1 and the minimum vertex (2, &minus;1)</span>
-            </button>
-
-            <button
-              type="button"
-              role="tab"
-              aria-selected="false"
-              class="scroll-step-btn"
-              data-scroll-step="3"
-            >
-              <span class="scroll-step-title">Paragraph 3 &middot; Parabola Curve</span>
-              <span class="scroll-step-sub">Highlights the plotted curve y = x&sup2; &minus; 4x + 3 and axes</span>
-            </button>
-          </div>
-
-          <div class="scroll-stage zoomable-shot" title="Click to inspect full-resolution screenshot">
-            <img
-              class="scroll-frame is-active"
-              data-scroll-frame="1"
-              src="assets/screenshots/ai_scroll_1.png"
-              alt="Scrolling Paragraph 1 highlights the factored equation and root points (1, 0) and (3, 0) on the note in yellow."
-              width="2388"
-              height="1668"
-            />
-            <img
-              class="scroll-frame"
-              data-scroll-frame="2"
-              src="assets/screenshots/ai_scroll_2.png"
-              alt="Scrolling Paragraph 2 highlights the completed-square step and minimum vertex (2, -1) on the note in yellow."
-              width="2388"
-              height="1668"
-            />
-            <img
-              class="scroll-frame"
-              data-scroll-frame="3"
-              src="assets/screenshots/ai_scroll_3.png"
-              alt="Scrolling Paragraph 3 highlights the plotted parabola curve y = x^2 - 4x + 3 and coordinate axes in yellow."
-              width="2388"
-              height="1668"
-            />
-          </div>
+        <div class="feature-media stage zoomable-shot" title="Click to enlarge screenshot">
+          <img
+            class="stage-frame is-active"
+            data-frame="1"
+            src="assets/screenshots/ai_before.png"
+            alt="Before AI Plot: Handwritten quadratic equation f(x) = x^2 - 4x + 3 selected on lined paper with the AI assistant ready."
+            width="2388"
+            height="1668"
+          />
+          <img
+            class="stage-frame"
+            data-frame="2"
+            src="assets/screenshots/ai_after.png"
+            alt="After AI Plot: Etonia writes the factoring and vertex steps in handwriting and plots the parabola y = x^2 - 4x + 3 with roots (1, 0), (3, 0) and minimum (2, -1) directly on the note."
+            width="2388"
+            height="1668"
+          />
         </div>
       </div>
     </section>
 
-    <!-- ==================================================================
-         2 & 3. All Essential Notebook Features Free + Direct Goodnotes Import
-         ================================================================== -->
-    <section class="section" id="essentials">
-      <div class="container">
-        <div class="two-col-grid">
-          <!-- Left: All Essential Notebook Features for Free -->
-          <article class="dog-ear-card pillar-card">
-            <div>
-              <span class="kicker kicker-mint">100% Free Core Notebook</span>
-              <h2 class="section-title" style="font-size: clamp(24px, 3vw, 32px);">
-                All essential notebook features—for free.
-              </h2>
-              <p class="section-desc" style="font-size: 16px;">
-                No paywalls on your everyday note-taking. Write with unlimited notebooks, low-latency vector ink, and full PDF/SVG export at zero cost.
-              </p>
+    <section class="feature" id="scroll-highlight">
+      <div class="container feature-row" data-stepper data-interval="2800">
+        <div class="feature-copy">
+          <div class="feature-label">
+            <span class="feature-num" aria-hidden="true">02</span>
+            <span class="kicker kicker-yellow">Linked Reading &amp; Canvas Highlight</span>
+          </div>
+          <h2 class="feature-title">Scroll the explanation to highlight related ink and plot points.</h2>
+          <p class="feature-desc">
+            Every paragraph in the AI assistant is linked to the exact strokes and graph features on your note. As you scroll through the explanation, Etonia highlights the matching equation, handwritten step, and plotted coordinates in yellow.
+          </p>
 
-              <div class="essentials-pills">
-                <span class="essential-chip">120 Hz Pen, Fountain &amp; Highlighter</span>
-                <span class="essential-chip">Hold-to-Shape Geometry</span>
-                <span class="essential-chip">Movable Sticky Notes</span>
-                <span class="essential-chip">Lined, Grid, Dotted &amp; Infinite Paper</span>
-                <span class="essential-chip">Your Own Handwriting Calibration</span>
-                <span class="essential-chip">PDF, PNG &amp; Vector SVG Export</span>
-              </div>
-            </div>
+          <div class="step-list" role="group" aria-label="Scroll highlight steps">
+            <button type="button" class="step-btn is-active" aria-pressed="true" data-step="1">
+              <span class="step-title">Paragraph 1 &middot; Factoring &amp; Roots</span>
+              <span class="step-sub">Highlights (x &minus; 1)(x &minus; 3) = 0 and roots (1, 0), (3, 0) on the graph</span>
+            </button>
+            <button type="button" class="step-btn" aria-pressed="false" data-step="2">
+              <span class="step-title">Paragraph 2 &middot; Vertex &amp; Minimum</span>
+              <span class="step-sub">Highlights (x &minus; 2)&sup2; &minus; 1 and the minimum vertex (2, &minus;1)</span>
+            </button>
+            <button type="button" class="step-btn" aria-pressed="false" data-step="3">
+              <span class="step-title">Paragraph 3 &middot; Parabola Curve</span>
+              <span class="step-sub">Highlights the plotted curve y = x&sup2; &minus; 4x + 3 and axes</span>
+            </button>
+          </div>
+        </div>
 
-            <div class="shot-frame zoomable-shot" title="Click to enlarge Ink Studio screenshot">
-              <img
-                src="assets/screenshots/feature_ink_studio_light.png"
-                alt="Etonia notebook showing dotted paper, snapped geometric shapes, a movable yellow sticky note, and pen tools."
-                loading="lazy"
-                width="2388"
-                height="1668"
-              />
-            </div>
-          </article>
+        <div class="feature-media stage zoomable-shot" title="Click to inspect full-resolution screenshot">
+          <img
+            class="stage-frame is-active"
+            data-frame="1"
+            src="assets/screenshots/ai_scroll_1.png"
+            alt="Scrolling Paragraph 1 highlights the factored equation and root points (1, 0) and (3, 0) on the note in yellow."
+            width="2388"
+            height="1668"
+          />
+          <img
+            class="stage-frame"
+            data-frame="2"
+            src="assets/screenshots/ai_scroll_2.png"
+            alt="Scrolling Paragraph 2 highlights the completed-square step and minimum vertex (2, -1) on the note in yellow."
+            width="2388"
+            height="1668"
+          />
+          <img
+            class="stage-frame"
+            data-frame="3"
+            src="assets/screenshots/ai_scroll_3.png"
+            alt="Scrolling Paragraph 3 highlights the plotted parabola curve y = x^2 - 4x + 3 and coordinate axes in yellow."
+            width="2388"
+            height="1668"
+          />
+        </div>
+      </div>
+    </section>
 
-          <!-- Right: Directly Import Goodnotes from Google Drive -->
-          <article class="dog-ear-card pillar-card">
-            <div>
-              <span class="kicker kicker-sky">Zero-Friction Switch</span>
-              <h2 class="section-title" style="font-size: clamp(24px, 3vw, 32px);">
-                Directly import Goodnotes from Google Drive.
-              </h2>
-              <p class="section-desc" style="font-size: 16px;">
-                Don't leave your past semesters behind. Connect your Google Drive to import your Goodnotes library directly into Etonia (Goodnotes import is supported exclusively via Google Drive), alongside local PDFs and cloud backup.
-              </p>
+    <section class="feature" id="essentials">
+      <div class="container feature-row">
+        <div class="feature-copy">
+          <div class="feature-label">
+            <span class="feature-num" aria-hidden="true">03</span>
+            <span class="kicker kicker-mint">100% Free Core Notebook</span>
+          </div>
+          <h2 class="feature-title">All essential notebook features&mdash;for free.</h2>
+          <p class="feature-desc">
+            No paywalls on your everyday note-taking. Write with unlimited notebooks, low-latency vector ink, and full PDF/SVG export at zero cost.
+          </p>
 
-              <div class="essentials-pills">
-                <span class="essential-chip">Goodnotes Import (via Google Drive only)</span>
-                <span class="essential-chip">PDF Annotation &amp; Markup</span>
-                <span class="essential-chip">Nested Folders &amp; Search</span>
-                <span class="essential-chip">Google Drive &amp; iCloud Sync</span>
-              </div>
-            </div>
+          <ul class="check-list">
+            <li>120 Hz Pen, Fountain &amp; Highlighter</li>
+            <li>Hold-to-Shape Geometry</li>
+            <li>Movable Sticky Notes</li>
+            <li>Lined, Grid, Dotted &amp; Infinite Paper</li>
+            <li>Your Own Handwriting Calibration</li>
+            <li>PDF, PNG &amp; Vector SVG Export</li>
+          </ul>
+        </div>
 
-            <div class="shot-frame zoomable-shot" title="Click to enlarge Library screenshot">
-              <img
-                src="assets/screenshots/feature_library_light.png"
-                alt="Etonia library view with folders, search bar, and dog-eared notebook cards."
-                loading="lazy"
-                width="2560"
-                height="1600"
-              />
-            </div>
-          </article>
+        <div class="feature-media zoomable-shot" title="Click to enlarge Ink Studio screenshot">
+          <img
+            src="assets/screenshots/feature_ink_studio_light.png"
+            alt="Etonia notebook with its toolbar expanded to show every tool, on dotted paper with snapped geometric shapes and a movable yellow sticky note."
+            loading="lazy"
+            width="2388"
+            height="1668"
+          />
+        </div>
+      </div>
+    </section>
+
+    <section class="feature" id="goodnotes">
+      <div class="container feature-row">
+        <div class="feature-copy">
+          <div class="feature-label">
+            <span class="feature-num" aria-hidden="true">04</span>
+            <span class="kicker kicker-sky">Zero-Friction Switch</span>
+          </div>
+          <h2 class="feature-title">Directly import Goodnotes from Google Drive.</h2>
+          <p class="feature-desc">
+            Don't leave your past semesters behind. Connect your Google Drive to import your Goodnotes library directly into Etonia (Goodnotes import is supported exclusively via Google Drive), alongside local PDFs and cloud backup.
+          </p>
+
+          <ul class="check-list">
+            <li>Goodnotes Import (via Google Drive only)</li>
+            <li>PDF Annotation &amp; Markup</li>
+            <li>Nested Folders &amp; Search</li>
+            <li>Google Drive &amp; iCloud Sync</li>
+          </ul>
+        </div>
+
+        <div class="feature-media zoomable-shot" title="Click to enlarge Library screenshot">
+          <img
+            src="assets/screenshots/feature_library_light.png"
+            alt="Etonia library view with folders, search bar, and dog-eared notebook cards."
+            loading="lazy"
+            width="2560"
+            height="1600"
+          />
         </div>
       </div>
     </section>

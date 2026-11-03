@@ -119,7 +119,7 @@ button, input {
 
 .container {
   width: 100%;
-  max-width: 1120px;
+  max-width: 1240px;
   margin: 0 auto;
   padding: 0 var(--space-lg);
 }
@@ -136,7 +136,7 @@ button, input {
 }
 
 .nav-bar {
-  max-width: 1072px;
+  max-width: 1192px;
   margin: 0 auto;
   min-height: 58px;
   padding: 6px var(--space-md);
@@ -309,7 +309,7 @@ button, input {
 .hero-inner {
   position: relative;
   z-index: 1;
-  max-width: 760px;
+  max-width: 880px;
   margin: 0 auto;
 }
 
@@ -320,6 +320,7 @@ button, input {
   line-height: 1.08;
   letter-spacing: -0.035em;
   color: var(--text-primary);
+  text-wrap: balance;
   margin-bottom: var(--space-md);
 }
 
@@ -420,12 +421,6 @@ button, input {
   border-top: 1px solid var(--divider);
 }
 
-.section-header {
-  max-width: 680px;
-  margin: 0 auto var(--space-xl);
-  text-align: center;
-}
-
 .kicker {
   display: inline-block;
   padding: 4px 12px;
@@ -435,7 +430,6 @@ button, input {
   text-transform: uppercase;
   letter-spacing: 0.04em;
   color: #0A0A0B;
-  margin-bottom: 10px;
 }
 .kicker-yellow { background: var(--hl-yellow-soft); }
 .kicker-mint   { background: var(--hl-mint); }
@@ -458,137 +452,136 @@ button, input {
 }
 
 /* ==========================================================================
-   Pillar 1A: Before & After AI Plot Comparison
+   Features: every feature is the same row, copy left and screenshot right,
+   so the page reads straight down one feature at a time.
    ========================================================================== */
-.compare-grid {
+.feature {
+  padding: var(--space-section) 0;
+  border-top: 1px solid var(--divider);
+  scroll-margin-top: var(--space-lg);
+}
+
+.feature-row {
   display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: var(--space-lg);
-  margin-bottom: var(--space-xxl);
+  grid-template-columns: minmax(0, 5fr) minmax(0, 9fr);
+  gap: var(--space-xxl);
+  align-items: start;
 }
 
-.shot-card {
-  background: var(--surface);
-  border: 1px solid var(--divider);
-  border-radius: var(--radius-xl);
-  padding: var(--space-md);
-  box-shadow: var(--shadow-floating);
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-sm);
-}
-
-.shot-card-header {
+.feature-label {
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  gap: var(--space-xs);
-  padding: 0 4px;
-}
-
-.step-badge {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  padding: 4px 12px;
-  border-radius: var(--radius-stadium);
-  font-size: 13px;
-  font-weight: 800;
-  background: var(--accent);
-  color: var(--on-accent);
-}
-.step-badge.is-after {
-  background: var(--hl-yellow-soft);
-  color: #0A0A0B;
-}
-
-.shot-caption {
-  font-size: 14.5px;
-  font-weight: 600;
-  color: var(--text-secondary);
-}
-
-.shot-frame {
-  border-radius: 16px;
-  overflow: hidden;
-  border: 1px solid var(--divider);
-  background: #FFFFFF;
-  cursor: zoom-in;
-}
-
-/* ==========================================================================
-   Pillar 1B: Scroll-to-Highlight Animation Showcase
-   ========================================================================== */
-.scroll-demo-card {
-  padding: var(--space-xl);
-  box-shadow: var(--shadow-floating);
-}
-
-.scroll-demo-top {
-  display: flex;
-  align-items: flex-end;
-  justify-content: space-between;
-  flex-wrap: wrap;
-  gap: var(--space-md);
-  margin-bottom: var(--space-lg);
-}
-
-.scroll-steps-bar {
-  display: grid;
-  grid-template-columns: repeat(3, 1fr);
   gap: var(--space-sm);
   margin-bottom: var(--space-md);
 }
 
-.scroll-step-btn {
-  text-align: left;
-  padding: 14px 16px;
-  border-radius: var(--radius-lg);
-  border: 1.5px solid var(--divider);
-  background: var(--surface-muted);
-  cursor: pointer;
-  transition: all 180ms ease;
-  position: relative;
-  overflow: hidden;
-}
-.scroll-step-btn:hover {
-  background: var(--surface);
-}
-.scroll-step-btn.is-active {
-  background: rgba(255, 230, 0, 0.20);
-  border-color: #0A0A0B;
-  box-shadow: inset 4px 0 0 #FFE600;
+.feature-num {
+  font-family: var(--font-rounded);
+  font-size: 15px;
+  font-weight: 800;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-secondary);
 }
 
-.scroll-step-title {
+.feature-title {
+  font-family: var(--font-rounded);
+  font-size: clamp(26px, 2.6vw, 34px);
+  font-weight: 800;
+  line-height: 1.14;
+  letter-spacing: -0.03em;
+  text-wrap: balance;
+  margin-bottom: var(--space-sm);
+}
+
+.feature-desc {
+  font-size: 16.5px;
+  line-height: 1.55;
+  color: var(--text-secondary);
+}
+
+/* Steps that drive the screenshot beside them */
+.step-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-xs);
+  margin-top: var(--space-lg);
+}
+
+.step-btn {
+  text-align: left;
+  padding: 12px 16px;
+  border-radius: var(--radius-md);
+  border: 1px solid var(--divider);
+  background: var(--surface);
+  cursor: pointer;
+  transition: background-color 180ms ease, border-color 180ms ease, box-shadow 180ms ease;
+}
+.step-btn:hover {
+  border-color: var(--text-secondary);
+}
+.step-btn:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+.step-btn.is-active {
+  background: #FFFBCC;
+  border-color: var(--accent);
+  box-shadow: inset 4px 0 0 var(--hl-yellow);
+}
+
+.step-title {
   display: block;
   font-family: var(--font-rounded);
   font-size: 15px;
   font-weight: 800;
   color: var(--text-primary);
-  margin-bottom: 3px;
 }
 
-.scroll-step-sub {
+.step-sub {
   display: block;
+  margin-top: 2px;
   font-size: 13.5px;
-  color: var(--text-secondary);
   line-height: 1.35;
+  color: var(--text-secondary);
 }
 
-/* Animated Frame Stack */
-.scroll-stage {
-  position: relative;
-  border-radius: 18px;
+/* What a feature includes */
+.check-list {
+  list-style: none;
+  margin-top: var(--space-lg);
+  border-top: 1px solid var(--divider);
+}
+
+.check-list li {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  padding: 9px 0;
+  border-bottom: 1px solid var(--divider);
+  font-size: 15px;
+  font-weight: 600;
+}
+.check-list li::before {
+  content: "\2713";
+  font-weight: 800;
+}
+
+/* Screenshots */
+.feature-media {
+  border-radius: 16px;
   overflow: hidden;
-  border: 1.5px solid var(--divider);
-  box-shadow: var(--shadow-raised);
+  border: 1px solid var(--divider);
   background: #FFFFFF;
-  aspect-ratio: 2388 / 1668;
+  box-shadow: var(--shadow-floating);
   cursor: zoom-in;
 }
 
-.scroll-frame {
+.stage {
+  position: relative;
+  aspect-ratio: 2388 / 1668;
+}
+
+.stage-frame {
   position: absolute;
   inset: 0;
   width: 100%;
@@ -598,47 +591,15 @@ button, input {
   transition: opacity 420ms var(--ease-smooth);
   pointer-events: none;
 }
-.scroll-frame.is-active {
+.stage-frame.is-active {
   opacity: 1;
   pointer-events: auto;
 }
 
-/* ==========================================================================
-   Pillar 2 & 3: Two-Column Essential Free Features + Goodnotes Import
-   ========================================================================== */
-.two-col-grid {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: var(--space-xl);
-  align-items: stretch;
-}
-
-.pillar-card {
-  padding: var(--space-xl);
-  display: flex;
-  flex-direction: column;
-  justify-content: space-between;
-  gap: var(--space-lg);
-}
-
-.essentials-pills {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
-  margin-top: var(--space-md);
-}
-
-.essential-chip {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  padding: 6px 13px;
-  border-radius: var(--radius-stadium);
-  background: var(--surface-muted);
-  border: 1px solid var(--divider);
-  font-size: 14px;
-  font-weight: 600;
-  color: var(--text-primary);
+@media (prefers-reduced-motion: reduce) {
+  .stage-frame {
+    transition: none;
+  }
 }
 
 /* ==========================================================================
@@ -731,16 +692,18 @@ button, input {
 }
 
 /* Responsive */
-@media (max-width: 880px) {
-  .compare-grid,
-  .two-col-grid,
-  .scroll-steps-bar {
-    grid-template-columns: 1fr;
+@media (max-width: 980px) {
+  .nav-links {
+    display: none;
+  }
+  .feature-row {
+    grid-template-columns: minmax(0, 1fr);
+    gap: var(--space-xl);
   }
 }
 
 @media (max-width: 640px) {
-  .nav-links {
+  .nav-actions .btn-outline span {
     display: none;
   }
   .waitlist-bar {
@@ -751,7 +714,15 @@ button, input {
   .waitlist-input {
     padding: 10px 12px;
   }
-  .section {
+  .section,
+  .feature {
     padding: 52px 0;
+  }
+}
+
+/* Instagram stays reachable from the call to action and the footer. */
+@media (max-width: 360px) {
+  .nav-actions .btn-outline {
+    display: none;
   }
 }

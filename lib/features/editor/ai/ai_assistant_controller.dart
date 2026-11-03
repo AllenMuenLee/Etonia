@@ -278,7 +278,7 @@ class _AiConversation {
 /// It never touches the ink. It is handed a selection when AI is pressed,
 /// copies what it needs, and from then on works from that copy. Nothing is
 /// sent until [send], [sendQuickAction], or [retry] is called.
-class AiAssistantController extends ChangeNotifier {
+class AiAssistantController extends ChangeNotifier implements AiModelChooser {
   AiAssistantController({
     required this._client,
     this.renderer = const SelectionImageRenderer(),
@@ -323,6 +323,7 @@ class AiAssistantController extends ChangeNotifier {
 
   /// The models the user can pick between; empty when the client serves
   /// only one.
+  @override
   List<AiModelId> get models {
     final AiClient client = _client;
     return client is AiModelRouter ? client.models : const <AiModelId>[];
@@ -331,6 +332,7 @@ class AiAssistantController extends ChangeNotifier {
   /// The model the next message goes to: the one picked in this editor,
   /// else the one last picked anywhere, else the client's default. Null
   /// when the client serves only one.
+  @override
   AiModelId? get selectedModel {
     final AiClient client = _client;
     if (client is! AiModelRouter) {
@@ -340,6 +342,7 @@ class AiAssistantController extends ChangeNotifier {
   }
 
   /// Sends the next messages to [model], and remembers the choice.
+  @override
   void selectModel(AiModelId model) {
     if (_disposed || !models.contains(model) || model == selectedModel) {
       return;
@@ -350,9 +353,11 @@ class AiAssistantController extends ChangeNotifier {
   }
 
   /// What the plan allows with [model]; null when nothing is metered.
+  @override
   AiModelAccess? accessFor(AiModelId model) => _usageGate?.accessFor(model);
 
   /// Whether [model] has a key to send with.
+  @override
   bool isModelConfigured(AiModelId model) {
     final AiClient client = _client;
     return client is AiModelRouter
@@ -586,6 +591,7 @@ class AiAssistantController extends ChangeNotifier {
     return model == null ? _client.isConfigured : isModelConfigured(model);
   }
 
+  @override
   String get modelLabel => selectedModel?.label ?? _client.modelLabel;
 
   bool get notationEnabled => _notationEnabled;

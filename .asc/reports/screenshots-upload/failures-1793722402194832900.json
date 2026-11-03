@@ -1,0 +1,43 @@
+{
+  "versionLocalizationId": "7c384fe1-8831-4b26-8814-54fee4b89209",
+  "path": ".asc\\reports\\screenshots-upload\\failures-1793722402194832900.json",
+  "rootPath": "C:\\Users\\limue\\Documents\\Projects\\Etonia\\build\\appstore_screenshots\\iphone",
+  "deviceType": "IPHONE_65",
+  "displayType": "APP_IPHONE_65",
+  "replace": true,
+  "setId": "2de3e305-1eda-4d84-9b04-6bbc7ebbb4c0",
+  "files": [
+    "C:\\Users\\limue\\Documents\\Projects\\Etonia\\build\\appstore_screenshots\\iphone\\01_ai_annotate_and_plot.png",
+    "C:\\Users\\limue\\Documents\\Projects\\Etonia\\build\\appstore_screenshots\\iphone\\02_ai_guided_step_1.png",
+    "C:\\Users\\limue\\Documents\\Projects\\Etonia\\build\\appstore_screenshots\\iphone\\03_ai_guided_step_2.png",
+    "C:\\Users\\limue\\Documents\\Projects\\Etonia\\build\\appstore_screenshots\\iphone\\04_free_note_studio.png",
+    "C:\\Users\\limue\\Documents\\Projects\\Etonia\\build\\appstore_screenshots\\iphone\\05_library_and_folders.png",
+    "C:\\Users\\limue\\Documents\\Projects\\Etonia\\build\\appstore_screenshots\\iphone\\06_dark_mode_studio.png"
+  ],
+  "pendingFiles": [
+    "C:\\Users\\limue\\Documents\\Projects\\Etonia\\build\\appstore_screenshots\\iphone\\01_ai_annotate_and_plot.png",
+    "C:\\Users\\limue\\Documents\\Projects\\Etonia\\build\\appstore_screenshots\\iphone\\02_ai_guided_step_1.png",
+    "C:\\Users\\limue\\Documents\\Projects\\Etonia\\build\\appstore_screenshots\\iphone\\03_ai_guided_step_2.png",
+    "C:\\Users\\limue\\Documents\\Projects\\Etonia\\build\\appstore_screenshots\\iphone\\04_free_note_studio.png",
+    "C:\\Users\\limue\\Documents\\Projects\\Etonia\\build\\appstore_screenshots\\iphone\\05_library_and_folders.png",
+    "C:\\Users\\limue\\Documents\\Projects\\Etonia\\build\\appstore_screenshots\\iphone\\06_dark_mode_studio.png"
+  ],
+  "pendingAssets": [
+    {
+      "fileName": "01_ai_annotate_and_plot.png",
+      "filePath": "C:\\Users\\limue\\Documents\\Projects\\Etonia\\build\\appstore_screenshots\\iphone\\01_ai_annotate_and_plot.png",
+      "assetId": "8c800019-6c8d-8a77-8022-5bdcccb712f1",
+      "checksum": "ef9b3b5e2a5aa1b7091c33fdf5cd274f",
+      "state": "UPLOAD_COMPLETE"
+    }
+  ],
+  "failures": [
+    {
+      "fileName": "01_ai_annotate_and_plot.png",
+      "filePath": "C:\\Users\\limue\\Documents\\Projects\\Etonia\\build\\appstore_screenshots\\iphone\\01_ai_annotate_and_plot.png",
+      "error": "timed out waiting for screenshot 8c800019-6c8d-8a77-8022-5bdcccb712f1 checksum settlement after delivery state UPLOAD_COMPLETE: fetch screenshot 8c800019-6c8d-8a77-8022-5bdcccb712f1 during checksum settlement: request failed: Get \"https://api.appstoreconnect.apple.com/v1/appScreenshots/8c800019-6c8d-8a77-8022-5bdcccb712f1\": context deadline exceeded"
+    }
+  ],
+  "error": "timed out waiting for screenshot 8c800019-6c8d-8a77-8022-5bdcccb712f1 checksum settlement after delivery state UPLOAD_COMPLETE: fetch screenshot 8c800019-6c8d-8a77-8022-5bdcccb712f1 during checksum settlement: request failed: Get \"https://api.appstoreconnect.apple.com/v1/appScreenshots/8c800019-6c8d-8a77-8022-5bdcccb712f1\": context deadline exceeded",
+  "generatedAt": "2026-11-03T16:13:22Z"
+}
