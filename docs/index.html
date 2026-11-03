@@ -1,36 +1,32 @@
 <!DOCTYPE html>
-<html lang="en" data-theme="light">
+<html lang="en">
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Etonia — Handwriting Notes That Think With You</title>
+  <title>Etonia — Handwriting Notes with AI Plotting</title>
   <meta
     name="description"
-    content="Etonia is an AI handwriting notebook for iPad, iPhone, and Android tablets. Write with low-latency native ink, lasso equations or diagrams, and watch AI explain, plot, and annotate directly on your page in your own handwriting."
+    content="Etonia plots functions and writes step-by-step math directly on your page in handwriting, highlights related ink as you scroll, includes all essential notebook features for free, and imports Goodnotes directly."
   />
-  <meta property="og:title" content="Etonia — Handwriting Notes That Think With You" />
+  <meta property="og:title" content="Etonia — Handwriting Notes with AI Plotting" />
   <meta
     property="og:description"
-    content="Low-latency vector ink meets an AI tutor that writes and plots directly on your page in your own handwriting. Join the waitlist for iPad, iPhone, and Android."
+    content="Circle any equation to plot curves and handwritten steps on your page, scroll to highlight linked strokes, get all essential notebook features for free, and import Goodnotes directly."
   />
   <meta property="og:type" content="website" />
-  <meta property="og:image" content="assets/screenshots/hero_ai_light.png" />
-  <meta name="twitter:card" content="summary_large_image" />
+  <meta property="og:image" content="assets/screenshots/ai_scroll_1.png" />
   <link rel="icon" type="image/png" href="assets/etonia.png" />
   <link rel="apple-touch-icon" href="assets/etonia.png" />
   <link rel="stylesheet" href="styles.css" />
 </head>
 <body>
-  <a href="#main-content" class="skip-link">Skip to main content</a>
-
   <!-- ====================================================================
-       Sticky Glass Navigation Bar (GlassSurface + 24px continuous radius)
+       Sticky Glass Navigation Bar
        ==================================================================== -->
   <header class="site-header">
     <nav class="nav-bar" aria-label="Primary navigation">
       <a href="#" class="brand-link" aria-label="Etonia Home">
         <span class="brand-mark-box" aria-hidden="true">
-          <!-- Exact EtoniaMark vector geometry from lib/shared/widgets/etonia_mark.dart -->
           <svg viewBox="0 0 100 100" xmlns="http://www.w3.org/2000/svg">
             <rect x="12" y="10" width="25" height="80" rx="13" ry="13" />
             <rect x="18" y="10" width="54" height="28" rx="8" ry="8" />
@@ -43,10 +39,9 @@
       </a>
 
       <ul class="nav-links">
-        <li><a href="#features" class="nav-pill">Features</a></li>
-        <li><a href="#walkthrough" class="nav-pill">Product Tour</a></li>
-        <li><a href="#design" class="nav-pill">Design &amp; Privacy</a></li>
-        <li><a href="#plans" class="nav-pill">Plans</a></li>
+        <li><a href="#ai-plot" class="nav-pill">AI Plot</a></li>
+        <li><a href="#scroll-highlight" class="nav-pill">Scroll Highlight</a></li>
+        <li><a href="#essentials" class="nav-pill">Free Essentials &amp; Goodnotes</a></li>
         <li><a href="legal/" class="nav-pill">Support</a></li>
       </ul>
 
@@ -58,335 +53,215 @@
           class="btn btn-outline btn-compact"
           aria-label="Follow Etonia on Instagram @etoniaaa"
         >
-          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
             <rect x="2" y="2" width="20" height="20" rx="5" ry="5"></rect>
             <path d="M16 11.37A4 4 0 1 1 12.63 8 4 4 0 0 1 16 11.37z"></path>
             <line x1="17.5" y1="6.5" x2="17.51" y2="6.5"></line>
           </svg>
           <span>@etoniaaa</span>
         </a>
-
-        <button
-          type="button"
-          id="theme-toggle"
-          class="icon-btn"
-          aria-label="Switch to dark ink theme"
-          title="Dark mode"
-        >
-          <!-- Moon icon (shown in light mode) -->
-          <svg class="icon-moon" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-            <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"></path>
-          </svg>
-          <!-- Sun icon (shown in dark mode) -->
-          <svg class="icon-sun" style="display:none;" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-            <circle cx="12" cy="12" r="5"></circle>
-            <line x1="12" y1="1" x2="12" y2="3"></line>
-            <line x1="12" y1="21" x2="12" y2="23"></line>
-            <line x1="4.22" y1="4.22" x2="5.64" y2="5.64"></line>
-            <line x1="18.36" y1="18.36" x2="19.78" y2="19.78"></line>
-            <line x1="1" y1="12" x2="3" y2="12"></line>
-            <line x1="21" y1="12" x2="23" y2="12"></line>
-            <line x1="4.22" y1="19.78" x2="5.64" y2="18.36"></line>
-            <line x1="18.36" y1="5.64" x2="19.78" y2="4.22"></line>
-          </svg>
-        </button>
-
         <a href="#waitlist" class="btn btn-ink btn-compact">Join Waitlist</a>
       </div>
     </nav>
   </header>
 
-  <main id="main-content">
+  <main>
     <!-- ==================================================================
-         Hero Section + Waitlist Signup + Interactive Tablet Showcase
+         Hero + Simple Email Waitlist
          ================================================================== -->
     <section class="hero" id="waitlist">
       <div class="ai-ambient-glow" aria-hidden="true"></div>
 
+      <div class="container hero-inner">
+        <h1 class="hero-title">
+          Handwriting notes that <span class="highlighter-mark">plot and think</span> on your page.
+        </h1>
+
+        <p class="hero-subtitle">
+          Circle any handwritten problem to plot graphs and steps directly on your paper. Every essential notebook feature is free, and your Goodnotes files import in one tap.
+        </p>
+
+        <form class="waitlist-form" data-source="github_website_hero" novalidate>
+          <div class="waitlist-bar">
+            <label for="hero-email" class="sr-only">Email address</label>
+            <input
+              type="email"
+              id="hero-email"
+              name="email"
+              class="waitlist-input"
+              placeholder="Enter your email to join the waitlist…"
+              required
+              autocomplete="email"
+            />
+            <button type="submit" class="btn btn-ink">Join Waitlist</button>
+          </div>
+          <div class="waitlist-status" role="status" aria-live="polite"></div>
+        </form>
+
+        <div class="hero-pills">
+          <span class="stat-pill">&#10003; AI Plot &amp; Handwritten Steps</span>
+          <span class="stat-pill">&#10003; All Essential Notebook Features Free</span>
+          <span class="stat-pill">&#10003; Direct Goodnotes Import</span>
+        </div>
+      </div>
+    </section>
+
+    <!-- ==================================================================
+         1. AI Plot: Before & After + Scroll-to-Highlight Animation
+         ================================================================== -->
+    <section class="section" id="ai-plot">
       <div class="container">
-        <div class="hero-inner">
-          <div class="hero-eyebrow">
-            <span class="eyebrow-bars" aria-hidden="true">
-              <span></span>
-              <span></span>
-              <span></span>
-            </span>
-            <span>iPadOS &bull; iOS &bull; Android Tablets &mdash; Early Access Waitlist</span>
-          </div>
-
-          <h1 class="hero-title">
-            Handwriting notes that <span class="highlighter-mark">think with you.</span>
-          </h1>
-
-          <p class="hero-subtitle">
-            Etonia pairs a native 120&nbsp;Hz vector ink studio with an AI partner that reads your lassoed work, plots functions, and writes step-by-step explanations directly on your page—in your own handwriting.
+        <div class="section-header">
+          <span class="kicker kicker-yellow">AI Plot &amp; Notation</span>
+          <h2 class="section-title">From a circled equation to a plotted graph on your page.</h2>
+          <p class="section-desc">
+            Select your handwritten math and ask Etonia. Instead of replying in a detached text box, Etonia draws coordinate axes, plots the curve with roots and extrema, and writes the steps in handwriting right beside your work.
           </p>
-
-          <!-- Primary Waitlist Box -->
-          <div class="waitlist-box dog-ear-card">
-            <form class="waitlist-form" data-source="github_website_hero" novalidate>
-              <div class="waitlist-platform-row">
-                <span class="waitlist-label" id="hero-platform-label">Reserve your spot for:</span>
-                <div class="platform-pills" role="group" aria-labelledby="hero-platform-label">
-                  <button type="button" class="platform-pill" data-platform="ipad" aria-pressed="true">iPad + Apple Pencil</button>
-                  <button type="button" class="platform-pill" data-platform="android" aria-pressed="false">Android Tablet + S&nbsp;Pen</button>
-                  <button type="button" class="platform-pill" data-platform="iphone" aria-pressed="false">iPhone</button>
-                  <button type="button" class="platform-pill" data-platform="all" aria-pressed="false">All Devices</button>
-                </div>
-              </div>
-
-              <div class="waitlist-input-row">
-                <label for="hero-email" class="skip-link">Email address</label>
-                <input
-                  type="email"
-                  id="hero-email"
-                  name="email"
-                  class="input-field"
-                  placeholder="Enter your email for TestFlight &amp; beta access…"
-                  required
-                  autocomplete="email"
-                />
-                <button type="submit" class="btn btn-ink">
-                  <span>Join the Waitlist</span>
-                  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-                    <line x1="5" y1="12" x2="19" y2="12"></line>
-                    <polyline points="12 5 19 12 12 19"></polyline>
-                  </svg>
-                </button>
-              </div>
-
-              <div class="waitlist-status" role="status" aria-live="polite"></div>
-
-              <div class="waitlist-meta">
-                <span>No spam. Priority invites roll out in waves with free AI trial credits.</span>
-                <a
-                  href="https://www.instagram.com/etoniaaa/"
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  style="font-weight:700; color:var(--text-primary); text-decoration:underline;"
-                >
-                  See daily demos on Instagram @etoniaaa &rarr;
-                </a>
-              </div>
-            </form>
-          </div>
-
-          <div class="hero-social-row">
-            <a
-              href="https://www.instagram.com/etoniaaa/"
-              target="_blank"
-              rel="noopener noreferrer"
-              class="btn btn-outline btn-compact"
-            >
-              <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-                <rect x="2" y="2" width="20" height="20" rx="5" ry="5"></rect>
-                <path d="M16 11.37A4 4 0 1 1 12.63 8 4 4 0 0 1 16 11.37z"></path>
-                <line x1="17.5" y1="6.5" x2="17.51" y2="6.5"></line>
-              </svg>
-              <span>Follow @etoniaaa on Instagram</span>
-            </a>
-            <a href="#walkthrough" class="btn btn-outline btn-compact">
-              <span>Explore Real App Screenshots</span>
-            </a>
-          </div>
         </div>
 
-        <!-- Interactive Tablet Screen Switcher -->
-        <div class="showcase-shell" aria-label="Interactive product screenshot showcase">
-          <div class="showcase-controls">
-            <div class="segmented-group" role="tablist" aria-label="Choose product view">
-              <button
-                type="button"
-                role="tab"
-                aria-selected="true"
-                class="segment-btn is-active"
-                data-showcase-tab="ai"
-              >
-                1. AI Plot &amp; Handwritten Tutor
-              </button>
-              <button
-                type="button"
-                role="tab"
-                aria-selected="false"
-                class="segment-btn"
-                data-showcase-tab="ink"
-              >
-                2. Ink Studio &amp; Sticky Notes
-              </button>
-              <button
-                type="button"
-                role="tab"
-                aria-selected="false"
-                class="segment-btn"
-                data-showcase-tab="handwriting"
-              >
-                3. Your Handwriting Font
-              </button>
-              <button
-                type="button"
-                role="tab"
-                aria-selected="false"
-                class="segment-btn"
-                data-showcase-tab="library"
-              >
-                4. Library &amp; Folders
-              </button>
-              <button
-                type="button"
-                role="tab"
-                aria-selected="false"
-                class="segment-btn"
-                data-showcase-tab="overview"
-              >
-                5. Multi-Page Overview
-              </button>
+        <!-- Before & After Comparison -->
+        <div class="compare-grid">
+          <div class="shot-card">
+            <div class="shot-card-header">
+              <span class="step-badge">Before</span>
+              <span class="shot-caption">1. Circle your handwritten problem</span>
             </div>
-
-            <div class="segmented-group" role="group" aria-label="Canvas theme preview">
-              <button type="button" class="segment-btn is-active" data-paper-mode="light">
-                Light Paper
-              </button>
-              <button type="button" class="segment-btn" data-paper-mode="dark">
-                Dark Ink
-              </button>
-            </div>
-          </div>
-
-          <div class="tablet-frame">
-            <div class="tablet-screen zoomable-shot" title="Click to inspect full-resolution screenshot">
+            <div class="shot-frame zoomable-shot" title="Click to enlarge Before screenshot">
               <img
-                id="showcase-main-img"
-                src="assets/screenshots/hero_ai_light.png"
-                alt="Etonia editor showing handwritten quadratic equations on lined paper, a lasso selection, an AI-drawn parabola with roots and vertex marked in handwriting, and the AI assistant panel on the right."
+                src="assets/screenshots/ai_before.png"
+                alt="Before AI Plot: Handwritten quadratic equation f(x) = x^2 - 4x + 3 selected on lined paper with the AI assistant ready."
                 width="2388"
                 height="1668"
               />
             </div>
           </div>
 
-          <div class="showcase-caption-bar">
-            <p class="showcase-caption-text" id="showcase-caption">
-              <strong>AI Assistant &amp; Handwritten Notation:</strong> Lasso any equation or diagram, tap <strong>Explain this</strong> or <strong>Grade this</strong>, and watch Etonia plot curves and write step-by-step marks directly on your vector page.
-            </p>
-            <span style="font-size:13px; font-weight:600; color:var(--text-primary);">
-              Click any screenshot to zoom &oplus;
-            </span>
+          <div class="shot-card">
+            <div class="shot-card-header">
+              <span class="step-badge is-after">After</span>
+              <span class="shot-caption">2. AI writes the steps &amp; plots the curve on the page</span>
+            </div>
+            <div class="shot-frame zoomable-shot" title="Click to enlarge After screenshot">
+              <img
+                src="assets/screenshots/ai_after.png"
+                alt="After AI Plot: Etonia writes the factoring and vertex steps in handwriting and plots the parabola y = x^2 - 4x + 3 with roots (1, 0), (3, 0) and minimum (2, -1) directly on the note."
+                width="2388"
+                height="1668"
+              />
+            </div>
+          </div>
+        </div>
+
+        <!-- Scroll-to-Highlight Animation -->
+        <div class="dog-ear-card scroll-demo-card" id="scroll-highlight">
+          <div class="scroll-demo-top">
+            <div>
+              <span class="kicker kicker-yellow">Linked Reading &amp; Canvas Highlight</span>
+              <h3 class="section-title" style="font-size: clamp(22px, 3vw, 30px); margin-bottom: 4px;">
+                Scroll the explanation to highlight related ink and plot points.
+              </h3>
+              <p class="section-desc" style="font-size: 16px;">
+                Every paragraph in the AI assistant is linked to the exact strokes and graph features on your note. As you scroll through the explanation, Etonia highlights the matching equation, handwritten step, and plotted coordinates in yellow.
+              </p>
+            </div>
+          </div>
+
+          <div class="scroll-steps-bar" role="tablist" aria-label="Scroll highlight steps">
+            <button
+              type="button"
+              role="tab"
+              aria-selected="true"
+              class="scroll-step-btn is-active"
+              data-scroll-step="1"
+            >
+              <span class="scroll-step-title">Paragraph 1 &middot; Factoring &amp; Roots</span>
+              <span class="scroll-step-sub">Highlights (x &minus; 1)(x &minus; 3) = 0 and roots (1, 0), (3, 0) on the graph</span>
+            </button>
+
+            <button
+              type="button"
+              role="tab"
+              aria-selected="false"
+              class="scroll-step-btn"
+              data-scroll-step="2"
+            >
+              <span class="scroll-step-title">Paragraph 2 &middot; Vertex &amp; Minimum</span>
+              <span class="scroll-step-sub">Highlights (x &minus; 2)&sup2; &minus; 1 and the minimum vertex (2, &minus;1)</span>
+            </button>
+
+            <button
+              type="button"
+              role="tab"
+              aria-selected="false"
+              class="scroll-step-btn"
+              data-scroll-step="3"
+            >
+              <span class="scroll-step-title">Paragraph 3 &middot; Parabola Curve</span>
+              <span class="scroll-step-sub">Highlights the plotted curve y = x&sup2; &minus; 4x + 3 and axes</span>
+            </button>
+          </div>
+
+          <div class="scroll-stage zoomable-shot" title="Click to inspect full-resolution screenshot">
+            <img
+              class="scroll-frame is-active"
+              data-scroll-frame="1"
+              src="assets/screenshots/ai_scroll_1.png"
+              alt="Scrolling Paragraph 1 highlights the factored equation and root points (1, 0) and (3, 0) on the note in yellow."
+              width="2388"
+              height="1668"
+            />
+            <img
+              class="scroll-frame"
+              data-scroll-frame="2"
+              src="assets/screenshots/ai_scroll_2.png"
+              alt="Scrolling Paragraph 2 highlights the completed-square step and minimum vertex (2, -1) on the note in yellow."
+              width="2388"
+              height="1668"
+            />
+            <img
+              class="scroll-frame"
+              data-scroll-frame="3"
+              src="assets/screenshots/ai_scroll_3.png"
+              alt="Scrolling Paragraph 3 highlights the plotted parabola curve y = x^2 - 4x + 3 and coordinate axes in yellow."
+              width="2388"
+              height="1668"
+            />
           </div>
         </div>
       </div>
     </section>
 
     <!-- ==================================================================
-         Detailed Feature Walkthrough with Authentic App Screenshots
+         2 & 3. All Essential Notebook Features Free + Direct Goodnotes Import
          ================================================================== -->
-    <section class="section" id="walkthrough">
+    <section class="section" id="essentials">
       <div class="container">
-        <div class="section-header">
-          <span class="section-kicker">Inside Etonia</span>
-          <h2 class="section-title">Built around the sheet of paper, not a chat box.</h2>
-          <p class="section-desc">
-            Every screen in Etonia stays quiet—two-tone ink and paper—until you lay down highlighter strokes or summon the AI assistant. Here is how Etonia works from first stroke to final export.
-          </p>
-        </div>
-
-        <div class="feature-showcase-list" id="features">
-          <!-- Feature 1: AI Notation & Graphing on the Page -->
-          <article class="feature-row">
-            <div class="feature-copy">
-              <span class="feature-tag tag-lilac">AI Assistant &amp; Canvas Notation</span>
-              <h3 class="feature-heading">Lasso a problem. Get handwritten steps and graphs right on your page.</h3>
-              <p class="feature-body">
-                Instead of copying formulas into a separate chatbot window, circle any region of your note with the Lasso tool. Etonia's multimodal AI sees your exact strokes, checks your math or physics derivation, and writes annotations directly onto your canvas.
+        <div class="two-col-grid">
+          <!-- Left: All Essential Notebook Features for Free -->
+          <article class="dog-ear-card pillar-card">
+            <div>
+              <span class="kicker kicker-mint">100% Free Core Notebook</span>
+              <h2 class="section-title" style="font-size: clamp(24px, 3vw, 32px);">
+                All essential notebook features—for free.
+              </h2>
+              <p class="section-desc" style="font-size: 16px;">
+                No paywalls on your everyday note-taking. Write with unlimited notebooks, low-latency vector ink, and full PDF/SVG export at zero cost.
               </p>
-              <ul class="feature-bullets">
-                <li>
-                  <span class="check-capsule" aria-hidden="true">&#10003;</span>
-                  <span><strong>One-tap quick prompts:</strong> <em>Explain this</em>, <em>Complete this</em>, <em>Grade this</em>, and <em>Clean up handwriting</em>.</span>
-                </li>
-                <li>
-                  <span class="check-capsule" aria-hidden="true">&#10003;</span>
-                  <span><strong>Live function plotting:</strong> Automatically sketches coordinate axes, curves, roots, and vertices alongside your work.</span>
-                </li>
-                <li>
-                  <span class="check-capsule" aria-hidden="true">&#10003;</span>
-                  <span><strong>Editable vector strokes:</strong> Every AI annotation is real vector ink you can move, recolor, or erase with a single undo.</span>
-                </li>
-              </ul>
-            </div>
-            <div class="feature-media zoomable-shot" title="Click to enlarge AI Assistant screenshot">
-              <img
-                src="assets/screenshots/hero_ai_light.png"
-                data-src-light="assets/screenshots/hero_ai_light.png"
-                data-src-dark="assets/screenshots/hero_ai_dark.png"
-                alt="Etonia AI assistant solving a handwritten quadratic equation and plotting its parabola directly on the lined note page."
-                loading="lazy"
-                width="2388"
-                height="1668"
-              />
-            </div>
-          </article>
 
-          <!-- Feature 2: Personalized Handwriting Synthesis -->
-          <article class="feature-row is-reversed">
-            <div class="feature-copy">
-              <span class="feature-tag tag-peach">Personal Handwriting Engine</span>
-              <h3 class="feature-heading">AI that writes in your own handwriting.</h3>
-              <p class="feature-body">
-                Typed text boxes break the flow of a handwritten notebook. Etonia synthesizes fluid vector pen strokes with natural baseline rhythm, fraction bars, radicals, and superscripts—matched to your personal hand.
-              </p>
-              <ul class="feature-bullets">
-                <li>
-                  <span class="check-capsule" aria-hidden="true">&#10003;</span>
-                  <span><strong>Five built-in hands:</strong> Switch effortlessly between <em>Normal</em>, <em>Cursive</em>, <em>Print</em>, <em>Rounded</em>, and <em>Quick</em>.</span>
-                </li>
-                <li>
-                  <span class="check-capsule" aria-hidden="true">&#10003;</span>
-                  <span><strong>60-second calibration:</strong> Write 15 sample characters once and Etonia adapts its stroke slant, roundness, and spacing to match your style.</span>
-                </li>
-                <li>
-                  <span class="check-capsule" aria-hidden="true">&#10003;</span>
-                  <span><strong>Clean up messy notes:</strong> Select hurried lecture scribbles and reflow them into neat, legible handwriting without losing your voice.</span>
-                </li>
-              </ul>
+              <div class="essentials-pills">
+                <span class="essential-chip">120 Hz Pen, Fountain &amp; Highlighter</span>
+                <span class="essential-chip">Hold-to-Shape Geometry</span>
+                <span class="essential-chip">Movable Sticky Notes</span>
+                <span class="essential-chip">Lined, Grid, Dotted &amp; Infinite Paper</span>
+                <span class="essential-chip">Your Own Handwriting Calibration</span>
+                <span class="essential-chip">PDF, PNG &amp; Vector SVG Export</span>
+              </div>
             </div>
-            <div class="feature-media zoomable-shot" title="Click to enlarge Handwriting Style dialog screenshot">
-              <img
-                src="assets/screenshots/feature_handwriting_styles.png"
-                alt="Etonia AI Handwriting Style selector showing Normal, Cursive, Print, Rounded, Quick, and Your handwriting calibration."
-                loading="lazy"
-                width="2560"
-                height="1600"
-              />
-            </div>
-          </article>
 
-          <!-- Feature 3: Native Low-Latency Ink, Hold-to-Shape & Sticky Notes -->
-          <article class="feature-row">
-            <div class="feature-copy">
-              <span class="feature-tag tag-yellow">120 Hz Native Ink Studio</span>
-              <h3 class="feature-heading">Zero-lag Apple Pencil &amp; S&nbsp;Pen ink, instant shapes, and sticky notes.</h3>
-              <p class="feature-body">
-                Etonia's custom ink engine captures full-rate stylus coalesced and predicted touches on iOS and Android, stabilized by an adaptive One Euro Filter and rendered on the GPU with Impeller.
-              </p>
-              <ul class="feature-bullets">
-                <li>
-                  <span class="check-capsule" aria-hidden="true">&#10003;</span>
-                  <span><strong>Expressive toolset:</strong> Ballpoint, Fountain, and Highlighter brushes plus stroke/pixel Eraser, Lasso, Image, Text, and Sticky Notes.</span>
-                </li>
-                <li>
-                  <span class="check-capsule" aria-hidden="true">&#10003;</span>
-                  <span><strong>Hold-to-shape recognition:</strong> Pause at the end of a stroke to snap freehand lines, circles, rectangles, triangles, and arrows into crisp geometry.</span>
-                </li>
-                <li>
-                  <span class="check-capsule" aria-hidden="true">&#10003;</span>
-                  <span><strong>Movable sticky notes:</strong> Drop lined yellow sticky notes onto any page for formulas, reminders, or review checklists—and write right inside them.</span>
-                </li>
-              </ul>
-            </div>
-            <div class="feature-media zoomable-shot" title="Click to enlarge Ink Studio screenshot">
+            <div class="shot-frame zoomable-shot" title="Click to enlarge Ink Studio screenshot">
               <img
                 src="assets/screenshots/feature_ink_studio_light.png"
-                alt="Etonia editor showing wave optics equations on dotted paper, a snapped sine wave and circle, a yellow lined sticky note, and the pen options bar."
+                alt="Etonia notebook showing dotted paper, snapped geometric shapes, a movable yellow sticky note, and pen tools."
                 loading="lazy"
                 width="2388"
                 height="1668"
@@ -394,292 +269,88 @@
             </div>
           </article>
 
-          <!-- Feature 4: Library, Folders & Goodnotes Import -->
-          <article class="feature-row is-reversed">
-            <div class="feature-copy">
-              <span class="feature-tag tag-sky">Dog-Eared Library &amp; Sync</span>
-              <h3 class="feature-heading">Every notebook organized, searchable, and backed up.</h3>
-              <p class="feature-body">
-                Your library displays live first-page thumbnails with Etonia's signature folded top-right dog-ear. Group classes into nested folders, star daily notebooks, and switch between Light Paper and Dark Ink at any time.
+          <!-- Right: Directly Import Goodnotes -->
+          <article class="dog-ear-card pillar-card">
+            <div>
+              <span class="kicker kicker-sky">Zero-Friction Switch</span>
+              <h2 class="section-title" style="font-size: clamp(24px, 3vw, 32px);">
+                Directly import Goodnotes.
+              </h2>
+              <p class="section-desc" style="font-size: 16px;">
+                Don't leave your past semesters behind. Import existing <code>.goodnotes</code> files and PDFs straight into Etonia with folders and automatic Google Drive &amp; iCloud backup.
               </p>
-              <ul class="feature-bullets">
-                <li>
-                  <span class="check-capsule" aria-hidden="true">&#10003;</span>
-                  <span><strong>Bring your existing notes:</strong> Import PDFs, images, Etonia archives (<code>.etonote</code>), and <strong>Goodnotes</strong> (<code>.goodnotes</code>) notebooks directly.</span>
-                </li>
-                <li>
-                  <span class="check-capsule" aria-hidden="true">&#10003;</span>
-                  <span><strong>Automatic cloud backup:</strong> Background sync to your personal Google Drive or iCloud Drive keeps every stroke safe across devices.</span>
-                </li>
-                <li>
-                  <span class="check-capsule" aria-hidden="true">&#10003;</span>
-                  <span><strong>Instant local storage:</strong> All notes live offline-first on your device in a fast SQLite database—no internet required in lecture halls.</span>
-                </li>
-              </ul>
+
+              <div class="essentials-pills">
+                <span class="essential-chip">Direct <code>.goodnotes</code> Import</span>
+                <span class="essential-chip">PDF Annotation &amp; Markup</span>
+                <span class="essential-chip">Nested Folders &amp; Search</span>
+                <span class="essential-chip">Google Drive &amp; iCloud Sync</span>
+              </div>
             </div>
-            <div class="feature-media zoomable-shot" title="Click to enlarge Library screenshot">
+
+            <div class="shot-frame zoomable-shot" title="Click to enlarge Library screenshot">
               <img
                 src="assets/screenshots/feature_library_light.png"
-                data-src-light="assets/screenshots/feature_library_light.png"
-                data-src-dark="assets/screenshots/feature_library_dark.png"
-                alt="Etonia library screen showing folder navigation, Lectures folder, search bar, and dog-eared note card thumbnail."
+                alt="Etonia library view with folders, search bar, and dog-eared notebook cards."
                 loading="lazy"
                 width="2560"
                 height="1600"
               />
             </div>
           </article>
-
-          <!-- Feature 5: Multi-Page Overview & Flexible Paper Templates -->
-          <article class="feature-row">
-            <div class="feature-copy">
-              <span class="feature-tag tag-mint">Multi-Page &amp; Infinite Canvas</span>
-              <h3 class="feature-heading">Mix A4, Letter, Square, and Infinite Whiteboard pages in one note.</h3>
-              <p class="feature-body">
-                Open the Pages popover to skim miniature previews of every sheet, jump between problems, or add new pages with independent paper templates and background colors.
-              </p>
-              <ul class="feature-bullets">
-                <li>
-                  <span class="check-capsule" aria-hidden="true">&#10003;</span>
-                  <span><strong>Four paper patterns:</strong> Blank, Lined, Grid, and Dotted—each rendered as crisp procedural vector geometry at any zoom level.</span>
-                </li>
-                <li>
-                  <span class="check-capsule" aria-hidden="true">&#10003;</span>
-                  <span><strong>Per-page formats:</strong> Combine structured A4/Letter lecture pages with an Infinite Whiteboard sheet for mind-mapping.</span>
-                </li>
-                <li>
-                  <span class="check-capsule" aria-hidden="true">&#10003;</span>
-                  <span><strong>Lossless vector export:</strong> Share multi-page PDFs, crisp SVG vectors, high-DPI PNGs, or editable <code>.etonote</code> bundles.</span>
-                </li>
-              </ul>
-            </div>
-            <div class="feature-media zoomable-shot" title="Click to enlarge Multi-Page Overview screenshot">
-              <img
-                src="assets/screenshots/feature_tabs_overview_light.png"
-                alt="Etonia editor showing the Pages overview popover with live thumbnails of Page 1 and Page 2."
-                loading="lazy"
-                width="2388"
-                height="1668"
-              />
-            </div>
-          </article>
-        </div>
-
-        <!-- Bento Grid of Additional Screenshots -->
-        <div class="bento-grid" style="margin-top: var(--space-xxl);" id="plans">
-          <div class="dog-ear-card bento-card">
-            <div>
-              <div class="bento-icon" aria-hidden="true">
-                <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                  <rect x="3" y="3" width="18" height="18" rx="2" ry="2"></rect>
-                  <line x1="3" y1="9" x2="21" y2="9"></line>
-                  <line x1="9" y1="21" x2="9" y2="9"></line>
-                </svg>
-              </div>
-              <h3 class="bento-title" style="margin-top: var(--space-sm);">Custom Paper &amp; Page Formats</h3>
-              <p class="bento-text">
-                Start any note in A4, US Letter, Square, or Infinite Whiteboard with Blank, Lined, Grid, or Dotted templates.
-              </p>
-            </div>
-            <div class="bento-thumb zoomable-shot" title="Click to enlarge New Note dialog screenshot">
-              <img
-                src="assets/screenshots/feature_templates.png"
-                alt="Etonia New Note dialog showing title input, Lined/Grid/Blank/Dotted templates, and A4/Letter/Square/Whiteboard page formats."
-                loading="lazy"
-                width="2560"
-                height="1600"
-              />
-            </div>
-          </div>
-
-          <div class="dog-ear-card bento-card">
-            <div>
-              <div class="bento-icon" aria-hidden="true">
-                <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                  <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
-                  <polyline points="7 10 12 15 17 10"></polyline>
-                  <line x1="12" y1="15" x2="12" y2="3"></line>
-                </svg>
-              </div>
-              <h3 class="bento-title" style="margin-top: var(--space-sm);">PDF, SVG &amp; Goodnotes Workflow</h3>
-              <p class="bento-text">
-                Configure paper tints, toggle Hold-to-Shape, calibrate your handwriting, or export vector PDF &amp; SVG in two taps.
-              </p>
-            </div>
-            <div class="bento-thumb zoomable-shot" title="Click to enlarge Note Settings & Export screenshot">
-              <img
-                src="assets/screenshots/feature_export_settings.png"
-                alt="Etonia Note Settings sheet showing paper template options, paper color swatches, AI handwriting style, and Export & Share actions for PDF, PNG, SVG, and Etonia File."
-                loading="lazy"
-                width="2560"
-                height="1600"
-              />
-            </div>
-          </div>
-
-          <div class="dog-ear-card bento-card">
-            <div>
-              <div class="bento-icon" aria-hidden="true">
-                <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                  <polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"></polygon>
-                </svg>
-              </div>
-              <h3 class="bento-title" style="margin-top: var(--space-sm);">Simple, Transparent Plans</h3>
-              <p class="bento-text">
-                Handwriting, unlimited local notes, and exports are free. Upgrade to Basic or Pro for higher monthly AI credit allowances.
-              </p>
-            </div>
-            <div class="bento-thumb zoomable-shot" title="Click to enlarge Etonia Plans screenshot">
-              <img
-                src="assets/screenshots/feature_plans.png"
-                alt="Etonia Plans & Credits screen showing Free, Basic, and Pro tiers alongside credit packs."
-                loading="lazy"
-                width="2560"
-                height="1600"
-              />
-            </div>
-          </div>
         </div>
       </div>
     </section>
 
     <!-- ==================================================================
-         Logo Design Language & Privacy Architecture
-         ================================================================== -->
-    <section class="section" id="design">
-      <div class="container">
-        <div class="section-header">
-          <span class="section-kicker">Design Language &amp; Privacy</span>
-          <h2 class="section-title">Shaped by the folded-E mark.</h2>
-          <p class="section-desc">
-            Etonia's visual identity comes directly from its icon: a bold white <strong>E</strong> with rounded capsule slots and a folded top-right corner on a deep ink squircle.
-          </p>
-        </div>
-
-        <div class="mark-grid">
-          <div class="mark-hero-card">
-            <img
-              src="assets/etonia.png"
-              alt="Etonia app icon: a bold white letter E with rounded capsule slots and a folded top-right dog-ear corner on a near-black rounded square."
-              width="148"
-              height="148"
-            />
-            <h3 style="font-family:var(--font-rounded); font-size:24px; font-weight:800; margin-bottom:8px;">
-              Quiet Chrome. Expressive Ink.
-            </h3>
-            <p style="font-size:15px; color:#D4D4DC; line-height:1.55; max-width:320px;">
-              The interface has no competing brand hue. Every button, toolbar, and card is monochrome ink and paper so your six highlighters and handwritten diagrams carry 100% of the color.
-            </p>
-          </div>
-
-          <div class="mark-facts-list">
-            <div class="fact-card">
-              <span class="fact-num">1</span>
-              <h3 class="fact-title">Two-Tone Ink &amp; Paper</h3>
-              <p class="fact-desc">
-                High-contrast carbon ink (<code>#0A0A0B</code>) on warm daylight paper (<code>#F2F2F4</code> / <code>#FFFFFF</code>) in Light mode, and crisp white ink on true OLED black in Dark mode.
-              </p>
-            </div>
-
-            <div class="fact-card">
-              <span class="fact-num">2</span>
-              <h3 class="fact-title">Fat, Pill-Ended Slots</h3>
-              <p class="fact-desc">
-                Inspired by the two horizontal slots cut into the E mark, every primary action, tool selector, and filter chip uses a tactile stadium capsule with spring physics.
-              </p>
-            </div>
-
-            <div class="fact-card">
-              <span class="fact-num">3</span>
-              <h3 class="fact-title">The Top-Trailing Dog-Ear</h3>
-              <p class="fact-desc">
-                The folded corner in the upper-right of the mark turns the letter E into a physical sheet of paper—echoed across note cards in your library and dialogs.
-              </p>
-            </div>
-
-            <div class="fact-card">
-              <span class="fact-num">4</span>
-              <h3 class="fact-title">On-Device First &amp; Private</h3>
-              <p class="fact-desc">
-                Notes are stored locally on your device. AI requests send only the cropped snapshot and stroke context you explicitly select, proxied securely without exposing API keys.
-              </p>
-            </div>
-          </div>
-        </div>
-      </div>
-    </section>
-
-    <!-- ==================================================================
-         Bottom Waitlist & Instagram Community Banner
+         Bottom Waitlist & Instagram CTA
          ================================================================== -->
     <section class="section">
       <div class="container">
-        <div class="cta-banner dog-ear-card">
-          <span class="section-kicker">Early Access &amp; Community</span>
-          <h2 class="section-title" style="max-width:640px; margin:0 auto var(--space-sm);">
-            Ready to write with an AI that shares your page?
+        <div class="dog-ear-card bottom-cta">
+          <img
+            src="assets/etonia.png"
+            alt="Etonia logo"
+            width="64"
+            height="64"
+            style="margin: 0 auto var(--space-md); border-radius: 15px;"
+          />
+          <h2 class="section-title" style="font-size: clamp(24px, 3.4vw, 34px);">
+            Get early access to Etonia.
           </h2>
-          <p class="section-desc" style="max-width:600px; margin:0 auto var(--space-xl);">
-            Join the waitlist for priority TestFlight and Android beta access, and follow <strong>@etoniaaa</strong> on Instagram for behind-the-scenes ink physics, study workflows, and release drops.
+          <p class="section-desc" style="max-width: 480px; margin: 0 auto var(--space-lg); font-size: 16px;">
+            Enter your email for priority waitlist invites, and follow <a href="https://www.instagram.com/etoniaaa/" target="_blank" rel="noopener noreferrer" style="color:var(--text-primary); font-weight:700; text-decoration:underline;">@etoniaaa on Instagram</a>.
           </p>
 
-          <div class="waitlist-box" style="box-shadow:none; background:var(--bg); margin-bottom:var(--space-lg);">
-            <form class="waitlist-form" data-source="github_website_footer" novalidate>
-              <div class="waitlist-platform-row">
-                <span class="waitlist-label" id="footer-platform-label">Choose your primary device:</span>
-                <div class="platform-pills" role="group" aria-labelledby="footer-platform-label">
-                  <button type="button" class="platform-pill" data-platform="ipad" aria-pressed="true">iPad</button>
-                  <button type="button" class="platform-pill" data-platform="android" aria-pressed="false">Android Tablet</button>
-                  <button type="button" class="platform-pill" data-platform="iphone" aria-pressed="false">iPhone</button>
-                  <button type="button" class="platform-pill" data-platform="all" aria-pressed="false">All</button>
-                </div>
-              </div>
-
-              <div class="waitlist-input-row">
-                <label for="footer-email" class="skip-link">Email address</label>
-                <input
-                  type="email"
-                  id="footer-email"
-                  name="email"
-                  class="input-field"
-                  style="background:var(--surface);"
-                  placeholder="you@university.edu"
-                  required
-                  autocomplete="email"
-                />
-                <button type="submit" class="btn btn-ink">Join Waitlist</button>
-              </div>
-
-              <div class="waitlist-status" role="status" aria-live="polite"></div>
-            </form>
-          </div>
-
-          <a
-            href="https://www.instagram.com/etoniaaa/"
-            target="_blank"
-            rel="noopener noreferrer"
-            class="btn btn-outline"
-          >
-            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-              <rect x="2" y="2" width="20" height="20" rx="5" ry="5"></rect>
-              <path d="M16 11.37A4 4 0 1 1 12.63 8 4 4 0 0 1 16 11.37z"></path>
-              <line x1="17.5" y1="6.5" x2="17.51" y2="6.5"></line>
-            </svg>
-            <span>Follow @etoniaaa on Instagram</span>
-          </a>
+          <form class="waitlist-form" data-source="github_website_footer" novalidate>
+            <div class="waitlist-bar" style="background: var(--bg);">
+              <label for="footer-email" class="sr-only">Email address</label>
+              <input
+                type="email"
+                id="footer-email"
+                name="email"
+                class="waitlist-input"
+                placeholder="Enter your email…"
+                required
+                autocomplete="email"
+              />
+              <button type="submit" class="btn btn-ink">Join Waitlist</button>
+            </div>
+            <div class="waitlist-status" role="status" aria-live="polite"></div>
+          </form>
         </div>
       </div>
     </section>
   </main>
 
   <!-- ====================================================================
-       Footer (Preserves all legal & support routes under docs/legal/)
+       Footer
        ==================================================================== -->
   <footer class="site-footer">
     <div class="container footer-inner">
-      <div style="display:flex; align-items:center; gap:var(--space-sm);">
-        <span class="brand-mark-box" style="width:30px; height:30px; border-radius:8px;" aria-hidden="true">
-          <svg viewBox="0 0 100 100" xmlns="http://www.w3.org/2000/svg" style="width:20px; height:20px;">
+      <div style="display:flex; align-items:center; gap:10px;">
+        <span class="brand-mark-box" style="width:28px; height:28px; border-radius:7px;" aria-hidden="true">
+          <svg viewBox="0 0 100 100" xmlns="http://www.w3.org/2000/svg" style="width:18px; height:18px;">
             <rect x="12" y="10" width="25" height="80" rx="13" ry="13" />
             <rect x="18" y="10" width="54" height="28" rx="8" ry="8" />
             <rect x="18" y="37" width="65" height="20" rx="10" ry="10" />
@@ -687,21 +358,21 @@
             <path d="M 75 10 L 94 34 L 82 34 Q 75 34 75 27 Z" />
           </svg>
         </span>
-        <span>&copy; 2026 Etonia. Crafted for handwritten thinking.</span>
+        <span>&copy; 2026 Etonia</span>
       </div>
 
-      <nav class="footer-links" aria-label="Footer legal and social links">
+      <nav class="footer-links" aria-label="Footer links">
         <a href="https://www.instagram.com/etoniaaa/" target="_blank" rel="noopener noreferrer">Instagram (@etoniaaa)</a>
         <a href="legal/">Support</a>
-        <a href="legal/privacy">Privacy Policy</a>
-        <a href="legal/terms">Terms of Use</a>
+        <a href="legal/privacy">Privacy</a>
+        <a href="legal/terms">Terms</a>
         <a href="mailto:limuen.allen@gmail.com">Contact</a>
       </nav>
     </div>
   </footer>
 
   <!-- ====================================================================
-       Full-Screen Screenshot Lightbox Modal
+       Full-Screen Screenshot Lightbox
        ==================================================================== -->
   <div
     class="lightbox"
@@ -709,13 +380,13 @@
     role="dialog"
     aria-modal="true"
     aria-hidden="true"
-    aria-label="Full-resolution screenshot preview"
+    aria-label="Screenshot preview"
   >
     <div class="lightbox-content">
-      <button type="button" class="lightbox-close" id="lightbox-close" aria-label="Close preview">
+      <button type="button" class="lightbox-close" id="lightbox-close">
         Close &times;
       </button>
-      <img id="lightbox-img" src="assets/screenshots/hero_ai_light.png" alt="Etonia screenshot" />
+      <img id="lightbox-img" src="assets/screenshots/ai_after.png" alt="Etonia screenshot" />
     </div>
   </div>
 
