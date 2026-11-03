@@ -13,6 +13,10 @@ import 'google_drive_client.dart';
 /// tried until the user has connected Google Drive on this device, and a
 /// session is only ever restored without asking. Failures are left for the
 /// next turn.
+///
+/// [backUpSoon] asks for one ahead of the schedule, on leaving an edited note
+/// or when the app may be going down. Turning automatic backup off stops
+/// those too.
 class AutoBackupScheduler with WidgetsBindingObserver {
   AutoBackupScheduler({
     required this.backup,
@@ -20,6 +24,7 @@ class AutoBackupScheduler with WidgetsBindingObserver {
     required this.library,
     DateTime Function()? clock,
     this.minimumDelay = const Duration(seconds: 30),
+    this.soonDelay = const Duration(seconds: 2),
   }) : _clock = clock ?? DateTime.now;
 
   static const Duration defaultInterval = Duration(minutes: 15);
@@ -49,6 +54,9 @@ class AutoBackupScheduler with WidgetsBindingObserver {
   /// The least wait before a check, so one does not run straight after
   /// launch or on every return to the app.
   final Duration minimumDelay;
+
+  /// How long [backUpSoon] waits, so several requests make one backup.
+  final Duration soonDelay;
   final DateTime Function() _clock;
 
   /// How often to back up; [off] when it does not.
@@ -57,6 +65,11 @@ class AutoBackupScheduler with WidgetsBindingObserver {
   );
 
   Timer? _timer;
+  Timer? _soonTimer;
+  Future<void>? _intervalRead;
+
+  /// Asked for another while one was running.
+  bool _soonAgain = false;
   bool _started = false;
   bool _disposed = false;
   bool _running = false;
@@ -88,12 +101,61 @@ class AutoBackupScheduler with WidgetsBindingObserver {
     _started = true;
     library.addListener(_markDirty);
     WidgetsBinding.instance.addObserver(this);
+    await (_intervalRead = _readInterval());
+    await reschedule();
+  }
+
+  Future<void> _readInterval() async {
     final Object? minutes = (await backup.state.read())[_intervalKey];
     if (_disposed) return;
     if (minutes is int && minutes >= 0) {
       interval.value = Duration(minutes: minutes);
     }
-    await reschedule();
+  }
+
+  /// Backs up in [soonDelay] rather than when next due, if the library has
+  /// changed since the last automatic backup.
+  void backUpSoon() {
+    if (_disposed || !_started) return;
+    if (_running) {
+      _soonAgain = true;
+      return;
+    }
+    _soonTimer?.cancel();
+    _soonTimer = Timer(soonDelay, _backUpNow);
+  }
+
+  Future<void> _backUpNow() async {
+    _soonTimer = null;
+    await _intervalRead;
+    if (_disposed || _running || interval.value == off || !_dirty) return;
+    await _backUpIfConnected();
+    if (_disposed) return;
+    if (_soonAgain) {
+      _soonAgain = false;
+      backUpSoon();
+    }
+    // A turn that came up during this one found it busy.
+    if (_timer == null) await reschedule();
+  }
+
+  /// Backs up, when this destination is the one chosen and can be reached
+  /// without asking.
+  Future<void> _backUpIfConnected() async {
+    if (!await backup.isLinked()) return;
+    final GoogleDriveAccount? account =
+        client.currentAccount ?? await client.restoreSession();
+    if (_disposed || _running || account == null) return;
+    _running = true;
+    // Changes made while it runs are for the next one.
+    _dirty = false;
+    try {
+      await backup.backUp();
+    } on Object {
+      _dirty = true;
+    } finally {
+      _running = false;
+    }
   }
 
   /// Backs up every [every] from now on, or stops for [off].
@@ -128,9 +190,13 @@ class AutoBackupScheduler with WidgetsBindingObserver {
 
   Future<void> _check() async {
     _timer = null;
-    if (_disposed || _running) return;
+    if (_disposed) return;
     final Duration every = interval.value;
     if (every == off) return;
+    if (_running) {
+      _wait(every);
+      return;
+    }
     final DateTime? last = await backup.lastBackupAt();
     if (_disposed) return;
     if (last != null) {
@@ -144,27 +210,7 @@ class AutoBackupScheduler with WidgetsBindingObserver {
       _wait(every);
       return;
     }
-    if (!await backup.isLinked()) {
-      _wait(every);
-      return;
-    }
-    final GoogleDriveAccount? account =
-        client.currentAccount ?? await client.restoreSession();
-    if (_disposed) return;
-    if (account == null) {
-      _wait(every);
-      return;
-    }
-    _running = true;
-    // Changes made while it runs are for the next one.
-    _dirty = false;
-    try {
-      await backup.backUp();
-    } on Object {
-      _dirty = true;
-    } finally {
-      _running = false;
-    }
+    await _backUpIfConnected();
     if (_disposed) return;
     _wait(every);
   }
@@ -182,6 +228,8 @@ class AutoBackupScheduler with WidgetsBindingObserver {
     _disposed = true;
     _timer?.cancel();
     _timer = null;
+    _soonTimer?.cancel();
+    _soonTimer = null;
     if (_started) {
       library.removeListener(_markDirty);
       WidgetsBinding.instance.removeObserver(this);

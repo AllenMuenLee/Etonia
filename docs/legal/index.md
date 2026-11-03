@@ -25,8 +25,8 @@ Subscriptions are managed by Apple. Open Settings, tap your name, then
 Subscriptions, and choose Etonia.
 
 **Where are my notes stored?**
-On your device. Turn on Google Drive backup in Account, then Backup, to keep a
-copy in your own Google Drive.
+On your device. Turn on backup in Account, then Backup, to keep a copy in your
+own Google Drive or, on Apple devices, your own iCloud.
 
 **How do I delete my account?**
 Open Account, then Profile, and tap **Delete account**. Your notes on the device

@@ -17,6 +17,7 @@ import 'package:greatnote/features/editor/page/note_document.dart';
 import 'package:greatnote/features/editor/page/page_setup.dart';
 import 'package:greatnote/features/editor/widgets/page_controls.dart';
 import 'package:greatnote/features/editor/document_io/document_platform.dart';
+import 'package:greatnote/features/library/cloud/cloud_sync_state.dart';
 import 'package:greatnote/features/library/cloud/google_drive_backup_service.dart';
 import 'package:greatnote/features/library/library_dialogs.dart';
 import 'package:greatnote/features/library/library_models.dart';
@@ -1585,6 +1586,68 @@ void main() {
       find.text('Written on the iPad', skipOffstage: false),
       findsOneWidget,
     );
+  });
+
+  group('backing up on leaving a note', () {
+    late FakeGoogleDriveClient drive;
+    late InMemoryNoteRepository repository;
+
+    /// A library backing up to Drive, with one note in it, the note open.
+    Future<void> openNote(WidgetTester tester) async {
+      setViewportSize(tester, TestViewport.tabletLandscape.size);
+      drive = FakeGoogleDriveClient(signedIn: true);
+      repository = _repository();
+      await repository.createNote(title: 'Lecture');
+      final InMemoryCloudStateStore state = InMemoryCloudStateStore();
+      await state.write(<String, Object?>{'driveLinked': true});
+      await tester.pumpWidget(
+        GreatnoteApp(
+          home: LibraryScreen(
+            repository: repository,
+            clock: () => _now,
+            googleDriveClient: drive,
+            cloudStateStore: state,
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Lecture'));
+      await tester.pumpAndSettle();
+    }
+
+    Future<void> draw(WidgetTester tester) {
+      final Offset origin = tester.getRect(find.byType(InkCanvas)).topLeft;
+      return _drawLine(
+        tester,
+        origin + const Offset(100, 100),
+        origin + const Offset(300, 120),
+      );
+    }
+
+    Future<void> leave(WidgetTester tester) async {
+      await tester.tap(find.byTooltip('Back to library'));
+      await tester.pumpAndSettle();
+      await tester.pump(const Duration(seconds: 3));
+      await tester.pumpAndSettle();
+    }
+
+    testWidgets('an edited note is backed up when it is left', (
+      WidgetTester tester,
+    ) async {
+      await openNote(tester);
+      await draw(tester);
+      await tester.pump(const Duration(seconds: 1));
+      expect(drive.uploads, isEmpty);
+
+      await leave(tester);
+      expect(drive.itemAt('Etonia/manifest.json'), isNotNull);
+    });
+
+    testWidgets('a note only looked at is not', (WidgetTester tester) async {
+      await openNote(tester);
+      await leave(tester);
+      expect(drive.uploads, isEmpty);
+    });
   });
 
   testWidgets('opening signed in goes straight on', (

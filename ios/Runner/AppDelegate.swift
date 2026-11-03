@@ -8,6 +8,7 @@ import Vision
   private var handwritingRecognizer: HandwritingRecognizerChannel?
   private var nativeInk: NativeInkChannel?
   private var recordingTranscriber: RecordingTranscriberChannel?
+  private var iCloudDrive: ICloudDriveChannel?
   let sharedDocuments = SharedDocumentChannel()
 
   override func application(
@@ -36,6 +37,9 @@ import Vision
       forPlugin: "EtoniaRecordingTranscriber")
     {
       recordingTranscriber = RecordingTranscriberChannel(messenger: registrar.messenger())
+    }
+    if let registrar = engineBridge.pluginRegistry.registrar(forPlugin: "EtoniaICloudDrive") {
+      iCloudDrive = ICloudDriveChannel(messenger: registrar.messenger())
     }
   }
 

@@ -193,11 +193,21 @@ class GoogleDriveBackupService {
     CloudStateStore? state,
     this.flushPendingSaves,
     this.isNoteOpen,
+    this.destinationName = 'Google Drive',
+    this.orphanGrace = Duration.zero,
     DateTime Function()? clock,
   }) : state = state ?? InMemoryCloudStateStore(),
        _clock = clock ?? DateTime.now;
 
   static const String rootFolderName = 'Etonia';
+
+  /// The name to tell the person, for where this service backs up to.
+  final String destinationName;
+
+  /// How old a file no manifest refers to must be before it goes. For a place
+  /// that syncs slowly: another device's new files can be seen here before
+  /// the manifest that refers to them.
+  final Duration orphanGrace;
 
   /// Where older versions kept the backup; a restore still looks there
   /// when there is none in [rootFolderName].
@@ -515,9 +525,14 @@ class GoogleDriveBackupService {
       for (final GoogleDriveItem item in await client.listChildren(
         notesFolder.id,
       )) {
-        if (!keep.contains(item.id)) {
-          await client.deleteFile(item.id);
+        if (keep.contains(item.id)) continue;
+        if (orphanGrace > Duration.zero) {
+          final DateTime? modified = item.modifiedTime;
+          if (modified == null || _clock().difference(modified) < orphanGrace) {
+            continue;
+          }
         }
+        await client.deleteFile(item.id);
       }
     } on GoogleDriveException {
       // Left for the next backup to tidy.
@@ -655,8 +670,8 @@ class GoogleDriveBackupService {
       ),
     );
     await flushPendingSaves?.call();
-    const GoogleDriveBackupException missing = GoogleDriveBackupException(
-      'No Etonia backup was found in your Google Drive',
+    final GoogleDriveBackupException missing = GoogleDriveBackupException(
+      'No Etonia backup was found in your $destinationName',
     );
     _Manifest? manifest;
     search:
@@ -1079,7 +1094,7 @@ class GoogleDriveBackupService {
       check();
       onProgress?.call(
         CloudProgress(
-          phase: 'Updating from Google Drive',
+          phase: 'Updating from $destinationName',
           completedItems: 0,
           totalItems: 0,
           currentName: there.entry.title,
@@ -1425,8 +1440,8 @@ class GoogleDriveBackupService {
     } on GoogleDriveException {
       rethrow;
     } on Object {
-      throw const GoogleDriveBackupException(
-        'The backup in Google Drive could not be read',
+      throw GoogleDriveBackupException(
+        'The backup in $destinationName could not be read',
       );
     }
     final Object? version = json['schema'];
@@ -1438,8 +1453,8 @@ class GoogleDriveBackupService {
     try {
       return _Manifest.fromJson(file.id, json);
     } on Object {
-      throw const GoogleDriveBackupException(
-        'The backup in Google Drive could not be read',
+      throw GoogleDriveBackupException(
+        'The backup in $destinationName could not be read',
       );
     }
   }

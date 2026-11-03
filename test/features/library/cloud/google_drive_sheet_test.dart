@@ -6,6 +6,7 @@ import 'package:greatnote/app/greatnote_app.dart';
 import 'package:greatnote/app/theme/app_icons.dart';
 import 'package:greatnote/features/editor/document_io/document_importer.dart';
 import 'package:greatnote/features/library/cloud/auto_backup_scheduler.dart';
+import 'package:greatnote/features/library/cloud/backup_destinations.dart';
 import 'package:greatnote/features/library/cloud/cloud_sync_state.dart';
 import 'package:greatnote/features/library/cloud/goodnotes_drive_replicator.dart';
 import 'package:greatnote/features/library/cloud/google_drive_backup_service.dart';
@@ -98,6 +99,161 @@ void main() {
   bool enabled(WidgetTester tester, String label) =>
       tester.widget<ButtonStyleButton>(button(label)).onPressed != null;
 
+  group('choosing where to back up', () {
+    late FakeGoogleDriveClient iCloud;
+    late BackupDestinations destinations;
+
+    BackupTarget target(
+      BackupDestination destination,
+      FakeGoogleDriveClient client,
+    ) {
+      final GoogleDriveBackupService backup = GoogleDriveBackupService(
+        client: client,
+        repository: repository,
+        state: InMemoryCloudStateStore(),
+        destinationName: destination.label,
+        clock: () => _now,
+      );
+      return BackupTarget(
+        destination: destination,
+        client: client,
+        backup: backup,
+        scheduler: AutoBackupScheduler(
+          backup: backup,
+          client: client,
+          library: repository,
+          clock: () => _now,
+        ),
+      );
+    }
+
+    Future<void> pumpChoice(WidgetTester tester) async {
+      iCloud = FakeGoogleDriveClient(
+        account: const GoogleDriveAccount(
+          email: 'The iCloud account on this device',
+          displayName: 'iCloud',
+        ),
+        signedIn: true,
+      );
+      destinations = BackupDestinations(
+        googleDrive: target(BackupDestination.googleDrive, drive),
+        iCloud: target(BackupDestination.iCloud, iCloud),
+      );
+      addTearDown(destinations.dispose);
+      setViewportSize(tester, TestViewport.tabletLandscape.size);
+      await destinations.start();
+      await tester.pumpWidget(
+        GreatnoteApp(
+          home: Scaffold(
+            body: SingleChildScrollView(
+              child: GoogleDriveSheet(
+                client: drive,
+                backup: destinations.googleDrive.backup,
+                autoBackup: destinations.googleDrive.scheduler,
+                destinations: destinations,
+                replicator: GoodnotesDriveReplicator(
+                  client: drive,
+                  repository: repository,
+                  importer: DocumentImporter(rasterizer: FakePdfRasterizer()),
+                  state: state,
+                ),
+                clock: () => _now,
+                embedded: true,
+              ),
+            ),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+    }
+
+    Finder segment(String label) => find.descendant(
+      of: find.byType(SegmentedButton<BackupDestination>),
+      matching: find.text(label),
+    );
+
+    testDrive('with nothing chosen, backing up waits for a choice', (
+      WidgetTester tester,
+    ) async {
+      await pumpChoice(tester);
+      expect(
+        find.text('Choose where your library is backed up.'),
+        findsOneWidget,
+      );
+      expect(enabled(tester, 'Back up library now'), isFalse);
+    });
+
+    testDrive('iCloud needs no Google account', (WidgetTester tester) async {
+      await repository.createNote(title: 'Lecture');
+      await pumpChoice(tester);
+      await tester.tap(segment('iCloud'));
+      await tester.pumpAndSettle();
+      expect(drive.currentAccount, isNull);
+      expect(destinations.current?.destination, BackupDestination.iCloud);
+
+      await tester.tap(button('Back up library now'));
+      await tester.pumpAndSettle();
+      expect(iCloud.itemAt('Etonia/manifest.json'), isNotNull);
+      expect(drive.uploads, isEmpty);
+    });
+
+    testDrive('iCloud being off is explained, and nothing is chosen', (
+      WidgetTester tester,
+    ) async {
+      await pumpChoice(tester);
+      iCloud.signInError = const GoogleDriveException(
+        GoogleDriveErrorKind.unauthorized,
+        'iCloud is not available.',
+      );
+      await tester.tap(segment('iCloud'));
+      await tester.pumpAndSettle();
+      expect(find.text('iCloud is not available.'), findsOneWidget);
+      expect(destinations.current, isNull);
+    });
+
+    testDrive('Google Drive asks for Google, and cancelling chooses nothing', (
+      WidgetTester tester,
+    ) async {
+      await pumpChoice(tester);
+      final GoogleDriveAccount? ada = drive.account;
+      drive.account = null;
+      await tester.tap(segment('Google Drive'));
+      await tester.pumpAndSettle();
+      expect(destinations.current, isNull);
+
+      drive.account = ada;
+      await tester.tap(segment('Google Drive'));
+      await tester.pumpAndSettle();
+      expect(drive.currentAccount, isNotNull);
+      expect(destinations.current?.destination, BackupDestination.googleDrive);
+    });
+
+    testDrive('signing into Google for Goodnotes leaves backups on iCloud', (
+      WidgetTester tester,
+    ) async {
+      await pumpChoice(tester);
+      await tester.tap(segment('iCloud'));
+      await tester.pumpAndSettle();
+      expect(find.text('Not connected'), findsOneWidget);
+
+      await tester.tap(button('Import Goodnotes folder from Drive'));
+      await tester.pumpAndSettle();
+      expect(drive.currentAccount, isNotNull);
+      expect(destinations.current?.destination, BackupDestination.iCloud);
+    });
+
+    testDrive('cancelling Google for Goodnotes does not start the import', (
+      WidgetTester tester,
+    ) async {
+      await pumpChoice(tester);
+      drive.account = null;
+      await tester.tap(button('Import Goodnotes folder from Drive'));
+      await tester.pumpAndSettle();
+      expect(find.text(noGoodnotesFolderMessage), findsNothing);
+      expect(find.text('Not connected'), findsOneWidget);
+    });
+  });
+
   group('connection', () {
     testDrive('signed out, points to the Account button', (
       WidgetTester tester,
@@ -107,7 +263,8 @@ void main() {
       expect(button('Connect'), findsNothing);
       expect(button('Disconnect'), findsNothing);
       expect(enabled(tester, 'Back up library now'), isFalse);
-      expect(enabled(tester, 'Import Goodnotes folder from Drive'), isFalse);
+      // Importing asks for Google when it is pressed.
+      expect(enabled(tester, 'Import Goodnotes folder from Drive'), isTrue);
     });
 
     testDrive('shows the signed-in account', (WidgetTester tester) async {

@@ -34,7 +34,7 @@ create unlawful or harmful content.
 ## Your content
 
 Your notes belong to you. Etonia stores them on your device, and in your own
-Google Drive if you turn on backup. See the [Privacy Policy](privacy).
+Google Drive or iCloud if you turn on backup. See the [Privacy Policy](privacy).
 
 ## Contact
 

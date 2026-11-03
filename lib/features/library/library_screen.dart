@@ -4,9 +4,11 @@ import 'dart:math' as math;
 import 'dart:ui' as ui;
 import '../../backend/backend_service.dart';
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/semantics.dart';
 
+import '../../app/crash_recovery.dart';
 import '../../app/theme/app_tokens.dart';
 import '../../app/theme/app_icons.dart';
 import '../../shared/layout/breakpoints.dart';
@@ -32,16 +34,19 @@ import '../editor/widgets/document_io_progress_dialog.dart';
 import '../editor/widgets/tool_palette.dart';
 
 import 'cloud/auto_backup_scheduler.dart';
+import 'cloud/backup_destinations.dart';
 import 'cloud/cloud_sync_state.dart';
 import 'cloud/goodnotes_drive_replicator.dart';
 import 'cloud/google_drive_backup_service.dart';
 import 'cloud/google_drive_client.dart';
 import 'cloud/google_drive_sheet.dart';
 import 'cloud/google_sign_in_screen.dart';
+import 'cloud/icloud_drive_client.dart';
 import 'file_note_repository.dart';
 import 'library_dialogs.dart';
 import 'library_models.dart';
 import 'note_content.dart';
+import 'note_autosaver.dart';
 import 'note_editor_page.dart';
 import 'note_repository.dart';
 import 'note_tabs_page.dart';
@@ -338,6 +343,8 @@ class LibraryScreen extends StatefulWidget {
     this.initialNotationEnabled = true,
     this.googleDriveClient,
     this.cloudStateStore,
+    this.iCloudClient,
+    this.iCloudStateStore,
     this.subscription,
     this.onboard = false,
   });
@@ -374,6 +381,13 @@ class LibraryScreen extends StatefulWidget {
   /// What is remembered about Google Drive between launches; kept beside
   /// the library by default.
   final CloudStateStore? cloudStateStore;
+
+  /// iCloud, offered beside Google Drive; by default on iOS only.
+  final GoogleDriveClient? iCloudClient;
+
+  /// What is remembered about iCloud between launches; by default a file
+  /// beside the library.
+  final CloudStateStore? iCloudStateStore;
 
   /// The user's plan and AI credits, shown in the top bar and passed to
   /// the editor. Without one, the screen keeps its own beside the library,
@@ -548,6 +562,85 @@ class _LibraryScreenState extends State<LibraryScreen> {
     clock: widget.clock,
   );
 
+  /// Google Drive and, on Apple devices, iCloud: the person chooses one.
+  late final BackupDestinations _destinations = BackupDestinations(
+    googleDrive: BackupTarget(
+      destination: BackupDestination.googleDrive,
+      client: _drive,
+      backup: _backup,
+      scheduler: _autoBackup,
+    ),
+    iCloud: _makeICloudTarget(),
+  );
+
+  BackupTarget? _makeICloudTarget() {
+    final GoogleDriveClient? client =
+        widget.iCloudClient ??
+        (defaultTargetPlatform == TargetPlatform.iOS
+            ? ICloudDriveClient()
+            : null);
+    if (client == null) return null;
+    final GoogleDriveBackupService backup = GoogleDriveBackupService(
+      client: client,
+      repository: _repository,
+      state:
+          widget.iCloudStateStore ??
+          switch (widget.repository) {
+            final FileNoteRepository files => FileCloudStateStore(
+              File('${files.directory.path}/cloud_state_icloud.json'),
+            ),
+            _ => InMemoryCloudStateStore(),
+          },
+      isNoteOpen: (String id) =>
+          _openNotes.notes.any((NoteEntry note) => note.id == id),
+      destinationName: BackupDestination.iCloud.label,
+      // iCloud brings another device's files here in no particular order.
+      orphanGrace: const Duration(days: 7),
+      clock: widget.clock,
+    );
+    return BackupTarget(
+      destination: BackupDestination.iCloud,
+      client: client,
+      backup: backup,
+      scheduler: AutoBackupScheduler(
+        backup: backup,
+        client: client,
+        library: _repository,
+        clock: widget.clock,
+      ),
+    );
+  }
+
+  /// Finds on launch that the last run crashed, whatever way it went down.
+  late final UncleanExitMarker? _exitMarker = switch (widget.repository) {
+    final FileNoteRepository files => UncleanExitMarker(
+      File('${files.directory.path}/running.marker'),
+    ),
+    _ => null,
+  };
+
+  /// Notes saved from their editors since they were last left.
+  final Set<String> _editedNotes = <String>{};
+
+  /// Backs up if an edited note is no longer in view: back to the library,
+  /// another tab shown, or its tab closed. A note still saving as it is left
+  /// comes here when that save ends.
+  void _backUpLeftNotes() {
+    if (_editedNotes.isEmpty) return;
+    final Iterable<String> shown = _tabsShowing
+        ? _openNotes.visibleNoteIds
+        : const <String>[];
+    final int edited = _editedNotes.length;
+    _editedNotes.retainAll(shown);
+    if (_editedNotes.length < edited) unawaited(_destinations.backUpSoon());
+  }
+
+  /// An uncaught error may mean the app is going down: everything open is
+  /// saved and backed up while Dart can still run.
+  void _backUpAfterError() {
+    unawaited(NoteAutosaver.flushAll().whenComplete(_destinations.backUpSoon));
+  }
+
   SubscriptionController? _ownedSubscription;
 
   late HandwritingProfileStore _handwritingProfileStore =
@@ -607,14 +700,18 @@ class _LibraryScreenState extends State<LibraryScreen> {
         if (_tabsShowing) _thumbnails.pause();
       },
       onResume: () {
-        if (widget.onboard) _pullFromDrive();
+        if (widget.onboard) _pullFromBackup();
       },
     );
     _repository.addListener(_onRepositoryChanged);
     _search.addListener(_scheduleSearchReload);
     _reload();
     _repository.purgeTrash(_trashKeeps);
-    _autoBackup.start();
+    unawaited(_destinations.start());
+    _openNotes.addListener(_backUpLeftNotes);
+    AppErrorMonitor.instance.addListener(_backUpAfterError);
+    // Saved edits from a run that crashed may not have reached the backup.
+    if (_exitMarker?.begin() ?? false) unawaited(_destinations.backUpSoon());
     unawaited(_loadToolbarLayout());
     _sharedDocumentsSubscription = widget.sharedDocuments.incomingDocuments
         .listen(_enqueueSharedDocument);
@@ -661,11 +758,10 @@ class _LibraryScreenState extends State<LibraryScreen> {
       );
     }
     if (account != null) {
-      // As connecting from the Drive sheet does, so backups may run.
-      await _backup.setLinked(true);
-      await _autoBackup.reschedule();
+      // As connecting from the backup section does, so backups may run.
+      await _destinations.googleConnected();
     }
-    unawaited(_pullFromDrive());
+    unawaited(_pullFromBackup());
     final HandwritingCalibrationState? state = await _handwritingProfileStore
         .read();
     if (state == null && mounted) await _calibrateHandwriting();
@@ -673,18 +769,21 @@ class _LibraryScreenState extends State<LibraryScreen> {
 
   bool _pulling = false;
 
-  /// Brings the library up to date with a Google Drive backup that another
-  /// device has made since, on opening the app and on coming back to it.
-  /// Quiet when there is nothing new, or Drive cannot be reached.
-  Future<void> _pullFromDrive() async {
+  /// Brings the library up to date with a backup that another device has
+  /// made since, on opening the app and on coming back to it. Quiet when
+  /// there is nothing new, or the backup cannot be reached.
+  Future<void> _pullFromBackup() async {
     if (_pulling) return;
     _pulling = true;
     try {
-      if (!await _backup.isLinked()) return;
+      await _destinations.start();
+      final BackupTarget? target = _destinations.current;
+      if (target == null) return;
       final GoogleDriveAccount? account =
-          _drive.currentAccount ?? await _drive.restoreSession();
+          target.client.currentAccount ?? await target.client.restoreSession();
       if (account == null) return;
-      final SyncSummary? summary = await _backup.pullIfChangedElsewhere();
+      final String from = target.destination.label;
+      final SyncSummary? summary = await target.backup.pullIfChangedElsewhere();
       if (!mounted || summary == null || summary.changedNotes == 0) return;
       final int count = summary.changedNotes;
       final String notes = count == 1 ? '1 note' : '$count notes';
@@ -692,9 +791,9 @@ class _LibraryScreenState extends State<LibraryScreen> {
         SnackBar(
           content: Text(
             summary.keptBoth > 0
-                ? 'Updated $notes from Google Drive. A note changed on two '
+                ? 'Updated $notes from $from. A note changed on two '
                       'devices was kept in both versions.'
-                : 'Updated $notes from Google Drive',
+                : 'Updated $notes from $from',
           ),
         ),
       );
@@ -750,9 +849,11 @@ class _LibraryScreenState extends State<LibraryScreen> {
       ..removeListener(_saveToolbarLayout)
       ..dispose();
     _stylusActions.dispose();
+    AppErrorMonitor.instance.removeListener(_backUpAfterError);
+    _exitMarker?.dispose();
     _openNotes.dispose();
     _editorAtRest.dispose();
-    _autoBackup.dispose();
+    _destinations.dispose();
     _ownedSubscription?.dispose();
     super.dispose();
   }
@@ -1015,6 +1116,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
     final bool zooming = _tabsShowing;
     _editorAtRest.value = false;
     setState(() => _tabsShowing = false);
+    _backUpLeftNotes();
     // Pictures are drawn once the note has gone ([_onLibraryShown]): until
     // then the cards keep their old ones, and nothing redraws the library
     // under the moving note.
@@ -1030,7 +1132,10 @@ class _LibraryScreenState extends State<LibraryScreen> {
   /// [note] was saved from its editor: its card's picture is drawn from
   /// the first page in memory, and stored, rather than read back from disk.
   void _onNoteSaved(NoteEntry note, NoteContent content) {
-    if (!mounted || content.pages.isEmpty) return;
+    if (!mounted) return;
+    _editedNotes.add(note.id);
+    _backUpLeftNotes();
+    if (content.pages.isEmpty) return;
     _thumbnails.capture(note, content.pages.first);
   }
 
@@ -1221,6 +1326,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
         client: _drive,
         backup: _backup,
         autoBackup: _autoBackup,
+        destinations: _destinations,
         replicator: GoodnotesDriveReplicator(
           client: _drive,
           repository: _repository,

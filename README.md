@@ -414,9 +414,9 @@ library, and its title renames the note.
   pause.
 - Thumbnails are painted from each note's content and cached for the session
   only.
-- There is no live sync: Google Drive backups run on a schedule or when
-  asked, and another device's backup is brought in when the app opens (see
-  below).
+- There is no live sync: backups run on a schedule, on leaving an edited note,
+  or when asked, and another device's backup is brought in when the app opens
+  (see below).
 
 ## Google Drive
 
@@ -446,6 +446,17 @@ day, or off. It runs only when the library has changed, restores the Google
 session silently or skips the turn, and takes turns with backups and
 restores started from the sheet.
 
+**Backing up ahead of the schedule.** `AutoBackupScheduler.backUpSoon` runs a
+backup without waiting for the interval, if the library has changed, and does
+nothing when automatic backup is off. The library asks for one when an edited
+note leaves view (back to the library, another tab, or its tab closed). It also
+asks when an uncaught Dart error is reported (`AppErrorMonitor`), first saving
+every open note. A native crash or the system ending the app runs no Dart, so
+nothing can be uploaded in that moment: a marker file present while the app is
+in front (`UncleanExitMarker`) shows on the next launch that the last run
+crashed, and the backup runs then. Notes are saved to disk within a second of
+each change, so what was saved is what goes up.
+
 **Catching up with other devices.** Each backup records the installation
 that made it (`deviceId` in the manifest). When the app opens or comes back
 to the foreground, `pullIfChangedElsewhere` reads the manifest and, if
@@ -456,6 +467,23 @@ uploads, so an older copy on one device never replaces newer work in Drive.
 A note changed on both devices since they last synced keeps this device's
 version, and the other comes in beside it as "… (from another device)". A
 note open in the editor is left alone and brought on the next launch.
+
+**iCloud** (iOS). `BackupDestinations` holds the one place backups go, which the
+Backup tab lets the person choose. `ICloudDriveClient` implements
+`GoogleDriveClient` over the `com.etonia.app/icloud_drive` channel
+(`ios/Runner/ICloudDriveChannel.swift`), so the same `GoogleDriveBackupService`
+backs up, restores and syncs in `Backups/Etonia` in the container
+`iCloud.com.etonia.app`, with its own `cloud_state_icloud.json`. iCloud uses the
+device's iCloud account, not Sign in with Apple. It delivers files in no
+particular order, so files no manifest refers to are only removed after seven
+days. The App ID needs the iCloud capability with that container, and every
+provisioning profile, `IOS_APPSTORE_PROFILE_NAME`'s included, must be
+regenerated after adding it.
+
+Google and Apple are separate here: someone signed into Etonia with Apple can
+also connect Google, which leaves their Etonia account as it is, and signing
+out of either leaves the other. Signing into Google chooses Drive only if no
+destination has been chosen. Goodnotes import always needs Google.
 
 **Goodnotes import** (`GoodnotesDriveReplicator`) looks for non-trashed
 folders named GoodNotes in any case, asks which one to use when there are

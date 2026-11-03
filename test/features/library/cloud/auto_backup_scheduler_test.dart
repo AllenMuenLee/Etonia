@@ -1,7 +1,10 @@
+import 'dart:async';
+
 import 'package:flutter_test/flutter_test.dart';
 import 'package:greatnote/features/library/cloud/auto_backup_scheduler.dart';
 import 'package:greatnote/features/library/cloud/cloud_sync_state.dart';
 import 'package:greatnote/features/library/cloud/google_drive_backup_service.dart';
+import 'package:greatnote/features/library/cloud/google_drive_client.dart';
 import 'package:greatnote/features/library/note_repository.dart';
 
 import '../../../helpers/google_drive_fakes.dart';
@@ -108,6 +111,128 @@ void main() {
     await again.start();
     expect(again.interval.value, const Duration(hours: 1));
     again.dispose();
+  });
+
+  group('backing up ahead of the schedule', () {
+    testScheduler('runs without waiting for the interval', (
+      WidgetTester tester,
+    ) async {
+      await backup.setLinked(true);
+      await scheduler.start();
+      await advance(tester, const Duration(minutes: 1));
+      final DateTime first = (await backup.lastBackupAt())!;
+
+      await repository.createNote(title: 'Edited');
+      scheduler.backUpSoon();
+      await advance(tester, const Duration(seconds: 3));
+      expect((await backup.lastBackupAt())!.isAfter(first), isTrue);
+    });
+
+    testScheduler('sends nothing when nothing changed', (
+      WidgetTester tester,
+    ) async {
+      await backup.setLinked(true);
+      await scheduler.start();
+      await advance(tester, const Duration(minutes: 1));
+      drive.uploads.clear();
+
+      scheduler.backUpSoon();
+      await advance(tester, const Duration(seconds: 3));
+      expect(drive.uploads, isEmpty);
+    });
+
+    testScheduler('several requests make one backup', (
+      WidgetTester tester,
+    ) async {
+      await backup.setLinked(true);
+      await scheduler.start();
+      await advance(tester, const Duration(minutes: 1));
+      drive.uploads.clear();
+
+      await repository.createNote(title: 'Edited');
+      scheduler
+        ..backUpSoon()
+        ..backUpSoon()
+        ..backUpSoon();
+      await advance(tester, const Duration(seconds: 3));
+      expect(
+        drive.uploads.where(
+          (String name) => name == GoogleDriveBackupService.manifestName,
+        ),
+        hasLength(1),
+      );
+    });
+
+    testScheduler('asked again while one runs, it backs up once more', (
+      WidgetTester tester,
+    ) async {
+      await backup.setLinked(true);
+      await scheduler.start();
+      await advance(tester, const Duration(minutes: 1));
+      drive.uploads.clear();
+
+      await repository.createNote(title: 'First edit');
+      final Completer<void> gate = drive.uploadGate = Completer<void>();
+      scheduler.backUpSoon();
+      await advance(tester, const Duration(seconds: 3));
+      await repository.createNote(title: 'Second edit');
+      scheduler.backUpSoon();
+
+      drive.uploadGate = null;
+      gate.complete();
+      await advance(tester, const Duration(seconds: 1));
+      await advance(tester, const Duration(seconds: 3));
+      expect(
+        drive.uploads.where(
+          (String name) => name == GoogleDriveBackupService.manifestName,
+        ),
+        hasLength(2),
+      );
+    });
+
+    testScheduler('off means none of these either', (
+      WidgetTester tester,
+    ) async {
+      await backup.setLinked(true);
+      await scheduler.start();
+      await scheduler.setInterval(AutoBackupScheduler.off);
+      await repository.createNote(title: 'Edited');
+      scheduler.backUpSoon();
+      await advance(tester, const Duration(seconds: 3));
+      expect(await backup.lastBackupAt(), isNull);
+    });
+
+    testScheduler('waits until the destination is connected', (
+      WidgetTester tester,
+    ) async {
+      await scheduler.start();
+      await repository.createNote(title: 'Edited');
+      scheduler.backUpSoon();
+      await advance(tester, const Duration(seconds: 3));
+      expect(await backup.lastBackupAt(), isNull);
+    });
+
+    testScheduler('a failure is left for the schedule, which goes on', (
+      WidgetTester tester,
+    ) async {
+      await backup.setLinked(true);
+      await scheduler.start();
+      await advance(tester, const Duration(minutes: 1));
+      final DateTime first = (await backup.lastBackupAt())!;
+
+      await repository.createNote(title: 'Edited');
+      drive.failure = const GoogleDriveException(
+        GoogleDriveErrorKind.offline,
+        'Offline',
+      );
+      scheduler.backUpSoon();
+      await advance(tester, const Duration(seconds: 3));
+      expect(await backup.lastBackupAt(), first);
+
+      drive.failure = null;
+      await advance(tester, const Duration(minutes: 16));
+      expect((await backup.lastBackupAt())!.isAfter(first), isTrue);
+    });
   });
 
   testScheduler('off backs nothing up', (WidgetTester tester) async {

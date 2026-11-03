@@ -29,8 +29,7 @@ class BackendService extends BillingBackend with WidgetsBindingObserver {
     if (client != null) {
       WidgetsBinding.instance.addObserver(this);
       HttpGoogleDriveClient.onSharedSignIn = signInWithGoogleAccount;
-      HttpGoogleDriveClient.onSharedSignOut = () =>
-          signOut(includeGoogleDrive: false);
+      HttpGoogleDriveClient.onSharedSignOut = _onGoogleDisconnected;
     }
     _authChanges = client?.auth.onAuthStateChange.listen((_) {
       notifyListeners();
@@ -392,6 +391,9 @@ class BackendService extends BillingBackend with WidgetsBindingObserver {
     final client = _client;
     if (client == null) throw const BackendFailure('not_configured');
     if (userId != null && email == account.email) return;
+    // Google is only Drive for someone signed in with Apple: their account,
+    // and the plan on it, stay as they are.
+    if (signInMethod == SignInMethod.apple) return;
     final idToken = account.authentication.idToken;
     if (idToken == null || idToken.isEmpty) {
       throw const BackendFailure('unauthorized');
@@ -539,9 +541,16 @@ class BackendService extends BillingBackend with WidgetsBindingObserver {
     }
   }
 
+  /// Disconnecting Drive ends a Google account, but not an Apple one.
+  Future<void> _onGoogleDisconnected() async {
+    if (signInMethod == SignInMethod.apple) return;
+    await signOut(includeGoogleDrive: false);
+  }
+
   @override
   Future<void> signOut({bool includeGoogleDrive = true}) async {
-    if (includeGoogleDrive) {
+    // Signing out of Apple leaves the separate Drive connection alone.
+    if (includeGoogleDrive && signInMethod != SignInMethod.apple) {
       await HttpGoogleDriveClient.signOutShared();
     }
     await _client?.auth.signOut(scope: SignOutScope.local);

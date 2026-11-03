@@ -25,6 +25,24 @@ class NoteAutosaver with WidgetsBindingObserver {
     document.addListener(_onStructureChanged);
     _listenToPages();
     WidgetsBinding.instance.addObserver(this);
+    _live.add(this);
+  }
+
+  static final Set<NoteAutosaver> _live = <NoteAutosaver>{};
+
+  /// Saves every open note now, for when the app may be about to go down.
+  /// One that cannot be saved does not stop the others.
+  static Future<void> flushAll() async {
+    await Future.wait<void>(<Future<void>>[
+      for (final NoteAutosaver autosaver in _live.toList())
+        () async {
+          try {
+            await autosaver.flush();
+          } on Object {
+            // Its pages may be what went wrong.
+          }
+        }(),
+    ]);
   }
 
   final NoteDocument document;
@@ -114,6 +132,7 @@ class NoteAutosaver with WidgetsBindingObserver {
   }
 
   void dispose() {
+    _live.remove(this);
     _disposed = true;
     _timer?.cancel();
     WidgetsBinding.instance.removeObserver(this);

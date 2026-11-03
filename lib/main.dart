@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:pdfrx/pdfrx.dart';
 
+import 'app/crash_recovery.dart';
 import 'app/greatnote_app.dart';
 import 'app/system_bars.dart';
 import 'backend/backend_service.dart';
@@ -12,6 +13,7 @@ import 'shared/widgets/processing.dart';
 
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
+  AppErrorMonitor.instance.install();
   SystemBars.install();
   // AI notation writes with glyphs from EMS Readability.
   LicenseRegistry.addLicense(() async* {

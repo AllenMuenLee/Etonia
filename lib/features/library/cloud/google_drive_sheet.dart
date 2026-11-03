@@ -6,6 +6,7 @@ import '../../../shared/widgets/processing.dart';
 import '../../editor/document_io/document_importer.dart';
 import '../library_screen.dart' show formatModified;
 import 'auto_backup_scheduler.dart';
+import 'backup_destinations.dart';
 import 'cloud_sync_state.dart';
 import 'goodnotes_drive_replicator.dart';
 import 'google_drive_backup_service.dart';
@@ -48,6 +49,7 @@ class GoogleDriveSheet extends StatefulWidget {
     required this.backup,
     required this.replicator,
     this.autoBackup,
+    this.destinations,
     this.onOpenFolder,
     this.clock = DateTime.now,
     this.embedded = false,
@@ -64,6 +66,10 @@ class GoogleDriveSheet extends StatefulWidget {
   /// Offers the choice of how often to back up on its own; without one
   /// the choice is not shown.
   final AutoBackupScheduler? autoBackup;
+
+  /// Where backups go. Offers the choice where there is one; [client] stays
+  /// the Google account, which Goodnotes import needs whichever is chosen.
+  final BackupDestinations? destinations;
   final ValueChanged<String>? onOpenFolder;
   final DateTime Function() clock;
 
@@ -86,9 +92,45 @@ class _GoogleDriveSheetState extends State<GoogleDriveSheet> {
 
   bool get _busy => _task != null;
 
+  BackupTarget? get _target => widget.destinations?.current;
+  GoogleDriveBackupService get _backupService =>
+      _target?.backup ?? widget.backup;
+  AutoBackupScheduler? get _scheduler =>
+      _target?.scheduler ?? widget.autoBackup;
+  String get _destinationName =>
+      _target?.destination.label ?? BackupDestination.googleDrive.label;
+
+  /// Whether there is somewhere to back up to right now.
+  bool get _canBackUp {
+    final BackupDestinations? destinations = widget.destinations;
+    if (destinations == null || !destinations.offersChoice) {
+      return _account != null;
+    }
+    return switch (destinations.current?.destination) {
+      BackupDestination.iCloud => true,
+      BackupDestination.googleDrive => _account != null,
+      null => false,
+    };
+  }
+
+  void _onDestinationChanged() {
+    if (mounted) setState(() {});
+    _loadLastBackup();
+  }
+
+  void _loadLastBackup() {
+    final GoogleDriveBackupService backup = _backupService;
+    backup.lastBackupAt().then((DateTime? time) {
+      if (mounted && identical(backup, _backupService)) {
+        setState(() => _lastBackup = time);
+      }
+    });
+  }
+
   @override
   void initState() {
     super.initState();
+    widget.destinations?.addListener(_onDestinationChanged);
     _account = widget.client.currentAccount;
     if (_account == null) {
       _restoreSession();
@@ -96,13 +138,12 @@ class _GoogleDriveSheetState extends State<GoogleDriveSheet> {
       // Signed in from the Account button: let automatic backup run.
       _link(true);
     }
-    widget.backup.lastBackupAt().then((DateTime? time) {
-      if (mounted) setState(() => _lastBackup = time);
-    });
+    _loadLastBackup();
   }
 
   @override
   void dispose() {
+    widget.destinations?.removeListener(_onDestinationChanged);
     // A closed sheet stops what it started; a note being imported is
     // rolled back.
     _cancellation?.cancel();
@@ -118,10 +159,58 @@ class _GoogleDriveSheetState extends State<GoogleDriveSheet> {
   }
 
   /// Records whether Drive is connected, so automatic backup knows whether
-  /// it may run.
+  /// it may run. Where there is a choice of destination, connecting never
+  /// changes the one already chosen.
   Future<void> _link(bool linked) async {
+    final BackupDestinations? destinations = widget.destinations;
+    if (destinations != null) {
+      if (linked) await destinations.googleConnected();
+      return;
+    }
     await widget.backup.setLinked(linked);
     await widget.autoBackup?.reschedule();
+  }
+
+  /// Asks the person to sign into Google, true once they have.
+  Future<bool> _signInToGoogle() async {
+    try {
+      final GoogleDriveAccount? account = await widget.client.signIn();
+      if (!mounted || account == null) return false;
+      setState(() {
+        _account = account;
+        _message = null;
+      });
+      await _link(true);
+      return mounted;
+    } on GoogleDriveException catch (error) {
+      if (mounted) _show(error.message, error: true);
+      return false;
+    } on Object {
+      if (mounted) _show("Couldn't sign in to Google", error: true);
+      return false;
+    }
+  }
+
+  Future<void> _chooseDestination(BackupDestination destination) async {
+    final BackupDestinations destinations = widget.destinations!;
+    switch (destination) {
+      case BackupDestination.googleDrive:
+        if (_account == null && !await _signInToGoogle()) return;
+      case BackupDestination.iCloud:
+        try {
+          await destinations.iCloud!.client.signIn();
+        } on GoogleDriveException catch (error) {
+          if (mounted) _show(error.message, error: true);
+          return;
+        }
+    }
+    await destinations.choose(destination);
+    if (mounted) {
+      _show(
+        'Your library now backs up to ${destination.label}. Any backup '
+        'already in the other place stays there.',
+      );
+    }
   }
 
   void _show(String message, {bool error = false}) {
@@ -187,7 +276,7 @@ class _GoogleDriveSheetState extends State<GoogleDriveSheet> {
       ImportCancellationToken cancellation,
       ValueChanged<CloudProgress> onProgress,
     ) async {
-      final BackupSummary summary = await widget.backup.backUp(
+      final BackupSummary summary = await _backupService.backUp(
         onProgress: onProgress,
         cancellation: cancellation,
       );
@@ -217,7 +306,7 @@ class _GoogleDriveSheetState extends State<GoogleDriveSheet> {
       context: context,
       motionKey: 'drive-restore',
       builder: (BuildContext context) => AlertDialog(
-        title: const Text('Restore from Google Drive?'),
+        title: Text('Restore from $_destinationName?'),
         content: const Text(
           'Add the backup to this library, keeping what is here, or replace '
           'the library with it. Replaced notes go to Recently Deleted.',
@@ -243,7 +332,7 @@ class _GoogleDriveSheetState extends State<GoogleDriveSheet> {
       ImportCancellationToken cancellation,
       ValueChanged<CloudProgress> onProgress,
     ) async {
-      final RestoreSummary summary = await widget.backup.restore(
+      final RestoreSummary summary = await _backupService.restore(
         mode: mode,
         onProgress: onProgress,
         cancellation: cancellation,
@@ -264,6 +353,9 @@ class _GoogleDriveSheetState extends State<GoogleDriveSheet> {
   }
 
   Future<void> _importGoodnotes() async {
+    // Goodnotes is read from Google Drive, whichever way the person signed
+    // into Etonia and wherever they back up to.
+    if (_account == null && !await _signInToGoogle()) return;
     await _run(_Task.replicate, (
       ImportCancellationToken cancellation,
       ValueChanged<CloudProgress> onProgress,
@@ -350,25 +442,46 @@ class _GoogleDriveSheetState extends State<GoogleDriveSheet> {
     final AppColors colors = AppColors.of(context);
     final TextTheme text = Theme.of(context).textTheme;
     final GoogleDriveAccount? account = _account;
-    final bool connected = account != null;
-    final bool canAct = connected && !_busy;
+    final bool canAct = _canBackUp && !_busy;
+    final bool offersChoice = widget.destinations?.offersChoice ?? false;
+    final Widget connection = _ConnectionCard(
+      account: account,
+      onSignIn: _busy ? null : _signInToGoogle,
+    );
     final List<Widget> cards = <Widget>[
-      _ConnectionCard(account: account),
-      const SizedBox(height: AppSpacing.md),
+      if (offersChoice) ...<Widget>[
+        _DestinationPicker(
+          selected: _target?.destination,
+          enabled: !_busy,
+          onChanged: _chooseDestination,
+        ),
+        const SizedBox(height: AppSpacing.md),
+      ] else ...<Widget>[connection, const SizedBox(height: AppSpacing.md)],
       _BackupCard(
         lastBackup: _lastBackup,
         now: widget.clock(),
-        scheduler: widget.autoBackup,
+        scheduler: _scheduler,
         enabled: canAct,
         onBackUp: _backUp,
         onRestore: _restore,
       ),
       const SizedBox(height: AppSpacing.md),
-      _GoodnotesCard(enabled: canAct, onImport: _importGoodnotes),
+      if (offersChoice) ...<Widget>[
+        connection,
+        const SizedBox(height: AppSpacing.md),
+      ],
+      _GoodnotesCard(
+        enabled: !_busy,
+        signedIn: account != null,
+        onImport: _importGoodnotes,
+      ),
       if (_busy) ...<Widget>[
         const SizedBox(height: AppSpacing.lg),
         _ProgressPanel(
           progress: _progress,
+          destinationName: _task == _Task.replicate
+              ? BackupDestination.googleDrive.label
+              : _destinationName,
           onCancel:
               _task == _Task.restore && _progress?.phase == 'Restoring library'
               ? null
@@ -432,6 +545,61 @@ class _GoogleDriveSheetState extends State<GoogleDriveSheet> {
             ],
           ),
         ),
+      ),
+    );
+  }
+}
+
+/// Where backups go: one or the other, on the device's iCloud account or a
+/// Google account, however the person signed into Etonia.
+class _DestinationPicker extends StatelessWidget {
+  const _DestinationPicker({
+    required this.selected,
+    required this.enabled,
+    required this.onChanged,
+  });
+
+  final BackupDestination? selected;
+  final bool enabled;
+  final ValueChanged<BackupDestination> onChanged;
+
+  @override
+  Widget build(BuildContext context) {
+    final AppColors colors = AppColors.of(context);
+    final TextTheme text = Theme.of(context).textTheme;
+    return _DriveCard(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: <Widget>[
+          Text('Back up to', style: text.titleMedium),
+          const SizedBox(height: AppSpacing.xxs),
+          Text(switch (selected) {
+            BackupDestination.iCloud =>
+              'Uses the iCloud account on this device.',
+            BackupDestination.googleDrive => 'Uses your Google account.',
+            null => 'Choose where your library is backed up.',
+          }, style: text.bodySmall!.copyWith(color: colors.textSecondary)),
+          const SizedBox(height: AppSpacing.sm),
+          SegmentedButton<BackupDestination>(
+            emptySelectionAllowed: true,
+            showSelectedIcon: false,
+            segments: <ButtonSegment<BackupDestination>>[
+              for (final BackupDestination destination
+                  in BackupDestination.values)
+                ButtonSegment<BackupDestination>(
+                  value: destination,
+                  label: Text(destination.label),
+                ),
+            ],
+            selected: <BackupDestination>{?selected},
+            onSelectionChanged: enabled
+                ? (Set<BackupDestination> chosen) {
+                    // Tapping the one chosen leaves it chosen.
+                    if (chosen.isNotEmpty) onChanged(chosen.first);
+                  }
+                : null,
+          ),
+        ],
       ),
     );
   }
@@ -656,9 +824,14 @@ class _AutoBackupControl extends StatelessWidget {
 }
 
 class _GoodnotesCard extends StatelessWidget {
-  const _GoodnotesCard({required this.enabled, required this.onImport});
+  const _GoodnotesCard({
+    required this.enabled,
+    required this.signedIn,
+    required this.onImport,
+  });
 
   final bool enabled;
+  final bool signedIn;
   final VoidCallback onImport;
 
   @override
@@ -681,8 +854,12 @@ class _GoodnotesCard extends StatelessWidget {
                     Text('Import from Goodnotes', style: text.titleMedium),
                     const SizedBox(height: AppSpacing.xxs),
                     Text(
-                      'Bring in every notebook and PDF while keeping your '
-                      'folder structure.',
+                      signedIn
+                          ? 'Bring in every notebook and PDF while keeping your '
+                                'folder structure.'
+                          : 'Bring in every notebook and PDF while keeping your '
+                                'folder structure. You will be asked to sign in '
+                                'with Google.',
                       style: text.bodySmall!.copyWith(
                         color: colors.textSecondary,
                       ),
@@ -745,9 +922,12 @@ class _CardIcon extends StatelessWidget {
 }
 
 class _ConnectionCard extends StatelessWidget {
-  const _ConnectionCard({required this.account});
+  const _ConnectionCard({required this.account, required this.onSignIn});
 
   final GoogleDriveAccount? account;
+
+  /// Null while it cannot be done.
+  final VoidCallback? onSignIn;
 
   @override
   Widget build(BuildContext context) {
@@ -756,7 +936,7 @@ class _ConnectionCard extends StatelessWidget {
     final GoogleDriveAccount? account = this.account;
     final String title = account == null ? 'Not connected' : account.label;
     final String detail = account == null
-        ? 'Sign in from the Account button to back up your library and import from Goodnotes.'
+        ? 'Sign in with Google to import from Goodnotes and to back up to Google Drive.'
         : account.email;
     return Semantics(
       container: true,
@@ -800,6 +980,14 @@ class _ConnectionCard extends StatelessWidget {
                 ),
               ),
             ),
+            if (account == null) ...<Widget>[
+              const SizedBox(width: AppSpacing.sm),
+              OutlinedButton(
+                key: const ValueKey<String>('drive-sign-in-google'),
+                onPressed: onSignIn,
+                child: const Text('Sign in'),
+              ),
+            ],
           ],
         ),
       ),
@@ -810,11 +998,13 @@ class _ConnectionCard extends StatelessWidget {
 class _ProgressPanel extends StatelessWidget {
   const _ProgressPanel({
     required this.progress,
+    required this.destinationName,
     required this.onCancel,
     required this.cancelling,
   });
 
   final CloudProgress? progress;
+  final String destinationName;
 
   /// Null while the work can no longer be stopped.
   final VoidCallback? onCancel;
@@ -847,7 +1037,7 @@ class _ProgressPanel extends StatelessWidget {
               ),
               ProgressCount(
                 value: fraction,
-                semanticsLabel: 'Google Drive progress',
+                semanticsLabel: '$destinationName progress',
                 style: text.titleSmall!.copyWith(color: colors.textSecondary),
               ),
             ],

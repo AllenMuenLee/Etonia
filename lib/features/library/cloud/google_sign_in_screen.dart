@@ -26,8 +26,9 @@ Future<GoogleDriveAccount?> showGoogleSignIn(
 
 /// The first thing shown to someone not signed in: one sign-in that is
 /// both their Google account and Google Drive, for backing up their notes.
-/// On Apple devices, Sign in with Apple is offered too; it signs into
-/// Etonia without Drive.
+/// On Apple devices, Sign in with Apple is offered beside it; it signs into
+/// Etonia without Drive, which can still be connected later, and notes can be
+/// backed up to iCloud instead.
 class GoogleSignInScreen extends StatefulWidget {
   const GoogleSignInScreen({
     super.key,
@@ -116,8 +117,9 @@ class _GoogleSignInScreenState extends State<GoogleSignInScreen> {
                   const SizedBox(height: AppSpacing.xs),
                   Text(
                     widget.signInWithApple != null
-                        ? 'Sign in so your plan follows you. With Google, '
-                              'your notes are also backed up to Google Drive.'
+                        ? 'Sign in so your plan follows you. Back up your '
+                              'notes to iCloud or Google Drive. Importing from '
+                              'Goodnotes needs Google.'
                         : 'Sign in with your Google account and connect Google '
                               'Drive, so your notes are backed up and your plan '
                               'follows you.',

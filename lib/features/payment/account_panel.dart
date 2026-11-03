@@ -227,7 +227,8 @@ class _AccountPanelState extends State<AccountPanel> {
               Text(
                 widget.backend.canSignInWithApple
                     ? 'Sign in to manage your subscription and AI credits. '
-                          'Google also backs up your notes to Google Drive.'
+                          'Back up your notes to iCloud or Google Drive from '
+                          'the Backup tab.'
                     : 'Sign in with Google to manage your subscription, AI credits, and Drive backup.',
                 style: text.titleMedium?.copyWith(color: colors.textPrimary),
               ),

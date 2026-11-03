@@ -4,7 +4,7 @@ title: Etonia Privacy Policy
 
 # Etonia Privacy Policy
 
-Last updated: 26 October 2026
+Last updated: 2 November 2026
 
 Etonia is a handwriting notes app made by Mu-En Lee ("we"). This policy explains
 what Etonia collects, why, and what stays on your device.
@@ -18,6 +18,17 @@ content.
 If you turn on **Google Drive backup**, Etonia copies your notes into your own
 Google Drive using the permission you grant. They are stored under your Google
 account, not ours. You can turn backup off and delete those files at any time.
+
+On Apple devices you can choose **iCloud backup** instead. Etonia then copies
+your notes into the app's private storage in your own iCloud account, under the
+terms of your agreement with Apple. We have no access to them. You can turn
+automatic backup off, and delete them under iCloud storage in Settings.
+
+If you choose a backup, Etonia also backs up automatically when you leave a note
+you have edited, and after the app has hit an unexpected error or closed
+unexpectedly.
+
+Importing from Goodnotes needs Google sign-in, even if you back up to iCloud.
 
 ## Account
 
