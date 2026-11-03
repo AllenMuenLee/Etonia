@@ -88,6 +88,7 @@ import 'widgets/editor_settings_sheet.dart';
 import 'widgets/export_options_sheet.dart';
 import 'widgets/history_controls.dart';
 import 'widgets/document_io_progress_dialog.dart';
+import 'widgets/page_chapters.dart';
 import 'widgets/page_controls.dart';
 import 'widgets/selection_action_bar.dart';
 import 'widgets/recording_options.dart';
@@ -457,7 +458,7 @@ class EditorScreenState extends State<EditorScreen>
     // An open menu hangs over the page wherever it likes, and its size is
     // not known here: while one is open, the pen is left to Flutter, which
     // lets the menu take the press.
-    if (_paletteController.hasOpenPopover || _pageOverviewOpen.value) {
+    if (_paletteController.hasOpenPopover || _pageOverviewCovers) {
       return const <Rect>[Rect.fromLTRB(-1e6, -1e6, 1e6, 1e6)];
     }
     final Size paletteSize = ToolPalette.sizeFor(
@@ -475,6 +476,7 @@ class EditorScreenState extends State<EditorScreen>
         : Offset.zero;
     return <Rect>[
       if (_toolbarShown.value) paletteRect.shift(origin),
+      if (_pageOverviewOpen.value) _pageOverviewRect.shift(origin),
       layout.history.shift(origin),
       layout.pageControls.shift(origin),
       if (topMargin > 0)
@@ -697,6 +699,7 @@ class EditorScreenState extends State<EditorScreen>
     previewNotation: _previewNotation,
     endNotationPreview: _endNotationPreview,
     inkInArea: _inkInArea,
+    shownPage: () => _inkController,
     notationEnabled: widget.initialNotationEnabled,
   );
 
@@ -803,11 +806,22 @@ class EditorScreenState extends State<EditorScreen>
           ));
   }
 
-  /// The outline of the PDF [assetId], for the page overview's chapters. A
-  /// method, not a closure, so each build hands the overview the same one.
+  /// The outline of the PDF [assetId], for the page overview's chapters.
   Future<List<PdfOutlineEntry>> _loadPdfOutline(String assetId) =>
       _pageRenderCache?.outline(assetId) ??
       Future<List<PdfOutlineEntry>>.value(const <PdfOutlineEntry>[]);
+
+  /// The note's chapters, read as soon as the note opens rather than when the
+  /// overview first does, by when the PDF's pages have the renderer busy.
+  /// Null without assets to read them from.
+  NoteChapterIndex? _chapterIndex;
+
+  void _indexChapters() {
+    _chapterIndex?.dispose();
+    _chapterIndex = widget.assetReader == null
+        ? null
+        : NoteChapterIndex(document: _document, loadOutline: _loadPdfOutline);
+  }
 
   /// What the PDF paper was last focused with, to focus it again on another
   /// page as a scroll passes it, without building.
@@ -1433,15 +1447,35 @@ class EditorScreenState extends State<EditorScreen>
     }
   }
 
-  /// Whether the page overview hangs under the top-left card.
+  /// Whether the page overview shows, down the left side of the editor.
   late final ValueNotifier<bool> _pageOverviewOpen = ValueNotifier<bool>(false)
-    // Over the page, it takes the pen from the native layer, as a popover
-    // does.
-    ..addListener(_paletteController.popoverChanged.notify);
+    ..addListener(_onPageOverviewChanged);
+
+  /// Whether pages or chapters show in the overview, kept between openings.
+  final ValueNotifier<PageOverviewView> _pageOverviewView =
+      ValueNotifier<PageOverviewView>(PageOverviewView.pages);
+
+  /// Where the open overview is, in the body's coordinates.
+  Rect _pageOverviewRect = Rect.zero;
+
+  /// Whether the open overview lies over the page, there being no room
+  /// beside it: it then takes the pen from the native layer, as a popover
+  /// does, and closes once a page is chosen.
+  bool _pageOverviewCovers = false;
+
+  void _onPageOverviewChanged() {
+    setState(() {});
+    // Once laid out: the native layer asks where the overview is.
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) _paletteController.popoverChanged.notify();
+    });
+  }
 
   void _togglePageOverview() {
     _pageOverviewOpen.value = !_pageOverviewOpen.value;
   }
+
+  void _closePageOverview() => _pageOverviewOpen.value = false;
 
   Future<void> _openPageSettings() {
     return showPagePanel(
@@ -2831,6 +2865,7 @@ class EditorScreenState extends State<EditorScreen>
     // it starts now rather than when the first page asks to be drawn.
     final PdfPageSource? firstPdf = _document.current.pdfSource;
     if (firstPdf != null) _pageRenderCache?.warm(firstPdf);
+    _indexChapters();
     WidgetsBinding.instance.addPostFrameCallback((_) {
       // PDF paper reports itself once rendered.
       if (mounted &&
@@ -3017,7 +3052,12 @@ class EditorScreenState extends State<EditorScreen>
       _adoptAiSession();
       _setAiNotesHidden(!_showAiNotes);
       _onDocumentChanged();
+      _indexChapters();
       owned?.dispose();
+    } else if (oldWidget.assetReader != widget.assetReader ||
+        oldWidget.pdfRasterizer != widget.pdfRasterizer ||
+        oldWidget.documentIoConfig != widget.documentIoConfig) {
+      _indexChapters();
     }
   }
 
@@ -3086,6 +3126,8 @@ class EditorScreenState extends State<EditorScreen>
     _stickySettings.dispose();
     _textSettings.dispose();
     _pageOverviewOpen.dispose();
+    _pageOverviewView.dispose();
+    _chapterIndex?.dispose();
     _pastePrompt.dispose();
     _handwritingFindTarget.dispose();
     _ownedStylusOnly?.dispose();
@@ -3119,11 +3161,17 @@ class EditorScreenState extends State<EditorScreen>
           // compact widths.
           final bool sheet =
               placement.isOpen && sizeClass == WindowSizeClass.compact;
+          // On a phone the overview fills the screen, so back closes it.
+          final bool overviewFills =
+              _pageOverviewOpen.value && sizeClass == WindowSizeClass.compact;
           return PopScope(
-            canPop: !sheet,
+            canPop: !sheet && !overviewFills,
             onPopInvokedWithResult: (bool didPop, Object? _) {
-              if (!didPop) {
+              if (didPop) return;
+              if (sheet) {
                 _closeAi();
+              } else {
+                _closePageOverview();
               }
             },
             child: Stack(
@@ -3197,7 +3245,7 @@ class EditorScreenState extends State<EditorScreen>
     for (int i = 0; i < pages.length && target == null; i++) {
       if (pages[i].ink.strokes.any(tied.contains)) target = i;
     }
-    if (target == null && focus.links.regions.isNotEmpty) {
+    if (target == null && focus.links.circles.isNotEmpty) {
       final Object? owner = _ai.context?.groups.firstOrNull?.page;
       final int index = pages.indexWhere(
         (NotePage page) => identical(page.ink, owner),
@@ -3459,17 +3507,43 @@ class EditorScreenState extends State<EditorScreen>
         child: LayoutBuilder(
           builder: (BuildContext context, BoxConstraints constraints) {
             final Size size = constraints.biggest;
+            final AiLayoutConfig aiLayout = widget.aiLayoutConfig;
+            final bool overviewOpen = _pageOverviewOpen.value;
+            // Beside the page when both have room, with the assistant's
+            // narrowest panel too if it is open; otherwise over them.
+            final bool overviewCovers =
+                overviewOpen &&
+                (sizeClass == WindowSizeClass.compact ||
+                    size.width -
+                            PageOverviewPanel.width -
+                            (panelSide == null ? 0 : aiLayout.minPanelWidth) <
+                        aiLayout.minEditorWidth);
+            // How much of the left side it takes from what is beside it.
+            final double overviewInset = overviewOpen && !overviewCovers
+                ? PageOverviewPanel.width
+                : 0;
+            _pageOverviewCovers = overviewCovers;
+            _pageOverviewRect = !overviewOpen
+                ? Rect.zero
+                : Rect.fromLTWH(
+                    0,
+                    0,
+                    sizeClass == WindowSizeClass.compact
+                        ? size.width
+                        : PageOverviewPanel.width,
+                    size.height,
+                  );
             final double panelWidth = panelSide == null
                 ? 0
-                : widget.aiLayoutConfig.inlineWidth(
-                    size.width,
+                : aiLayout.inlineWidth(
+                    size.width - overviewInset,
                     preferred: _aiPanelWidth,
                   );
-            // What the panel leaves for the page and the palette.
+            // What the panels leave for the page and the palette.
             final Rect region = Rect.fromLTWH(
-              panelSide == AiPanelSide.left ? panelWidth : 0,
+              overviewInset + (panelSide == AiPanelSide.left ? panelWidth : 0),
               0,
-              size.width - panelWidth,
+              size.width - overviewInset - panelWidth,
               size.height,
             );
             _paletteRegion = region;
@@ -3770,19 +3844,34 @@ class EditorScreenState extends State<EditorScreen>
                               return Stack(
                                 fit: StackFit.expand,
                                 children: <Widget>[
-                                  SelectionActionBar(
-                                    controller: _inkController,
-                                    crossPageListenable: _selectionCarry,
-                                    selectionResolver: _stableSelection,
-                                    onAiPressed: _openAi,
-                                    onCopy: _copy,
-                                    onCut: _cut,
-                                    onDuplicate: () => _selectionCarry
-                                        .duplicateSelection(_inkController),
-                                    onDelete: (_) => _selectionCarry
-                                        .deleteSelection(_inkController),
-                                    transform: transform,
-                                    obstruction: paletteOnPage,
+                                  // What the AI tool chooses is asked about
+                                  // in the chat, so it offers no actions here.
+                                  ValueListenableBuilder<EditorTool>(
+                                    valueListenable: _tool,
+                                    builder:
+                                        (
+                                          BuildContext context,
+                                          EditorTool tool,
+                                          Widget? bar,
+                                        ) {
+                                          return tool == EditorTool.ai
+                                              ? const SizedBox.shrink()
+                                              : bar!;
+                                        },
+                                    child: SelectionActionBar(
+                                      controller: _inkController,
+                                      crossPageListenable: _selectionCarry,
+                                      selectionResolver: _stableSelection,
+                                      onAiPressed: _openAi,
+                                      onCopy: _copy,
+                                      onCut: _cut,
+                                      onDuplicate: () => _selectionCarry
+                                          .duplicateSelection(_inkController),
+                                      onDelete: (_) => _selectionCarry
+                                          .deleteSelection(_inkController),
+                                      transform: transform,
+                                      obstruction: paletteOnPage,
+                                    ),
                                   ),
                                   PastePrompt(
                                     anchor: _pastePrompt,
@@ -3800,29 +3889,20 @@ class EditorScreenState extends State<EditorScreen>
                 _PaintTranslatedPositioned(
                   key: const ValueKey<String>('history-position'),
                   origin: layout.history.topLeft,
-                  child: PageOverviewAnchor(
-                    open: _pageOverviewOpen,
-                    document: _document,
-                    writingArea: _viewportSize,
-                    config: widget.pageConfig,
-                    loadOutline: widget.assetReader == null
-                        ? null
-                        : _loadPdfOutline,
-                    child: FloatingHistoryControls(
-                      height: layout.history.height,
-                      width: layout.history.width,
-                      children: <Widget>[
-                        HistoryControls(
-                          controller: _inkController,
-                          onUndo: _undo,
-                          onRedo: _redo,
-                        ),
-                        PageNavigationControls(
-                          onOpenOverview: _togglePageOverview,
-                          overviewOpen: _pageOverviewOpen,
-                        ),
-                      ],
-                    ),
+                  child: FloatingHistoryControls(
+                    height: layout.history.height,
+                    width: layout.history.width,
+                    children: <Widget>[
+                      HistoryControls(
+                        controller: _inkController,
+                        onUndo: _undo,
+                        onRedo: _redo,
+                      ),
+                      PageNavigationControls(
+                        onOpenOverview: _togglePageOverview,
+                        overviewOpen: _pageOverviewOpen,
+                      ),
+                    ],
                   ),
                 ),
                 _PaintTranslatedPositioned(
@@ -3936,7 +4016,7 @@ class EditorScreenState extends State<EditorScreen>
                     top: 0,
                     bottom: 0,
                     left: panelSide == AiPanelSide.left
-                        ? 0
+                        ? overviewInset
                         : size.width - panelWidth,
                     width: panelWidth,
                     child: ColoredBox(color: colors.writingSurface),
@@ -3965,7 +4045,7 @@ class EditorScreenState extends State<EditorScreen>
                             top: 0,
                             bottom: 0,
                             left: panelSide == AiPanelSide.left
-                                ? 0
+                                ? overviewInset
                                 : size.width - width,
                             width: width,
                             child: panel!,
@@ -4031,13 +4111,30 @@ class EditorScreenState extends State<EditorScreen>
                                     _startAiPanelResize(panelWidth),
                                 onDragUpdate: (double dx) => _resizeAiPanel(
                                   panelSide == AiPanelSide.right ? -dx : dx,
-                                  size.width,
+                                  size.width - overviewInset,
                                 ),
                                 onDragEnd: _endAiPanelResize,
                               ),
                             ),
                           ],
                         ),
+                      ),
+                    ),
+                  ),
+                if (overviewOpen)
+                  Positioned.fromRect(
+                    key: const ValueKey<String>('page-overview-position'),
+                    rect: _pageOverviewRect,
+                    child: PageOverviewSidebar(
+                      onClose: _closePageOverview,
+                      child: PageOverviewPanel(
+                        document: _document,
+                        writingArea: _viewportSize,
+                        config: widget.pageConfig,
+                        chapters: _chapterIndex,
+                        view: _pageOverviewView,
+                        onSelected: overviewCovers ? _closePageOverview : null,
+                        onClose: overviewCovers ? _closePageOverview : null,
                       ),
                     ),
                   ),

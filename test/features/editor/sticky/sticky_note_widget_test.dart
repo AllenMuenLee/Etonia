@@ -60,8 +60,14 @@ Future<void> _tapPage(WidgetTester tester, InkVector at) async {
   await tester.pump();
 }
 
-/// Picks the Sticky note tool, which opens its options.
+/// Picks the Sticky note tool, which opens its options, unfolding the
+/// palette to reach it if it is not yet.
 Future<void> _pickSticky(WidgetTester tester) async {
+  final Finder unfold = find.byTooltip('Expand toolbar');
+  if (unfold.evaluate().isNotEmpty) {
+    await tester.tap(unfold);
+    await tester.pumpAndSettle();
+  }
   await tester.tap(find.byTooltip('Sticky note'));
   await tester.pumpAndSettle();
 }
@@ -117,6 +123,8 @@ void main() {
     WidgetTester tester,
   ) async {
     final InkController controller = await pumpEditor(tester);
+    await tester.tap(find.byTooltip('Expand toolbar'));
+    await tester.pumpAndSettle();
     expect(
       find.bySemanticsLabel(RegExp('Sticky note, Yellow, Lined')),
       findsOneWidget,

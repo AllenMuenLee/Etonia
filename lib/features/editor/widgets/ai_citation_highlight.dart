@@ -1,6 +1,7 @@
+import 'dart:math' as math;
+
 import 'package:flutter/material.dart';
 
-import '../../../app/theme/app_tokens.dart';
 import '../ai/ai_assistant_controller.dart';
 import '../ai/ai_citation.dart';
 import '../ink/ink_controller.dart';
@@ -10,9 +11,42 @@ import '../page/page_viewport.dart';
 /// The highlighter's color, on the note and beside the paragraph in the chat.
 const Color aiCitationHighlightColor = Color(0xFFFFE600);
 
-/// Marks on [page] what the paragraph last read in the chat is tied to: the
-/// ink it cites, the strokes drawn for it, and the parts of a picture or
-/// printed page it cites. Stays on whether or not the chat is open.
+/// The ring around a detail of a picture. Yellow would vanish on white paper.
+const Color aiCitationRingColor = Color(0xFFE5342B);
+
+/// The ring around [detail]: an oval through its corners, so that all of it is
+/// inside. A long thin detail, such as a printed line, gets a slim oval that
+/// reaches just past its ends, rather than one far longer than it.
+Rect aiCitationRing(Rect detail) {
+  const double clearance = 12;
+  const double smallest = 28;
+  final double long = math.max(detail.width, detail.height) / 2;
+  final double short = math.min(detail.width, detail.height) / 2;
+  if (long <= 0) {
+    return Rect.fromCenter(
+      center: detail.center,
+      width: smallest,
+      height: smallest,
+    );
+  }
+  final double reach = math.min(
+    long * math.sqrt2,
+    long + short * (math.sqrt2 - 1) + clearance,
+  );
+  final double fit = long / reach;
+  final double across = short / math.sqrt(1 - fit * fit);
+  final bool wide = detail.width >= detail.height;
+  return Rect.fromCenter(
+    center: detail.center,
+    width: math.max((wide ? reach : across) * 2, smallest),
+    height: math.max((wide ? across : reach) * 2, smallest),
+  );
+}
+
+/// Marks on [page] what the paragraph last read in the chat is tied to:
+/// highlights the ink it cites and the strokes drawn for it, and rings the
+/// details of a picture or printed page it names. A picture is never
+/// highlighted. Stays on whether or not the chat is open.
 ///
 /// Goes under the ink, as a highlighter's mark does, so the ink stays as dark
 /// and as readable as it was. It is never part of the ink.
@@ -63,9 +97,9 @@ class _AiCitationHighlightState extends State<AiCitationHighlight> {
     ];
   }
 
-  /// Whether cited regions belong here: on the page the chat's first chosen
-  /// thing lies on.
-  bool get _holdsRegions {
+  /// Whether rings belong here: on the page the chat's first chosen thing lies
+  /// on.
+  bool get _holdsCircles {
     final AiContextGroup? group = widget.assistant.context?.groups.firstOrNull;
     if (group == null) return false;
     final Object? owner = group.page;
@@ -81,8 +115,10 @@ class _AiCitationHighlightState extends State<AiCitationHighlight> {
     final AiParagraphLinks? links =
         widget.assistant.paragraphFocus.value?.links;
     if (links == null || !mounted) return false;
-    Rect? bounds = _holdsRegions && links.regions.isNotEmpty
-        ? links.regions.reduce((Rect a, Rect b) => a.expandToInclude(b))
+    Rect? bounds = _holdsCircles && links.circles.isNotEmpty
+        ? links.circles
+              .map(aiCitationRing)
+              .reduce((Rect a, Rect b) => a.expandToInclude(b))
         : null;
     for (final Stroke stroke in <Stroke>[
       ..._onPage(links.cited),
@@ -148,16 +184,16 @@ class _AiCitationHighlightState extends State<AiCitationHighlight> {
               ..._onPage(links.cited),
               ..._onPage(links.drawn),
             ].where((Stroke it) => !widget.page.isStrokeHidden(it)).toList();
-            final List<Rect> regions = _holdsRegions
-                ? links.regions
+            final List<Rect> circles = _holdsCircles
+                ? links.circles
                 : const <Rect>[];
-            if (strokes.isEmpty && regions.isEmpty) {
+            if (strokes.isEmpty && circles.isEmpty) {
               return const SizedBox.expand();
             }
             return RepaintBoundary(
               child: CustomPaint(
                 key: const ValueKey<String>('ai-citation-highlight-layer'),
-                painter: _CitationPainter(strokes: strokes, regions: regions),
+                painter: _CitationPainter(strokes: strokes, circles: circles),
                 size: Size.infinite,
               ),
             );
@@ -169,26 +205,47 @@ class _AiCitationHighlightState extends State<AiCitationHighlight> {
 }
 
 class _CitationPainter extends CustomPainter {
-  const _CitationPainter({required this.strokes, required this.regions});
+  const _CitationPainter({required this.strokes, required this.circles});
 
   final List<Stroke> strokes;
-  final List<Rect> regions;
+  final List<Rect> circles;
 
   /// How far the mark reaches past a stroke's own width, on each side.
   static const double _spread = 4;
   static const double _opacity = 0.75;
 
+  /// A ring, and the pale edge that keeps it visible on a dark picture.
+  static const double _ringWidth = 3;
+  static const double _ringEdgeWidth = 6;
+
   @override
   void paint(Canvas canvas, Size size) {
+    if (strokes.isNotEmpty) _paintHighlight(canvas);
+    final Paint edge = Paint()
+      ..color = Colors.white.withValues(alpha: 0.7)
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = _ringEdgeWidth
+      ..isAntiAlias = true;
+    final Paint ring = Paint()
+      ..color = aiCitationRingColor
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = _ringWidth
+      ..isAntiAlias = true;
+    for (final Rect circle in circles) {
+      final Rect oval = aiCitationRing(circle);
+      canvas
+        ..drawOval(oval, edge)
+        ..drawOval(oval, ring);
+    }
+  }
+
+  void _paintHighlight(Canvas canvas) {
     // Drawn solid in a layer that is then faded, so strokes that cross do not
     // darken where they overlap, and a whole word reads as one mark.
     Rect? bounds;
     for (final Stroke stroke in strokes) {
       final Rect mark = stroke.bounds.inflate(stroke.style.width + _spread);
       bounds = bounds?.expandToInclude(mark) ?? mark;
-    }
-    for (final Rect region in regions) {
-      bounds = bounds?.expandToInclude(region) ?? region;
     }
     canvas.saveLayer(
       bounds,
@@ -218,21 +275,15 @@ class _CitationPainter extends CustomPainter {
         canvas.drawPath(stroke.path, ink..strokeWidth = width);
       }
     }
-    for (final Rect region in regions) {
-      canvas.drawRRect(
-        RRect.fromRectAndRadius(region, const Radius.circular(AppRadii.small)),
-        dot,
-      );
-    }
     canvas.restore();
   }
 
   @override
   bool shouldRepaint(_CitationPainter oldDelegate) {
     return oldDelegate.strokes.length != strokes.length ||
-        oldDelegate.regions.length != regions.length ||
+        oldDelegate.circles.length != circles.length ||
         !_same(oldDelegate.strokes, strokes) ||
-        !_same(oldDelegate.regions, regions);
+        !_same(oldDelegate.circles, circles);
   }
 
   static bool _same(List<Object> a, List<Object> b) {

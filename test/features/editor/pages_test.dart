@@ -706,12 +706,17 @@ void main() {
 
     final Finder panel = find.byType(PageOverviewPanel);
     expect(panel, findsOneWidget);
-    expect(tester.getRect(panel).left, lessThan(40));
-    // It hangs below the top-left card rather than over it.
+    // It is the left side of the editor, top to bottom, with the top-left
+    // card and the page moved over beside it.
     final Rect card = tester.getRect(
       find.byKey(const ValueKey<String>('history-card')),
     );
-    expect(tester.getRect(panel).top, greaterThanOrEqualTo(card.bottom));
+    final Rect pages = tester.getRect(find.byType(PageViewport));
+    expect(tester.getRect(panel).left, 0);
+    expect(tester.getRect(panel).top, card.top);
+    expect(tester.getRect(panel).bottom, pages.bottom);
+    expect(card.left, tester.getRect(panel).right);
+    expect(pages.left, tester.getRect(panel).right);
     expect(
       find.byKey(const ValueKey<String>('page-overview-grid')),
       findsOneWidget,
@@ -758,8 +763,13 @@ void main() {
     await tester.tap(find.byKey(const ValueKey<String>('page-thumbnail-2')));
     await tester.pumpAndSettle();
 
+    // Beside the page it stays, to choose another or write on this one.
     expect(document.currentIndex, 2);
+    expect(find.byType(PageOverviewPanel), findsOneWidget);
+    await tester.tap(find.byTooltip('Page overview'));
+    await tester.pumpAndSettle();
     expect(find.byType(PageOverviewPanel), findsNothing);
+    expect(tester.getRect(find.byType(PageViewport)).left, 0);
   });
 
   testWidgets('pointer positions map to page coordinates when scaled and '
@@ -1024,7 +1034,10 @@ void main() {
     await tester.pumpAndSettle();
     final Rect first = tester.getRect(find.byType(InkCanvas).first);
     final Rect second = tester.getRect(find.byType(InkCanvas).last);
-    expect(second.top - first.bottom, closeTo(16, 0.01));
+    expect(
+      second.top - first.bottom,
+      closeTo(16 * EditorScreen.openingZoom, 0.01),
+    );
     expect(second.left, first.left);
     // Adding the page scrolled it to the top of the area.
     expect(
@@ -1052,7 +1065,10 @@ void main() {
     await tester.pumpAndSettle();
     expect(document.currentIndex, 1);
 
-    await _stepPage(tester, 'Previous page');
+    // Not through the overview: opening it narrows the page area, where these
+    // short pages both fit and there is nothing to scroll.
+    document.previousPage();
+    await tester.pumpAndSettle();
     expect(
       tester.getRect(find.byType(InkCanvas).first).top,
       closeTo(area.top, 0.5),
@@ -1173,6 +1189,82 @@ void main() {
     expect(document.undo(), isTrue);
     expect(document.pages[0].ink.strokes, hasLength(1));
     expect(document.currentIndex, 0);
+  });
+
+  testWidgets('selection and paste bars over another page can be pressed', (
+    WidgetTester tester,
+  ) async {
+    final NoteDocument document = await _pumpDocument(
+      tester,
+      setup: const PageSetup(size: PageSize.square),
+    );
+    document.addPage();
+    document.goTo(0);
+    await tester.pumpAndSettle();
+    // Scroll so the seam between the pages is in the middle of the area.
+    final Rect area = tester.getRect(find.byType(PageViewport));
+    final TestPointer mouse = TestPointer(1, PointerDeviceKind.mouse);
+    await tester.sendEventToBinding(mouse.hover(area.center));
+    await tester.sendEventToBinding(
+      mouse.scroll(
+        Offset(0, tester.getRect(find.byType(InkCanvas).first).height / 2),
+      ),
+    );
+    await tester.pumpAndSettle();
+    final Rect first = tester.getRect(find.byType(InkCanvas).first);
+    final Rect second = tester.getRect(find.byType(InkCanvas).last);
+
+    // Ink at the very top of the second page, so its bar sits on the first.
+    final Offset ink = Offset(second.left + 300, second.top + 30);
+    await _drawLine(tester, ink, ink + const Offset(200, 0));
+    await tester.tap(find.byTooltip('Select'));
+    await tester.pumpAndSettle();
+    await _drawLine(
+      tester,
+      ink + const Offset(-50, -20),
+      ink + const Offset(250, 40),
+    );
+    final InkController page = document.pages[1].ink;
+    expect(document.currentIndex, 1);
+    expect(page.selection, isNotNull);
+    expect(
+      tester.getCenter(find.byTooltip('Duplicate')).dy,
+      lessThan(first.bottom),
+    );
+
+    await tester.tap(find.byTooltip('Duplicate'));
+    await tester.pumpAndSettle();
+
+    expect(page.strokes, hasLength(2));
+    expect(page.selection, isNotNull);
+    expect(document.currentIndex, 1);
+    expect(document.pages[0].ink.strokes, isEmpty);
+
+    await tester.tap(find.byTooltip('Copy'));
+    await tester.pumpAndSettle();
+    expect(page.canPaste, isTrue);
+
+    // Held near the top of the page, Paste is offered on the page above.
+    final TestGesture hold = await tester.startGesture(
+      Offset(second.left + 700, second.top + 10),
+      kind: PointerDeviceKind.stylus,
+    );
+    await tester.pump(const Duration(milliseconds: 600));
+    await hold.up();
+    await tester.pumpAndSettle();
+    expect(
+      tester.getCenter(find.byTooltip('Paste')).dy,
+      lessThan(first.bottom),
+    );
+
+    await tester.tap(find.byTooltip('Paste'));
+    await tester.pumpAndSettle();
+
+    // Duplicate left only the new copy selected, so one stroke was copied.
+    expect(page.strokes, hasLength(3));
+    expect(document.currentIndex, 1);
+    expect(document.pages[0].ink.strokes, isEmpty);
+    expect(tester.takeException(), isNull);
   });
 
   testWidgets('a lasso dragged across pages selects strokes on both pages '

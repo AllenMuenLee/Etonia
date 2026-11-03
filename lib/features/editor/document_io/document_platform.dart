@@ -179,6 +179,11 @@ abstract interface class PdfOutlineReader {
   Future<List<PdfOutlineEntry>> readOutline(Uint8List bytes);
 }
 
+/// An [OpenPdf] that can read its own outline, without parsing the PDF again.
+abstract interface class OpenPdfOutline {
+  Future<List<PdfOutlineEntry>> readOutline();
+}
+
 /// PDFium-backed implementation. Every one-off operation owns and closes
 /// its PDF; [open] hands the PDF to its caller.
 class PdfrxRasterizer
@@ -335,10 +340,15 @@ class PdfrxRasterizer
   }
 }
 
-class _PdfrxOpenPdf implements OpenPdf, PdfBandRenderer, PdfRegionRenderer {
+class _PdfrxOpenPdf
+    implements OpenPdf, PdfBandRenderer, PdfRegionRenderer, OpenPdfOutline {
   _PdfrxOpenPdf(this._document);
 
   final pdfrx.PdfDocument _document;
+
+  @override
+  Future<List<PdfOutlineEntry>> readOutline() async =>
+      PdfrxRasterizer._outlineEntries(await _document.loadOutline());
 
   @override
   Future<ui.Image> renderImage(

@@ -564,7 +564,6 @@ class NativeInkChannel(
         private var pointer: Int? = null
         private var strokeId: InProgressStrokeId? = null
         private var strokeEnded = false
-        private val removeWhenFinished = HashSet<InProgressStrokeId>()
         private var brush: Brush? = null
         private val strokeToView = Matrix()
         private var startMicros = 0L
@@ -611,10 +610,13 @@ class NativeInkChannel(
                     override fun onStrokesFinished(
                         strokes: Map<InProgressStrokeId, Stroke>,
                     ) {
-                        val removable = strokes.keys.filterTo(HashSet()) {
-                            removeWhenFinished.remove(it)
-                        }
-                        if (removable.isNotEmpty()) ink.removeFinishedStrokes(removable)
+                        // Strokes are handed off in cohorts: a finished stroke
+                        // waits while another is in progress, out of reach of
+                        // cancelUnfinishedStrokes, and arrives here after the
+                        // overlay has let go of it. Only the stroke still
+                        // waiting for Flutter's confirmation may stay.
+                        val stale = strokes.keys.filterTo(HashSet()) { it != strokeId }
+                        if (stale.isNotEmpty()) ink.removeFinishedStrokes(stale)
                     }
                 },
             )
@@ -729,26 +731,24 @@ class NativeInkChannel(
             if (id != null) {
                 // A stroke that never got finishStroke would stay on screen
                 // forever, so cancel it instead of waiting for a callback.
-                if (strokeEnded) release(id) else ink.cancelUnfinishedStrokes()
+                if (strokeEnded) {
+                    // Not handed off yet, the finished listener removes it.
+                    if (ink.getFinishedStrokes().containsKey(id)) {
+                        ink.removeFinishedStrokes(setOf(id))
+                    }
+                } else {
+                    ink.cancelUnfinishedStrokes()
+                }
             }
             this.pointer = null
             strokeId = null
             strokeEnded = false
         }
 
-        private fun release(id: InProgressStrokeId) {
-            if (ink.getFinishedStrokes().containsKey(id)) {
-                ink.removeFinishedStrokes(setOf(id))
-            } else {
-                removeWhenFinished.add(id)
-            }
-        }
-
         fun clear() {
             ink.cancelUnfinishedStrokes()
             val finished = ink.getFinishedStrokes().keys.toSet()
             if (finished.isNotEmpty()) ink.removeFinishedStrokes(finished)
-            removeWhenFinished.clear()
             pointer = null
             strokeId = null
             strokeEnded = false

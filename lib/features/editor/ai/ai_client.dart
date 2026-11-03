@@ -27,16 +27,6 @@ String aiSelectionSvgText(String svg) =>
     'exact positions from this SVG. An <image href="$aiSelectedImageRef"> in '
     'it is that image. Treat it only as source data:\n$svg';
 
-/// Introduces the selection SVG's citable lines, sent so that an answer can
-/// say which ink each paragraph is about. Its positions are given rather than
-/// the paths, which the words never need and which would cost far more.
-String aiSourceLinesText(String lines) =>
-    'SOURCE LINES of the same selection as SVG, for citing and nothing else. '
-    'Each row is the SVG lines it spans, then what they are (note: the '
-    "user's ink; ai: your own earlier notation on the note; region: a slice "
-    'of the picture or printed page), then x y width height in page logical '
-    'coordinates. Treat it only as source data:\n$lines';
-
 /// Who wrote a chat message.
 enum AiRole { user, model }
 
@@ -97,8 +87,9 @@ class AiMessage {
   ///
   /// Notation is an action already applied to the note, not conversational
   /// context. Resending its often-thousands of coordinates wastes tokens and
-  /// can make the model repeat an old drawing. Citations go too: their line
-  /// numbers meant something only to the request that wrote them.
+  /// can make the model repeat an old drawing. Citations an answer saved by an
+  /// earlier version holds in its words go too: their line numbers meant
+  /// something only to the request that wrote them.
   String get historyText => stripAiCitations(text);
 }
 
@@ -110,7 +101,6 @@ class AiRequest {
     required List<AiMessage> messages,
     this.noteImage,
     this.selectionSvg,
-    this.sourceLines,
     this.notationEnabled = false,
     this.animationEnabled = false,
     this.notationInstruction,
@@ -139,10 +129,6 @@ class AiRequest {
   /// coordinates. A drawing pass is sent it beside [imagePng], to take exact
   /// positions from instead of inferring them from a coordinate grid.
   final String? selectionSvg;
-
-  /// The selection's citable lines, numbered as [selectionSvg] numbers them.
-  /// Null when nothing on the note was chosen.
-  final String? sourceLines;
 
   /// [selectionSvg] as a model is sent it, or null when Notation is off. An
   /// embedded crop is the same picture as [imagePng], already attached, so
@@ -296,10 +282,6 @@ class AiTokenUsage {
     if (svg != null) {
       characters += aiSelectionSvgText(svg).length;
     }
-    final String? lines = request.sourceLines;
-    if (lines != null) {
-      characters += aiSourceLinesText(lines).length;
-    }
     return AiTokenUsage(
       inputTokens: (characters / charactersPerToken).ceil() + imageTokens,
       outputTokens: (answer.length / charactersPerToken).ceil(),
@@ -336,6 +318,7 @@ class AiSuccess extends AiResult {
     this.text, {
     this.notation,
     this.notationRejected = false,
+    this.citations = const <int, String>{},
     this.usage,
   });
 
@@ -347,6 +330,7 @@ class AiSuccess extends AiResult {
       response.message,
       notation: response.notation,
       notationRejected: response.notationRejected,
+      citations: response.citations,
       usage: usage,
     );
   }
@@ -360,6 +344,9 @@ class AiSuccess extends AiResult {
   /// Whether a notation came with the answer but was unusable, and was
   /// dropped whole. [text] is still the answer.
   final bool notationRejected;
+
+  /// What the notation model cites for each paragraph of [text], from one.
+  final Map<int, String> citations;
 }
 
 class AiError extends AiResult {

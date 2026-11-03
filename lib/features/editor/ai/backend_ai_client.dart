@@ -145,8 +145,6 @@ class BackendAiClient implements AiModelRouter {
         // paper is blank. Apart, so it does not break the cached prefix.
         if (notation) 'noteMetadata': aiNoteMetadata(note),
         'selectedImage': base64Encode(request.imagePng),
-        // Where each line of the selection SVG lies, for the words to cite.
-        'sourceLines': ?request.sourceLines,
         if (notation && request.selectionSvg != null)
           'selectedSvg': request.selectionSvg,
         // Formatted output: the provider must answer in exactly this
@@ -191,6 +189,7 @@ class BackendAiClient implements AiModelRouter {
         answer.message,
         notation: request.notationEnabled ? answer.notation : null,
         notationRejected: answer.notationRejected,
+        citations: answer.citations,
         usage: AiTokenUsage(
           inputTokens: usage['inputTokens'] as int,
           outputTokens: usage['outputTokens'] as int,

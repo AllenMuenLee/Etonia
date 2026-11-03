@@ -880,28 +880,58 @@ class PdfPageRenderCache {
     }
   }
 
-  /// The outline of each PDF asked for, read once.
-  final Map<String, Future<List<PdfOutlineEntry>>> _outlines =
+  /// The outline of each PDF read so far.
+  final Map<String, List<PdfOutlineEntry>> _outlines =
+      <String, List<PdfOutlineEntry>>{};
+
+  /// The outlines being read for [outline].
+  final Map<String, Future<List<PdfOutlineEntry>>> _outlineReads =
       <String, Future<List<PdfOutlineEntry>>>{};
 
   /// The outline of the PDF [assetId], its chapters: empty when it has
   /// none, cannot be read, or the [rasterizer] does not read outlines.
+  ///
+  /// A PDF kept open already has it, see [_open]. Any other is opened on its
+  /// own just to read this, so that asking does not push the PDF on screen
+  /// out of those kept open.
   Future<List<PdfOutlineEntry>> outline(String assetId) {
-    final PdfRasterizer rasterizer = this.rasterizer;
-    if (rasterizer is! PdfOutlineReader) {
-      return Future<List<PdfOutlineEntry>>.value(const <PdfOutlineEntry>[]);
-    }
-    return _outlines[assetId] ??= () async {
-      try {
-        final Uint8List? bytes = await _sources.load(assetId);
-        if (bytes == null) return const <PdfOutlineEntry>[];
-        return await (rasterizer as PdfOutlineReader).readOutline(bytes);
-      } on Object {
-        // Asked again next time, in case the asset was not there yet.
-        unawaited(_outlines.remove(assetId));
-        return const <PdfOutlineEntry>[];
+    final List<PdfOutlineEntry>? read = _outlines[assetId];
+    if (read != null) return Future<List<PdfOutlineEntry>>.value(read);
+    return _outlineReads[assetId] ??= _readOutline(assetId).whenComplete(() {
+      // In a block: whenComplete would wait on a future returned to it, and
+      // the one removed is this one.
+      _outlineReads.remove(assetId);
+    });
+  }
+
+  Future<List<PdfOutlineEntry>> _readOutline(String assetId) async {
+    try {
+      final Future<OpenPdf>? opening = _documents[assetId];
+      if (opening != null) {
+        await opening;
+        final List<PdfOutlineEntry>? read = _outlines[assetId];
+        if (read != null) return read;
       }
-    }();
+      final PdfRasterizer rasterizer = this.rasterizer;
+      if (rasterizer is! PdfOutlineReader) return const <PdfOutlineEntry>[];
+      final Uint8List? bytes = await _sources.load(assetId);
+      if (bytes == null) return const <PdfOutlineEntry>[];
+      return _outlines[assetId] = await (rasterizer as PdfOutlineReader)
+          .readOutline(bytes);
+    } on Object {
+      // Asked again next time, in case the asset was not there yet.
+      return const <PdfOutlineEntry>[];
+    }
+  }
+
+  /// Reads the outline of [open], the PDF [assetId], unless it is known.
+  Future<void> _readOutlineOf(String assetId, OpenPdf open) async {
+    if (open is! OpenPdfOutline || _outlines.containsKey(assetId)) return;
+    try {
+      _outlines[assetId] = await (open as OpenPdfOutline).readOutline();
+    } on Object {
+      // A PDF whose chapters cannot be read still shows its pages.
+    }
   }
 
   /// The PDF [assetId], parsed once and kept open for the pages after.
@@ -929,7 +959,11 @@ class PdfPageRenderCache {
           },
         );
       }
-      return rasterizer.open(bytes);
+      final OpenPdf open = await rasterizer.open(bytes);
+      // Before any page: every render waits on this future, and PDFium does
+      // one thing at a time, so chapters never queue behind the note's pages.
+      await _readOutlineOf(assetId, open);
+      return open;
     }();
     _documents[assetId] = opening;
     opening.then<void>(
@@ -1021,6 +1055,7 @@ class PdfPageRenderCache {
     _pending.clear();
     _sources.clear();
     _outlines.clear();
+    _outlineReads.clear();
     _closeDocuments();
   }
 }

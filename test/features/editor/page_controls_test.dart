@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:greatnote/app/theme/app_theme.dart';
+import 'package:greatnote/app/theme/app_tokens.dart';
 import 'package:greatnote/features/editor/page/note_document.dart';
 import 'package:greatnote/features/editor/widgets/page_controls.dart';
 
@@ -12,28 +13,74 @@ Widget _wrap(Widget child) {
 }
 
 void main() {
-  testWidgets('a page overview that was never opened is disposed cleanly', (
-    WidgetTester tester,
-  ) async {
-    final NoteDocument doc = NoteDocument();
-    addTearDown(doc.dispose);
-    final ValueNotifier<bool> open = ValueNotifier<bool>(false);
-    addTearDown(open.dispose);
-
-    await tester.pumpWidget(
-      _wrap(
-        PageOverviewAnchor(
-          open: open,
-          document: doc,
-          writingArea: const Size(800, 1000),
-          child: const SizedBox(width: 120, height: 48),
+  group('the overview grid finds the current page', () {
+    Future<NoteDocument> pumpGrid(WidgetTester tester, int current) async {
+      final NoteDocument doc = NoteDocument();
+      addTearDown(doc.dispose);
+      for (int i = 0; i < 59; i++) {
+        doc.addPage();
+      }
+      doc.goTo(current);
+      await tester.pumpWidget(
+        _wrap(
+          SizedBox(
+            width: PageOverviewPanel.width,
+            height: 600,
+            child: PageOverviewPanel(
+              document: doc,
+              writingArea: const Size(800, 600),
+            ),
+          ),
         ),
-      ),
-    );
-    // Leaving the editor unmounts it; its animation must not be made then,
-    // from a context that can no longer be read.
-    await tester.pumpWidget(_wrap(const SizedBox()));
-    expect(tester.takeException(), isNull);
+      );
+      return doc;
+    }
+
+    Finder thumbnail(int index) =>
+        find.byKey(ValueKey<String>('page-thumbnail-$index'));
+
+    void expectInView(WidgetTester tester, int index) {
+      final Rect grid = tester.getRect(
+        find.byKey(const ValueKey<String>('page-overview-grid')),
+      );
+      final Rect tile = tester.getRect(thumbnail(index));
+      expect(tile.top, greaterThanOrEqualTo(grid.top));
+      expect(tile.bottom, lessThanOrEqualTo(grid.bottom));
+    }
+
+    testWidgets('on the first frame, far down a long note', (
+      WidgetTester tester,
+    ) async {
+      await pumpGrid(tester, 40);
+      expect(thumbnail(40), findsOneWidget);
+      expectInView(tester, 40);
+      expect(thumbnail(0), findsNothing);
+    });
+
+    testWidgets('at either end of the note, without overscrolling', (
+      WidgetTester tester,
+    ) async {
+      await pumpGrid(tester, 59);
+      await tester.pumpAndSettle();
+      expectInView(tester, 59);
+      final Rect grid = tester.getRect(
+        find.byKey(const ValueKey<String>('page-overview-grid')),
+      );
+      expect(
+        tester.getRect(thumbnail(59)).bottom,
+        moreOrLessEquals(grid.bottom - AppSpacing.md),
+      );
+    });
+
+    testWidgets('as the current page moves out of view', (
+      WidgetTester tester,
+    ) async {
+      final NoteDocument doc = await pumpGrid(tester, 0);
+      expectInView(tester, 0);
+      doc.goTo(50);
+      await tester.pumpAndSettle();
+      expectInView(tester, 50);
+    });
   });
 
   group('AddMenuButton', () {
@@ -143,12 +190,7 @@ void main() {
       WidgetTester tester,
     ) async {
       await tester.pumpWidget(
-        _wrap(
-          AddMenuButton(
-            onAddPage: () {},
-            onInsertPdf: () {},
-          ),
-        ),
+        _wrap(AddMenuButton(onAddPage: () {}, onInsertPdf: () {})),
       );
 
       // Open menu.

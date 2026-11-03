@@ -901,12 +901,18 @@ class AiAssistantResponse {
     required this.message,
     this.notation,
     this.notationRejected = false,
+    this.citations = const <int, String>{},
   });
 
   static const int version = 2;
 
   final String message;
   final AiNotation? notation;
+
+  /// What the notation model says each paragraph of [message] is about, by
+  /// paragraph number from one. It may say so without drawing anything. Local
+  /// only, never sent: what they resolve to is saved as the answer's links.
+  final Map<int, String> citations;
 
   /// Whether a notation came with the answer but broke the contract, and
   /// was dropped. The message is kept. Local only, never sent.
@@ -935,6 +941,7 @@ class AiAssistantResponse {
         return AiAssistantResponse(
           message: svg.message!,
           notation: svg.hasVisualContent ? AiNotation.vector(svg) : null,
+          citations: svg.citations,
         );
       } on FormatException {
         return AiAssistantResponse(

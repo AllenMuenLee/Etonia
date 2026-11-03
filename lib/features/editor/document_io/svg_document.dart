@@ -19,6 +19,7 @@ class EditableSvg {
     required this.contentBounds,
     required this.label,
     required this.message,
+    required this.citations,
     required this.stepCount,
     required this.duration,
     required this.hasVisualContent,
@@ -37,6 +38,10 @@ class EditableSvg {
 
   /// Markdown stored in the response SVG's non-rendering description.
   final String? message;
+
+  /// What the response's non-rendering citation descriptions cite, by the
+  /// answer paragraph each names, from one. Their text is not yet read.
+  final Map<int, String> citations;
 
   /// Highest `data-etonia-step` on a drawable element.
   final int stepCount;
@@ -149,6 +154,22 @@ class EditableSvg {
     if (modelResponse && (message == null || message.isEmpty)) {
       throw const FormatException('SVG response has no message');
     }
+    final Map<int, String> citations = <int, String>{};
+    for (final XmlElement node in root.descendantElements) {
+      if (node.name.local.toLowerCase() != 'desc' ||
+          node.getAttribute('data-etonia-role') != 'citation') {
+        continue;
+      }
+      // A bad number says nothing: the rest of the response is still good.
+      final int? paragraph = int.tryParse(
+        node.getAttribute('data-etonia-paragraph')?.trim() ?? '',
+      );
+      if (paragraph == null || paragraph < 1) continue;
+      final String? earlier = citations[paragraph];
+      citations[paragraph] = earlier == null
+          ? node.innerText
+          : '$earlier ${node.innerText}';
+    }
     final String title =
         root.childElements
             .where(
@@ -183,6 +204,7 @@ class EditableSvg {
       contentBounds: contentBounds,
       label: label,
       message: message,
+      citations: Map<int, String>.unmodifiable(citations),
       stepCount: highestStep,
       duration: duration,
       hasVisualContent: hasVisual,
@@ -295,6 +317,7 @@ class EditableSvg {
       contentBounds: contentBounds,
       label: label,
       message: message,
+      citations: citations,
       stepCount: stepCount,
       duration: duration,
       hasVisualContent: hasVisualContent,

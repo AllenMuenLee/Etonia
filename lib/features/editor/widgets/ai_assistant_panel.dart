@@ -112,7 +112,9 @@ class _AiAssistantPanelState extends State<AiAssistantPanel> {
   /// A paragraph asked for by name, which stays the one being read, however
   /// little the transcript could scroll to it, until the user scrolls.
   AiParagraphRef? _pinnedParagraph;
-  bool _focusUpdateScheduled = false;
+
+  /// The latest update of the paragraph being read to be asked for.
+  int _focusUpdate = 0;
   final SpeechToText _speech = SpeechToText();
   int _shownMessages = 0;
   String? _shownPartial;
@@ -138,13 +140,13 @@ class _AiAssistantPanelState extends State<AiAssistantPanel> {
   }
 
   /// Works out the paragraph being read after the next layout, which is when
-  /// everything the scroll moved is where it now is.
+  /// everything the scroll moved is where it now is. Only the latest asked for
+  /// runs: a jump made after a frame, as [_scrollToEnd] makes, is laid out by
+  /// the frame after it, and an update already waiting would see the old place.
   void _scheduleFocusUpdate() {
-    if (_focusUpdateScheduled) return;
-    _focusUpdateScheduled = true;
+    final int update = ++_focusUpdate;
     WidgetsBinding.instance.addPostFrameCallback((Duration _) {
-      _focusUpdateScheduled = false;
-      if (mounted) _updateFocusedParagraph();
+      if (mounted && update == _focusUpdate) _updateFocusedParagraph();
     });
     WidgetsBinding.instance.ensureVisualUpdate();
   }
@@ -162,7 +164,7 @@ class _AiAssistantPanelState extends State<AiAssistantPanel> {
         ?.findRenderObject();
     if (transcript is! RenderBox || !transcript.hasSize) return;
     final double height = transcript.size.height;
-    final double readingLine = height * _readingLine;
+    final double readingLine = _readingLineIn(height);
     AiParagraphRef? nearest;
     double nearestDistance = double.infinity;
     for (final MapEntry<AiParagraphRef, BuildContext> entry
@@ -194,6 +196,25 @@ class _AiAssistantPanelState extends State<AiAssistantPanel> {
 
   /// How far down the transcript the line being read is taken to be.
   static const double _readingLine = 0.4;
+
+  /// Where the line being read is in a transcript [height] tall. Near either
+  /// end of the scroll it runs out to that edge, so that scrolling all the way
+  /// passes it over every paragraph, however short those at the ends are.
+  double _readingLineIn(double height) {
+    final double resting = height * _readingLine;
+    if (!_scroll.hasClients || !_scroll.position.hasContentDimensions) {
+      return resting;
+    }
+    final double before = _scroll.position.extentBefore;
+    final double after = _scroll.position.extentAfter;
+    final double range = before + after;
+    if (range <= 0) return resting;
+    // Too little scroll to come to rest in between.
+    if (range < height) return height * before / range;
+    if (before < resting) return before;
+    if (after < height - resting) return height - after;
+    return resting;
+  }
 
   /// The most steps taken towards a paragraph not built yet, each about a
   /// transcript's height.
@@ -239,12 +260,15 @@ class _AiAssistantPanelState extends State<AiAssistantPanel> {
     widget.onShowOnNote?.call();
   }
 
-  void _registerParagraph(AiParagraphRef ref, BuildContext? context) {
-    if (context == null) {
-      _paragraphs.remove(ref);
-    } else {
-      _paragraphs[ref] = context;
-    }
+  void _registerParagraph(AiParagraphRef ref, BuildContext context) {
+    _paragraphs[ref] = context;
+    _scheduleFocusUpdate();
+  }
+
+  /// Forgets [context] as [ref]'s paragraph. Leaves one built in its place: a
+  /// finished answer's paragraphs are built before those it streamed as go.
+  void _unregisterParagraph(AiParagraphRef ref, BuildContext context) {
+    if (identical(_paragraphs[ref], context)) _paragraphs.remove(ref);
     _scheduleFocusUpdate();
   }
 
@@ -574,6 +598,7 @@ class _AiAssistantPanelState extends State<AiAssistantPanel> {
       links: controller.answerLinks(index),
       focus: controller.paragraphFocus,
       register: _registerParagraph,
+      unregister: _unregisterParagraph,
       onShow: _showParagraphOnNote,
     );
   }
@@ -663,8 +688,6 @@ class _AiAssistantPanelState extends State<AiAssistantPanel> {
           child: _MessageBubble(
             key: const ValueKey<String>('ai-partial-answer'),
             message: AiMessage.model(partial),
-            streaming: true,
-            answer: _answerLinking(controller, controller.messages.length),
           ),
         );
       }
@@ -1316,20 +1339,12 @@ class _Notice extends StatelessWidget {
 /// trailing edge on a tinted fill; the assistant's at the leading edge,
 /// outlined, with its Markdown and formulas rendered and selectable.
 class _MessageBubble extends StatelessWidget {
-  const _MessageBubble({
-    super.key,
-    required this.message,
-    this.answer,
-    this.streaming = false,
-  });
+  const _MessageBubble({super.key, required this.message, this.answer});
 
   final AiMessage message;
 
   /// How its paragraphs join up with the note.
   final _AnswerLinking? answer;
-
-  /// Whether it is still being written, and may end in half a citation.
-  final bool streaming;
 
   /// The answer's words: one block, or, once anything in it is tied to the
   /// note, a block for each paragraph with its citation after it.
@@ -1346,14 +1361,9 @@ class _MessageBubble extends StatelessWidget {
     final _AnswerLinking? answer = this.answer;
     final AiAnswerLinks? links = answer?.links;
     if (answer == null || links == null || links.isEmpty) {
-      return markdown(
-        stripAiCitations(message.displayText, streaming: streaming),
-      );
+      return markdown(stripAiCitations(message.displayText));
     }
-    final List<AiAnswerParagraph> paragraphs = parseAiAnswer(
-      message.displayText,
-      streaming: streaming,
-    );
+    final List<String> paragraphs = parseAiAnswer(message.displayText);
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: <Widget>[
@@ -1362,7 +1372,7 @@ class _MessageBubble extends StatelessWidget {
             ref: AiParagraphRef(answer.message, i + 1),
             answer: answer,
             links: links.paragraphs[i + 1],
-            child: markdown(paragraphs[i].text),
+            child: markdown(paragraphs[i]),
           ),
       ],
     );
@@ -1435,6 +1445,7 @@ class _AnswerLinking {
     required this.links,
     required this.focus,
     required this.register,
+    required this.unregister,
     required this.onShow,
   });
 
@@ -1442,7 +1453,8 @@ class _AnswerLinking {
   final int message;
   final AiAnswerLinks? links;
   final ValueListenable<AiParagraphFocus?> focus;
-  final void Function(AiParagraphRef ref, BuildContext? context) register;
+  final void Function(AiParagraphRef ref, BuildContext context) register;
+  final void Function(AiParagraphRef ref, BuildContext context) unregister;
   final void Function(AiParagraphRef ref) onShow;
 }
 
@@ -1476,14 +1488,14 @@ class _LinkedParagraphState extends State<_LinkedParagraph> {
   void didUpdateWidget(_LinkedParagraph oldWidget) {
     super.didUpdateWidget(oldWidget);
     if (oldWidget.ref != widget.ref) {
-      oldWidget.answer.register(oldWidget.ref, null);
+      oldWidget.answer.unregister(oldWidget.ref, context);
       widget.answer.register(widget.ref, context);
     }
   }
 
   @override
   void dispose() {
-    widget.answer.register(widget.ref, null);
+    widget.answer.unregister(widget.ref, context);
     super.dispose();
   }
 

@@ -97,6 +97,57 @@ class _OpenPdf implements OpenPdf {
   Future<void> dispose() async => pages.disposals++;
 }
 
+/// Keeps [calls], a record of what is asked of the PDF, and can read its own outline.
+class _OutlineRasterizer extends _DocumentRasterizer
+    implements PdfOutlineReader {
+  _OutlineRasterizer(this.calls);
+
+  final List<String> calls;
+
+  @override
+  Future<OpenPdf> open(Uint8List bytes) async {
+    opens++;
+    calls.add('open');
+    return _OutlineOpenPdf(this);
+  }
+
+  @override
+  Future<List<PdfOutlineEntry>> readOutline(Uint8List bytes) async {
+    calls.add('separate outline');
+    return const <PdfOutlineEntry>[
+      PdfOutlineEntry(title: 'Separate', pageIndex: 0),
+    ];
+  }
+}
+
+class _OutlineOpenPdf extends _OpenPdf implements OpenPdfOutline {
+  _OutlineOpenPdf(_OutlineRasterizer super.pages);
+
+  List<String> get _log => (pages as _OutlineRasterizer).calls;
+
+  @override
+  Future<List<PdfOutlineEntry>> readOutline() async {
+    _log.add('outline');
+    return const <PdfOutlineEntry>[
+      PdfOutlineEntry(title: 'Chapter', pageIndex: 0),
+    ];
+  }
+
+  @override
+  Future<ui.Image> renderImage(
+    int pageIndex, {
+    required int pixelWidth,
+    required int pixelHeight,
+  }) {
+    _log.add('render');
+    return super.renderImage(
+      pageIndex,
+      pixelWidth: pixelWidth,
+      pixelHeight: pixelHeight,
+    );
+  }
+}
+
 /// Large enough to be shown from a preview first.
 const ui.Size _page = ui.Size(1000, 1400);
 
@@ -109,6 +160,49 @@ Future<void> _until(bool Function() done) async {
 }
 
 void main() {
+  group('PDF outlines', () {
+    testWidgets('are read from the open PDF, before any of its pages', (
+      tester,
+    ) async {
+      await tester.runAsync(() async {
+        final List<String> calls = <String>[];
+        final cache = PdfPageRenderCache(
+          readAsset: (String _) async => Uint8List(4),
+          rasterizer: _OutlineRasterizer(calls),
+        );
+        cache.warm(_source(0));
+        final Future<ui.Image> page = cache.renderImage(
+          _source(0),
+          const ui.Size(10, 10),
+          1,
+        );
+        final List<PdfOutlineEntry> outline = await cache.outline('pdf');
+        (await page).dispose();
+        cache.clear();
+
+        expect(outline.single.title, 'Chapter');
+        expect(calls.take(3), <String>['open', 'outline', 'render']);
+      });
+    });
+
+    test('of a PDF not open do not open it for its pages', () async {
+      final List<String> log = <String>[];
+      final cache = PdfPageRenderCache(
+        readAsset: (String _) async => Uint8List(4),
+        rasterizer: _OutlineRasterizer(log),
+      );
+      addTearDown(cache.clear);
+
+      final List<PdfOutlineEntry> outline = await cache.outline('pdf');
+
+      expect(outline.single.title, 'Separate');
+      expect(log, <String>['separate outline']);
+      // Known from then on, without reading it again.
+      await cache.outline('pdf');
+      expect(log, <String>['separate outline']);
+    });
+  });
+
   testWidgets('PDF pages in view render in preview while the view moves, '
       'then sharp nearest first once it settles', (tester) async {
     await tester.runAsync(() async {

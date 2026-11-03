@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:greatnote/app/theme/app_theme.dart';
@@ -112,6 +114,37 @@ void main() {
     expect(chapterPathAt(chapters, 3).map((NoteChapter c) => c.title), <String>[
       'Chapter 2',
     ]);
+  });
+
+  group('NoteChapterIndex', () {
+    testWidgets('reads the PDF on the current page first, one at a time', (
+      WidgetTester tester,
+    ) async {
+      final NoteDocument doc = NoteDocument(
+        pages: <NotePage>[_pdfPage('first', 0), _pdfPage('second', 0)],
+      );
+      addTearDown(doc.dispose);
+      doc.goTo(1);
+      final List<String> asked = <String>[];
+      final Map<String, Completer<List<PdfOutlineEntry>>> reads =
+          <String, Completer<List<PdfOutlineEntry>>>{};
+      final NoteChapterIndex index = NoteChapterIndex(
+        document: doc,
+        loadOutline: (String assetId) {
+          asked.add(assetId);
+          return (reads[assetId] = Completer<List<PdfOutlineEntry>>()).future;
+        },
+      );
+      addTearDown(index.dispose);
+
+      expect(asked, <String>['second']);
+      reads['second']!.complete(const <PdfOutlineEntry>[]);
+      await tester.pump();
+      expect(asked, <String>['second', 'first']);
+      reads['first']!.complete(_bookOutline);
+      await tester.pump();
+      expect(index.chapters.first.title, 'Preface');
+    });
   });
 
   group('page overview chapters', () {

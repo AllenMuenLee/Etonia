@@ -253,6 +253,10 @@ class _AiConversation {
   /// The strokes this conversation's answers drew on the note. Selecting
   /// them finds this conversation, as its own ink does.
   final Set<Stroke> notationStrokes = Set<Stroke>.identity();
+
+  /// The pages it has been had on, as the editor named them: where its ink
+  /// was chosen, and where its messages were sent from.
+  final Set<Object> pages = Set<Object>.identity();
   List<AiMessage> messages = const <AiMessage>[];
   AiRequestState requestState = AiRequestState.idle;
   AiFailure? failure;
@@ -266,10 +270,6 @@ class _AiConversation {
 
   /// What the line numbers of the request in flight mean.
   AiSourceMap? source;
-
-  /// [partialAnswer]'s links, worked out once for each text it has.
-  String? partialLinksText;
-  AiAnswerLinks? partialLinks;
 }
 
 /// The AI assistant for one editor session: where the panel is, what ink
@@ -287,6 +287,7 @@ class AiAssistantController extends ChangeNotifier {
     this.previewNotation,
     this.endNotationPreview,
     this.inkInArea,
+    this.shownPage,
     AiPanelSide side = AiPanelSide.left,
     this._notationEnabled = false,
     this._animationEnabled = true,
@@ -372,6 +373,10 @@ class AiAssistantController extends ChangeNotifier {
   /// Finds the ink that has appeared where a conversation's ink lies, to
   /// draw over its image. Without it, the image stays as first drawn.
   final AiAreaInk? inkInArea;
+
+  /// The page on screen now, named as the editor names pages to [open]. Without
+  /// it, conversations are not told apart by page.
+  final Object? Function()? shownPage;
   final ValueNotifier<AiPanelPlacement> _placement;
 
   final List<_AiConversation> _conversations = <_AiConversation>[];
@@ -384,6 +389,10 @@ class AiAssistantController extends ChangeNotifier {
             conversation.context.isRendering),
   );
   _AiConversation? _conversation;
+
+  /// The last conversation, put aside by [show] on a page it was not had on,
+  /// for [show] to take up again back on one it was.
+  _AiConversation? _setAside;
   int _conversationClock = 0;
   bool _selectionChanged = false;
   bool _selectionHasChat = false;
@@ -454,23 +463,9 @@ class AiAssistantController extends ChangeNotifier {
   final Map<Object, bool Function()> _noteRevealers =
       Map<Object, bool Function()>.identity();
 
-  /// What message [message]'s paragraphs are tied to; for the message still
-  /// being written, one past the last, as far as it has been written.
-  AiAnswerLinks? answerLinks(int message) {
-    final _AiConversation? conversation = _conversation;
-    if (conversation == null) return null;
-    if (message != conversation.messages.length) {
-      return conversation.links[message];
-    }
-    final String? partial = conversation.partialAnswer;
-    final AiSourceMap? source = conversation.source;
-    if (partial == null || source == null) return null;
-    if (partial != conversation.partialLinksText) {
-      conversation.partialLinksText = partial;
-      conversation.partialLinks = source.resolve(partial, streaming: true);
-    }
-    return conversation.partialLinks;
-  }
+  /// What message [message]'s paragraphs are tied to. Only the notation model
+  /// ties them, so an answer has none until its drawing pass has finished.
+  AiAnswerLinks? answerLinks(int message) => _conversation?.links[message];
 
   /// Makes [ref] the paragraph being read. With no paragraph, or one tied to
   /// nothing on the note, the last one stays, unless it was another
@@ -725,13 +720,34 @@ class AiAssistantController extends ChangeNotifier {
     notifyListeners();
   }
 
-  /// Shows the panel on whatever conversation it was showing, or on none
-  /// yet, without choosing new ink. Sends nothing.
+  /// Shows the panel without choosing new ink. Sends nothing. The last
+  /// conversation resumes when it was had on the page shown; on any other page
+  /// the panel shows none, ready to start one, and the last conversation can
+  /// still be found through its ink.
   void show() {
     if (_disposed || isOpen) {
       return;
     }
+    _resumeOnShownPage();
     _placement.value = AiPanelPlacement(isOpen: true, side: side);
+  }
+
+  void _resumeOnShownPage() {
+    final Object? page = shownPage?.call();
+    final _AiConversation? last = _conversation ?? _setAside;
+    if (page == null || last == null) {
+      return;
+    }
+    final _AiConversation? resumed = last.pages.contains(page) ? last : null;
+    if (identical(resumed, _conversation)) {
+      return;
+    }
+    _setAside = resumed == null ? last : null;
+    _conversation = resumed;
+    _selectionChanged = false;
+    _selectionHasChat = false;
+    focusParagraph(null);
+    notifyListeners();
   }
 
   /// Adds [words] to the end of [draft], a single space apart from what is
@@ -885,6 +901,7 @@ class AiAssistantController extends ChangeNotifier {
     _selectionChanged = false;
     _selectionHasChat = false;
     if (merged != null) {
+      if (page != null) conversation.pages.add(page);
       final AiSelectionContext previous = conversation.context;
       final AiSelectionContext context = AiSelectionContext._(
         merged,
@@ -1021,6 +1038,9 @@ class AiAssistantController extends ChangeNotifier {
     }
     final _AiConversation conversation =
         _conversation ?? _startPageConversation();
+    if (shownPage?.call() case final Object page) {
+      conversation.pages.add(page);
+    }
     conversation.messages = List<AiMessage>.unmodifiable(<AiMessage>[
       // A message that failed and was never answered is replaced, so that
       // turns keep alternating.
@@ -1153,12 +1173,12 @@ class AiAssistantController extends ChangeNotifier {
     }
     // Drawing also gets the selection as page-coordinate SVG, for exact
     // positions; the clean PNG beside it is what the model reads.
-    // A conversation about nothing on the note has no selection to give.
+    // A conversation about nothing on the note has no selection to give. With
+    // Notation off no model sees it, and so nothing cites it.
     final bool isPage = conversation.context.isPage;
     String? selectionSvg;
-    String? sourceLines;
     conversation.source = null;
-    if (!isPage) {
+    if (!isPage && noteImage != null) {
       final AiSelectionContext context = conversation.context;
       final SelectionInkSnapshot snapshot = context._snapshot.withInkOver(
         context._ink,
@@ -1169,36 +1189,29 @@ class AiAssistantController extends ChangeNotifier {
           if (conversation.notationStrokes.contains(origins[i])) i,
       };
       const SelectionSvgRenderer svgRenderer = SelectionSvgRenderer();
-      List<SelectionSvgLine> lines = const <SelectionSvgLine>[];
+      final List<SelectionSvgLine> lines;
       try {
-        if (noteImage != null) {
-          final SelectionSvgDocument document = svgRenderer.document(
-            snapshot: snapshot,
-            preview: image,
-            pageSize: noteImage.logicalSize,
-            assistantStrokes: byAssistant,
-          );
-          selectionSvg = document.svg;
-          lines = document.lines;
-        } else {
-          lines = svgRenderer.lineIndex(
-            snapshot: snapshot,
-            preview: image,
-            assistantStrokes: byAssistant,
-          );
-        }
+        final SelectionSvgDocument document = svgRenderer.document(
+          snapshot: snapshot,
+          preview: image,
+          pageSize: noteImage.logicalSize,
+          assistantStrokes: byAssistant,
+        );
+        selectionSvg = document.svg;
+        lines = document.lines;
       } on Object {
-        if (noteImage != null) {
-          finish(
-            const AiError(AiFailure(AiFailureKind.noteUnavailable)),
-            noteImage: noteImage,
-          );
-          return;
-        }
+        finish(
+          const AiError(AiFailure(AiFailureKind.noteUnavailable)),
+          noteImage: noteImage,
+        );
+        return;
       }
-      if (lines.isNotEmpty) {
-        sourceLines = SelectionSvgRenderer.outline(lines);
-        conversation.source = AiSourceMap(lines, origins);
+      if (lines.isNotEmpty || snapshot.holdsPicture) {
+        conversation.source = AiSourceMap(
+          lines,
+          origins,
+          picture: snapshot.holdsPicture ? image.logicalBounds : null,
+        );
       }
     }
     if (_disposed || token != conversation.requestToken) {
@@ -1232,7 +1245,6 @@ class AiAssistantController extends ChangeNotifier {
               : null,
           imagePng: image.png,
           selectionSvg: selectionSvg,
-          sourceLines: sourceLines,
           messages: conversation.messages,
           noteImage: noteImage,
           notationEnabled: notationAuthorized,
@@ -1302,8 +1314,6 @@ class AiAssistantController extends ChangeNotifier {
         : null;
     conversation.partialAnswer = null;
     conversation.partialAnswerComplete = false;
-    conversation.partialLinksText = null;
-    conversation.partialLinks = null;
     // The links of the answer about to join the messages, where it goes.
     final AiSourceMap? source = conversation.source;
     final int answerIndex = conversation.messages.length;
@@ -1325,18 +1335,21 @@ class AiAssistantController extends ChangeNotifier {
                 : AiNotationStatus.none,
           ),
         ]);
-        if (source != null) {
-          conversation.links[answerIndex] = source.resolve(streamed);
-        }
         conversation.requestState = AiRequestState.idle;
       case AiSuccess(
         :final String text,
         :final AiNotation? notation,
         :final bool notationRejected,
+        :final Map<int, String> citations,
       ):
         AiNotationStatus status = AiNotationStatus.none;
         AiNotationPresentation? presentation;
-        final AiAnswerLinks links = source?.resolve(text) ?? AiAnswerLinks();
+        final AiAnswerLinks links =
+            source?.resolve(
+              citations,
+              paragraphs: parseAiAnswer(text).length,
+            ) ??
+            AiAnswerLinks();
         if (notationRejected) {
           status = notationAuthorized
               ? AiNotationStatus.notAppliedInvalid
@@ -1474,6 +1487,7 @@ class AiAssistantController extends ChangeNotifier {
     final _AiConversation? remembered = _bestMatch(selection);
     if (remembered != null) {
       _conversation = remembered;
+      if (page != null) remembered.pages.add(page);
       remembered.lastUsed = ++_conversationClock;
       // A conversation saved with the note is drawn when first resumed, and
       // any is drawn again over what was written where it lies since.
@@ -1496,6 +1510,7 @@ class AiAssistantController extends ChangeNotifier {
       context,
       ++_conversationClock,
     );
+    if (page != null) conversation.pages.add(page);
     _conversations.add(conversation);
     _conversation = conversation;
     unawaited(_render(context));
@@ -1909,9 +1924,9 @@ class AiAssistantController extends ChangeNotifier {
             for (final AiLineRange range in paragraph.value.ranges)
               <int>[range.first, range.last],
           ],
-          'regions': <Object?>[
-            for (final Rect region in paragraph.value.regions)
-              <double>[region.left, region.top, region.right, region.bottom],
+          'circles': <Object?>[
+            for (final Rect circle in paragraph.value.circles)
+              <double>[circle.left, circle.top, circle.right, circle.bottom],
           ],
           'cited': refs(paragraph.value.cited),
           'drawn': refs(paragraph.value.drawn),
@@ -1943,10 +1958,12 @@ class AiAssistantController extends ChangeNotifier {
             if (range case [final int first, final int last])
               AiLineRange(first, last),
         ],
-        regions: <Rect>[
-          for (final Object? region
-              in (item['regions'] as List?) ?? <Object?>[])
-            if (region case [
+        // Older notes stored whole-width bands of a picture as `regions`:
+        // they name no detail of it, so they are left behind.
+        circles: <Rect>[
+          for (final Object? circle
+              in (item['circles'] as List?) ?? <Object?>[])
+            if (circle case [
               final num left,
               final num top,
               final num right,

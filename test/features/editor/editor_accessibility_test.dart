@@ -59,9 +59,7 @@ void main() {
       'Eraser',
       'Select',
       'Turn on AI',
-      'Sticky note',
       'Expand toolbar',
-      'Customize toolbar',
       'Add',
       'Page settings',
     ];

@@ -88,8 +88,6 @@ class OpenAiClient extends SseAiClient {
             text('Selected ink image:'),
             image(request.imagePng),
             if (selectionSvg != null) text(aiSelectionSvgText(selectionSvg)),
-            if (request.sourceLines case final String lines)
-              text(aiSourceLinesText(lines)),
           ],
           if (request.noteImage case final note? when index == lastUser)
             text(aiNoteMetadata(note)),

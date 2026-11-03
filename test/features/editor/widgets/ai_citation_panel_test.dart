@@ -22,6 +22,17 @@ Stroke _line(double y) => Stroke.fromPoints(
 
 Finder _chip(String label) => find.bySemanticsLabel(label);
 
+ScrollPosition _transcript(WidgetTester tester) => tester
+    .state<ScrollableState>(
+      find
+          .descendant(
+            of: find.byType(ListView),
+            matching: find.byType(Scrollable),
+          )
+          .first,
+    )
+    .position;
+
 void main() {
   late InkController ink;
   late FakeAiClient client;
@@ -67,7 +78,11 @@ void main() {
     await tester.pump();
   }
 
-  Future<void> ask(WidgetTester tester, String answer) async {
+  Future<void> ask(
+    WidgetTester tester,
+    String answer, {
+    Map<int, String> citations = const <int, String>{1: '[[L5]]', 2: '[[L6]]'},
+  }) async {
     await tester.runAsync(() async {
       assistant.open(
         selectInk(ink, const Rect.fromLTRB(90, 90, 210, 310)),
@@ -84,6 +99,7 @@ void main() {
       client.answerResponse(
         AiAssistantResponse(
           message: answer,
+          citations: citations,
           notation: AiNotation.vector(
             EditableSvg.parse(
               '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 400">'
@@ -127,7 +143,11 @@ void main() {
   ) async {
     final SemanticsHandle semantics = tester.ensureSemantics();
     await pumpEditor(tester);
-    await ask(tester, 'About the first. [[L5]]\n\nA short aside.');
+    await ask(
+      tester,
+      'About the first.\n\nA short aside.',
+      citations: const <int, String>{1: '[[L5]]'},
+    );
 
     expect(find.textContaining('[['), findsNothing);
     expect(find.textContaining('About the first.'), findsOneWidget);
@@ -142,8 +162,8 @@ void main() {
     await pumpEditor(tester);
     await ask(
       tester,
-      '${long('first')} [[L5]]\n\n'
-      '${long('second')} [[L6]]\n\n'
+      '${long('first')}\n\n'
+      '${long('second')}\n\n'
       '${long('third')}',
     );
 
@@ -172,11 +192,111 @@ void main() {
     ]);
   });
 
+  testWidgets('scrolling still moves the highlight once a streamed answer has '
+      'finished', (WidgetTester tester) async {
+    final String answer =
+        '${long('first')}\n\n'
+        '${long('second')}\n\n'
+        '${long('third')}';
+    const Map<int, String> citations = <int, String>{1: '[[L5]]', 2: '[[L6]]'};
+    await pumpEditor(tester);
+    await tester.runAsync(() async {
+      assistant.open(
+        selectInk(ink, const Rect.fromLTRB(90, 90, 210, 310)),
+        brightness: Brightness.light,
+        background: Colors.white,
+      );
+      await pumpEventQueue();
+    });
+    await tester.pump();
+    assistant.setNotationEnabled(true);
+    await tester.runAsync(() async {
+      assistant.send('Explain');
+      await pumpEventQueue();
+    });
+    await tester.pump();
+    // Whole while it streams, then a block for each paragraph as the message.
+    client.stream(answer);
+    await tester.pump();
+    await tester.pump();
+    expect(assistant.answerLinks(1), isNull);
+    await tester.runAsync(() async {
+      client.answerResponse(
+        AiAssistantResponse(
+          message: answer,
+          citations: citations,
+          notation: AiNotation.vector(
+            EditableSvg.parse(
+              '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 400">'
+              '<path d="M1 1 L9 9"/></svg>',
+            ),
+          ),
+        ),
+      );
+      await pumpEventQueue();
+    });
+    await tester.pump();
+    await tester.pump();
+    await tester.pump();
+
+    expect(assistant.paragraphFocus.value?.ref, const AiParagraphRef(1, 3));
+
+    final ScrollPosition position = _transcript(tester);
+    position.jumpTo(0);
+    await tester.pump();
+    await tester.pump();
+    expect(assistant.paragraphFocus.value?.ref, const AiParagraphRef(1, 1));
+
+    position.jumpTo(position.maxScrollExtent);
+    await tester.pump();
+    await tester.pump();
+    expect(assistant.paragraphFocus.value?.ref, const AiParagraphRef(1, 3));
+  });
+
+  testWidgets('scrolling reaches short paragraphs at either end of the chat', (
+    WidgetTester tester,
+  ) async {
+    await pumpEditor(tester);
+    await ask(
+      tester,
+      'A short opening.\n\n'
+      '${List<String>.filled(500, 'middle').join(' ')}\n\n'
+      'A short close.',
+    );
+
+    final ScrollPosition position = _transcript(tester);
+    expect(assistant.paragraphFocus.value?.ref, const AiParagraphRef(1, 3));
+
+    position.jumpTo(position.maxScrollExtent / 2);
+    await tester.pump();
+    await tester.pump();
+    expect(assistant.paragraphFocus.value?.ref, const AiParagraphRef(1, 2));
+    expect(assistant.paragraphFocus.value!.links.cited, <Stroke>[
+      ink.strokes[1],
+    ]);
+
+    position.jumpTo(0);
+    await tester.pump();
+    await tester.pump();
+    expect(assistant.paragraphFocus.value?.ref, const AiParagraphRef(1, 1));
+    expect(assistant.paragraphFocus.value!.links.cited, <Stroke>[
+      ink.strokes[0],
+    ]);
+
+    position.jumpTo(position.maxScrollExtent);
+    await tester.pump();
+    await tester.pump();
+    expect(assistant.paragraphFocus.value?.ref, const AiParagraphRef(1, 3));
+    expect(assistant.paragraphFocus.value!.links.drawn, <Stroke>[
+      ink.strokes[2],
+    ]);
+  });
+
   testWidgets('a citation pressed shows its paragraph on the note, and stays '
       'the one being read until the user scrolls', (WidgetTester tester) async {
     final SemanticsHandle semantics = tester.ensureSemantics();
     await pumpEditor(tester);
-    await ask(tester, 'Short one. [[L5]]\n\nShort two. [[L6]]');
+    await ask(tester, 'Short one.\n\nShort two.');
 
     await tester.tap(_chip('Show on the note: L5'));
     await tester.pump();
@@ -192,8 +312,8 @@ void main() {
     await pumpEditor(tester);
     await ask(
       tester,
-      '${long('first')} [[L5]]\n\n'
-      '${long('second')} [[L6]]\n\n'
+      '${long('first')}\n\n'
+      '${long('second')}\n\n'
       '${long('third')}',
     );
     final Finder list = find.byType(ListView);

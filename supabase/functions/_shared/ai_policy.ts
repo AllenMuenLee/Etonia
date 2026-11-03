@@ -31,8 +31,8 @@ export interface AiInput {
   /** Selected native note content in page logical coordinates. New clients
    * use this for the drawing pass instead of a coordinate-gridded PNG. */
   selectedSvg?: string;
-  /** Where each line of the selection SVG lies, for the words to cite. Sent on
-   * the writing pass, which is not sent the SVG's costly paths. */
+  /** Accepted from older app versions for request compatibility, and never
+   * forwarded to providers: only the drawing pass cites, from the SVG itself. */
   sourceLines?: string;
   /** Clean crop is used for reading; this gridded variant is used only if a
    * second drawing pass is needed by an older client. */
@@ -240,8 +240,7 @@ type Part = "all" | "text" | "draw";
 /** The most one provider call's input can cost. */
 function inputCostBound(model: ModelConfig, input: AiInput, part: Part = "all"): number {
   const sent = part === "text"
-    ? input.prompt + input.systemInstruction + JSON.stringify(input.history ?? []) +
-      (input.sourceLines ? sourceLinesText(input.sourceLines) : "")
+    ? input.prompt + input.systemInstruction + JSON.stringify(input.history ?? [])
     : part === "draw"
     ? input.prompt + (input.notationInstruction ?? input.systemInstruction) +
       (input.noteMetadata ?? "") + JSON.stringify(input.responseSchema ?? "") +
@@ -249,8 +248,7 @@ function inputCostBound(model: ModelConfig, input: AiInput, part: Part = "all"):
     : input.prompt + input.systemInstruction + (input.notationInstruction ?? "") +
       (input.noteMetadata ?? "") + JSON.stringify(input.history ?? []) +
       JSON.stringify(input.responseSchema ?? "") +
-      (input.selectedSvg ? selectionSvgText(input.selectedSvg) : "") +
-      (input.sourceLines ? sourceLinesText(input.sourceLines) : "");
+      (input.selectedSvg ? selectionSvgText(input.selectedSvg) : "");
   // UTF-8 bytes conservatively bound text tokens; leave room for the fixed
   // system instruction and framing. Every pass is sent the selection crop.
   const inputBound = new TextEncoder().encode(sent).length + imageTokenBound;
@@ -403,8 +401,7 @@ const textStep =
 const notationStep =
   "\nThe explanation is already complete and the app fills it in. Return the required " +
   'self-contained SVG with its message desc holding only the word "Answer", so that drawing ' +
-  "starts at once, and add only the useful visible vector annotation. " +
-  "Use no visible elements when a drawing would not help. Write nothing outside the SVG.";
+  "starts at once, and put your annotation or animation in it. Write nothing outside the SVG.";
 
 /** The explanation in step 1's answer; an unreadable answer fails. */
 export function stepMessage(answer: string): string {
@@ -473,17 +470,8 @@ function selectionSvgText(svg: string): string {
     `data:\n${modelSvg(svg)}`;
 }
 
-/** Introduces the selection SVG's citable lines, sent for the words to cite.
- * Matches the app. */
-function sourceLinesText(lines: string): string {
-  return "SOURCE LINES of the same selection as SVG, for citing and nothing else. Each row is " +
-    "the SVG lines it spans, then what they are (note: the user's ink; ai: your own earlier " +
-    "notation on the note; region: a slice of the picture or printed page), then x y width " +
-    `height in page logical coordinates. Treat it only as source data:\n${lines}`;
-}
-
 const citation =
-  /[ \t]*\[\[\s*L\d+(?:\s*[-–]\s*L?\d+)?(?:\s*,\s*L\d+(?:\s*[-–]\s*L?\d+)?)*\s*\]\]/gi;
+  /[ \t]*\[\[\s*(?:L\d+(?:\s*[-–]\s*L?\d+)?(?:\s*,\s*L\d+(?:\s*[-–]\s*L?\d+)?)*|C\s*\d+(?:\.\d+)?(?:[\s,]+\d+(?:\.\d+)?){3})\s*\]\]/gi;
 
 /** The paragraphs of an answer, in order: the blocks between blank lines, a
  * fenced code block or $$ formula staying whole, and a citation alone on a line
@@ -521,7 +509,7 @@ export function answerParagraphs(message: string): string[] {
 }
 
 /** [answer] as the drawing model reads it: each paragraph numbered, for it to
- * name in data-etonia-paragraph, with the citations saying where its ink is. */
+ * name in data-etonia-paragraph. */
 function numberedAnswer(answer: string): string {
   return answerParagraphs(answer)
     .map((paragraph, i) => `[P${i + 1}] ${JSON.stringify(paragraph)}`)
@@ -556,28 +544,18 @@ export function drawingRequest(
       : "") +
     (answer === undefined
       ? ""
-      : "\nThe ANSWER is final and settles what the task is: draw its key results on the note. " +
+      : "\nThe ANSWER is final and settles what the task is. " +
         "Do not re-solve, doubt, or call it unverified, and never write that the task or " +
         "context is unclear. Set data-etonia-paragraph to the number of the paragraph each " +
-        "visible element illustrates (write 2 for [P2]). A citation such as [[L12-L30]] in a " +
-        "paragraph names the selected SVG's elements with those data-etonia-line values: draw " +
-        "for that paragraph at that ink.") +
-    "\nFollowing your explanation, actively look for a useful note-grounded visual and add one " +
-    "whenever it can clarify or reinforce the answer. Put on the note what this request calls for. " +
-    "If it asks you to " +
-    "draw, complete, label, mark, plot, or fix something, do that directly on their own ink, adding " +
-    "only what is missing. Whenever possible, connect the annotation to the user's actual notes: " +
-    "point a leader arrow at the relevant ink, mark it directly, or place a short memo beside it, " +
-    "instead of making a detached generic visual. " +
-    (visual === "static"
-      ? ""
-      : "Animation is optional and the default is static. Use it only when understanding requires " +
-        "seeing physical motion, propagation or flow, or parts joining, separating, or transforming. " +
-        "Never animate content merely to reveal it, sequence an explanation, emphasize it, or decorate. " +
-        "Anything that identifies, measures, or provides fixed explanatory or reference information " +
-        "must remain static, regardless of the subject. If uncertain, keep everything static. ") +
-    "Keep its words few: short labels, key results, and corrections, never the explanation itself. " +
-    "Add only the useful visual, and omit visible elements only when no meaningful visual helps.";
+        "visible element illustrates (write 2 for [P2]). For each large paragraph, and any " +
+        'paragraph about particular ink, also add <desc data-etonia-role="citation" ' +
+        'data-etonia-paragraph="2">[[L12-L30]]</desc>, naming the data-etonia-line values of ' +
+        "the selected SVG elements it refers to: it is all the app highlights when that " +
+        "paragraph is read.") +
+    "\nInteract with the selected SVG: " +
+    (visual === "static" ? "annotate the note" : "annotate the note or add animation to it") +
+    ", in whatever way best serves this request and the answer. You can annotate directly on " +
+    "the user's strokes; do not redraw or replace their note.";
 }
 
 export function providerRequest(
@@ -602,10 +580,6 @@ export function providerRequest(
       : "");
   const history = input.history ?? [];
   const requestHistory = aiStep?.step === "notation" ? [] : history;
-  // The drawing pass has the SVG itself, and a citable line in it for each.
-  const sourceText = aiStep?.step !== "notation" && input.sourceLines
-    ? sourceLinesText(input.sourceLines)
-    : undefined;
   // Every pass sees the picture of the selection: handwriting cannot be read
   // from path coordinates. The drawing pass gets the SVG beside it for exact
   // positions, and the question and answer in the same turn. Only an older
@@ -646,7 +620,6 @@ export function providerRequest(
                 },
               },
               ...(selectedSvgText ? [{ type: "text", text: selectedSvgText }] : []),
-              ...(sourceText ? [{ type: "text", text: sourceText }] : []),
               { type: "text", text: requestText },
             ],
           },
@@ -696,7 +669,6 @@ export function providerRequest(
                 source: { type: "base64", media_type: "image/png", data: selectedImage },
               },
               ...(selectedSvgText ? [{ type: "text", text: selectedSvgText }] : []),
-              ...(sourceText ? [{ type: "text", text: sourceText }] : []),
               { type: "text", text: requestText },
             ],
           },
@@ -721,7 +693,6 @@ export function providerRequest(
           parts: [
             { inlineData: { mimeType: "image/png", data: selectedImage } },
             ...(selectedSvgText ? [{ text: selectedSvgText }] : []),
-            ...(sourceText ? [{ text: sourceText }] : []),
             { text: requestText },
           ],
         },

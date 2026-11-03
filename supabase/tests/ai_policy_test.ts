@@ -393,18 +393,19 @@ Deno.test("with Notation on, the chosen model writes the words and a second mode
       assert(body.includes("existing-ink"));
       assert(body.includes('\\"what is this?\\"'));
       assert(!body.includes("A triangle."));
-      assert(body.includes("actively look for a useful note-grounded visual"));
-      assert(body.includes("connect the annotation to the user's actual notes"));
-      assert(body.includes("point a leader arrow at the relevant ink"));
-      assert(body.includes("Animation is optional and the default is static"));
-      assert(body.includes("physical motion, propagation or flow"));
-      assert(body.includes("Never animate content merely to reveal it"));
-      assert(body.includes("If uncertain, keep everything static"));
+      assert(body.includes("Interact with the selected SVG"));
+      assert(body.includes("annotate the note or add animation to it"));
+      assert(body.includes("annotate directly on the user's strokes"));
+      assert(body.includes("do not redraw or replace their note"));
+      assert(body.includes("Set data-etonia-paragraph"));
+      // How to annotate is the model's choice.
+      assert(!body.includes("default is static"));
+      assert(!body.includes("Keep its words few"));
     }
     const staticText = drawingRequest(asked, "static");
-    assert(staticText.includes("adding only what is missing"));
-    assert(staticText.includes("connect the annotation to the user's actual notes"));
-    assert(!staticText.includes("animate"));
+    assert(staticText.includes("annotate the note"));
+    assert(staticText.includes("annotate directly on the user's strokes"));
+    assert(!staticText.includes("animat"));
     // An overlong question is clipped, so the drawing prompt stays bounded:
     // Under 3000 characters here with the current instructions.
     assert(
@@ -845,6 +846,7 @@ Deno.test("the service numbers an answer's paragraphs as the app does", () => {
     ["One.\n\n$$a$$\n\nThree.", 3],
     ["One.\n\n[[L5-L9]]\n\nTwo.", 2],
     ["[[L5-L9]]\n\nOne.", 1],
+    ["One.\n\n[[C 1 2 3 4]]\n\nTwo.", 2],
     ["", 0],
   ];
   for (const [answer, count] of numbering) {
@@ -857,7 +859,7 @@ Deno.test("the service numbers an answer's paragraphs as the app does", () => {
   ]);
 });
 
-Deno.test("the words get the citable lines, the drawing the numbered paragraphs", () => {
+Deno.test("only the drawing is told how to cite, and the words never get the lines", () => {
   const cited = validateInput({
     ...input,
     notationContext: { width: 800, height: 1100, left: 0.1, top: 0.2, right: 0.4, bottom: 0.5 },
@@ -873,34 +875,36 @@ Deno.test("the words get the citable lines, the drawing the numbered paragraphs"
     maxOutputTokens: 1024,
   } as const;
   const words = JSON.stringify(providerRequest(model, cited, 256, "k", { step: "text" }).body);
-  assert(words.includes("SOURCE LINES"));
-  assert(words.includes("L5-L9 note 80 220 240 30"));
+  // An older app still sends them; they go no further.
+  assert(!words.includes("SOURCE LINES"));
+  assert(!words.includes("L5-L9 note 80 220 240 30"));
+  assert(!words.includes("data-etonia-role=\\\"citation\\\""));
 
   const drawing = JSON.stringify(
     providerRequest(model, cited, 256, "k", {
       step: "notation",
-      message: "First. [[L5-L9]]\n\nSecond.",
+      message: "First.\n\nSecond.",
     }).body,
   );
-  // The drawing has the SVG itself, so it is not sent the outline too.
   assert(!drawing.includes("SOURCE LINES"));
   assert(drawing.includes("[P1]"));
-  assert(drawing.includes("[[L5-L9]]"));
   assert(drawing.includes("[P2]"));
   assert(drawing.includes("data-etonia-paragraph"));
+  assert(drawing.includes("data-etonia-role=\\\"citation\\\""));
+  assert(drawing.includes("[[L12-L30]]"));
 
-  // A request with Notation off can still cite.
+  // A request with Notation off has no drawing, and so cites nothing.
   const plain = validateInput({ ...input, sourceLines: "L5 note 1 2 3 4" });
-  assert(JSON.stringify(providerRequest(model, plain, 256, "k").body).includes("SOURCE LINES"));
-  // What the outline costs is held for.
+  assert(!JSON.stringify(providerRequest(model, plain, 256, "k").body).includes("SOURCE LINES"));
+  // Lines that go nowhere cost nothing, so nothing is held for them.
   const priced = { ...model, inputMicroPerKilo: 1000 };
-  assert(
-    reservationCap(priced, cited, priced) >
-      reservationCap(priced, { ...cited, sourceLines: undefined }, priced),
+  assert.equal(
+    reservationCap(priced, cited, priced),
+    reservationCap(priced, { ...cited, sourceLines: undefined }, priced),
   );
 });
 
-Deno.test("citable lines must be a short string", () => {
+Deno.test("lines an older app sends must still be a short string", () => {
   assert.throws(() => validateInput({ ...input, sourceLines: 5 }));
   assert.throws(() => validateInput({ ...input, sourceLines: "x".repeat(16001) }));
 });

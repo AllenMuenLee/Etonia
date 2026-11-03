@@ -12,6 +12,7 @@ import 'package:greatnote/features/editor/ink/ink_controller.dart';
 import 'package:greatnote/features/editor/ink/ink_palette.dart';
 import 'package:greatnote/features/editor/ink/ink_sample.dart';
 import 'package:greatnote/features/editor/ink/stroke.dart';
+import 'package:greatnote/features/editor/page/note_document.dart';
 import 'package:greatnote/features/editor/sticky/sticky_note.dart';
 import 'package:greatnote/features/editor/widgets/ai_assistant_panel.dart';
 import 'package:greatnote/features/editor/widgets/ai_options.dart';
@@ -191,6 +192,50 @@ void main() {
       );
     });
 
+    testWidgets('pressed on another page, leaves the last chat behind', (
+      WidgetTester tester,
+    ) async {
+      final NoteDocument document = NoteDocument(
+        pages: <NotePage>[NotePage(ink: InkController())],
+      );
+      addTearDown(document.dispose);
+      final FakeAiClient client = FakeAiClient();
+      await pumpApp(
+        tester,
+        home: EditorScreen(
+          document: document,
+          aiClient: client,
+          initialNotationEnabled: false,
+          textRecognizer: FakeCanvasTextRecognizer(),
+          handwritingRenderer: FakeHandwritingImageRenderer(),
+        ),
+      );
+      document.addPage();
+      document.goTo(0);
+      await tester.pumpAndSettle();
+
+      await _turnOnAi(tester);
+      _assistant(tester).send('Question');
+      await settleAi(tester);
+      client.answer('Answer');
+      await settleAi(tester);
+      await tester.pumpAndSettle();
+      final AiSelectionContext context = _assistant(tester).context!;
+      await _closeChat(tester);
+
+      document.goTo(1);
+      await tester.pumpAndSettle();
+      await _turnOnAi(tester);
+      expect(_assistant(tester).context, isNull);
+      expect(find.text(AiAssistantPanel.noContextPrompt), findsOneWidget);
+      await _closeChat(tester);
+
+      document.goTo(0);
+      await tester.pumpAndSettle();
+      await _turnOnAi(tester);
+      expect(_assistant(tester).context, same(context));
+    });
+
     testWidgets('pressed with a selection, asks about it', (
       WidgetTester tester,
     ) async {
@@ -234,7 +279,9 @@ void main() {
     });
 
     testWidgets('asked about a selection, the composer takes the keyboard, '
-        'and the selection keeps its actions', (WidgetTester tester) async {
+        'and the selection stays, without its actions', (
+      WidgetTester tester,
+    ) async {
       final _Editor editor = await _pump(
         tester,
         strokes: <Stroke>[_mark(const Offset(200, 200))],
@@ -252,7 +299,7 @@ void main() {
 
       expect(_composing(tester), isTrue);
       expect(editor.ink.selection, isNotNull);
-      expect(find.byTooltip('Copy'), findsOneWidget);
+      expect(find.byTooltip('Copy'), findsNothing);
     });
 
     testWidgets('the AI tool takes what any lasso encloses, as Select does', (
@@ -275,7 +322,6 @@ void main() {
       await settleAi(tester);
 
       expect(editor.ink.selection, isNotNull);
-      expect(find.byTooltip('Copy'), findsOneWidget);
       expect(_assistant(tester).context!.snapshot.sourceStrokeCount, 1);
     });
 
@@ -345,7 +391,6 @@ void main() {
       await tester.pumpAndSettle();
 
       expect(editor.ink.selection, isNull);
-      expect(find.byTooltip('Copy'), findsNothing);
       expect(_assistant(tester).context, same(first));
     });
 
@@ -376,6 +421,40 @@ void main() {
       expect(editor.ink.selection, isNotNull);
       expect(_assistant(tester).hasSelection, isTrue);
       expect(_composing(tester), isTrue);
+    });
+
+    testWidgets('what the AI tool selects shows no action bar, while what '
+        'the Select tool selects does', (WidgetTester tester) async {
+      final _Editor editor = await _pump(
+        tester,
+        strokes: <Stroke>[_mark(const Offset(200, 200))],
+      );
+      await _turnOnAi(tester);
+      await _write(tester, const <Offset>[
+        Offset(260, 200),
+        Offset(260, 260),
+        Offset(140, 260),
+        Offset(140, 170),
+        Offset(260, 170),
+      ]);
+      await tester.pumpAndSettle();
+      await settleAi(tester);
+
+      expect(editor.ink.selection, isNotNull);
+      for (final String action in <String>[
+        'Copy',
+        'Cut',
+        'Duplicate',
+        'Delete',
+      ]) {
+        expect(find.byTooltip(action), findsNothing, reason: action);
+      }
+
+      await tester.tap(find.byTooltip('Select'));
+      await tester.pumpAndSettle();
+      expect(_tool(tester), EditorTool.select);
+      selectInk(editor.ink, const Rect.fromLTRB(150, 180, 250, 220));
+      await tester.pumpAndSettle();
       expect(find.byTooltip('Copy'), findsOneWidget);
     });
 
@@ -504,6 +583,8 @@ void main() {
       await tester.tap(find.byTooltip('Select'));
       await tester.pump();
       expect(_tool(tester), EditorTool.select);
+      await tester.tap(find.byTooltip('Expand toolbar'));
+      await tester.pumpAndSettle();
       await tester.tap(find.byTooltip('Sticky note'));
       await tester.pumpAndSettle();
       expect(_tool(tester), EditorTool.sticky);

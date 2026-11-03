@@ -112,7 +112,9 @@ List<NoteChapter> chapterPathAt(List<NoteChapter> chapters, int pageIndex) {
 
 /// The chapters of a [document], kept as its pages change: reads the
 /// outline of each PDF that comes into it once, with [loadOutline], and
-/// notifies when one arrives.
+/// notifies when one arrives. They are read one PDF at a time, the one on
+/// the current page first, so a note of many PDFs does not hold them all in
+/// memory at once.
 class NoteChapterIndex extends ChangeNotifier {
   NoteChapterIndex({required this.document, required this.loadOutline}) {
     document.addListener(_loadNew);
@@ -125,6 +127,7 @@ class NoteChapterIndex extends ChangeNotifier {
   final Map<String, List<PdfOutlineEntry>> _outlines =
       <String, List<PdfOutlineEntry>>{};
   final Set<String> _asked = <String>{};
+  bool _loading = false;
   bool _disposed = false;
 
   List<NoteChapter>? _chapters;
@@ -139,17 +142,35 @@ class NoteChapterIndex extends ChangeNotifier {
     return _chapters!;
   }
 
-  void _loadNew() {
+  /// The next PDF whose outline has not been asked for.
+  String? _nextToAsk() {
+    final String? current = document.current.pdfSource?.assetId;
+    if (current != null && !_asked.contains(current)) return current;
     for (final NotePage page in document.pages) {
       final String? assetId = page.pdfSource?.assetId;
-      if (assetId == null || !_asked.add(assetId)) continue;
-      loadOutline(assetId).then<void>((List<PdfOutlineEntry> outline) {
-        if (_disposed || outline.isEmpty) return;
+      if (assetId != null && !_asked.contains(assetId)) return assetId;
+    }
+    return null;
+  }
+
+  Future<void> _loadNew() async {
+    if (_loading) return;
+    _loading = true;
+    while (!_disposed) {
+      final String? assetId = _nextToAsk();
+      if (assetId == null) break;
+      _asked.add(assetId);
+      try {
+        final List<PdfOutlineEntry> outline = await loadOutline(assetId);
+        if (_disposed || outline.isEmpty) continue;
         _outlines[assetId] = outline;
         _chapters = null;
         notifyListeners();
-      }, onError: (Object _) {});
+      } on Object {
+        // No chapters from this PDF; its pages still show.
+      }
     }
+    _loading = false;
   }
 
   @override
@@ -218,8 +239,10 @@ class _PageChapterListState extends State<PageChapterList> {
     add(widget.chapters, 0);
     return ListView.builder(
       key: const ValueKey<String>('page-overview-chapters'),
-      shrinkWrap: true,
-      padding: const EdgeInsetsDirectional.only(end: AppSpacing.xs),
+      padding: const EdgeInsetsDirectional.only(
+        end: AppSpacing.xs,
+        bottom: AppSpacing.md,
+      ),
       itemCount: rows.length,
       itemBuilder: (BuildContext context, int index) {
         final (NoteChapter chapter, int depth) = rows[index];

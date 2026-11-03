@@ -1533,6 +1533,9 @@ class _InkCanvasState extends State<InkCanvas> with WidgetsBindingObserver {
   bool _nativeRegistering = false;
   bool _nativeSyncScheduled = false;
   int _nativeHandoffGeneration = 0;
+
+  /// The native pointer whose wet ink is waiting for its stroke's frame.
+  int? _nativeHandoffPointer;
   bool _dispatchingNative = false;
   List<RawInkSample>? _nativeSamples;
   List<Object?>? _lastNativeSurfaceSignature;
@@ -1696,6 +1699,12 @@ class _InkCanvasState extends State<InkCanvas> with WidgetsBindingObserver {
     _releaseClaims();
     _rulerReadout.dispose();
     _nativePreviewActive.dispose();
+    // The handoff's frames stop with this canvas, but the wet ink lives in the
+    // root view and would stay there, over whatever comes next.
+    final int? handoffPointer = _nativeHandoffPointer;
+    if (handoffPointer != null) {
+      NativeInkBridge.instance.finishPreview(_nativeSurfaceId, handoffPointer);
+    }
     if (_nativeRegistered || _nativeRegistering) {
       NativeInkBridge.instance.unregisterSurface(_nativeSurfaceId);
     }
@@ -2283,6 +2292,7 @@ class _InkCanvasState extends State<InkCanvas> with WidgetsBindingObserver {
       // A new native stroke supersedes any delayed removal for the previous
       // pointer id. Native pointer ids may be reused between gestures.
       _nativeHandoffGeneration++;
+      _nativeHandoffPointer = null;
       _ignoredNativePointers.remove(packet.pointer);
       if (!_nativePenTool || !_nativeHitsCanvas(packet)) {
         _ignoreNativePointer(packet.pointer);
@@ -2427,6 +2437,7 @@ class _InkCanvasState extends State<InkCanvas> with WidgetsBindingObserver {
   /// next paint, and that paint reaches the display a frame or more later.
   void _finishNativePreviewAfterCommittedFrame(int pointer) {
     final int generation = ++_nativeHandoffGeneration;
+    _nativeHandoffPointer = pointer;
     final WidgetsBinding binding = WidgetsBinding.instance;
     bool superseded() => !mounted || generation != _nativeHandoffGeneration;
     void finishAfterFrames(int frames) {
@@ -2438,6 +2449,7 @@ class _InkCanvasState extends State<InkCanvas> with WidgetsBindingObserver {
         if (frames > 1) {
           finishAfterFrames(frames - 1);
         } else {
+          _nativeHandoffPointer = null;
           NativeInkBridge.instance.finishPreview(_nativeSurfaceId, pointer);
         }
       });

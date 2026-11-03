@@ -44,9 +44,9 @@ class PageTransform {
 }
 
 /// Shows a note's pages as a column in the writing area, each page its own
-/// sheet, [pageGap] below the one before. Each page is at its own
-/// [PageGeometry]'s scale; a page narrower than the area is centered across
-/// it, and a column shorter than the area is centered in it.
+/// sheet, [pageGap] below the one before, scaled with the zoom. Each page is
+/// at its own [PageGeometry]'s scale; a page narrower than the area is centered
+/// across it, and a column shorter than the area is centered in it.
 ///
 /// Writing input is never taken for scrolling: the column scrolls with two
 /// fingers, a mouse wheel, or a trackpad. When two fingers start scrolling,
@@ -151,7 +151,9 @@ class PageViewport extends StatefulWidget {
 
   final List<PageGeometry> pages;
 
-  /// The space between one page and the next, in viewport pixels.
+  /// The space between one page and the next, in viewport pixels at a zoom
+  /// of one. It scales with the zoom, as the pages do, so a zoom keeps the
+  /// column's proportions.
   final double pageGap;
 
   /// One per page, so a page keeps its state when others are added or
@@ -172,6 +174,8 @@ class PageViewport extends StatefulWidget {
 
   /// Builds what floats above the current page in viewport coordinates,
   /// such as action bars, which keep their size whatever the page's scale.
+  /// A press on them is not reported to [onPageTouched], whatever page they
+  /// float over.
   final Widget Function(BuildContext context, PageTransform transform)?
   overlayBuilder;
 
@@ -253,10 +257,35 @@ class PageViewportState extends State<PageViewport>
   final _ZoomSnapshotPainter _zoomSnapshotPainter = _ZoomSnapshotPainter();
 
   /// The page that picture is kept aligned with, the one under the fingers,
-  /// and where it was when the picture was taken. Gaps between pages do not
-  /// scale, so the others come back into line when the zoom stops.
+  /// and where it was when the picture was taken.
   int _zoomAnchorPage = 0;
   PageTransform? _zoomAnchorStart;
+
+  /// The pointer last pressed on what [PageViewport.overlayBuilder] built.
+  int? _overlayPointer;
+
+  /// How far past the area, along each axis, the picture reaches, so that
+  /// zooming out shows what was off screen rather than an empty desk. None
+  /// while no zoom is under way.
+  Offset _zoomPictureMargin = Offset.zero;
+
+  /// The area the picture was taken for.
+  Size? _zoomPictureViewport;
+
+  /// Whether this build's frame takes the picture.
+  bool _zoomPictureFresh = false;
+
+  /// The most the picture reaches past the area, as a share of the area on
+  /// each side: half costs four times the pixels, and is taken again about
+  /// once for each halving of the zoom.
+  static const double _zoomPictureReach = 0.5;
+
+  /// The longest side of the picture, in device pixels, within what GPUs can
+  /// hold as one texture.
+  static const double _zoomPictureMaxSide = 8192;
+
+  /// How far past a page the picture reaches for its shadow.
+  static const double _zoomPictureBleed = 24;
 
   /// The page last reported, or scrolled to; a different [currentPage]
   /// means a jump.
@@ -436,7 +465,10 @@ class PageViewportState extends State<PageViewport>
       _completeScroll();
     }
     final _ColumnLayout? layout = _layout;
-    if (layout != null) {
+    // A press on the overlay is not a touch of the page under it, which may
+    // not be the current one: making that page current would drop the
+    // selection the overlay's bar acts on before the press could land.
+    if (layout != null && event.pointer != _overlayPointer) {
       final Offset content =
           event.localPosition + _offset - Offset(0, layout.top);
       final int? page = layout.pageContaining(content);
@@ -638,9 +670,9 @@ class PageViewportState extends State<PageViewport>
       // zoom, so the next finger's pan neither maps through a stale column
       // nor is clamped to the smaller one it had, which scrolls the page.
       _adoptLayout(after);
-      // Page gaps and the space centering a short column do not scale. Map
-      // through the page itself so neither can turn a pure pinch into a
-      // vertical scroll. This is clamped when the new column is laid out.
+      // The space centering a short column does not scale. Map through the
+      // page itself so it cannot turn a pure pinch into a vertical scroll.
+      // This is clamped when the new column is laid out.
       _offset = Offset(
         to.left + (inColumn.dx - from.left) * ratio - focal.dx,
         after.top + to.top + (inColumn.dy - from.top) * ratio - focal.dy,
@@ -655,12 +687,15 @@ class PageViewportState extends State<PageViewport>
   }
 
   /// Takes the picture of the pages as a zoom begins, keeps it where the
-  /// column now is, and gives it up when the zoom has stopped. Runs in the
-  /// build that lays the column out, so the picture is taken of exactly the
-  /// column this frame paints.
-  void _updateZoomSnapshot(_ColumnLayout layout) {
+  /// column now is, and gives it up when the zoom has stopped. If the view
+  /// reaches pages past the edge of the picture, it is taken again from there.
+  /// Runs in the build that lays the column out, so the picture is taken of
+  /// exactly the column this frame paints.
+  void _updateZoomSnapshot(_ColumnLayout layout, double pixelRatio) {
+    _zoomPictureFresh = false;
     if (_zoomSettle == null) {
       _zoomAnchorStart = null;
+      _zoomPictureMargin = Offset.zero;
       _zoomSnapshot.allowSnapshotting = false;
       return;
     }
@@ -668,30 +703,100 @@ class PageViewportState extends State<PageViewport>
       _zoomAnchorPage = layout.rects.length - 1;
     }
     final PageTransform now = _transformOf(layout, _zoomAnchorPage);
-    final PageTransform start = _zoomAnchorStart ??= now;
-    _zoomSnapshotPainter.placement = PageTransform(
-      scale: now.scale / start.scale,
-      origin: now.origin - start.origin * (now.scale / start.scale),
-    );
+    final PageTransform? start = _zoomAnchorStart;
+    bool retake = false;
+    if (start != null) {
+      final double ratio = now.scale / start.scale;
+      final PageTransform placement = PageTransform(
+        scale: ratio,
+        origin: now.origin - start.origin * ratio,
+      );
+      _zoomSnapshotPainter.placement = placement;
+      retake =
+          layout.viewport != _zoomPictureViewport ||
+          _pagesLeavePicture(layout, placement);
+    }
+    if (start == null || retake) {
+      _zoomAnchorStart = now;
+      _zoomPictureViewport = layout.viewport;
+      _zoomPictureMargin = _pictureMarginFor(layout, pixelRatio);
+      _zoomPictureFresh = true;
+      _zoomSnapshotPainter
+        ..margin = _zoomPictureMargin
+        ..placement = PageTransform.identity;
+      if (retake) _zoomSnapshot.clear();
+    }
     _zoomSnapshot.allowSnapshotting = true;
   }
 
+  /// Where the pages of [layout] are in the area, with room for their shadows.
+  Rect _pagesOnScreen(_ColumnLayout layout) {
+    return layout.content
+        .shift(Offset(-_offset.dx, layout.top - _offset.dy))
+        .inflate(_zoomPictureBleed);
+  }
+
+  /// How far past the area a picture of [layout] should reach: as far as there
+  /// are pages to show, up to [_zoomPictureReach]. An axis the picture could
+  /// not reach usefully along, for want of texture, gets none.
+  Offset _pictureMarginFor(_ColumnLayout layout, double pixelRatio) {
+    final Size viewport = layout.viewport;
+    final Rect pages = _pagesOnScreen(layout);
+    double along(double extent, double start, double end) {
+      final double room = (_zoomPictureMaxSide / pixelRatio - extent) / 2;
+      final double wanted = math.min(
+        extent * _zoomPictureReach,
+        math.max(-start, end - extent),
+      );
+      if (wanted <= 0 || room < extent * _zoomPictureReach / 2) return 0;
+      return math.min(wanted, room);
+    }
+
+    return Offset(
+      along(viewport.width, pages.left, pages.right),
+      along(viewport.height, pages.top, pages.bottom),
+    );
+  }
+
+  /// Whether pages now in view lie past the edge of the picture, [placement]
+  /// being where it has moved to. An axis it has no margin along is left out:
+  /// taking it again would not help.
+  bool _pagesLeavePicture(_ColumnLayout layout, PageTransform placement) {
+    final Rect area = Offset.zero & layout.viewport;
+    final Rect pages = _pagesOnScreen(layout);
+    if (!pages.overlaps(area)) return false;
+    final Rect shown = pages.intersect(area);
+    final Rect needed = Rect.fromPoints(
+      placement.invert(shown.topLeft),
+      placement.invert(shown.bottomRight),
+    );
+    final Size pictured = _zoomPictureViewport ?? layout.viewport;
+    final Offset margin = _zoomPictureMargin;
+    const double slack = 0.5;
+    return (margin.dx > 0 &&
+            (needed.left < -margin.dx - slack ||
+                needed.right > pictured.width + margin.dx + slack)) ||
+        (margin.dy > 0 &&
+            (needed.top < -margin.dy - slack ||
+                needed.bottom > pictured.height + margin.dy + slack));
+  }
+
   /// Keeps what [PageViewport.paintAreaOf] and [PageViewport.scaleOf] report
-  /// for a page up to date with [seen], the part of it on screen, at [scale].
-  void _updatePaintArea(Key key, Rect seen, double scale) {
+  /// for a page up to date: [seen], the part of it on screen, at [scale]; or,
+  /// while a zoom is under way, [pictured], the part the picture holds.
+  void _updatePaintArea(Key key, Rect seen, Rect pictured, double scale) {
     final ValueNotifier<Rect> area = _paintAreaFor(key);
     final Rect held = area.value;
     final bool zooming = _zoomSettle != null;
     if (zooming &&
+        !_zoomPictureFresh &&
         held.left <= seen.left &&
         held.top <= seen.top &&
         held.right >= seen.right &&
         held.bottom >= seen.bottom) {
       return;
     }
-    // Zooming out past what is painted: paint ahead of the view, so this
-    // happens only once for each halving of the zoom.
-    area.value = zooming ? seen.inflate(seen.longestSide / 2) : seen;
+    area.value = zooming ? pictured : seen;
     _scaleFor(key).value = scale;
   }
 
@@ -1039,7 +1144,20 @@ class PageViewportState extends State<PageViewport>
           return gone;
         });
 
+        _updateZoomSnapshot(
+          layout,
+          MediaQuery.maybeDevicePixelRatioOf(context) ?? 1,
+        );
+        final Offset margin = _zoomPictureMargin;
         final Rect area = Offset.zero & viewport;
+        // What this frame paints: more than the area while a zoom is under
+        // way, so the picture holds what zooming out brings into view.
+        final Rect paintedArea = Rect.fromLTRB(
+          -margin.dx,
+          -margin.dy,
+          viewport.width + margin.dx,
+          viewport.height + margin.dy,
+        );
         // Pages within a screen of the visible area are built.
         final Rect builtArea = area.inflate(viewport.height);
         final AppColors colors = AppColors.of(context);
@@ -1057,10 +1175,10 @@ class PageViewportState extends State<PageViewport>
             Offset(-_offset.dx, layout.top - _offset.dy),
           );
           coversArea =
-              onScreen.left <= 0 &&
-              onScreen.top <= 0 &&
-              onScreen.right >= viewport.width &&
-              onScreen.bottom >= viewport.height;
+              onScreen.left <= paintedArea.left &&
+              onScreen.top <= paintedArea.top &&
+              onScreen.right >= paintedArea.right &&
+              onScreen.bottom >= paintedArea.bottom;
         }
         final bool isDark = Theme.of(context).brightness == Brightness.dark;
         final Color deskColor = Color.lerp(
@@ -1068,7 +1186,6 @@ class PageViewportState extends State<PageViewport>
           colors.shadow,
           isDark ? 0.16 : 0.025,
         )!;
-        _updateZoomSnapshot(layout);
         // What a picture being zoomed out no longer reaches shows.
         _zoomSnapshotPainter.backdrop = coversArea
             ? colors.writingSurface
@@ -1107,7 +1224,7 @@ class PageViewportState extends State<PageViewport>
           if (!coversArea) {
             sheets.add(
               Positioned.fromRect(
-                rect: onScreen,
+                rect: onScreen.shift(margin),
                 child: DecoratedBox(
                   decoration: BoxDecoration(
                     color: colors.writingSurface,
@@ -1118,7 +1235,7 @@ class PageViewportState extends State<PageViewport>
             );
             edges.add(
               Positioned.fromRect(
-                rect: onScreen,
+                rect: onScreen.shift(margin),
                 child: IgnorePointer(
                   child: DecoratedBox(
                     decoration: BoxDecoration(
@@ -1141,12 +1258,20 @@ class PageViewportState extends State<PageViewport>
               transform.invert(Offset.zero),
               transform.invert(viewport.bottomRight(Offset.zero)),
             );
-          _updatePaintArea(widget.pageKeys[i], visible.value, transform.scale);
+          _updatePaintArea(
+            widget.pageKeys[i],
+            visible.value,
+            Rect.fromPoints(
+              transform.invert(paintedArea.topLeft),
+              transform.invert(paintedArea.bottomRight),
+            ),
+            transform.scale,
+          );
           pages.add(
             Positioned(
               key: widget.pageKeys[i],
-              left: transform.origin.dx,
-              top: transform.origin.dy,
+              left: transform.origin.dx + margin.dx,
+              top: transform.origin.dy + margin.dy,
               width: geometry.pageSize.width,
               height: geometry.pageSize.height,
               child: Transform.scale(
@@ -1182,54 +1307,81 @@ class PageViewportState extends State<PageViewport>
             // Round the whole of it, floating bars too, rather than the pages
             // alone: a Stack of its own would take a page leaving the column
             // out of the tree before those bars have been told.
-            child: SnapshotWidget(
-              controller: _zoomSnapshot,
-              painter: _zoomSnapshotPainter,
-              // Anything that cannot be pictured just paints as usual.
-              mode: SnapshotMode.permissive,
-              autoresize: true,
-              child: Stack(
-                fit: StackFit.expand,
-                children: <Widget>[
-                  if (!coversArea) ColoredBox(color: deskColor),
-                  // Below the pages, so only a tap that misses them lands.
-                  if (widget.onDeskTap != null)
-                    GestureDetector(
-                      key: const ValueKey<String>('page-desk'),
-                      behavior: HitTestBehavior.opaque,
-                      onTap: widget.onDeskTap,
-                    ),
-                  ...sheets,
-                  ...pages,
-                  ...edges,
-                  if (widget.overlayBuilder != null &&
-                      widget.currentPage < widget.pages.length)
-                    widget.overlayBuilder!(
-                      context,
-                      _transformOf(layout, widget.currentPage),
-                    ),
-                  if (_canScroll && !widget.infinite)
-                    IgnorePointer(
-                      child: CustomPaint(
-                        key: const ValueKey<String>('page-scroll-indicators'),
-                        painter: _ScrollIndicatorPainter(
-                          offset: Offset(
-                            _offset.dx.clamp(0, _maxScroll.dx),
-                            _offset.dy.clamp(0, _maxScroll.dy),
-                          ),
-                          maxScroll: _maxScroll,
-                          color: colors.textSecondary.withValues(alpha: 0.45),
-                        ),
+            child: OverflowBox(
+              minWidth: paintedArea.width,
+              maxWidth: paintedArea.width,
+              minHeight: paintedArea.height,
+              maxHeight: paintedArea.height,
+              child: SnapshotWidget(
+                controller: _zoomSnapshot,
+                painter: _zoomSnapshotPainter,
+                // Anything that cannot be pictured just paints as usual.
+                mode: SnapshotMode.permissive,
+                autoresize: true,
+                child: Stack(
+                  fit: StackFit.expand,
+                  children: <Widget>[
+                    if (!coversArea) ColoredBox(color: deskColor),
+                    // Below the pages, so only a tap that misses them lands.
+                    if (widget.onDeskTap != null)
+                      GestureDetector(
+                        key: const ValueKey<String>('page-desk'),
+                        behavior: HitTestBehavior.opaque,
+                        onTap: widget.onDeskTap,
+                      ),
+                    ...sheets,
+                    ...pages,
+                    ...edges,
+                    // These keep to the area, whatever the picture reaches.
+                    Positioned.fromRect(
+                      rect: margin & viewport,
+                      child: Stack(
+                        fit: StackFit.expand,
+                        children: <Widget>[
+                          if (widget.overlayBuilder != null &&
+                              widget.currentPage < widget.pages.length)
+                            // Hit only where the overlay has something to
+                            // press, and heard before the column's listener.
+                            Listener(
+                              behavior: HitTestBehavior.deferToChild,
+                              onPointerDown: (PointerDownEvent event) {
+                                _overlayPointer = event.pointer;
+                              },
+                              child: widget.overlayBuilder!(
+                                context,
+                                _transformOf(layout, widget.currentPage),
+                              ),
+                            ),
+                          if (_canScroll && !widget.infinite)
+                            IgnorePointer(
+                              child: CustomPaint(
+                                key: const ValueKey<String>(
+                                  'page-scroll-indicators',
+                                ),
+                                painter: _ScrollIndicatorPainter(
+                                  offset: Offset(
+                                    _offset.dx.clamp(0, _maxScroll.dx),
+                                    _offset.dy.clamp(0, _maxScroll.dy),
+                                  ),
+                                  maxScroll: _maxScroll,
+                                  color: colors.textSecondary.withValues(
+                                    alpha: 0.45,
+                                  ),
+                                ),
+                              ),
+                            ),
+                          if (widget.onPullToAddPage != null)
+                            IgnorePointer(
+                              child: _PullToAddIndicator(
+                                pull: _pull,
+                                distance: widget.pullToAddDistance,
+                              ),
+                            ),
+                        ],
                       ),
                     ),
-                  if (widget.onPullToAddPage != null)
-                    IgnorePointer(
-                      child: _PullToAddIndicator(
-                        pull: _pull,
-                        distance: widget.pullToAddDistance,
-                      ),
-                    ),
-                ],
+                  ],
+                ),
               ),
             ),
           ),
@@ -1307,6 +1459,9 @@ class _ZoomSnapshotPainter extends SnapshotPainter {
   /// Fills what the picture does not reach.
   Color backdrop = const Color(0x00000000);
 
+  /// How far past the area, along each axis, the picture reaches.
+  Offset margin = Offset.zero;
+
   @override
   void paint(
     PaintingContext context,
@@ -1328,10 +1483,12 @@ class _ZoomSnapshotPainter extends SnapshotPainter {
   ) {
     final Canvas canvas = context.canvas;
     canvas.drawRect(offset & size, Paint()..color = backdrop);
+    // The placement is in the area's coordinates; the picture starts [margin]
+    // before the area does.
     canvas.drawImageRect(
       image,
       Offset.zero & sourceSize,
-      (offset + _placement.origin) & (size * _placement.scale),
+      (offset + margin + _placement.apply(-margin)) & (size * _placement.scale),
       Paint()..filterQuality = FilterQuality.low,
     );
   }
@@ -1444,17 +1601,22 @@ class _ColumnLayout {
   }) {
     double y = 0;
     double right = viewport.width;
+    double left = double.infinity;
+    double contentRight = 0;
     for (final PageGeometry page in pages) {
       if (rects.isNotEmpty) {
-        y += gap;
+        y += gap * zoom;
       }
       final Size display = page.displaySize * zoom;
       final double x = math.max(0, (viewport.width - display.width) / 2);
       rects.add(Rect.fromLTWH(x, y, display.width, display.height));
       y += display.height;
       right = math.max(right, x + display.width);
+      left = math.min(left, x);
+      contentRight = math.max(contentRight, x + display.width);
     }
     size = Size(right, y);
+    content = Rect.fromLTRB(left, 0, contentRight, y);
     top = math.max(y < viewport.height ? (viewport.height - y) / 2 : 0, lead);
   }
 
@@ -1465,6 +1627,9 @@ class _ColumnLayout {
   final double lead;
   final List<Rect> rects = <Rect>[];
   late final Size size;
+
+  /// The box round the pages.
+  late final Rect content;
 
   /// How far a column shorter than the area is moved down to center it,
   /// or the lead kept above the first page, whichever is more.

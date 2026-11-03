@@ -317,20 +317,18 @@ void main() {
     );
 
     final String drawing = AiPrompts.systemFor(notationEnabled: true);
-    // Finishing the user's drawing adds to it; it never copies it.
+    expect(drawing, contains('Interact with that SVG'));
+    // The note stays the user's, and each stroke names its paragraph.
     expect(drawing, contains('existing-ink paths in the selected SVG'));
-    expect(drawing, contains('add only what is missing'));
-    expect(drawing, contains('never a second copy of a shape'));
-    expect(drawing, contains("Do not redraw the user's note"));
+    expect(drawing, contains("annotate directly on the user's strokes"));
+    expect(drawing, contains("do not redraw the user's note"));
+    expect(drawing, contains('data-etonia-paragraph="N"'));
+    expect(drawing, contains('data-etonia-line'));
     // Words become the user's own handwriting, kept as SVG paths.
     expect(drawing, contains('user-configured handwriting'));
-    // Line art is drawn as a pen draws it, not cleaned up for the app.
-    expect(drawing, contains('sketching quickly with a pen on paper'));
-    expect(drawing, contains('no jitter or wiggles'));
-    expect(drawing, contains('the pen lifting at each corner'));
-    expect(drawing, isNot(contains('clean and simple')));
-    expect(drawing, isNot(contains('is ambiguous')));
-    expect(drawing, isNot(contains('op amp')));
+    // How to annotate is the model's choice.
+    expect(drawing, isNot(contains('sketching quickly')));
+    expect(drawing, isNot(contains('margin note')));
   });
 
   test('typed messages and follow-ups carry the history in order', () async {
@@ -783,6 +781,147 @@ void main() {
     // Adding the drawing to the chat does not draw it into the image twice.
     assistant.addToContext(_selectionOf(ink, <int>[0, 2, 3]));
     expect(assistant.context, same(drawn));
+  });
+
+  group('opening with nothing selected', () {
+    final Object pageOne = Object();
+    final Object pageTwo = Object();
+    late Object shown;
+    late AiAssistantController assistant;
+
+    setUp(() {
+      shown = pageOne;
+      assistant = AiAssistantController(
+        client: rig.client,
+        renderer: rig.renderer,
+        shownPage: () => shown,
+      );
+      addTearDown(assistant.dispose);
+    });
+
+    Future<void> answer(String question) async {
+      assistant.send(question);
+      rig.client.answer('Answer');
+      await pumpEventQueue();
+    }
+
+    test('resumes a chat had on the page shown', () async {
+      assistant.show();
+      await answer('Question');
+      final AiSelectionContext context = assistant.context!;
+
+      assistant
+        ..close()
+        ..show();
+
+      expect(assistant.isOpen, isTrue);
+      expect(assistant.context, same(context));
+      expect(_texts(assistant), <String>['user: Question', 'model: Answer']);
+    });
+
+    test(
+      'does not resume a chat had on another page, until back there',
+      () async {
+        assistant.show();
+        await answer('Question');
+        final AiSelectionContext context = assistant.context!;
+        assistant.close();
+
+        shown = pageTwo;
+        assistant.show();
+        expect(assistant.isOpen, isTrue);
+        expect(assistant.context, isNull);
+        expect(assistant.messages, isEmpty);
+        assistant.close();
+
+        shown = pageOne;
+        assistant.show();
+        expect(assistant.context, same(context));
+        expect(_texts(assistant), <String>['user: Question', 'model: Answer']);
+      },
+    );
+
+    test('a chat about ink lies on the page that ink was chosen on', () async {
+      assistant.open(
+        selectInk(rig.ink, _top),
+        brightness: Brightness.light,
+        background: Colors.white,
+        page: pageOne,
+      );
+      await pumpEventQueue();
+      final AiSelectionContext context = assistant.context!;
+      assistant.close();
+
+      shown = pageTwo;
+      assistant.show();
+      expect(assistant.context, isNull);
+      assistant.close();
+
+      shown = pageOne;
+      assistant.show();
+      expect(assistant.context, same(context));
+    });
+
+    test('a chat continued on another page lies there too', () async {
+      assistant.show();
+      await answer('First');
+      shown = pageTwo;
+      await answer('Second');
+      final AiSelectionContext context = assistant.context!;
+
+      assistant
+        ..close()
+        ..show();
+      expect(assistant.context, same(context));
+      assistant.close();
+
+      shown = pageOne;
+      assistant.show();
+      expect(assistant.context, same(context));
+    });
+
+    test(
+      'a chat started on the new page is the last one from then on',
+      () async {
+        assistant.show();
+        await answer('On one');
+        assistant.close();
+
+        shown = pageTwo;
+        assistant.show();
+        await answer('On two');
+        final AiSelectionContext two = assistant.context!;
+        expect(_texts(assistant), <String>['user: On two', 'model: Answer']);
+        assistant.close();
+
+        shown = pageOne;
+        assistant.show();
+        expect(assistant.context, isNull);
+        assistant.close();
+
+        shown = pageTwo;
+        assistant.show();
+        expect(assistant.context, same(two));
+      },
+    );
+
+    test('an answer arriving for the chat left behind is kept', () async {
+      assistant.show();
+      assistant.send('Question');
+      assistant.close();
+
+      shown = pageTwo;
+      assistant.show();
+      expect(assistant.requestState, AiRequestState.idle);
+      rig.client.answer('Answer');
+      await pumpEventQueue();
+      expect(assistant.messages, isEmpty);
+      assistant.close();
+
+      shown = pageOne;
+      assistant.show();
+      expect(_texts(assistant), <String>['user: Question', 'model: Answer']);
+    });
   });
 
   test('closing keeps everything; the same selection reopens it', () async {

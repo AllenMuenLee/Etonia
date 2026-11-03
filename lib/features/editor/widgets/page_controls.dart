@@ -548,239 +548,68 @@ class _AddMenuButtonState extends State<AddMenuButton> {
   }
 }
 
-/// Hangs the page overview under [child], the top-left card that holds its
-/// button. Unlike a dialog it leaves the top bar and the cards across the top
-/// usable while it shows, so stepping through pages there updates the grid in
-/// place and the grid button closes it again. A press on the page, Escape, or
-/// choosing a page closes it too.
-class PageOverviewAnchor extends StatefulWidget {
-  const PageOverviewAnchor({
-    super.key,
-    required this.open,
-    required this.document,
-    required this.writingArea,
-    this.config = const PageConfig(),
-    this.loadOutline,
-    required this.child,
-  });
-
-  final ValueNotifier<bool> open;
-  final NoteDocument document;
-  final Size writingArea;
-  final PageConfig config;
-
-  /// Reads the outline of a PDF in the note, to choose pages by chapter.
-  /// Without it the overview shows pages only.
-  final PdfOutlineLoader? loadOutline;
-  final Widget child;
-
-  @override
-  State<PageOverviewAnchor> createState() => _PageOverviewAnchorState();
-}
-
-class _PageOverviewAnchorState extends State<PageOverviewAnchor>
-    with SingleTickerProviderStateMixin {
-  final LayerLink _link = LayerLink();
-  final OverlayPortalController _portal = OverlayPortalController();
-  // Made in initState, not lazily: an overview never opened would otherwise
-  // first create its ticker in dispose, from a deactivated context.
-  late final AnimationController _reveal;
-  late final CurvedAnimation _curved;
-  late final Animation<double> _scale;
-
-  /// Whether pages or chapters show, kept between openings.
-  final ValueNotifier<PageOverviewView> _view = ValueNotifier<PageOverviewView>(
-    PageOverviewView.pages,
-  );
-
-  /// The note's chapters, read when the overview first opens.
-  NoteChapterIndex? _chapters;
-
-  @override
-  void initState() {
-    super.initState();
-    _reveal = AnimationController(vsync: this)
-      ..addStatusListener(_onRevealStatus);
-    _curved = CurvedAnimation(
-      parent: _reveal,
-      curve: AppMotion.fadeInCurve,
-      reverseCurve: AppMotion.fadeOutCurve,
-    );
-    _scale = Tween<double>(begin: 0.94, end: 1).animate(_curved);
-    widget.open.addListener(_sync);
-    if (widget.open.value) {
-      _indexChapters();
-      _reveal.value = 1;
-      _portal.show();
-    }
-  }
-
-  @override
-  void didUpdateWidget(PageOverviewAnchor oldWidget) {
-    super.didUpdateWidget(oldWidget);
-    if (oldWidget.document != widget.document ||
-        oldWidget.loadOutline != widget.loadOutline) {
-      _chapters?.dispose();
-      _chapters = null;
-      if (widget.open.value) _indexChapters();
-    }
-    if (oldWidget.open != widget.open) {
-      oldWidget.open.removeListener(_sync);
-      widget.open.addListener(_sync);
-      _sync();
-    }
-  }
-
-  void _indexChapters() {
-    final PdfOutlineLoader? loadOutline = widget.loadOutline;
-    if (loadOutline == null || _chapters != null) return;
-    _chapters = NoteChapterIndex(
-      document: widget.document,
-      loadOutline: loadOutline,
-    );
-  }
-
-  void _sync() {
-    if (widget.open.value) {
-      _indexChapters();
-      _reveal.duration = AppMotion.resolve(context, AppMotion.snappy.duration);
-      _portal.show();
-      _reveal.forward();
-    } else if (_reveal.isDismissed) {
-      _portal.hide();
-    } else {
-      _reveal.reverseDuration = AppMotion.resolve(context, AppMotion.fadeOut);
-      _reveal.reverse();
-    }
-  }
-
-  void _onRevealStatus(AnimationStatus status) {
-    if (status == AnimationStatus.dismissed && _portal.isShowing) {
-      _portal.hide();
-    }
-  }
-
-  void _close() => widget.open.value = false;
-
-  @override
-  void dispose() {
-    widget.open.removeListener(_sync);
-    _chapters?.dispose();
-    _view.dispose();
-    _curved.dispose();
-    _reveal.dispose();
-    super.dispose();
-  }
-
-  Widget _buildOverlay(BuildContext context) {
-    final MediaQueryData media = MediaQuery.of(context);
-    final RenderObject? anchor = this.context.findRenderObject();
-    // Where the card ends, in the overlay's coordinates: the page starts
-    // below it.
-    final Offset corner = anchor is RenderBox && anchor.hasSize
-        ? anchor.localToGlobal(anchor.size.bottomLeft(Offset.zero))
-        : Offset(0, media.padding.top + AppSizes.appBarHeight);
-    const double gap = AppSpacing.xs;
-    final double maxWidth = math.min(
-      PageOverviewPanel.width,
-      media.size.width - corner.dx - 2 * gap - media.padding.right,
-    );
-    final double maxHeight =
-        media.size.height - corner.dy - 2 * gap - media.padding.bottom;
-    return ValueListenableBuilder<bool>(
-      valueListenable: widget.open,
-      builder: (BuildContext context, bool open, Widget? panel) {
-        // While it fades out, presses already reach what is beneath.
-        return IgnorePointer(ignoring: !open, child: panel);
-      },
-      child: Stack(
-        children: <Widget>[
-          // Only the page closes it: the top bar and the cards beside this
-          // one stay live. The press that closes it leaves no mark.
-          Positioned(
-            left: 0,
-            right: 0,
-            top: corner.dy,
-            bottom: 0,
-            child: Semantics(
-              label: 'Close page overview',
-              onTap: _close,
-              child: Listener(
-                behavior: HitTestBehavior.opaque,
-                onPointerDown: (_) => _close(),
-              ),
-            ),
-          ),
-          Positioned(
-            left: 0,
-            top: 0,
-            child: CompositedTransformFollower(
-              link: _link,
-              targetAnchor: Alignment.bottomLeft,
-              offset: const Offset(gap, gap),
-              child: ConstrainedBox(
-                constraints: BoxConstraints(
-                  maxWidth: math.max(0, maxWidth),
-                  maxHeight: math.max(0, maxHeight),
-                ),
-                child: CallbackShortcuts(
-                  bindings: <ShortcutActivator, VoidCallback>{
-                    const SingleActivator(LogicalKeyboardKey.escape): _close,
-                  },
-                  child: Focus(
-                    autofocus: true,
-                    skipTraversal: true,
-                    child: FadeTransition(
-                      opacity: _curved,
-                      child: ScaleTransition(
-                        scale: _scale,
-                        alignment: Alignment.topLeft,
-                        // The panel's tooltips get an overlay of their own,
-                        // inside the follower: Flutter cannot place one
-                        // across a CompositedTransformFollower, so hovering
-                        // an arrow with a mouse or a pencil threw.
-                        child: Overlay.wrap(
-                          alwaysSizeToContent: true,
-                          clipBehavior: Clip.none,
-                          child: PageOverviewPanel(
-                            document: widget.document,
-                            writingArea: widget.writingArea,
-                            config: widget.config,
-                            chapters: _chapters,
-                            view: _view,
-                            onSelected: _close,
-                          ),
-                        ),
-                      ),
-                    ),
-                  ),
-                ),
-              ),
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return OverlayPortal(
-      controller: _portal,
-      overlayChildBuilder: _buildOverlay,
-      child: CompositedTransformTarget(link: _link, child: widget.child),
-    );
-  }
-}
-
 /// What the page overview lists: every page, or the chapters of the PDFs in
 /// the note.
 enum PageOverviewView { pages, chapters }
 
+/// The page overview as the left side of the editor, top to bottom: eases in
+/// from that edge when it opens, and Escape closes it.
+class PageOverviewSidebar extends StatelessWidget {
+  const PageOverviewSidebar({
+    super.key,
+    required this.child,
+    required this.onClose,
+  });
+
+  final Widget child;
+  final VoidCallback onClose;
+
+  @override
+  Widget build(BuildContext context) {
+    final AppColors colors = AppColors.of(context);
+    final BorderSide edge = BorderSide(
+      color: colors.divider,
+      width: AppSizes.hairline,
+    );
+    return Semantics(
+      container: true,
+      explicitChildNodes: true,
+      label: 'Page overview',
+      child: CallbackShortcuts(
+        bindings: <ShortcutActivator, VoidCallback>{
+          const SingleActivator(LogicalKeyboardKey.escape): onClose,
+        },
+        child: Focus(
+          autofocus: true,
+          skipTraversal: true,
+          child: TweenAnimationBuilder<double>(
+            tween: Tween<double>(begin: 1, end: 0),
+            duration: AppMotion.resolve(context, AppMotion.smooth.duration),
+            curve: AppMotion.fadeInCurve,
+            builder: (BuildContext context, double hidden, Widget? panel) {
+              return FractionalTranslation(
+                translation: Offset(-hidden * 0.12, 0),
+                child: Opacity(opacity: 1 - hidden, child: panel),
+              );
+            },
+            child: DecoratedBox(
+              position: DecorationPosition.foreground,
+              decoration: BoxDecoration(
+                border: Border(top: edge, right: edge),
+              ),
+              child: child,
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
 /// A grid of the note's pages under a header with the page number, which can
 /// be typed into to go to a page. Selecting a thumbnail changes the current
-/// page and calls [onSelected], so the overview can close and the page is
-/// immediately usable.
+/// page and calls [onSelected]. The grid opens on the current page and keeps
+/// it in view as it changes.
 ///
 /// When the note has [chapters], from the outline of a PDF in it, the
 /// header offers them too, to go to a chapter rather than a page; [view]
@@ -794,6 +623,7 @@ class PageOverviewPanel extends StatefulWidget {
     this.chapters,
     this.view,
     this.onSelected,
+    this.onClose,
   });
 
   static const double width = 360;
@@ -806,6 +636,9 @@ class PageOverviewPanel extends StatefulWidget {
   /// Owned by the panel when not given.
   final ValueNotifier<PageOverviewView>? view;
   final VoidCallback? onSelected;
+
+  /// Offers a button to close the panel, where it covers what else would.
+  final VoidCallback? onClose;
 
   @override
   State<PageOverviewPanel> createState() => _PageOverviewPanelState();
@@ -826,6 +659,208 @@ class _PageOverviewPanelState extends State<PageOverviewPanel> {
     super.dispose();
   }
 
+  @override
+  Widget build(BuildContext context) {
+    final AppColors colors = AppColors.of(context);
+    final TextTheme text = Theme.of(context).textTheme;
+    final NoteChapterIndex? chapterIndex = widget.chapters;
+    return Material(
+      color: colors.surface,
+      child: ListenableBuilder(
+        listenable: Listenable.merge(<Listenable?>[
+          document,
+          chapterIndex,
+          _view,
+        ]),
+        builder: (BuildContext context, Widget? child) {
+          final List<NoteChapter> chapters =
+              chapterIndex?.chapters ?? const <NoteChapter>[];
+          final PageOverviewView view = chapters.isEmpty
+              ? PageOverviewView.pages
+              : _view.value;
+          return Padding(
+            padding: const EdgeInsets.fromLTRB(
+              AppSpacing.md,
+              AppSpacing.xs,
+              AppSpacing.xs,
+              0,
+            ),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: <Widget>[
+                Row(
+                  children: <Widget>[
+                    Expanded(
+                      child: Semantics(
+                        header: true,
+                        child: Text('Pages', style: text.titleMedium),
+                      ),
+                    ),
+                    // The arrows flank the number they change; stepping
+                    // keeps the overview open, so the grid follows along.
+                    ToolbarIconButton(
+                      tooltip: 'Previous page',
+                      onPressed: document.canGoBack
+                          ? document.previousPage
+                          : null,
+                      icon: AppIcons.previous,
+                    ),
+                    _PageNumberField(document: document),
+                    ToolbarIconButton(
+                      tooltip: 'Next page',
+                      onPressed: document.canGoForward
+                          ? document.nextPage
+                          : null,
+                      icon: AppIcons.disclosure,
+                    ),
+                    if (widget.onClose != null)
+                      ToolbarIconButton(
+                        tooltip: 'Close page overview',
+                        onPressed: widget.onClose,
+                        icon: AppIcons.close,
+                      ),
+                  ],
+                ),
+                if (chapters.isNotEmpty) ...<Widget>[
+                  const SizedBox(height: AppSpacing.xs),
+                  Padding(
+                    padding: const EdgeInsetsDirectional.only(
+                      end: AppSpacing.xs,
+                    ),
+                    child: SegmentedChoice<PageOverviewView>(
+                      options: PageOverviewView.values,
+                      selected: view,
+                      labelOf: (PageOverviewView option) => switch (option) {
+                        PageOverviewView.pages => 'Pages',
+                        PageOverviewView.chapters => 'Chapters',
+                      },
+                      iconOf: (PageOverviewView option) => switch (option) {
+                        PageOverviewView.pages => AppIcons.gridView,
+                        PageOverviewView.chapters => AppIcons.listView,
+                      },
+                      keyOf: (PageOverviewView option) =>
+                          ValueKey<String>('page-overview-${option.name}'),
+                      onSelected: (PageOverviewView option) =>
+                          _view.value = option,
+                    ),
+                  ),
+                ],
+                const SizedBox(height: AppSpacing.xs),
+                Expanded(
+                  child: view == PageOverviewView.chapters
+                      ? PageChapterList(
+                          document: document,
+                          chapters: chapters,
+                          onSelected: widget.onSelected,
+                        )
+                      : _PageOverviewGrid(
+                          document: document,
+                          current: document.currentIndex,
+                          writingArea: widget.writingArea,
+                          config: widget.config,
+                          onSelected: widget.onSelected,
+                        ),
+                ),
+              ],
+            ),
+          );
+        },
+      ),
+    );
+  }
+}
+
+/// The thumbnails of every page, scrolled to [current]: centered on it when
+/// the grid first shows, and brought back to it when it moves out of view.
+class _PageOverviewGrid extends StatefulWidget {
+  const _PageOverviewGrid({
+    required this.document,
+    required this.current,
+    required this.writingArea,
+    required this.config,
+    required this.onSelected,
+  });
+
+  static const double _maxTileWidth = 148;
+  static const double _tileHeight = 174;
+  static const double _spacing = AppSpacing.sm;
+  static const double _rowHeight = _tileHeight + _spacing;
+  static const double _bottomPadding = AppSpacing.md;
+
+  /// The header's capsule reaches nearer the edge than the thumbnails do.
+  static const double _endPadding = AppSpacing.xs;
+
+  final NoteDocument document;
+  final int current;
+  final Size writingArea;
+  final PageConfig config;
+  final VoidCallback? onSelected;
+
+  @override
+  State<_PageOverviewGrid> createState() => _PageOverviewGridState();
+}
+
+class _PageOverviewGridState extends State<_PageOverviewGrid> {
+  /// Made at the first layout, when the offset of the current page is known,
+  /// so that the grid never shows the wrong pages first.
+  ScrollController? _scroll;
+  int _columns = 1;
+  double _viewport = 0;
+
+  NoteDocument get document => widget.document;
+
+  /// The scroll offset that centers the row of [index], as far as the grid
+  /// can scroll.
+  double _offsetCentering(int index) {
+    final int rows = (document.pageCount / _columns).ceil();
+    final double content =
+        rows * _PageOverviewGrid._rowHeight -
+        _PageOverviewGrid._spacing +
+        _PageOverviewGrid._bottomPadding;
+    final double centered =
+        (index ~/ _columns) * _PageOverviewGrid._rowHeight -
+        (_viewport - _PageOverviewGrid._tileHeight) / 2;
+    return centered.clamp(0.0, math.max(0.0, content - _viewport));
+  }
+
+  @override
+  void didUpdateWidget(_PageOverviewGrid oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.current == widget.current) return;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) _revealCurrent();
+    });
+  }
+
+  void _revealCurrent() {
+    final ScrollController? scroll = _scroll;
+    if (scroll == null || !scroll.hasClients) return;
+    final double top =
+        (widget.current ~/ _columns) * _PageOverviewGrid._rowHeight;
+    final double bottom = top + _PageOverviewGrid._tileHeight;
+    if (top >= scroll.offset && bottom <= scroll.offset + _viewport) return;
+    final double target = _offsetCentering(widget.current);
+    final Duration duration = AppMotion.resolve(
+      context,
+      AppMotion.snappy.duration,
+    );
+    if (duration == Duration.zero) {
+      scroll.jumpTo(target);
+    } else {
+      scroll.animateTo(
+        target,
+        duration: duration,
+        curve: AppMotion.fadeInCurve,
+      );
+    }
+  }
+
+  @override
+  void dispose() {
+    _scroll?.dispose();
+    super.dispose();
+  }
+
   /// The part of [page] its thumbnail shows: its paper, or the frame round
   /// a whiteboard's ink.
   Rect _paperFor(NotePage page) {
@@ -840,195 +875,94 @@ class _PageOverviewPanelState extends State<PageOverviewPanel> {
 
   @override
   Widget build(BuildContext context) {
+    return LayoutBuilder(
+      builder: (BuildContext context, BoxConstraints constraints) {
+        final double width =
+            constraints.maxWidth - _PageOverviewGrid._endPadding;
+        _columns = math.max(
+          1,
+          (width /
+                  (_PageOverviewGrid._maxTileWidth +
+                      _PageOverviewGrid._spacing))
+              .ceil(),
+        );
+        _viewport = constraints.maxHeight;
+        final ScrollController scroll = _scroll ??= ScrollController(
+          initialScrollOffset: _offsetCentering(widget.current),
+        );
+        return GridView.builder(
+          key: const ValueKey<String>('page-overview-grid'),
+          controller: scroll,
+          padding: const EdgeInsetsDirectional.only(
+            end: _PageOverviewGrid._endPadding,
+            bottom: _PageOverviewGrid._bottomPadding,
+          ),
+          gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
+            crossAxisCount: _columns,
+            mainAxisExtent: _PageOverviewGrid._tileHeight,
+            crossAxisSpacing: _PageOverviewGrid._spacing,
+            mainAxisSpacing: _PageOverviewGrid._spacing,
+          ),
+          itemCount: document.pageCount,
+          itemBuilder: _buildTile,
+        );
+      },
+    );
+  }
+
+  Widget _buildTile(BuildContext context, int index) {
     final AppColors colors = AppColors.of(context);
     final TextTheme text = Theme.of(context).textTheme;
-    final NoteChapterIndex? chapterIndex = widget.chapters;
-    // Opaque: it hangs over the palette, whose buttons would otherwise show
-    // through its header like controls of its own.
-    return GlassSurface(
-      color: colors.surface,
-      borderRadius: AppBorderRadius.large,
-      boxShadow: AppShadows.floating(colors),
-      child: Material(
-        type: MaterialType.transparency,
-        child: ListenableBuilder(
-          listenable: Listenable.merge(<Listenable?>[
-            document,
-            chapterIndex,
-            _view,
-          ]),
-          builder: (BuildContext context, Widget? child) {
-            final List<NoteChapter> chapters =
-                chapterIndex?.chapters ?? const <NoteChapter>[];
-            final PageOverviewView view = chapters.isEmpty
-                ? PageOverviewView.pages
-                : _view.value;
-            return Padding(
-              padding: const EdgeInsets.fromLTRB(
-                AppSpacing.md,
-                AppSpacing.xs,
-                AppSpacing.xs,
-                AppSpacing.md,
-              ),
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                crossAxisAlignment: CrossAxisAlignment.stretch,
-                children: <Widget>[
-                  Row(
-                    children: <Widget>[
-                      Expanded(
-                        child: Semantics(
-                          header: true,
-                          child: Text('Pages', style: text.titleMedium),
-                        ),
-                      ),
-                      // The arrows flank the number they change; stepping
-                      // keeps the overview open, so the grid follows along.
-                      ToolbarIconButton(
-                        tooltip: 'Previous page',
-                        onPressed: document.canGoBack
-                            ? document.previousPage
-                            : null,
-                        icon: AppIcons.previous,
-                      ),
-                      _PageNumberField(document: document),
-                      ToolbarIconButton(
-                        tooltip: 'Next page',
-                        onPressed: document.canGoForward
-                            ? document.nextPage
-                            : null,
-                        icon: AppIcons.disclosure,
-                      ),
-                    ],
+    final NotePage page = document.pages[index];
+    final Rect paper = _paperFor(page);
+    final bool selected = index == widget.current;
+    return Semantics(
+      button: true,
+      selected: selected,
+      label: PageNavigationControls.describe(index, document.pageCount),
+      child: InkWell(
+        key: ValueKey<String>('page-thumbnail-$index'),
+        onTap: () => _select(index),
+        borderRadius: AppBorderRadius.medium,
+        child: AnimatedContainer(
+          duration: AppMotion.resolve(context, AppMotion.snappy.duration),
+          padding: const EdgeInsets.all(AppSpacing.xs),
+          decoration: BoxDecoration(
+            color: selected ? colors.selected : null,
+            borderRadius: AppBorderRadius.medium,
+            border: Border.all(
+              color: selected ? colors.accent : colors.divider,
+              width: selected ? 2 : AppSizes.hairline,
+            ),
+          ),
+          child: Column(
+            children: <Widget>[
+              Expanded(
+                child: Center(
+                  child: PagePreview(
+                    paper: paper.size,
+                    background: page.setup.background,
+                    config: widget.config,
+                    infinite:
+                        !document.isImportedPdf &&
+                        page.setup.size == PageSize.infinite,
+                    maxSize: const Size(116, 132),
+                    child: _PageInkPreview(page: page, paper: paper),
                   ),
-                  if (chapters.isNotEmpty) ...<Widget>[
-                    const SizedBox(height: AppSpacing.xs),
-                    Padding(
-                      padding: const EdgeInsetsDirectional.only(
-                        end: AppSpacing.xs,
-                      ),
-                      child: SegmentedChoice<PageOverviewView>(
-                        options: PageOverviewView.values,
-                        selected: view,
-                        labelOf: (PageOverviewView option) => switch (option) {
-                          PageOverviewView.pages => 'Pages',
-                          PageOverviewView.chapters => 'Chapters',
-                        },
-                        iconOf: (PageOverviewView option) => switch (option) {
-                          PageOverviewView.pages => AppIcons.gridView,
-                          PageOverviewView.chapters => AppIcons.listView,
-                        },
-                        keyOf: (PageOverviewView option) =>
-                            ValueKey<String>('page-overview-${option.name}'),
-                        onSelected: (PageOverviewView option) =>
-                            _view.value = option,
-                      ),
-                    ),
+                ),
+              ),
+              const SizedBox(height: AppSpacing.xs),
+              Text(
+                '${index + 1}',
+                style: text.labelMedium?.copyWith(
+                  color: selected ? colors.accent : colors.textPrimary,
+                  fontFeatures: const <FontFeature>[
+                    FontFeature.tabularFigures(),
                   ],
-                  const SizedBox(height: AppSpacing.xs),
-                  Flexible(
-                    child: view == PageOverviewView.chapters
-                        ? PageChapterList(
-                            document: document,
-                            chapters: chapters,
-                            onSelected: widget.onSelected,
-                          )
-                        : GridView.builder(
-                            key: const ValueKey<String>('page-overview-grid'),
-                            shrinkWrap: true,
-                            // The header's capsule reaches nearer the edge than
-                            // the thumbnails do.
-                            padding: const EdgeInsetsDirectional.only(
-                              end: AppSpacing.xs,
-                            ),
-                            gridDelegate:
-                                const SliverGridDelegateWithMaxCrossAxisExtent(
-                                  maxCrossAxisExtent: 148,
-                                  mainAxisExtent: 174,
-                                  crossAxisSpacing: AppSpacing.sm,
-                                  mainAxisSpacing: AppSpacing.sm,
-                                ),
-                            itemCount: document.pageCount,
-                            itemBuilder: (BuildContext context, int index) {
-                              final NotePage page = document.pages[index];
-                              final Rect paper = _paperFor(page);
-                              final bool selected =
-                                  index == document.currentIndex;
-                              return Semantics(
-                                button: true,
-                                selected: selected,
-                                label: PageNavigationControls.describe(
-                                  index,
-                                  document.pageCount,
-                                ),
-                                child: InkWell(
-                                  key: ValueKey<String>(
-                                    'page-thumbnail-$index',
-                                  ),
-                                  onTap: () => _select(index),
-                                  borderRadius: AppBorderRadius.medium,
-                                  child: AnimatedContainer(
-                                    duration: AppMotion.resolve(
-                                      context,
-                                      AppMotion.snappy.duration,
-                                    ),
-                                    padding: const EdgeInsets.all(
-                                      AppSpacing.xs,
-                                    ),
-                                    decoration: BoxDecoration(
-                                      color: selected ? colors.selected : null,
-                                      borderRadius: AppBorderRadius.medium,
-                                      border: Border.all(
-                                        color: selected
-                                            ? colors.accent
-                                            : colors.divider,
-                                        width: selected ? 2 : AppSizes.hairline,
-                                      ),
-                                    ),
-                                    child: Column(
-                                      children: <Widget>[
-                                        Expanded(
-                                          child: Center(
-                                            child: PagePreview(
-                                              paper: paper.size,
-                                              background: page.setup.background,
-                                              config: widget.config,
-                                              infinite:
-                                                  !document.isImportedPdf &&
-                                                  page.setup.size ==
-                                                      PageSize.infinite,
-                                              maxSize: const Size(116, 132),
-                                              child: _PageInkPreview(
-                                                page: page,
-                                                paper: paper,
-                                              ),
-                                            ),
-                                          ),
-                                        ),
-                                        const SizedBox(height: AppSpacing.xs),
-                                        Text(
-                                          '${index + 1}',
-                                          style: text.labelMedium?.copyWith(
-                                            color: selected
-                                                ? colors.accent
-                                                : colors.textPrimary,
-                                            fontFeatures: const <FontFeature>[
-                                              FontFeature.tabularFigures(),
-                                            ],
-                                          ),
-                                        ),
-                                      ],
-                                    ),
-                                  ),
-                                ),
-                              );
-                            },
-                          ),
-                  ),
-                ],
+                ),
               ),
-            );
-          },
+            ],
+          ),
         ),
       ),
     );

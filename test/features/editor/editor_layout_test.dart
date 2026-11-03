@@ -690,14 +690,13 @@ void main() {
     ) async {
       await pumpApp(tester);
 
-      // The six tools, the arrow that unfolds the recordings and the ruler,
-      // and the button that customizes them.
-      expect(find.byType(PaletteButton), findsNWidgets(8));
-      expect(find.byTooltip('Customize toolbar'), findsOneWidget);
+      // The five tools, and the arrow that unfolds the others.
+      expect(find.byType(PaletteButton), findsNWidgets(6));
       expect(find.byTooltip('Expand toolbar'), findsOneWidget);
+      expect(find.byTooltip('Customize toolbar'), findsNothing);
       expect(find.byTooltip('Recordings'), findsNothing);
       expect(find.byTooltip('Show ruler'), findsNothing);
-      expect(find.byTooltip('Sticky note'), findsOneWidget);
+      expect(find.byTooltip('Sticky note'), findsNothing);
       expect(
         find.byKey(const ValueKey<String>('palette-surface')),
         findsOneWidget,

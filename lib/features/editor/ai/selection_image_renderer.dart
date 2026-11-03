@@ -295,6 +295,10 @@ class SelectionInkSnapshot {
     );
   }
 
+  /// Whether the picture of this holds raster content: a picture, a printed
+  /// page, or a sticky note, none of which an SVG can describe in detail.
+  bool get holdsPicture => bitmaps.isNotEmpty || stickies.isNotEmpty;
+
   /// This snapshot over [bitmaps] instead of its own.
   SelectionInkSnapshot withBitmaps(List<SnapshotBitmap> bitmaps) {
     return SelectionInkSnapshot._(

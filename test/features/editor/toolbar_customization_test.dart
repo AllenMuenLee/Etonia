@@ -5,6 +5,8 @@ import 'package:greatnote/features/editor/ink/eraser_settings.dart';
 import 'package:greatnote/features/editor/ink/pen_settings.dart';
 import 'package:greatnote/features/editor/ink/ruler.dart';
 import 'package:greatnote/features/editor/sticky/sticky_note.dart';
+import 'package:greatnote/features/editor/widgets/palette_button.dart';
+import 'package:greatnote/features/editor/widgets/sticky_options.dart';
 import 'package:greatnote/features/editor/widgets/tool_palette.dart';
 import 'package:greatnote/features/editor/widgets/toolbar_customizer.dart';
 import 'package:greatnote/features/editor/widgets/toolbar_layout.dart';
@@ -75,12 +77,17 @@ Future<ValueNotifier<ToolbarLayout>> _pumpPalette(
 
 double _x(WidgetTester tester, Finder finder) => tester.getCenter(finder).dx;
 
+Future<void> _unfold(WidgetTester tester) async {
+  await tester.tap(find.byTooltip('Expand toolbar'));
+  await tester.pumpAndSettle();
+}
+
 void main() {
   group('ToolbarLayout', () {
     test('round-trips through JSON', () {
       const ToolbarLayout layout = ToolbarLayout(
         shown: <PaletteItem>[PaletteItem.text, PaletteItem.pen],
-        folded: <PaletteItem>[PaletteItem.ruler],
+        folded: <PaletteItem>[PaletteItem.ruler, PaletteItem.customize],
       );
       expect(ToolbarLayout.fromJson(layout.toJson()), layout);
     });
@@ -99,6 +106,39 @@ void main() {
         layout.shown.length + layout.folded.length + layout.hidden.length,
         PaletteItem.values.length,
       );
+    });
+
+    test('folds the sticky note and the customize button by default', () {
+      expect(
+        ToolbarLayout.standard.folded,
+        containsAll(<PaletteItem>[PaletteItem.sticky, PaletteItem.customize]),
+      );
+      expect(ToolbarLayout.standard.shown, isNot(contains(PaletteItem.sticky)));
+    });
+
+    test('keeps a layout saved before the customize button was a tool', () {
+      final ToolbarLayout layout = ToolbarLayout.fromJson(<String, Object?>{
+        'shown': <String>['pen', 'sticky'],
+        'folded': <String>['ruler'],
+        'hidden': <String>['ai'],
+      });
+      expect(layout.shown.take(2), <PaletteItem>[
+        PaletteItem.pen,
+        PaletteItem.sticky,
+      ]);
+      expect(layout.folded, contains(PaletteItem.customize));
+      expect(layout.hidden, contains(PaletteItem.ai));
+    });
+
+    test('never hides the customize button', () {
+      expect(
+        ToolbarLayout.standard.hide(PaletteItem.customize),
+        ToolbarLayout.standard,
+      );
+      final ToolbarLayout read = ToolbarLayout.fromJson(<String, Object?>{
+        'hidden': <String>['customize'],
+      });
+      expect(read.hidden, isNot(contains(PaletteItem.customize)));
     });
 
     test('reads anything else as the standard layout', () {
@@ -137,22 +177,70 @@ void main() {
   });
 
   group('palette', () {
-    testWidgets('ends with the customize button', (WidgetTester tester) async {
+    testWidgets('folds the customize button away behind the arrow', (
+      WidgetTester tester,
+    ) async {
       await _pumpPalette(tester);
+      expect(find.byKey(_customize), findsNothing);
+      await _unfold(tester);
       final Finder toggle = find.byKey(
         const ValueKey<String>('palette-extension-toggle'),
       );
       expect(find.byKey(_customize), findsOneWidget);
-      expect(
-        _x(tester, find.byKey(_customize)),
-        greaterThan(_x(tester, toggle)),
+      expect(_x(tester, find.byKey(_customize)), lessThan(_x(tester, toggle)));
+    });
+
+    testWidgets('a folded sticky note fills its own selection', (
+      WidgetTester tester,
+    ) async {
+      await _pumpPalette(tester);
+      await _unfold(tester);
+      final Finder sticky = find.byKey(
+        const ValueKey<String>('sticky-note-tool'),
       );
+      await tester.tap(sticky);
+      await tester.pumpAndSettle();
+      final PaletteButton button = tester.widget<PaletteButton>(sticky);
+      expect(button.selected, isTrue);
+      expect(button.hostsSelection, isFalse);
+      expect(find.byType(StickyOptions), findsOneWidget);
+    });
+
+    testWidgets('the customize button can move to the toolbar, not to hidden', (
+      WidgetTester tester,
+    ) async {
+      final ValueNotifier<ToolbarLayout> layout = await _pumpPalette(tester);
+      await _unfold(tester);
+      await tester.tap(find.byKey(_customize));
+      await tester.pumpAndSettle();
+      expect(
+        find.byKey(const ValueKey<String>('toolbar-visibility-customize')),
+        findsNothing,
+      );
+
+      void reorder(int from, int to) => tester
+          .widget<ReorderableListView>(
+            find.byKey(const ValueKey<String>('toolbar-customizer-list')),
+          )
+          .onReorderItem!(from, to);
+
+      // The headings, the tools, and the hidden group's placeholder, in
+      // order: the customize button is at 11, the placeholder at 13.
+      reorder(11, 13);
+      await tester.pumpAndSettle();
+      expect(layout.value, ToolbarLayout.standard);
+
+      reorder(11, 5);
+      await tester.pumpAndSettle();
+      expect(layout.value.shown, contains(PaletteItem.customize));
+      expect(layout.value.folded, isNot(contains(PaletteItem.customize)));
     });
 
     testWidgets('follows the layout as it changes', (
       WidgetTester tester,
     ) async {
       final ValueNotifier<ToolbarLayout> layout = await _pumpPalette(tester);
+      await _unfold(tester);
       final Finder sticky = find.byKey(
         const ValueKey<String>('sticky-note-tool'),
       );
@@ -186,6 +274,7 @@ void main() {
       WidgetTester tester,
     ) async {
       final ValueNotifier<ToolbarLayout> layout = await _pumpPalette(tester);
+      await _unfold(tester);
       await tester.tap(find.byKey(_customize));
       await tester.pumpAndSettle();
       expect(find.byType(ToolbarCustomizer), findsOneWidget);
@@ -202,7 +291,16 @@ void main() {
       final Finder eye = find.byKey(
         const ValueKey<String>('toolbar-visibility-eraser'),
       );
-      await tester.ensureVisible(eye);
+      await tester.scrollUntilVisible(
+        eye,
+        100,
+        scrollable: find
+            .descendant(
+              of: find.byKey(const ValueKey<String>('toolbar-customizer-list')),
+              matching: find.byType(Scrollable),
+            )
+            .first,
+      );
       await tester.pumpAndSettle();
       await tester.tap(eye);
       await tester.pumpAndSettle();

@@ -84,8 +84,6 @@ class GeminiAiClient implements AiClient {
             },
             if (selectionSvg != null)
               <String, Object?>{'text': aiSelectionSvgText(selectionSvg)},
-            if (request.sourceLines case final String lines)
-              <String, Object?>{'text': aiSourceLinesText(lines)},
           ],
           if (request.noteImage case final note? when index == lastUser)
             <String, Object?>{'text': aiNoteMetadata(note)},

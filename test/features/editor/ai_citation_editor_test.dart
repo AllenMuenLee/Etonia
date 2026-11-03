@@ -4,7 +4,6 @@ import 'package:greatnote/features/editor/ai/ai_assistant_controller.dart';
 import 'package:greatnote/features/editor/ai/ai_citation.dart';
 import 'package:greatnote/features/editor/ai/ai_client.dart';
 import 'package:greatnote/features/editor/ai/ai_notation.dart';
-import 'package:greatnote/features/editor/document_io/svg_document.dart';
 import 'package:greatnote/features/editor/ink/ink_controller.dart';
 import 'package:greatnote/features/editor/ink/ink_palette.dart';
 import 'package:greatnote/features/editor/ink/ink_sample.dart';
@@ -24,8 +23,8 @@ Stroke _line(double y) => Stroke.fromPoints(
 void main() {
   autoScrollTests();
 
-  testWidgets('through the real editor: an answer cites the selection SVG, and '
-      'the strokes drawn for it name its paragraph', (
+  testWidgets('through the real editor: the notation model cites the selection '
+      'SVG, and the strokes it draws name their paragraph', (
     WidgetTester tester,
   ) async {
     final FakeAiClient client = FakeAiClient();
@@ -49,34 +48,28 @@ void main() {
     await settleAi(tester);
 
     final AiRequest request = client.requests.single;
-    // The model is told the same line numbers both ways.
     final List<String> svgLines = request.selectionSvg!.split('\n');
     expect(svgLines[4], contains('data-etonia-line="5"'));
     expect(svgLines[5], contains('data-etonia-line="6"'));
-    expect(request.sourceLines, contains('L5'));
-    expect(request.sourceLines, contains('L6'));
 
     final Size page = request.noteImage!.logicalSize;
     final int before = ink.strokes.length;
     client.answerResponse(
-      AiAssistantResponse(
-        message:
-            'The first line says this. [[L5]]\n\n'
-            'The second says that. [[L6]]',
-        notation: AiNotation.vector(
-          EditableSvg.parse(
-            '<svg xmlns="http://www.w3.org/2000/svg" data-etonia-version="1" '
-            'viewBox="0 0 ${page.width} ${page.height}" '
-            'data-etonia-bounds="100 200 200 80">'
-            '<desc data-etonia-role="message">Answer</desc>'
-            '<line data-etonia-paragraph="2" x1="100" y1="210" x2="280" '
-            'y2="210" stroke="black"/>'
-            '<text data-etonia-paragraph="1" x="100" y="260" '
-            'font-size="16">ok</text>'
-            '</svg>',
-            modelResponse: true,
-          ),
-        ),
+      AiAssistantResponse.parse(
+        '<svg xmlns="http://www.w3.org/2000/svg" data-etonia-version="1" '
+        'viewBox="0 0 ${page.width} ${page.height}" '
+        'data-etonia-bounds="100 200 200 80">'
+        '<desc data-etonia-role="message">The first line says this.\n\n'
+        'The second says that.</desc>'
+        '<desc data-etonia-role="citation" data-etonia-paragraph="1">[[L5]]'
+        '</desc>'
+        '<desc data-etonia-role="citation" data-etonia-paragraph="2">[[L6]]'
+        '</desc>'
+        '<line data-etonia-paragraph="2" x1="100" y1="210" x2="280" '
+        'y2="210" stroke="black"/>'
+        '<text data-etonia-paragraph="1" x="100" y="260" '
+        'font-size="16">ok</text>'
+        '</svg>',
       ),
     );
     await tester.pumpAndSettle();
@@ -138,11 +131,16 @@ void autoScrollTests() {
     final AiAssistantController assistant = tester
         .widget<AiAssistantPanel>(find.byType(AiAssistantPanel))
         .controller;
+    assistant.setNotationEnabled(true);
+    await tester.pump();
     assistant.send('Explain');
     await settleAi(tester);
     final Finder layer = find.byType(AiCitationHighlight).first;
-    client.answer(
-      'The top. [[L5]]\n\nAlso the top. [[L6]]\n\nFar down. [[L7]]',
+    client.answerResponse(
+      const AiAssistantResponse(
+        message: 'The top.\n\nAlso the top.\n\nFar down.',
+        citations: <int, String>{1: '[[L5]]', 2: '[[L6]]', 3: '[[L7]]'},
+      ),
     );
     await tester.pumpAndSettle();
 
