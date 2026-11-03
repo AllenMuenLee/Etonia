@@ -601,6 +601,9 @@ class SubscriptionController extends ChangeNotifier with AiUsageGate {
   }
 
   @override
+  bool get isOutOfTokens => remainingCreditsMicroUsd <= 0;
+
+  @override
   String get creditsLabel {
     if ((activePlan == null && !hasFreeCredit) ||
         remainingCreditsMicroUsd <= 0) {

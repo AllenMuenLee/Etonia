@@ -9,7 +9,9 @@ import 'package:greatnote/app/greatnote_app.dart';
 import 'package:greatnote/app/theme/app_tokens.dart';
 import 'package:greatnote/features/editor/ai/ai_citation.dart';
 import 'package:greatnote/features/editor/ai/ai_client.dart';
+import 'package:greatnote/features/editor/ai/ai_config.dart';
 import 'package:greatnote/features/editor/document_io/document_models.dart';
+import 'package:greatnote/features/editor/document_io/document_platform.dart';
 import 'package:greatnote/features/editor/document_io/svg_document.dart';
 import 'package:greatnote/features/editor/editor_screen.dart';
 import 'package:greatnote/features/editor/ink/eraser_settings.dart';
@@ -175,7 +177,236 @@ class _CountingRenderer implements StudyChunkRenderer {
   }
 }
 
+/// A fake PDF's words, by page.
+class _FakePdfText implements PdfTextExtractor {
+  _FakePdfText(this.pages);
+
+  final Map<int, List<PdfTextRun>> pages;
+  Object? error;
+  int reads = 0;
+
+  @override
+  Future<Map<int, List<PdfTextRun>>> extractText(
+    Uint8List bytes,
+    Set<int> pageIndices,
+  ) async {
+    reads++;
+    if (error case final Object error) throw error;
+    return <int, List<PdfTextRun>>{
+      for (final int index in pageIndices)
+        index: pages[index] ?? const <PdfTextRun>[],
+    };
+  }
+}
+
+/// A line of a page, at [top] down it as a share of its height.
+PdfTextRun _pdfLine(String text, double top, {double left = 0.1}) =>
+    PdfTextRun(text, Rect.fromLTRB(left, top, left + 0.4, top + 0.015));
+
+StoredPage _pdfPage(int pdfPage, {List<Rect> masks = const <Rect>[]}) =>
+    StoredPage(
+      setup: const PageSetup(),
+      strokes: const <Stroke>[],
+      pdfSource: PdfPageSource(
+        assetId: 'book',
+        pageIndex: pdfPage,
+        pageSize: const Size(600, 800),
+      ),
+      pdfMasks: masks,
+    );
+
+Future<NoteEntry> _storePdfNote(
+  NoteRepository repository,
+  String title,
+  List<StoredPage> pages,
+) async {
+  final NoteEntry note = await repository.createNote(title: title);
+  final String asset = await repository.storeAsset(
+    note.id,
+    Uint8List.fromList(<int>[1, 2, 3]),
+    kind: NoteAssetKind.pdf,
+    extension: 'pdf',
+  );
+  return repository.saveNote(
+    note.id,
+    NoteContent(<StoredPage>[
+      for (final StoredPage page in pages)
+        StoredPage(
+          setup: page.setup,
+          strokes: page.strokes,
+          pdfMasks: page.pdfMasks,
+          pdfSource: PdfPageSource(
+            assetId: asset,
+            pageIndex: page.pdfSource!.pageIndex,
+            pageSize: page.pdfSource!.pageSize,
+          ),
+        ),
+    ]),
+  );
+}
+
 void main() {
+  group('PDFs', () {
+    test('runs on one line join; those apart stay apart', () {
+      final List<PdfTextRun> lines = joinPdfTextRuns(<PdfTextRun>[
+        const PdfTextRun('The Krebs', Rect.fromLTRB(0.1, 0.1, 0.3, 0.12)),
+        const PdfTextRun('cycle\n', Rect.fromLTRB(0.305, 0.1, 0.4, 0.12)),
+        const PdfTextRun('  ', Rect.fromLTRB(0.4, 0.1, 0.41, 0.12)),
+        const PdfTextRun('Next line', Rect.fromLTRB(0.1, 0.14, 0.3, 0.16)),
+        const PdfTextRun('Far column', Rect.fromLTRB(0.7, 0.14, 0.9, 0.16)),
+      ]);
+      expect(lines.map((PdfTextRun line) => line.text), <String>[
+        'The Krebs cycle',
+        'Next line',
+        'Far column',
+      ]);
+      expect(lines.first.bounds.right, 0.4);
+    });
+
+    test('its words are found and sent as words, costing no picture', () async {
+      final InMemoryNoteRepository repository = InMemoryNoteRepository();
+      addTearDown(repository.dispose);
+      final NoteEntry note = await _storePdfNote(
+        repository,
+        'Textbook',
+        <StoredPage>[_pdfPage(0), _pdfPage(1)],
+      );
+      final _FakePdfText text = _FakePdfText(<int, List<PdfTextRun>>{
+        0: <PdfTextRun>[_pdfLine('Contract law offers', 0.1)],
+        1: <PdfTextRun>[
+          _pdfLine('The Krebs cycle makes ATP', 0.1),
+          _pdfLine('in the mitochondrial matrix', 0.13),
+        ],
+      });
+      final List<StudyChunk> chunks = await StudyRagIndex(
+        repository: repository,
+        pdfText: text,
+      ).chunksFor(note);
+      expect(text.reads, 1, reason: 'One PDF, opened once.');
+      expect(chunks.length, 2);
+      final StudyChunk chunk = chunks.last;
+      expect(chunk.pageIndex, 1);
+      expect(chunk.kind, StudyChunkKind.text);
+      expect(chunk.needsPicture, isFalse);
+      expect(chunk.typed, contains('Krebs cycle'));
+      // Placed on the page as it is shown: shares of 600 by 800.
+      expect(chunk.logicalBounds.left, closeTo(60, 0.001));
+      expect(chunk.logicalBounds.top, closeTo(80, 0.001));
+
+      final List<StudyHit> hits = StudyRetriever.retrieve(<StudySearchDocument>[
+        for (final StudyChunk c in chunks) _document(c, 'Textbook'),
+      ], 'where is ATP made');
+      expect(hits.single.chunk, same(chunk));
+      final _CountingRenderer renderer = _CountingRenderer();
+      final StudyPayload payload = await const StudyContextAssembler().assemble(
+        hits,
+        renderer: renderer,
+      );
+      expect(renderer.rendered, isEmpty);
+      expect(payload.imagePng, StudyContextAssembler.placeholderPng);
+      expect(payload.contextText, contains('The Krebs cycle makes ATP'));
+      expect(
+        payload.contextText,
+        contains('[Source N1:P2:C1 | Note: "Textbook"'),
+      );
+    });
+
+    test(
+      'a scanned page, with no words, is drawn for the model instead',
+      () async {
+        final InMemoryNoteRepository repository = InMemoryNoteRepository();
+        addTearDown(repository.dispose);
+        final NoteEntry note = await _storePdfNote(
+          repository,
+          'Scan',
+          <StoredPage>[_pdfPage(0)],
+        );
+        final StudyChunk chunk = (await StudyRagIndex(
+          repository: repository,
+          pdfText: _FakePdfText(const <int, List<PdfTextRun>>{}),
+        ).chunksFor(note)).single;
+        expect(chunk.kind, StudyChunkKind.diagram);
+        expect(chunk.needsPicture, isTrue);
+        expect(chunk.logicalBounds, const Rect.fromLTWH(0, 0, 600, 800));
+      },
+    );
+
+    test('words rubbed out of the PDF are not read', () {
+      final List<StudyChunk> chunks = StudyChunker.chunkPage(
+        'n',
+        StudyPageData.of(
+          _pdfPage(0, masks: const <Rect>[Rect.fromLTWH(0, 70, 600, 40)]),
+          0,
+          pdfText: <PdfTextRun>[
+            _pdfLine('rubbed out', 0.1),
+            _pdfLine('still there', 0.5),
+          ],
+        ),
+      );
+      expect(chunks.single.typed, 'still there');
+    });
+
+    test(
+      'a PDF that cannot be read now is tried again, not remembered',
+      () async {
+        final Directory directory = await Directory.systemTemp.createTemp(
+          'pdf',
+        );
+        addTearDown(() => directory.delete(recursive: true));
+        final InMemoryNoteRepository repository = InMemoryNoteRepository();
+        addTearDown(repository.dispose);
+        final NoteEntry note = await _storePdfNote(
+          repository,
+          'Book',
+          <StoredPage>[_pdfPage(0)],
+        );
+        final FileStudyChunkCache cache = FileStudyChunkCache(directory);
+        await StudyRagIndex(
+          repository: repository,
+          diskCache: cache,
+          pdfText: _FakePdfText(const <int, List<PdfTextRun>>{})
+            ..error = StateError('No engine'),
+        ).chunksFor(note);
+        await Future<void>.delayed(const Duration(milliseconds: 50));
+        expect(await cache.read(note.id, note.revision), isNull);
+      },
+    );
+
+    test('two columns in one chunk are read one after the other', () {
+      final StudyChunk chunk = StudyChunker.chunkPage(
+        'n',
+        StudyPageData.of(
+          _pdfPage(0),
+          0,
+          pdfText: <PdfTextRun>[
+            _pdfLine('left one', 0.10, left: 0.05),
+            _pdfLine('left two', 0.12, left: 0.05),
+            _pdfLine('right one', 0.10, left: 0.46),
+            _pdfLine('right two', 0.12, left: 0.46),
+          ],
+        ),
+      ).single;
+      expect(chunk.lines.map((StudyChunkLine line) => line.text), <String>[
+        'left one',
+        'left two',
+        'right one',
+        'right two',
+      ]);
+    });
+  });
+
+  group('What the tutor is told about the notes', () {
+    test('it is told to answer, and never to comment on the notes', () {
+      const String system = AiPrompts.studySystem;
+      expect(system, contains('Always answer the question asked'));
+      expect(system, contains('silently ignore any excerpt'));
+      expect(system, contains('Never remark on how the question relates'));
+      // What used to invite it.
+      expect(system, isNot(contains('say so in one short line')));
+      expect(system, isNot(contains('Base your answer on the excerpts')));
+    });
+  });
+
   group('Handwriting and diagram chunks', () {
     test('a page falls into text, diagram, and mixed chunks', () {
       final List<StudyChunk> chunks = StudyChunker.chunkPage(
@@ -973,6 +1204,8 @@ void main() {
         ),
       );
       await openDeskWithNote(tester);
+      await tester.tap(find.byKey(const ValueKey<String>('study-leave')));
+      await tester.pumpAndSettle();
       expect(
         find.descendant(of: row, matching: find.text('1')),
         findsOneWidget,
@@ -996,6 +1229,133 @@ void main() {
         findsOneWidget,
       );
       expect(find.byType(FloatingActionButton), findsNothing);
+    });
+
+    testDesk('it fills the window, and the way back returns to the folder', (
+      WidgetTester tester,
+    ) async {
+      final Folder folder = await repository.createFolder('Biology');
+      await _storeNote(repository, 'Inside', <StoredPage>[
+        _writtenPage(<String>['x']),
+      ], folderId: folder.id);
+      await pumpLibrary(tester);
+      await tester.tap(
+        find.byKey(ValueKey<String>('sidebar-folder-${folder.id}')),
+      );
+      await tester.pumpAndSettle();
+      expect(find.text('Inside'), findsOneWidget);
+
+      await openDeskWithNote(tester);
+      // Nothing of the library is left in front: no folders, no search.
+      expect(
+        find.byKey(const ValueKey<String>('library-sidebar')),
+        findsNothing,
+      );
+      expect(find.byType(TextField), findsOneWidget, reason: 'The composer.');
+      final Size window = TestViewport.tabletLandscape.size;
+      expect(tester.getSize(find.byType(StudyDeskScreen)).width, window.width);
+      expect(tester.getTopLeft(find.byType(StudyDeskScreen)).dx, 0);
+
+      await tester.tap(find.byKey(const ValueKey<String>('study-leave')));
+      await tester.pumpAndSettle();
+      expect(find.byType(StudyDeskScreen), findsNothing);
+      expect(find.text('Inside'), findsOneWidget, reason: 'Where it was left.');
+      expect(
+        find.byKey(const ValueKey<String>('library-sidebar')),
+        findsOneWidget,
+      );
+    });
+
+    testDesk('the chat keeps a reading width, in the middle of the window', (
+      WidgetTester tester,
+    ) async {
+      await pumpLibrary(tester);
+      await openDeskWithNote(tester);
+      final Rect chat = tester.getRect(
+        find.byKey(const ValueKey<String>('study-chat-column')),
+      );
+      expect(chat.width, StudyDeskScreen.readingWidth);
+      expect(chat.center.dx, TestViewport.tabletLandscape.size.width / 2);
+    });
+
+    testDesk('the system bars go for the desk, and return with the library', (
+      WidgetTester tester,
+    ) async {
+      final List<String> modes = <String>[];
+      tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+        SystemChannels.platform,
+        (MethodCall call) async {
+          if (call.method == 'SystemChrome.setEnabledSystemUIMode') {
+            modes.add(call.arguments as String);
+          }
+          // Manual mode, as in a note, is sent as the overlays it keeps.
+          if (call.method == 'SystemChrome.setEnabledSystemUIOverlays') {
+            modes.add('manual');
+          }
+          return null;
+        },
+      );
+      addTearDown(
+        () => tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+          SystemChannels.platform,
+          null,
+        ),
+      );
+      const String away = 'SystemUiMode.immersiveSticky';
+      await pumpLibrary(tester);
+      expect(modes, isNot(contains(away)));
+
+      await openDeskWithNote(tester);
+      expect(modes.last, away);
+
+      // Through a note and back, they go again.
+      await ask(tester, 'Explain mitosis3');
+      await answer(tester, 'In phases. [[N1:P2:L4-L7]]');
+      await tester.tap(find.text('Cell Biology · p.2'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const ValueKey<String>('study-edit-note')));
+      await tester.pumpAndSettle();
+      expect(modes.last, isNot(away));
+      await tester.tap(find.byTooltip('Back to ${StudyDesk.title}'));
+      await tester.pumpAndSettle();
+      expect(modes.last, away);
+
+      await tester.tap(find.byKey(const ValueKey<String>('study-leave')));
+      await tester.pumpAndSettle();
+      expect(modes.last, 'SystemUiMode.edgeToEdge');
+    });
+
+    testDesk('the keyboard lifts the composer clear of itself on a phone', (
+      WidgetTester tester,
+    ) async {
+      await pumpLibrary(tester, viewport: TestViewport.compact);
+      await tester.tap(find.byTooltip('Folders'));
+      await tester.pumpAndSettle();
+      await tester.tap(
+        find.byKey(const ValueKey<String>('sidebar-study-desk')),
+      );
+      await tester.pumpAndSettle();
+      await tester.tap(
+        find.byKey(const ValueKey<String>('study-empty-add-sources')),
+      );
+      await tester.pumpAndSettle();
+      await tester.tap(
+        find.byKey(ValueKey<String>('study-pick-note-${note.id}')),
+      );
+      await tester.pump();
+      await tester.tap(find.byKey(const ValueKey<String>('study-source-done')));
+      await tester.pumpAndSettle();
+
+      const double keyboard = 300;
+      tester.view.viewInsets = const FakeViewPadding(bottom: keyboard);
+      addTearDown(tester.view.resetViewInsets);
+      await tester.pumpAndSettle();
+      expect(
+        tester
+            .getBottomLeft(find.byKey(const ValueKey<String>('study-composer')))
+            .dy,
+        lessThanOrEqualTo(TestViewport.compact.size.height - keyboard),
+      );
     });
 
     testDesk('a question sends only what it retrieved, with no picture', (
@@ -1025,6 +1385,30 @@ void main() {
       expect(sent[1].text, 'It is a phase.');
       expect(sent[2].text, contains('Introduction'));
       await answer(tester, 'Done.');
+    });
+
+    testDesk('with nothing to read, the question goes alone', (
+      WidgetTester tester,
+    ) async {
+      final NoteEntry empty = await repository.createNote(title: 'Blank');
+      await pumpLibrary(tester);
+      await tester.tap(
+        find.byKey(const ValueKey<String>('sidebar-study-desk')),
+      );
+      await tester.pumpAndSettle();
+      await tester.tap(
+        find.byKey(const ValueKey<String>('study-empty-add-sources')),
+      );
+      await tester.pumpAndSettle();
+      await tester.tap(
+        find.byKey(ValueKey<String>('study-pick-note-${empty.id}')),
+      );
+      await tester.pump();
+      await tester.tap(find.byKey(const ValueKey<String>('study-source-done')));
+      await tester.pumpAndSettle();
+      await ask(tester, 'What is entropy?');
+      expect(client.requests.single.messages.single.text, 'What is entropy?');
+      await answer(tester, 'A measure of disorder.');
     });
 
     testDesk('a failed turn is not sent as history, and can be tried again', (
@@ -1278,6 +1662,11 @@ void main() {
 
       await ask(tester, 'Explain mitosis3');
       await answer(tester, 'In phases. [[N1:P2:L4-L7]]');
+
+      // The bar still names the desk, with little room to do it in.
+      final Finder name = find.text(StudyDesk.title);
+      expect(name, findsWidgets);
+      expect(tester.getSize(name.first).width, greaterThan(60));
 
       // Reading on, the pane does not cover the chat by itself.
       final Finder pane = find.byKey(

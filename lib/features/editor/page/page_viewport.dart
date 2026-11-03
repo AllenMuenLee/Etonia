@@ -1352,24 +1352,6 @@ class PageViewportState extends State<PageViewport>
                                 _transformOf(layout, widget.currentPage),
                               ),
                             ),
-                          if (_canScroll && !widget.infinite)
-                            IgnorePointer(
-                              child: CustomPaint(
-                                key: const ValueKey<String>(
-                                  'page-scroll-indicators',
-                                ),
-                                painter: _ScrollIndicatorPainter(
-                                  offset: Offset(
-                                    _offset.dx.clamp(0, _maxScroll.dx),
-                                    _offset.dy.clamp(0, _maxScroll.dy),
-                                  ),
-                                  maxScroll: _maxScroll,
-                                  color: colors.textSecondary.withValues(
-                                    alpha: 0.45,
-                                  ),
-                                ),
-                              ),
-                            ),
                           if (widget.onPullToAddPage != null)
                             IgnorePointer(
                               child: _PullToAddIndicator(
@@ -1672,73 +1654,3 @@ class _ColumnLayout {
   }
 }
 
-/// Slim bars at the trailing and bottom edges showing where the visible
-/// part sits in the column.
-class _ScrollIndicatorPainter extends CustomPainter {
-  const _ScrollIndicatorPainter({
-    required this.offset,
-    required this.maxScroll,
-    required this.color,
-  });
-
-  static const double _thickness = 3;
-  static const double _inset = AppSpacing.xxs;
-  static const double _minLength = AppSpacing.lg;
-
-  final Offset offset;
-  final Offset maxScroll;
-  final Color color;
-
-  @override
-  void paint(Canvas canvas, Size size) {
-    final Paint paint = Paint()..color = color;
-    const Radius radius = Radius.circular(_thickness / 2);
-    if (maxScroll.dy > 0) {
-      final double track = size.height - 2 * _inset;
-      final double length = math.max(
-        _minLength,
-        track * size.height / (size.height + maxScroll.dy),
-      );
-      final double top = _inset + (track - length) * offset.dy / maxScroll.dy;
-      canvas.drawRRect(
-        RRect.fromRectAndRadius(
-          Rect.fromLTWH(
-            size.width - _inset - _thickness,
-            top,
-            _thickness,
-            length,
-          ),
-          radius,
-        ),
-        paint,
-      );
-    }
-    if (maxScroll.dx > 0) {
-      final double track = size.width - 2 * _inset;
-      final double length = math.max(
-        _minLength,
-        track * size.width / (size.width + maxScroll.dx),
-      );
-      final double left = _inset + (track - length) * offset.dx / maxScroll.dx;
-      canvas.drawRRect(
-        RRect.fromRectAndRadius(
-          Rect.fromLTWH(
-            left,
-            size.height - _inset - _thickness,
-            length,
-            _thickness,
-          ),
-          radius,
-        ),
-        paint,
-      );
-    }
-  }
-
-  @override
-  bool shouldRepaint(_ScrollIndicatorPainter oldDelegate) {
-    return oldDelegate.offset != offset ||
-        oldDelegate.maxScroll != maxScroll ||
-        oldDelegate.color != color;
-  }
-}

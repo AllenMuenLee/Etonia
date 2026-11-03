@@ -59,6 +59,9 @@ abstract mixin class AiUsageGate implements Listenable {
   /// Fraction (`0.0` to `1.0`) of the active token allowance remaining.
   double get tokenFraction => 0;
 
+  /// Whether the metered token allowance has reached zero.
+  bool get isOutOfTokens => tokenFraction <= 0;
+
   /// The model last picked, remembered across launches.
   AiModelId? get preferredModel;
 

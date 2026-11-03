@@ -282,35 +282,6 @@ void main() {
       expect(shape!.points, hasLength(6));
     });
 
-    test('an irregular, concave polygon', () {
-      final RecognizedShape? shape = recognize(
-        traced(const <InkVector>[
-          InkVector(100, 100),
-          InkVector(300, 100),
-          InkVector(300, 200),
-          InkVector(200, 200),
-          InkVector(200, 350),
-          InkVector(100, 350),
-          InkVector(100, 100),
-        ]),
-      );
-      expect(shape?.kind, ShapeKind.polygon);
-      expect(shape!.sides, 6);
-    });
-
-    test('an open zig-zag', () {
-      final RecognizedShape? shape = recognize(
-        traced(const <InkVector>[
-          InkVector(100, 300),
-          InkVector(180, 150),
-          InkVector(260, 300),
-          InkVector(340, 150),
-        ]),
-      );
-      expect(shape?.kind, ShapeKind.polyline);
-      expect(shape!.points, hasLength(4));
-    });
-
     test('an arc', () {
       final RecognizedShape? shape = recognize(
         curve(
@@ -353,6 +324,53 @@ void main() {
   });
 
   group('rejects', () {
+    test('an irregular, concave polygon', () {
+      expect(
+        recognize(
+          traced(const <InkVector>[
+            InkVector(100, 100),
+            InkVector(300, 100),
+            InkVector(300, 200),
+            InkVector(200, 200),
+            InkVector(200, 350),
+            InkVector(100, 350),
+            InkVector(100, 100),
+          ]),
+        ),
+        isNull,
+      );
+    });
+
+    test('an irregular pentagon', () {
+      expect(
+        recognize(
+          traced(const <InkVector>[
+            InkVector(100, 300),
+            InkVector(140, 100),
+            InkVector(260, 140),
+            InkVector(480, 260),
+            InkVector(250, 400),
+            InkVector(100, 300),
+          ]),
+        ),
+        isNull,
+      );
+    });
+
+    test('an open zig-zag', () {
+      expect(
+        recognize(
+          traced(const <InkVector>[
+            InkVector(100, 300),
+            InkVector(180, 150),
+            InkVector(260, 300),
+            InkVector(340, 150),
+          ]),
+        ),
+        isNull,
+      );
+    });
+
     test('a scribble', () {
       final math.Random random = math.Random(7);
       InkVector at = const InkVector(300, 300);

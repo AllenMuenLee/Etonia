@@ -4,6 +4,7 @@ import 'dart:math' as math;
 import 'dart:ui' as ui;
 
 import 'package:file_picker/file_picker.dart';
+import 'package:flutter/foundation.dart' show immutable;
 import 'package:flutter/services.dart';
 import 'package:image_picker/image_picker.dart' as image_picker;
 import 'package:pdfrx/pdfrx.dart' as pdfrx;
@@ -96,6 +97,57 @@ abstract interface class PdfRasterizer {
     required int pixelWidth,
     required int pixelHeight,
   });
+}
+
+/// A run of a PDF page's own text, and where it lies: each side a share of the
+/// page's width or height, from its top left corner, as the page is shown.
+@immutable
+class PdfTextRun {
+  const PdfTextRun(this.text, this.bounds);
+
+  final String text;
+  final ui.Rect bounds;
+}
+
+/// Reads the text a PDF holds, for a [PdfRasterizer] that can. A scanned page
+/// holds none, and is given as an empty list.
+abstract interface class PdfTextExtractor {
+  /// Each of [pageIndices], from zero, with its lines top to bottom as the PDF
+  /// orders them. Throws when the PDF cannot be opened.
+  Future<Map<int, List<PdfTextRun>>> extractText(
+    Uint8List bytes,
+    Set<int> pageIndices,
+  );
+}
+
+/// [runs], as a PDF gives them, joined into whole lines: a run on the same line
+/// as the one before it, and near it, continues it.
+List<PdfTextRun> joinPdfTextRuns(Iterable<PdfTextRun> runs) {
+  final List<PdfTextRun> lines = <PdfTextRun>[];
+  for (final PdfTextRun run in runs) {
+    final String text = run.text.trim();
+    if (text.isEmpty) continue;
+    final PdfTextRun? last = lines.lastOrNull;
+    if (last != null) {
+      final double height = math.max(last.bounds.height, run.bounds.height);
+      final double gap = run.bounds.left - last.bounds.right;
+      final bool sameLine =
+          (run.bounds.center.dy - last.bounds.center.dy).abs() < height * 0.5;
+      // Far enough apart on the page is another column, or a table's next cell.
+      if (sameLine && gap > -height && gap < height * 3) {
+        // A word space is about a quarter of the type's height, and writing
+        // with no spaces, like Chinese, has no gap at all.
+        final String joint = gap > height * 0.15 ? ' ' : '';
+        lines[lines.length - 1] = PdfTextRun(
+          '${last.text}$joint$text',
+          last.bounds.expandToInclude(run.bounds),
+        );
+        continue;
+      }
+    }
+    lines.add(PdfTextRun(text, run.bounds));
+  }
+  return lines;
 }
 
 /// Optional fast path for consumers that display a rasterized page directly.
@@ -191,8 +243,50 @@ class PdfrxRasterizer
         PdfRasterizer,
         PdfImageRasterizer,
         PdfDocumentRasterizer,
-        PdfOutlineReader {
+        PdfOutlineReader,
+        PdfTextExtractor {
   const PdfrxRasterizer();
+
+  @override
+  Future<Map<int, List<PdfTextRun>>> extractText(
+    Uint8List bytes,
+    Set<int> pageIndices,
+  ) async {
+    final pdfrx.PdfDocument document = await _openForRendering(
+      bytes,
+      'greatnote-text-${bytes.length}-${identityHashCode(bytes)}',
+    );
+    try {
+      final Map<int, List<PdfTextRun>> text = <int, List<PdfTextRun>>{};
+      for (final int index in pageIndices) {
+        if (index < 0 || index >= document.pages.length) continue;
+        final pdfrx.PdfPage page = document.pages[index];
+        final pdfrx.PdfPageText read = await page.loadStructuredText();
+        text[index] = joinPdfTextRuns(<PdfTextRun>[
+          for (final pdfrx.PdfPageTextFragment fragment in read.fragments)
+            PdfTextRun(fragment.text, _shareOf(fragment, page)),
+        ]);
+      }
+      return text;
+    } finally {
+      await document.dispose();
+    }
+  }
+
+  /// Where [fragment] lies as a share of [page] as shown. Rotation and the
+  /// flipped axis are the engine's to undo.
+  static ui.Rect _shareOf(
+    pdfrx.PdfPageTextFragment fragment,
+    pdfrx.PdfPage page,
+  ) {
+    final ui.Rect rect = fragment.bounds.toRect(page: page);
+    return ui.Rect.fromLTRB(
+      rect.left / page.width,
+      rect.top / page.height,
+      rect.right / page.width,
+      rect.bottom / page.height,
+    );
+  }
 
   @override
   Future<List<PdfOutlineEntry>> readOutline(Uint8List bytes) async {

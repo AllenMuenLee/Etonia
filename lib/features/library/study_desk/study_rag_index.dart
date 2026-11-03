@@ -39,7 +39,12 @@ class StudyPageData {
     required this.words,
   });
 
-  factory StudyPageData.of(StoredPage page, int pageIndex) {
+  /// [pdfText] is what the PDF under the page says, if it is on one.
+  factory StudyPageData.of(
+    StoredPage page,
+    int pageIndex, {
+    List<PdfTextRun> pdfText = const <PdfTextRun>[],
+  }) {
     final Map<String, ui.Rect> stickyBounds = <String, ui.Rect>{
       for (final sticky in page.stickyNotes) sticky.id: sticky.bounds,
     };
@@ -75,6 +80,7 @@ class StudyPageData {
               bounds: text.bounds,
               text: text.text.trim(),
             ),
+        ..._pdfBoxes(page, pageIndex, pdfText),
       ],
       words: <StudyWordData>[
         for (final StoredRecognizedInkWord word in page.recognizedWords)
@@ -93,6 +99,51 @@ class StudyPageData {
             ),
       ],
     );
+  }
+
+  /// What a PDF page brings. Its words become text like any typed on the page,
+  /// so they are chunked, found, and sent the same way, costing no picture. A
+  /// page with no words, a scan, is one picture: the only way to read it.
+  static List<StudyBoxData> _pdfBoxes(
+    StoredPage page,
+    int pageIndex,
+    List<PdfTextRun> text,
+  ) {
+    final PdfPageSource? source = page.pdfSource;
+    if (source == null) return const <StudyBoxData>[];
+    final ui.Size size = source.pageSize;
+    if (text.isEmpty) {
+      return <StudyBoxData>[
+        StudyBoxData(
+          id: 'pdf-page-$pageIndex',
+          kind: StudyBoxKind.image,
+          bounds: ui.Offset.zero & size,
+        ),
+      ];
+    }
+    return <StudyBoxData>[
+      for (int i = 0; i < text.length; i++)
+        if (_onPaper(text[i].bounds, size, page.pdfMasks))
+          StudyBoxData(
+            id: 'pdf-text-$pageIndex-$i',
+            kind: StudyBoxKind.text,
+            bounds: _onPage(text[i].bounds, size),
+            text: text[i].text,
+          ),
+    ];
+  }
+
+  static ui.Rect _onPage(ui.Rect share, ui.Size size) => ui.Rect.fromLTRB(
+    share.left * size.width,
+    share.top * size.height,
+    share.right * size.width,
+    share.bottom * size.height,
+  );
+
+  /// Whether a line still shows: the user may have rubbed it out of the PDF.
+  static bool _onPaper(ui.Rect share, ui.Size size, List<ui.Rect> masks) {
+    final ui.Offset center = _onPage(share, size).center;
+    return !masks.any((ui.Rect mask) => mask.contains(center));
   }
 
   final int pageIndex;
@@ -195,11 +246,19 @@ class StudyWordData {
 class StudyNoteData {
   const StudyNoteData(this.noteId, this.pages);
 
-  factory StudyNoteData.of(String noteId, NoteContent content) =>
-      StudyNoteData(noteId, <StudyPageData>[
-        for (int i = 0; i < content.pages.length; i++)
-          StudyPageData.of(content.pages[i], i),
-      ]);
+  /// [pdfText] holds what the PDF under each page says, by page.
+  factory StudyNoteData.of(
+    String noteId,
+    NoteContent content, {
+    Map<int, List<PdfTextRun>> pdfText = const <int, List<PdfTextRun>>{},
+  }) => StudyNoteData(noteId, <StudyPageData>[
+    for (int i = 0; i < content.pages.length; i++)
+      StudyPageData.of(
+        content.pages[i],
+        i,
+        pdfText: pdfText[i] ?? const <PdfTextRun>[],
+      ),
+  ]);
 
   final String noteId;
   final List<StudyPageData> pages;
@@ -377,8 +436,14 @@ abstract final class StudyChunker {
     final List<StudyBoxData> stickies = boxes
         .where((StudyBoxData box) => box.kind == StudyBoxKind.sticky)
         .toList();
-    final List<StudyBoxData> typed = boxes
-        .where((StudyBoxData box) => box.kind == StudyBoxKind.text)
+    // In the page's own order, not top to bottom, so that two columns in one
+    // chunk stay two columns.
+    final Set<String> here = <String>{for (final b in boxes) b.id};
+    final List<StudyBoxData> typed = everyBox
+        .where(
+          (StudyBoxData box) =>
+              box.kind == StudyBoxKind.text && here.contains(box.id),
+        )
         .toList();
     final bool drawnInk =
         ink.length >= minDiagramStrokes &&
@@ -674,10 +739,13 @@ class _Shape {
 /// Each note's chunks, by its id and revision, in memory and on disk, so a note
 /// that has not changed is never read again.
 class StudyRagIndex {
-  StudyRagIndex({required this.repository, this.diskCache});
+  StudyRagIndex({required this.repository, this.diskCache, this.pdfText});
 
   final NoteRepository repository;
   final StudyChunkDiskCache? diskCache;
+
+  /// Reads a PDF's words. Without one, every PDF page counts as a scan.
+  final PdfTextExtractor? pdfText;
 
   final Map<String, (int, List<StudyChunk>)> _memory =
       <String, (int, List<StudyChunk>)>{};
@@ -715,7 +783,15 @@ class StudyRagIndex {
   Future<List<StudyChunk>> _read(NoteEntry note) async {
     reads++;
     final NoteContent content = await repository.loadNote(note.id);
-    final StudyNoteData data = StudyNoteData.of(note.id, content);
+    final (Map<int, List<PdfTextRun>> text, bool complete) = await _pdfTextOf(
+      note.id,
+      content,
+    );
+    final StudyNoteData data = StudyNoteData.of(
+      note.id,
+      content,
+      pdfText: text,
+    );
     final List<StudyChunk> chunks = data.estimatedBytes >= offMainBytes
         ? await compute(
             StudyChunker.chunkNote,
@@ -723,8 +799,47 @@ class StudyRagIndex {
             debugLabel: 'study.chunkNote',
           )
         : StudyChunker.chunkNote(data);
-    unawaited(diskCache?.write(note.id, note.revision, chunks));
+    // What could not be read this time is not remembered as having no words.
+    if (complete) unawaited(diskCache?.write(note.id, note.revision, chunks));
     return chunks;
+  }
+
+  /// What the PDFs under [content]'s pages say, by page of the note, and
+  /// whether all of them could be read. A note's pages may come from several
+  /// PDFs, and each is opened once.
+  Future<(Map<int, List<PdfTextRun>>, bool)> _pdfTextOf(
+    String noteId,
+    NoteContent content,
+  ) async {
+    final PdfTextExtractor? extractor = pdfText;
+    final Map<int, List<PdfTextRun>> text = <int, List<PdfTextRun>>{};
+    if (extractor == null) return (text, true);
+    final Map<String, Map<int, int>> byAsset = <String, Map<int, int>>{};
+    for (int i = 0; i < content.pages.length; i++) {
+      final PdfPageSource? source = content.pages[i].pdfSource;
+      if (source == null) continue;
+      (byAsset[source.assetId] ??= <int, int>{})[source.pageIndex] = i;
+    }
+    bool complete = true;
+    for (final MapEntry<String, Map<int, int>> asset in byAsset.entries) {
+      try {
+        final NoteAssetData data = await repository.readAsset(
+          noteId,
+          asset.key,
+        );
+        final Map<int, List<PdfTextRun>> read = await extractor.extractText(
+          data.bytes,
+          asset.value.keys.toSet(),
+        );
+        read.forEach((int pdfPage, List<PdfTextRun> runs) {
+          text[asset.value[pdfPage]!] = runs;
+        });
+      } on Object {
+        // Its pages are shown to the model as pictures instead, for now.
+        complete = false;
+      }
+    }
+    return (text, complete);
   }
 
   /// Lets go of everything kept for every note but [noteIds].

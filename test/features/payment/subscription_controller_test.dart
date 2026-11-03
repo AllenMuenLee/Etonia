@@ -71,6 +71,7 @@ void main() {
       });
       expect(plan.creditsLabel, '100% tokens');
       expect(plan.tokenFraction, 1.0);
+      expect(plan.isOutOfTokens, isFalse);
     });
 
     for (final (SubscriptionPlan tier, int credits, String label)
@@ -144,6 +145,7 @@ void main() {
       plan.recordUsage(AiModelId.sonnet, _huge);
       // Clamped at zero.
       expect(plan.remainingCreditsMicroUsd, 0);
+      expect(plan.isOutOfTokens, isTrue);
       expect(plan.creditsLabel, 'Upgrade');
       for (final AiModelId model in _metered) {
         expect(plan.accessFor(model), AiModelAccess.outOfCredits);

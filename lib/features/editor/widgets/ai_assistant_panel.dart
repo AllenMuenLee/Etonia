@@ -561,8 +561,9 @@ class _AiAssistantPanelState extends State<AiAssistantPanel> {
     );
   }
 
-  /// For a model the plan does not cover: see the plans, or ask again with
-  /// one of the unlimited models.
+  /// For a model the plan does not cover, or when credits are spent:
+  /// see the plans, or ask again with one of the unlimited models if
+  /// the token count is at 0.
   List<(String, VoidCallback)> _accessActions(
     AiAssistantController controller,
     AiFailure failure,
@@ -572,22 +573,26 @@ class _AiAssistantPanelState extends State<AiAssistantPanel> {
       return const <(String, VoidCallback)>[];
     }
     final VoidCallback? openPlans = widget.onOpenPlans;
+    final bool tokenCountAtZero =
+        failure.kind == AiFailureKind.insufficientCredits ||
+        controller.isOutOfTokens;
     return <(String, VoidCallback)>[
       if (openPlans != null) ('See plans', openPlans),
-      for (final AiModelId model in const <AiModelId>[
-        AiModelId.haiku,
-        AiModelId.luna,
-      ])
-        if (model != controller.selectedModel &&
-            controller.models.contains(model) &&
-            (controller.accessFor(model)?.canSend ?? true))
-          (
-            'Use ${model.label}',
-            () {
-              controller.selectModel(model);
-              controller.retry();
-            },
-          ),
+      if (tokenCountAtZero)
+        for (final AiModelId model in const <AiModelId>[
+          AiModelId.haiku,
+          AiModelId.luna,
+        ])
+          if (model != controller.selectedModel &&
+              controller.models.contains(model) &&
+              (controller.accessFor(model)?.canSend ?? true))
+            (
+              'Use ${model.label}',
+              () {
+                controller.selectModel(model);
+                controller.retry();
+              },
+            ),
     ];
   }
 

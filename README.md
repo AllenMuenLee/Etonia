@@ -312,10 +312,12 @@ resamples the stroke to evenly spaced points and finds corners where it turns
 sharply. A nearly straight stroke is a line. A closed stroke with three or
 more corners is a polygon, beautified to the most specific shape that still
 fits: star (outline or pentagram), rectangle, square, rhombus, regular n-gon,
-or a plain polygon with straight edges; with fewer corners it is an ellipse or
-a circle. An open stroke whose long first segment ends in a short head that
-turns back is an arrow; any other open stroke becomes whichever of polyline,
-arc, sine wave, and Archimedean spiral fits best. Lines, rectangles, ellipse
+or triangle; with fewer corners it is an ellipse or a circle. An open stroke
+whose long first segment ends in a short head that turns back is an arrow; any
+other open stroke becomes whichever of arc, sine wave, and Archimedean spiral
+fits best. A stroke only ever becomes a conventional shape: corners that fit
+none (an irregular pentagon, a zig-zag) are left as drawn, not smoothed into an
+arbitrary polygon or polyline. Lines, rectangles, ellipse
 axes, and wave axes snap to horizontal or vertical when close.
 
 Every candidate is scored the same way: the root-mean-square distance between
@@ -332,8 +334,8 @@ stroke and shape, both ways, divided by the stroke's size. Tuning lives in
 | `cornerAngle` | 34° | turn that counts as a corner |
 | `lineTolerance` | 0.045 | a line strays at most this fraction of its length |
 | `fitTolerance` | 0.028 | other shapes' fit error, as a fraction of the size |
-| `maxPolygonSides` | 12 | largest polygon recognized |
-| `maxPolylineSegments` | 8 | longest open polyline recognized |
+| `maxPolygonSides` | 12 | most corners a closed shape may have |
+| `maxPolylineSegments` | 8 | most segments an arrow's outline may have |
 | `axisSnapAngle` | 7° | snapping to horizontal or vertical |
 | `circleRoundness` | 0.85 | minor/major radius above which an ellipse is a circle |
 | `rightAngleTolerance` | 14° | rectangle corners |

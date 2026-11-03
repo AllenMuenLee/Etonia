@@ -24,12 +24,6 @@ enum ShapeKind {
   /// such as a pentagram.
   star,
 
-  /// Any other polygon, with straight edges between the drawn corners.
-  polygon,
-
-  /// An open run of a few straight segments.
-  polyline,
-
   arc,
   sineWave,
   spiral,
@@ -72,10 +66,6 @@ class RecognizedShape {
         return 'Regular ${_polygonName(sides ?? 0).toLowerCase()}';
       case ShapeKind.star:
         return '${sides ?? 5}-point star';
-      case ShapeKind.polygon:
-        return _polygonName(sides ?? 0);
-      case ShapeKind.polyline:
-        return 'Polyline';
       case ShapeKind.arc:
         return 'Arc';
       case ShapeKind.sineWave:
@@ -109,12 +99,15 @@ class RecognizedShape {
 ///
 /// - a closed stroke with three or more corners is a polygon, beautified to
 ///   the most specific of star, rectangle, square, rhombus, regular n-gon,
-///   or plain polygon that still fits; one with fewer is an ellipse or a
-///   circle;
+///   or triangle that still fits; one with fewer is an ellipse or a circle;
 /// - an open stroke whose long first segment ends in a short head that
 ///   turns back is an arrow;
-/// - any other open stroke is whichever of polyline, arc, sine wave, and
-///   spiral fits best.
+/// - any other open stroke is whichever of arc, sine wave, and spiral fits
+///   best.
+///
+/// A stroke is only ever replaced by a conventional shape. Corners that
+/// form no known shape (an irregular pentagon, a zig-zag) are left as drawn
+/// rather than smoothed into some arbitrary polygon or polyline.
 ///
 /// Every candidate is measured the same way: the root-mean-square distance
 /// between stroke and shape, taken both ways and divided by the stroke's
@@ -363,11 +356,11 @@ class ShapeRecognizer {
       if (n == 4) _rectangle(vertices),
       if (n == 4) _rhombus(vertices),
       if (n != 4) _regular(vertices),
-      if (n <= config.maxPolygonSides)
+      if (n == 3)
         RecognizedShape(
-          kind: n == 3 ? ShapeKind.triangle : ShapeKind.polygon,
+          kind: ShapeKind.triangle,
           points: <InkVector>[...vertices, vertices.first],
-          sides: n,
+          sides: 3,
         ),
     ];
     for (final RecognizedShape? candidate in candidates) {
@@ -631,18 +624,16 @@ class ShapeRecognizer {
         return arrow;
       }
     }
+    final _Fit? straight =
+        vertices != null && vertices.length - 1 <= config.maxPolylineSegments
+        ? _fit(
+            p,
+            size,
+            RecognizedShape(kind: ShapeKind.arrow, points: vertices),
+            1,
+          )
+        : null;
     final List<_Fit> fits = <_Fit>[
-      if (vertices != null && vertices.length - 1 <= config.maxPolylineSegments)
-        ?_fit(
-          p,
-          size,
-          RecognizedShape(
-            kind: ShapeKind.polyline,
-            points: vertices,
-            sides: vertices.length - 1,
-          ),
-          1,
-        ),
       ?_fit(p, size, _arc(p, size), 1),
       ?_fit(p, size, _sine(p), _curveToleranceFactor),
       ?_fit(p, size, _spiral(p), _curveToleranceFactor),
@@ -651,6 +642,12 @@ class ShapeRecognizer {
       return null;
     }
     fits.sort((_Fit a, _Fit b) => a.score.compareTo(b.score));
+    // A stroke that straight segments describe better than any curve is no
+    // conventional shape. Leave it as drawn, rather than smoothing a zig-zag
+    // into a wave.
+    if (straight != null && straight.score <= fits.first.score) {
+      return null;
+    }
     return fits.first.shape;
   }
 

@@ -47,6 +47,9 @@ class StudyDeskScreen extends StatefulWidget {
 
   static const String composerHint = 'Ask about your notes';
 
+  /// The widest the chat goes.
+  static const double readingWidth = 760;
+
   @override
   State<StudyDeskScreen> createState() => _StudyDeskScreenState();
 }
@@ -296,7 +299,18 @@ class _StudyDeskScreenState extends State<StudyDeskScreen> {
   Widget build(BuildContext context) {
     final AppColors colors = AppColors.of(context);
     final StudyCitationFocus? focus = _controller.focus;
-    final Widget chat = _buildChat(context);
+    // With the whole window to itself, the chat keeps to a width lines can be
+    // read at, in the middle of whatever room it has.
+    final Widget chat = Align(
+      alignment: Alignment.topCenter,
+      child: ConstrainedBox(
+        key: const ValueKey<String>('study-chat-column'),
+        constraints: const BoxConstraints(
+          maxWidth: StudyDeskScreen.readingWidth,
+        ),
+        child: _buildChat(context),
+      ),
+    );
     final Widget? pane = _controller.paneOpen && focus != null
         ? StudyCitationPreview(
             controller: _controller,
@@ -335,10 +349,7 @@ class _StudyDeskScreenState extends State<StudyDeskScreen> {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: <Widget>[
-        StudySourceStrip(
-          controller: controller,
-          thumbnail: widget.thumbnail,
-        ),
+        StudySourceStrip(controller: controller, thumbnail: widget.thumbnail),
         Expanded(
           child: !hasSources && messages.isEmpty
               ? _NoSources(onAddSources: widget.onAddSources)
@@ -801,24 +812,21 @@ class _Starters extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final AppColors colors = AppColors.of(context);
-    return SizedBox(
+    // All in sight at once: they are what to do next, so none scrolls away.
+    return Padding(
       key: const ValueKey<String>('study-starters'),
-      height: AppSizes.minTouchTarget,
-      child: ListView(
-        scrollDirection: Axis.horizontal,
-        padding: const EdgeInsets.symmetric(horizontal: AppSpacing.md),
+      padding: const EdgeInsets.symmetric(horizontal: AppSpacing.md),
+      child: Wrap(
+        spacing: AppSpacing.xs,
         children: <Widget>[
           for (final StudyStarter starter in StudyStarter.all)
-            Padding(
-              padding: const EdgeInsetsDirectional.only(end: AppSpacing.xs),
-              child: ActionChip(
-                label: Text(
-                  starter.label,
-                  style: TextStyle(color: colors.textPrimary),
-                ),
-                backgroundColor: colors.surfaceMuted,
-                onPressed: () => onChosen(starter),
+            ActionChip(
+              label: Text(
+                starter.label,
+                style: TextStyle(color: colors.textPrimary),
               ),
+              backgroundColor: colors.surfaceMuted,
+              onPressed: () => onChosen(starter),
             ),
         ],
       ),

@@ -87,7 +87,7 @@ class FileStudyChunkCache implements StudyChunkDiskCache {
 
   /// Moves on whenever the chunks of the same revision would come out
   /// differently, so that older ones are not used.
-  static const int version = 1;
+  static const int version = 2;
 
   File _file(String noteId) => File('${directory.path}/$noteId.json');
 

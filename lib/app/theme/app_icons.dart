@@ -109,14 +109,4 @@ abstract final class AppIcons {
   static const IconData up = CupertinoIcons.arrow_up;
   static const IconData panelLeft = CupertinoIcons.sidebar_left;
   static const IconData panelRight = CupertinoIcons.sidebar_right;
-
-  // Split screen.
-  static const IconData splitScreen = CupertinoIcons.rectangle_split_3x1;
-  static const IconData splitTwo = CupertinoIcons.square_split_2x1;
-  static const IconData splitThree = CupertinoIcons.rectangle_split_3x1;
-  static const IconData splitFour = CupertinoIcons.square_grid_2x2;
-  static const IconData singlePane = CupertinoIcons.square;
-  static const IconData closePane = CupertinoIcons.xmark;
-  static const IconData maximizePane =
-      CupertinoIcons.arrow_up_left_arrow_down_right;
 }

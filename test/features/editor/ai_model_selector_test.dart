@@ -197,6 +197,45 @@ void main() {
     expect(plan.remainingCreditsMicroUsd, 0);
   });
 
+  testWidgets('a plan-required failure only offers switching to Haiku and Luna '
+      'when tokens are at 0', (WidgetTester tester) async {
+    final SubscriptionController plan = await loadedSubscription(
+      plan: SubscriptionPlan.starter699,
+    );
+    plan.setPreferredModel(AiModelId.opus);
+    final FakeAiModelRouter client = await _pumpOpen(tester, plan);
+
+    await tester.tap(find.text('Explain this'));
+    await tester.pumpAndSettle();
+    expect(client.requests, isEmpty);
+    expect(
+      find.text(const AiFailure(AiFailureKind.planRequired).message),
+      findsOneWidget,
+    );
+    expect(find.widgetWithText(TextButton, 'See plans'), findsOneWidget);
+    expect(find.widgetWithText(TextButton, 'Use Haiku'), findsNothing);
+    expect(find.widgetWithText(TextButton, 'Use Luna'), findsNothing);
+
+    plan.recordUsage(
+      AiModelId.sol,
+      const AiTokenUsage(inputTokens: 100000000, outputTokens: 0),
+    );
+    await tester.tap(find.text('Retry'));
+    await tester.pumpAndSettle();
+
+    expect(find.widgetWithText(TextButton, 'See plans'), findsOneWidget);
+    expect(find.widgetWithText(TextButton, 'Use Haiku'), findsOneWidget);
+    expect(find.widgetWithText(TextButton, 'Use Luna'), findsOneWidget);
+
+    await tester.tap(find.widgetWithText(TextButton, 'Use Haiku'));
+    await tester.pump();
+    expect(_shownModel(tester), 'Haiku');
+    expect(client.requests.single.model, AiModelId.haiku);
+    client.answer('Haiku answer.');
+    await tester.pumpAndSettle();
+    expect(find.text('Haiku answer.'), findsOneWidget);
+  });
+
   testWidgets('a model without a key cannot be picked', (
     WidgetTester tester,
   ) async {

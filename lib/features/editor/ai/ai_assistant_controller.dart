@@ -321,6 +321,9 @@ class AiAssistantController extends ChangeNotifier implements AiModelChooser {
     }
   }
 
+  /// Whether the active usage gate has no remaining metered tokens.
+  bool get isOutOfTokens => _usageGate?.isOutOfTokens ?? true;
+
   /// The models the user can pick between; empty when the client serves
   /// only one.
   @override

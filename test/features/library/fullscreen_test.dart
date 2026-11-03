@@ -247,35 +247,6 @@ void main() {
       expect(page(tester), const Rect.fromLTWH(0, 0, 1200, 800));
     });
 
-    testWidgets('a split window slides its bars away with its panes', (
-      tester,
-    ) async {
-      final OpenNotes notes = await pumpTabs(tester, <String>[]);
-      notes.splitWith('a', right: true);
-      await tester.pumpAndSettle();
-      final double restingTop = page(tester).top;
-      final double barHeight = tester
-          .getSize(find.byType(EditorAppBar).first)
-          .height;
-
-      await tester.tap(enter.first);
-      await tester.pump();
-      expect(page(tester).top, moreOrLessEquals(restingTop));
-      await tester.pump(const Duration(milliseconds: 100));
-
-      expect(find.byType(EditorAppBar), findsNWidgets(2));
-      expect(page(tester).top, inExclusiveRange(0, restingTop));
-      expect(
-        tester.getTopLeft(find.byType(EditorAppBar).first).dy,
-        moreOrLessEquals(page(tester).top - barHeight),
-      );
-
-      await tester.pumpAndSettle();
-      expect(find.byType(EditorAppBar), findsNothing);
-      expect(page(tester).top, 0);
-      expect(page(tester).height, 800);
-    });
-
     testWidgets('the native pen surface hears where the page came to rest', (
       tester,
     ) async {
@@ -331,23 +302,6 @@ void main() {
       await tester.pumpWidget(const SizedBox.shrink());
       debugDefaultTargetPlatformOverride = null;
     });
-  });
-
-  testWidgets('a split window loses both bars in fullscreen', (tester) async {
-    final List<String> built = <String>[];
-    final OpenNotes notes = await pumpTabs(tester, built);
-    notes.splitWith('a', right: true);
-    await tester.pumpAndSettle();
-    expect(find.byType(EditorAppBar), findsNWidgets(2));
-    final int builds = built.length;
-
-    await tester.tap(enter.first);
-    await tester.pumpAndSettle();
-
-    expect(find.byType(EditorAppBar), findsNothing);
-    expect(find.byKey(const ValueKey<String>('exit-a')), findsOneWidget);
-    expect(find.byKey(const ValueKey<String>('exit-b')), findsOneWidget);
-    expect(built.length, builds);
   });
 
   testWidgets('going back to the library leaves fullscreen', (tester) async {

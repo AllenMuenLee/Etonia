@@ -27,7 +27,7 @@ class ToolbarMemo {
 
 /// What one editor puts in the top bar when something else owns the bar.
 ///
-/// The bar is shared by every pane of a split window, so each editor hands
+/// The top bar is shared by open tabs, so each editor hands
 /// over its settings instead of building a bar of its own.
 @immutable
 class EditorChromeEntry {
@@ -125,8 +125,8 @@ class EditorToolbarScope extends InheritedWidget {
   final GlobalKey? toolbarKey;
 
   /// Whether the editor shows a toolbar at all. One out of view does not:
-  /// it keeps its [ToolbarMemo] instead. An editor beside the one in front,
-  /// in a split window, shows one of its own.
+  /// it keeps its [ToolbarMemo] instead.
+
   final bool showsToolbar;
 
   static EditorToolbarScope? maybeOf(BuildContext context) =>

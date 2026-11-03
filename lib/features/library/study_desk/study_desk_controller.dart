@@ -116,6 +116,9 @@ class StudyDeskController extends ChangeNotifier implements AiModelChooser {
     index = StudyRagIndex(
       repository: repository,
       diskCache: diskCache ?? studyChunkCacheFor(repository),
+      pdfText: pdfRasterizer is PdfTextExtractor
+          ? pdfRasterizer as PdfTextExtractor
+          : null,
     );
     this.renderer =
         renderer ??
@@ -652,11 +655,11 @@ class StudyDeskController extends ChangeNotifier implements AiModelChooser {
   }
 
   static String _withContext(StudyPayload payload, String prompt) {
-    final String excerpts = payload.contextText.isEmpty
-        ? 'None of the chosen notes has anything readable yet.'
-        : payload.contextText;
-    return 'Excerpts from my notes, retrieved for this question:\n\n'
-        '$excerpts\n\nQuestion: $prompt';
+    // With nothing found, nothing is said of the notes: a model told they hold
+    // nothing tends to tell the user so, in place of answering.
+    if (payload.contextText.isEmpty) return prompt;
+    return 'Excerpts from my notes that a search found, which may or may not '
+        'help:\n\n${payload.contextText}\n\nQuestion: $prompt';
   }
 
   Future<List<StudySearchDocument>> _documents() async {

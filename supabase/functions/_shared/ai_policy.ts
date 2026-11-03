@@ -554,7 +554,7 @@ export function drawingRequest(
         "the app highlights the cited user strokes and your drawing when that paragraph is read.") +
     "\nInteract with the selected SVG: " +
     (visual === "static" ? "annotate the note" : "annotate the note or add animation to it") +
-    ", in whatever way best serves this request and the answer. Draw graphs, plots, diagrams, or visual curves whenever they help clarify concepts and aid understanding. You can annotate directly on " +
+    ", in whatever way best serves this request and the answer. Draw graphs, plots, diagrams, or visual curves whenever they help clarify concepts and aid understanding, with concise explanations using precise keywords. You can annotate directly on " +
     "the user's strokes; do not redraw or replace their note.";
 }
 
