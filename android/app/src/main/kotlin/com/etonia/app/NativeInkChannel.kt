@@ -57,6 +57,9 @@ class NativeInkChannel(
     private var flutterView: FlutterView? = null
     private var overlay: NativeInkOverlay? = null
     private var active: ActiveStroke? = null
+
+    /** MotionEvent ids repeat; Dart addresses each stroke by its own number. */
+    private var nextStrokeNumber = 1
     private var predictor: MotionEventPredictor? = null
     private var primaryButtonDown = false
     private var secondaryButtonDown = false
@@ -79,11 +82,12 @@ class NativeInkChannel(
                 ensureOverlay()
                 // Leaving the pen hides a stroke still in progress at once; the
                 // rest of its gesture is swallowed rather than starting a new one.
+                // Finished strokes stay until Dart says Flutter is drawing them.
                 if (!surface.enabled || !surface.previewEnabled) {
                     active?.takeIf { it.surface.id == surface.id }?.let {
                         it.previewSuppressed = true
+                        overlay?.cancelLive()
                     }
-                    overlay?.clear()
                 }
                 result.success(true)
             }
@@ -96,19 +100,16 @@ class NativeInkChannel(
                 result.success(null)
             }
             "finishPreview" -> {
-                val pointer = argumentInt(call.arguments, "pointer")
-                if (pointer != null) {
-                    active?.takeIf { it.pointer == pointer }?.previewSuppressed = true
-                    overlay?.finish(pointer)
-                } else {
-                    active = null
-                    overlay?.clear()
+                val number = argumentInt(call.arguments, "pointer")
+                if (number != null) {
+                    active?.takeIf { it.number == number }?.previewSuppressed = true
+                    overlay?.finish(number)
                 }
                 result.success(null)
             }
-            "clearAllPreviews" -> {
+            "clearLivePreview" -> {
                 active = null
-                overlay?.clear()
+                overlay?.cancelLive()
                 result.success(null)
             }
             else -> result.notImplemented()
@@ -248,9 +249,10 @@ class NativeInkChannel(
         } else {
             null
         }
-        active = ActiveStroke(surface, pointer, inverted, model)
-        if (model != null) overlay?.begin(pointer, surface, model)
-        emit(surface.id, pointer, "down", inverted, samples)
+        val number = nextStrokeNumber++
+        active = ActiveStroke(surface, pointer, number, inverted, model)
+        if (model != null) overlay?.begin(number, surface, model)
+        emit(surface.id, number, "down", inverted, samples)
     }
 
     private fun move(event: MotionEvent, view: FlutterView) {
@@ -269,13 +271,13 @@ class NativeInkChannel(
             if (!stroke.previewSuppressed) {
                 val predicted = predictor?.predict()
                 try {
-                    overlay?.append(stroke.pointer, model, predictedSamples(predicted, stroke, view))
+                    overlay?.append(stroke.number, model, predictedSamples(predicted, stroke, view))
                 } finally {
                     predicted?.recycle()
                 }
             }
         }
-        emit(stroke.surface.id, stroke.pointer, "move", stroke.inverted, samples)
+        emit(stroke.surface.id, stroke.number, "move", stroke.inverted, samples)
     }
 
     private fun end(event: MotionEvent, view: FlutterView) {
@@ -287,21 +289,20 @@ class NativeInkChannel(
         if (model != null) {
             feed(model, samples, started = true)
             val final = model.finish()
-            if (!stroke.previewSuppressed) overlay?.end(stroke.pointer, model, final)
+            if (!stroke.previewSuppressed) overlay?.end(stroke.number, model, final)
         }
-        emit(stroke.surface.id, stroke.pointer, "up", stroke.inverted, samples)
+        emit(stroke.surface.id, stroke.number, "up", stroke.inverted, samples)
         active = null
-        // Keep Jetpack Ink's finished stroke until Flutter explicitly confirms
-        // that its durable rendering has crossed a frame boundary. Starting a
-        // new stroke also clears it, so no timeout can expose a blank frame.
+        // Jetpack Ink keeps the finished stroke until Dart says Flutter is
+        // drawing it, however many strokes come after it.
     }
 
     private fun cancelActive(sendPacket: Boolean) {
         val stroke = active ?: return
         active = null
-        overlay?.finish(stroke.pointer)
+        overlay?.finish(stroke.number)
         if (sendPacket) {
-            emit(stroke.surface.id, stroke.pointer, "cancel", stroke.inverted, emptyList())
+            emit(stroke.surface.id, stroke.number, "cancel", stroke.inverted, emptyList())
         }
     }
 
@@ -453,7 +454,10 @@ class NativeInkChannel(
 
     private class ActiveStroke(
         val surface: InkSurface,
+        /** The MotionEvent pointer id, which later gestures will reuse. */
         val pointer: Int,
+        /** This stroke's number, which Dart knows it by. */
+        val number: Int,
         val inverted: Boolean,
         /** The pen model behind the wet ink; null when there is no preview. */
         val model: InkStrokeModel?,
@@ -561,9 +565,13 @@ class NativeInkChannel(
      */
     private class NativeInkOverlay(context: android.content.Context) : FrameLayout(context) {
         private val ink = InProgressStrokesView(context)
-        private var pointer: Int? = null
+
+        /** The number of the stroke being drawn, and its Jetpack Ink id. */
+        private var number: Int? = null
         private var strokeId: InProgressStrokeId? = null
-        private var strokeEnded = false
+
+        /** Finished strokes on screen, by number, until [finish]. */
+        private val retained = HashMap<Int, InProgressStrokeId>()
         private var brush: Brush? = null
         private val strokeToView = Matrix()
         private var startMicros = 0L
@@ -613,9 +621,9 @@ class NativeInkChannel(
                         // Strokes are handed off in cohorts: a finished stroke
                         // waits while another is in progress, out of reach of
                         // cancelUnfinishedStrokes, and arrives here after the
-                        // overlay has let go of it. Only the stroke still
+                        // overlay has let go of it. Only strokes still
                         // waiting for Flutter's confirmation may stay.
-                        val stale = strokes.keys.filterTo(HashSet()) { it != strokeId }
+                        val stale = strokes.keys.filterTo(HashSet()) { it !in retained.values }
                         if (stale.isNotEmpty()) ink.removeFinishedStrokes(stale)
                     }
                 },
@@ -628,8 +636,8 @@ class NativeInkChannel(
             ink.eagerInit()
         }
 
-        fun begin(pointer: Int, surface: InkSurface, model: InkStrokeModel) {
-            clear()
+        fun begin(number: Int, surface: InkSurface, model: InkStrokeModel) {
+            cancelLive()
             val points = model.stable
             if (points.size == 0) return
             val density = resources.displayMetrics.density.toDouble()
@@ -656,7 +664,7 @@ class NativeInkChannel(
                 (EPSILON_PX / physicalPerUnit).toFloat(),
             )
             brush = created
-            this.pointer = pointer
+            this.number = number
             startMicros = points.micros[0]
             strokeId = guarded {
                 val first = input(points, 0)
@@ -666,9 +674,9 @@ class NativeInkChannel(
             sent = 1
         }
 
-        fun append(pointer: Int, model: InkStrokeModel, predicted: List<DoubleArray>) {
+        fun append(number: Int, model: InkStrokeModel, predicted: List<DoubleArray>) {
             val id = strokeId ?: return
-            if (this.pointer != pointer || strokeEnded) return
+            if (this.number != number) return
             guarded {
                 val stable = model.stable
                 val real = batch(stable, sent, stable.size, lastInput)
@@ -685,11 +693,10 @@ class NativeInkChannel(
          * stretch, so the stroke finishes in place; only a tapered stroke or
          * a pressure dot, whose drawn points change, is redrawn whole.
          */
-        fun end(pointer: Int, model: InkStrokeModel, final: InkPoints) {
+        fun end(number: Int, model: InkStrokeModel, final: InkPoints) {
             val id = strokeId ?: return
             val brush = brush ?: return
-            if (this.pointer != pointer || strokeEnded || final.size == 0) return
-            strokeEnded = true
+            if (this.number != number || final.size == 0) return
             guarded {
                 if (!model.finishReshapes) {
                     val stable = model.stable
@@ -697,15 +704,18 @@ class NativeInkChannel(
                     val tail = model.liveTail()
                     batch(tail, 0, tail.size, lastInput, rest)
                     sent = stable.size
+                    retained[number] = id
                     finishWith(rest, input(stable, stable.size - 1, 1), id)
                     return@guarded
                 }
                 ink.cancelStroke(id)
                 val first = input(final, 0)
                 val next = ink.startStroke(first, brush, strokeToView)
-                strokeId = next
+                retained[number] = next
                 finishWith(batch(final, 1, final.size, first), input(final, 0, 1), next)
             }
+            this.number = null
+            strokeId = null
         }
 
         /** Adds [rest] and ends on its last input; with nothing new, ends on [still]. */
@@ -724,34 +734,26 @@ class NativeInkChannel(
             ink.finishStroke(rest.get(rest.size - 1), id)
         }
 
-        /** Hides the stroke drawn by [pointer]. */
-        fun finish(pointer: Int) {
-            if (this.pointer != null && this.pointer != pointer) return
-            val id = strokeId
-            if (id != null) {
-                // A stroke that never got finishStroke would stay on screen
-                // forever, so cancel it instead of waiting for a callback.
-                if (strokeEnded) {
-                    // Not handed off yet, the finished listener removes it.
-                    if (ink.getFinishedStrokes().containsKey(id)) {
-                        ink.removeFinishedStrokes(setOf(id))
-                    }
-                } else {
-                    ink.cancelUnfinishedStrokes()
-                }
+        /** Hides the stroke numbered [number], and no other. */
+        fun finish(number: Int) {
+            if (this.number == number) {
+                cancelLive()
+                return
             }
-            this.pointer = null
-            strokeId = null
-            strokeEnded = false
+            val id = retained.remove(number) ?: return
+            // Not handed off yet, the finished listener removes it.
+            if (ink.getFinishedStrokes().containsKey(id)) {
+                ink.removeFinishedStrokes(setOf(id))
+            }
         }
 
-        fun clear() {
-            ink.cancelUnfinishedStrokes()
-            val finished = ink.getFinishedStrokes().keys.toSet()
-            if (finished.isNotEmpty()) ink.removeFinishedStrokes(finished)
-            pointer = null
+        /** Hides the stroke being drawn, leaving the finished ones. */
+        fun cancelLive() {
+            // A stroke that never got finishStroke would stay on screen
+            // forever, so cancel it instead of waiting for a callback.
+            if (number != null) ink.cancelUnfinishedStrokes()
+            number = null
             strokeId = null
-            strokeEnded = false
         }
 
         private fun input(points: InkPoints, index: Int, extraMillis: Long = 0): StrokeInput =

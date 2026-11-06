@@ -40,6 +40,7 @@ abstract final class SvgInkConverter {
     required double defaultWidth,
     bool animate = true,
     bool sketch = true,
+    bool skipInvalidElements = false,
     AiNotationConfig config = const AiNotationConfig(),
   }) {
     final XmlElement root = XmlDocument.parse(vector.source).rootElement;
@@ -50,6 +51,7 @@ abstract final class SvgInkConverter {
       stepCount: animate ? vector.stepCount : 0,
       duration: vector.duration,
       sketch: sketch,
+      skipInvalidElements: skipInvalidElements,
       config: config,
     );
     collector.visit(
@@ -77,6 +79,7 @@ class _Collector {
     required this.stepCount,
     required this.duration,
     required this.sketch,
+    required this.skipInvalidElements,
     required this.config,
   });
 
@@ -86,6 +89,7 @@ class _Collector {
   final int stepCount;
   final Duration duration;
   final bool sketch;
+  final bool skipInvalidElements;
   final AiNotationConfig config;
   final List<GeneratedInkTrace> traces = <GeneratedInkTrace>[];
 
@@ -112,6 +116,28 @@ class _Collector {
   };
 
   void visit(
+    XmlElement element,
+    _Affine parentTransform,
+    _Presentation parentPaint, {
+    required bool handwritten,
+    required int? paragraph,
+  }) {
+    final int before = traces.length;
+    try {
+      _visit(
+        element,
+        parentTransform,
+        parentPaint,
+        handwritten: handwritten,
+        paragraph: paragraph,
+      );
+    } on FormatException {
+      if (!skipInvalidElements) rethrow;
+      traces.removeRange(before, traces.length);
+    }
+  }
+
+  void _visit(
     XmlElement element,
     _Affine parentTransform,
     _Presentation parentPaint, {

@@ -63,6 +63,7 @@ abstract final class AppIcons {
 
   // Plans and AI models.
   static const IconData plans = CupertinoIcons.sparkles;
+  static const IconData sparkle = CupertinoIcons.sparkles;
   static const IconData lock = CupertinoIcons.lock_fill;
   static const IconData model = CupertinoIcons.chevron_down;
 

@@ -249,7 +249,7 @@ void main() {
         NoteImage(logicalSize: const Size(600, 800), revision: 0, space: space),
       );
       expect(text, contains('"your_notes":[['));
-      expect(text, contains('Never write or draw over'));
+      expect(text, contains('Preserve these regions'));
     });
   });
 
@@ -373,7 +373,7 @@ void main() {
         ),
       );
 
-      expect(text, contains('No blank space is provided'));
+      expect(text, contains('Available placement: annotate'));
       expect(text, contains('sticky_normalized'));
       expect(text, isNot(contains('free_areas')));
     });

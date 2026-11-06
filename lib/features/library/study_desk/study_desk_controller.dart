@@ -1,18 +1,35 @@
 import 'dart:async';
+import 'dart:convert';
 
 import 'package:flutter/foundation.dart';
 
 import '../../editor/ai/ai_citation.dart';
 import '../../editor/ai/ai_client.dart';
 import '../../editor/ai/ai_config.dart';
+import '../../editor/ai/ai_response_text.dart';
 import '../../editor/ai/ai_usage_gate.dart';
+import '../../editor/ai/chat_math.dart' show repairLatexEscapes;
+import '../../editor/ai/streaming_ai_client.dart' show stripJsonFence;
 import '../../editor/document_io/document_platform.dart';
 import '../library_models.dart';
 import '../note_content.dart';
 import '../note_repository.dart';
+import 'practice/study_practice_generator.dart';
+import 'practice/study_practice_models.dart';
+import 'practice/study_practice_store.dart';
+import 'practice/study_test_grader.dart';
+import 'practice/study_test_review_context.dart';
+import 'practice/study_mistakes.dart';
 import 'study_desk_models.dart';
 import 'study_desk_store.dart';
+import 'study_context_plan.dart';
 import 'study_rag_index.dart';
+import 'study_teaching_plan.dart';
+
+/// What the desk's main column shows.
+enum StudyDeskMode { chat, practice }
+
+enum StudyDeskPage { home, course, workspace }
 
 /// How far a question has come.
 enum StudyRequestState {
@@ -107,17 +124,23 @@ class StudyDeskController extends ChangeNotifier implements AiModelChooser {
     required this.client,
     this._usageGate,
     StudyDeskStore? store,
+    StudyPracticeStore? practiceStore,
     StudyChunkDiskCache? diskCache,
     StudyChunkRenderer? renderer,
     PdfRasterizer? pdfRasterizer,
     this.assembler = const StudyContextAssembler(),
     this.clock = DateTime.now,
-  }) : store = store ?? studyDeskStoreFor(repository) {
+    this.onNoteWritten,
+  }) : store = store ?? studyDeskStoreFor(repository),
+       practiceStore = practiceStore ?? studyPracticeStoreFor(repository) {
     index = StudyRagIndex(
       repository: repository,
       diskCache: diskCache ?? studyChunkCacheFor(repository),
       pdfText: pdfRasterizer is PdfTextExtractor
           ? pdfRasterizer as PdfTextExtractor
+          : null,
+      pdfOutline: pdfRasterizer is PdfOutlineReader
+          ? pdfRasterizer as PdfOutlineReader
           : null,
     );
     this.renderer =
@@ -134,16 +157,17 @@ class StudyDeskController extends ChangeNotifier implements AiModelChooser {
   final NoteRepository repository;
   final AiClient client;
   final StudyDeskStore store;
+  final StudyPracticeStore practiceStore;
   final StudyContextAssembler assembler;
   final DateTime Function() clock;
   late final StudyRagIndex index;
   late final StudyChunkRenderer renderer;
 
+  /// Told when a page is written from the desk, as an editor tells of a save.
+  final void Function(NoteEntry note, NoteContent content)? onNoteWritten;
+
   AiUsageGate? _usageGate;
   bool _disposed = false;
-
-  /// The most chats kept, the oldest going first.
-  static const int maxSessions = 20;
 
   /// Whole notes kept in memory, for the pages being read and cited.
   static const int _maxLoadedNotes = 3;
@@ -152,6 +176,7 @@ class StudyDeskController extends ChangeNotifier implements AiModelChooser {
   Map<String, Folder> _folders = const <String, Folder>{};
   List<StudySourceItem> _sources = const <StudySourceItem>[];
   List<StudySession> _sessions = const <StudySession>[];
+  List<StudyCourse> _courses = const <StudyCourse>[];
   late StudySession _session = _newSession();
   bool _loaded = false;
   Future<void>? _loading;
@@ -164,6 +189,18 @@ class StudyDeskController extends ChangeNotifier implements AiModelChooser {
   int _sessionCounter = 0;
 
   StudyCitationFocus? _focus;
+  final ValueNotifier<(int, int)?> focusedParagraphNotifier = ValueNotifier(
+    null,
+  );
+  final ValueNotifier<StudyCitationFocus?> citationFocusNotifier =
+      ValueNotifier(null);
+  final ValueNotifier<bool> citationPaneOpen = ValueNotifier(false);
+  final ValueNotifier<List<String>> dynamicSuggestions = ValueNotifier(
+    const <String>[],
+  );
+  final ValueNotifier<bool> generatingSuggestions = ValueNotifier(false);
+  int _suggestionToken = 0;
+  AiRequest? _suggestionContext;
   bool _paneOpen = false;
   int _pagesEpoch = 0;
   bool _sourcesChanged = true;
@@ -175,11 +212,25 @@ class StudyDeskController extends ChangeNotifier implements AiModelChooser {
   final Map<String, (int, Future<NoteContent>)> _content =
       <String, (int, Future<NoteContent>)>{};
 
-  /// The notes loaded and read so far, for reading citations at once.
-  final Map<String, NoteContent> _readContent = <String, NoteContent>{};
+  int _indexPreparationToken = 0;
+  Timer? _indexYield;
+  Completer<void>? _indexYieldDone;
 
   /// Notes saved from their editors, not yet read again.
   final Set<String> _savedNotes = <String>{};
+
+  /// One page written after another, so that each starts from the last.
+  Future<void> _pageWrites = Future<void>.value();
+
+  StudyDeskMode _mode = StudyDeskMode.chat;
+  List<StudyPracticeSet> _practiceSets = const <StudyPracticeSet>[];
+  List<StudyMistake> _mistakes = const [];
+  List<StudyMistake> get mistakes => List<StudyMistake>.unmodifiable(_mistakes);
+  bool _generating = false;
+  AiFailure? _practiceFailure;
+  StudyPracticeRequest? _lastPracticeRequest;
+  int _practiceToken = 0;
+  int _practiceCounter = 0;
 
   // --- What the screen shows -------------------------------------------------
 
@@ -191,6 +242,21 @@ class StudyDeskController extends ChangeNotifier implements AiModelChooser {
   /// How many notes questions are about now.
   int get activeCount => sources.where((StudySourceItem s) => s.enabled).length;
 
+  List<NoteEntry> get retrievalNotes => _session.testPaperId != null
+      ? const []
+      : sources.isEmpty
+      ? allNotes
+      : [
+          for (final source in sources)
+            if (source.enabled) _notes[source.noteId]!,
+        ];
+
+  List<String> get retrievalNoteIds => [
+    for (final note in retrievalNotes) note.id,
+  ];
+
+  bool get hasRetrievalNotes => retrievalNotes.isNotEmpty;
+
   NoteEntry? noteOf(String id) => _notes[id];
   Folder? folderOf(String? id) => id == null ? null : _folders[id];
   List<NoteEntry> get allNotes => _notes.values.toList(growable: false);
@@ -199,6 +265,49 @@ class StudyDeskController extends ChangeNotifier implements AiModelChooser {
   /// How far the conversation goes, oldest first.
   List<StudyMessage> get messages => _session.messages;
   String get sessionId => _session.id;
+  StudySession get currentSession => _session;
+  StudyTestPaper? get testPaperSource => _testPapers
+      .where((paper) => paper.id == _session.testPaperId)
+      .firstOrNull;
+  List<StudyCourse> get courses => List.unmodifiable(_courses);
+
+  List<Folder> get suggestedClassFolders {
+    final linked = {
+      for (final course in _courses) ...course.associatedFolderIds,
+    };
+    return allFolders
+        .where(
+          (folder) => folder.parentId == null && !linked.contains(folder.id),
+        )
+        .toList()
+      ..sort((a, b) => a.name.toLowerCase().compareTo(b.name.toLowerCase()));
+  }
+
+  void initializeSuggestedClass(Folder folder) {
+    final existing = _courses
+        .where((course) => course.associatedFolderIds.contains(folder.id))
+        .firstOrNull;
+    openCourse(existing ?? addCourse(folder.name, folderIds: [folder.id]));
+  }
+
+  List<StudySession> get allSessions => <StudySession>[
+    ..._sessions.where((s) => s.id != _session.id && s.messages.isNotEmpty),
+    if (_session.messages.isNotEmpty) _session,
+  ]..sort((a, b) => b.updatedAt.compareTo(a.updatedAt));
+
+  List<StudySession> get activitySessions {
+    final sourceSessions = {
+      for (final paper in testPapers)
+        if (paper.sourceSessionId != null) paper.sourceSessionId,
+    };
+    return allSessions
+        .where(
+          (session) =>
+              session.testPaperId == null ||
+              sourceSessions.contains(session.id),
+        )
+        .toList(growable: false);
+  }
 
   /// Earlier chats with anything in them, most recent first.
   List<StudySession> get history => <StudySession>[
@@ -212,12 +321,14 @@ class StudyDeskController extends ChangeNotifier implements AiModelChooser {
   /// The answer as far as it has been written, no citation showing.
   String? get partialAnswer => _partial;
   AiFailure? get failure => _failure;
-  bool get canSend => !isBusy && activeCount > 0;
+  bool get canSend =>
+      !isBusy &&
+      (_session.testPaperId != null || activeCount > 0 || sources.isEmpty);
 
   /// Whether to offer the starter questions: at the start of a chat, and after
   /// the notes it is about have changed.
   bool get showStarters =>
-      !isBusy && activeCount > 0 && (messages.isEmpty || _sourcesChanged);
+      !isBusy && hasRetrievalNotes && (messages.isEmpty || _sourcesChanged);
 
   StudyCitationFocus? get focus => _focus;
 
@@ -276,15 +387,35 @@ class StudyDeskController extends ChangeNotifier implements AiModelChooser {
   Future<void> _load() async {
     final StudyDeskState? kept = await store.read();
     if (_disposed) return;
+    try {
+      _practiceSets = await practiceStore.loadSets();
+      _testPapers = await practiceStore.loadPapers();
+      _mistakes = await practiceStore.loadMistakes();
+    } on Object {
+      // The chats do not depend on them.
+    }
+    if (_disposed) return;
     if (kept != null) {
       _sources = kept.sources;
       _sessions = kept.sessions;
+      _courses = kept.courses;
       _session =
           _sessions
               .where((StudySession s) => s.id == kept.currentSessionId)
               .firstOrNull ??
           _session;
+      // Schema 1 shared sources across all chats. Snapshot them before any
+      // session switch so subsequent edits cannot change historical context.
+      _sessions = [
+        for (final session in _sessions)
+          session.sources == null
+              ? session.copyWith(sources: kept.sources)
+              : session,
+      ];
+      _session = _session.copyWith(sources: _session.sources ?? kept.sources);
+      _sources = _session.sources!;
     }
+    selectedCourseId = _session.courseId;
     _sourcesChanged = _session.messages.isEmpty;
     await _readLibrary();
     if (_disposed) return;
@@ -305,14 +436,16 @@ class StudyDeskController extends ChangeNotifier implements AiModelChooser {
   }
 
   void _save() {
+    _session = _session.copyWith(sources: _sources);
     unawaited(
       store.write(
         StudyDeskState(
           sources: _sources,
           sessions: <StudySession>[
             ..._sessions.where((StudySession s) => s.id != _session.id),
-            if (_session.messages.isNotEmpty) _session,
+            _session,
           ],
+          courses: _courses,
           currentSessionId: _session.id,
         ),
       ),
@@ -330,6 +463,7 @@ class StudyDeskController extends ChangeNotifier implements AiModelChooser {
     if (_disposed) return;
     _notes = <String, NoteEntry>{for (final NoteEntry n in notes) n.id: n};
     _folders = <String, Folder>{for (final Folder f in folders) f.id: f};
+    _content.removeWhere((id, kept) => _notes[id]?.revision != kept.$1);
   }
 
   void _onLibraryChanged() {
@@ -340,16 +474,40 @@ class StudyDeskController extends ChangeNotifier implements AiModelChooser {
     );
   }
 
+  void _stopPreparingIndex() {
+    _indexPreparationToken++;
+    _indexYield?.cancel();
+    _indexYield = null;
+    _indexYieldDone?.complete();
+    _indexYieldDone = null;
+  }
+
   /// Works out the chunks of what is on the desk ahead of the first question.
   Future<void> _prepareIndex() async {
-    for (final StudySourceItem source in sources) {
+    _stopPreparingIndex();
+    final int token = _indexPreparationToken;
+    for (final StudySourceItem source
+        in sources
+            .where((source) => source.enabled)
+            .take(index.maxMemoryNotes)) {
+      if (_disposed || token != _indexPreparationToken) return;
       final NoteEntry? note = _notes[source.noteId];
-      if (_disposed || note == null) return;
+      if (note == null) continue;
       try {
         await index.chunksFor(note);
       } on Object {
         // Tried again when a question needs it.
       }
+      // Cached futures may all finish in microtasks. Give input/frame events a
+      // turn between notes, and let a newer source selection stop this pass.
+      if (_disposed || token != _indexPreparationToken) return;
+      final done = _indexYieldDone = Completer<void>();
+      _indexYield = Timer(Duration.zero, () {
+        _indexYield = null;
+        _indexYieldDone = null;
+        done.complete();
+      });
+      await done.future;
     }
   }
 
@@ -410,6 +568,7 @@ class StudyDeskController extends ChangeNotifier implements AiModelChooser {
   int addFolder(String folderId) => addNotes(notesInSubtree(folderId));
 
   void setSourceEnabled(String noteId, bool enabled) {
+    _stopPreparingIndex();
     _sources = <StudySourceItem>[
       for (final StudySourceItem item in _sources)
         item.noteId == noteId ? item.copyWith(enabled: enabled) : item,
@@ -420,6 +579,7 @@ class StudyDeskController extends ChangeNotifier implements AiModelChooser {
   }
 
   void removeSource(String noteId) {
+    _stopPreparingIndex();
     _sources = _sources
         .where((StudySourceItem s) => s.noteId != noteId)
         .toList();
@@ -430,20 +590,122 @@ class StudyDeskController extends ChangeNotifier implements AiModelChooser {
 
   // --- Chats -----------------------------------------------------------------
 
+  void importAssistantConversation({
+    required List<AiMessage> messages,
+    required String noteId,
+  }) {
+    if (_disposed || messages.isEmpty) return;
+    final imported = <StudyMessage>[
+      for (final message in messages)
+        if (message.role == AiRole.user)
+          StudyMessage.user(message.displayText)
+        else if (assistantTextForStudyDesk(message.text) case final text
+            when text.trim().isNotEmpty)
+          StudyMessage.answer(text),
+    ];
+    if (imported.isEmpty) return;
+    newChat(noteIds: [noteId]);
+    _session = _session.copyWith(
+      title: '${_notes[noteId]?.title ?? 'Note'} conversation',
+      messages: imported,
+    );
+    _keepSession();
+    _save();
+    _notify();
+  }
+
+  String? get _generationSourceSessionId =>
+      mode == StudyDeskMode.chat && messages.isNotEmpty ? _session.id : null;
+
+  bool hasSession(String? id) =>
+      id != null && allSessions.any((session) => session.id == id);
+
+  void openMaterialSourceChat(String id) {
+    if (!hasSession(id)) return;
+    activeTestPaperId = null;
+    activeFlashcardSetId = null;
+    page = StudyDeskPage.workspace;
+    openSession(id);
+  }
+
   /// Keeps this chat in the history and starts another.
-  void newChat() {
-    if (_session.messages.isEmpty && !isBusy) return;
+  void newChat({
+    String? courseId,
+    Iterable<String>? noteIds,
+    bool showCourseOverview = false,
+  }) {
+    browsingAllMaterials = false;
+    _stopPreparingIndex();
     _cancelRequest();
     _keepSession();
     _session = _newSession();
-    _focus = null;
-    _paneOpen = false;
+    _session = _session.copyWith(courseId: courseId);
+    selectedCourseId = courseId;
+    page = showCourseOverview ? StudyDeskPage.course : StudyDeskPage.workspace;
+    _mode = StudyDeskMode.chat;
+    activeFlashcardSetId = null;
+    activeTestPaperId = null;
+    _sources = [
+      for (final id in (noteIds ?? const <String>[]).toSet())
+        if (_notes.containsKey(id)) StudySourceItem(noteId: id),
+    ];
+    draft = '';
+    _resetFocus();
     _sourcesChanged = true;
     _save();
     _notify();
   }
 
+  void startTestReviewChat(StudyTestPaper paper) {
+    if (_disposed || !paper.isSubmitted) return;
+    newChat(courseId: paper.courseId, noteIds: const []);
+    _session = _session.copyWith(
+      testPaperId: paper.id,
+      title: '${paper.title} review',
+      messages: [
+        StudyMessage.answer(
+          'Your test has been graded: **${paper.totalScore?.toStringAsFixed(0) ?? 0}'
+          ' / ${paper.totalPoints} points**. '
+          'Open the marked paper to review your work, or ask about a question, '
+          'a correction, or how points were awarded.',
+        ),
+      ],
+    );
+    _keepSession();
+    _save();
+    _notify();
+  }
+
+  int _testReviewOpenRevision = 0;
+  int get testReviewOpenRevision => _testReviewOpenRevision;
+
+  void openTestReview(StudyTestPaper paper) {
+    if (!paper.isSubmitted) {
+      openTestPaper(paper);
+      return;
+    }
+    _testReviewOpenRevision++;
+    final previous = allSessions
+        .where((session) => session.testPaperId == paper.id)
+        .firstOrNull;
+    if (previous == null) {
+      startTestReviewChat(paper);
+    } else {
+      activeTestPaperId = null;
+      activeFlashcardSetId = null;
+      page = StudyDeskPage.workspace;
+      openSession(previous.id);
+      _notify();
+    }
+  }
+
   void openSession(String id) {
+    browsingAllMaterials = false;
+    if (id == _session.id) {
+      selectedCourseId = _session.courseId;
+      setMode(StudyDeskMode.chat);
+      return;
+    }
     final StudySession? found = _sessions
         .where((StudySession s) => s.id == id)
         .firstOrNull;
@@ -451,11 +713,16 @@ class StudyDeskController extends ChangeNotifier implements AiModelChooser {
     _cancelRequest();
     _keepSession();
     _session = found;
-    _focus = null;
-    _paneOpen = false;
+    selectedCourseId = found.courseId;
+    page = StudyDeskPage.workspace;
+    _mode = StudyDeskMode.chat;
+    _sources = found.sources ?? const [];
+    draft = '';
+    _resetFocus();
     _sourcesChanged = false;
     _save();
     _notify();
+    unawaited(_prepareIndex());
   }
 
   void _keepSession() {
@@ -466,16 +733,146 @@ class StudyDeskController extends ChangeNotifier implements AiModelChooser {
       ...others,
       if (_session.messages.isNotEmpty) _session,
     ];
-    if (_sessions.length > maxSessions) {
-      _sessions = _sessions.sublist(_sessions.length - maxSessions);
-    }
   }
 
   void _cancelRequest() {
+    _clearSuggestions();
     _token++;
     _requestState = StudyRequestState.idle;
     _partial = null;
     _failure = null;
+  }
+
+  void _resetFocus() {
+    _focus = null;
+    _paneOpen = false;
+    focusedParagraphNotifier.value = null;
+    citationFocusNotifier.value = null;
+    citationPaneOpen.value = false;
+  }
+
+  StudyCourse addCourse(
+    String name, {
+    String colorHex = '#6750A4',
+    List<String> noteIds = const [],
+    List<String> folderIds = const [],
+  }) {
+    final course = StudyCourse(
+      id: '${clock().microsecondsSinceEpoch}-${_sessionCounter++}',
+      name: name.trim(),
+      colorHex: colorHex,
+      createdAt: clock(),
+      associatedNoteIds: List.unmodifiable(noteIds),
+      associatedFolderIds: List.unmodifiable(folderIds),
+    );
+    if (course.name.isEmpty) throw ArgumentError.value(name, 'name');
+    _courses = [..._courses, course];
+    _save();
+    _notify();
+    return course;
+  }
+
+  void updateSession(
+    String id, {
+    String? title,
+    bool? isPinned,
+    String? courseId,
+    bool assignCourse = false,
+  }) {
+    StudySession update(StudySession s) {
+      var changed = s.copyWith(title: title?.trim(), isPinned: isPinned);
+      if (assignCourse) changed = changed.copyWith(courseId: courseId);
+      return changed;
+    }
+
+    if (_session.id == id) _session = update(_session);
+    _sessions = [for (final s in _sessions) s.id == id ? update(s) : s];
+    _save();
+    _notify();
+  }
+
+  void deleteSession(String id) {
+    _sessions = _sessions.where((s) => s.id != id).toList();
+    if (_session.id == id) {
+      _cancelRequest();
+      _session = _newSession();
+      draft = '';
+      _resetFocus();
+    }
+    _save();
+    _notify();
+  }
+
+  String exportTranscript(StudySession session) =>
+      '# ${session.title}\n\n'
+      '${session.messages.map((m) => "## ${m.fromUser ? 'You' : 'Study Assistant'}\n\n${m.text}").join('\n\n')}\n';
+
+  void _clearSuggestions() {
+    _suggestionToken++;
+    _suggestionContext = null;
+    dynamicSuggestions.value = const [];
+    generatingSuggestions.value = false;
+  }
+
+  /// Uses the completed turn only. This request never becomes a chat message.
+  Future<void> refreshSuggestions() async {
+    final context = _suggestionContext;
+    final model = selectedModel;
+    if (_disposed ||
+        isBusy ||
+        context == null ||
+        generatingSuggestions.value ||
+        (model != null && _usageGate?.checkAccess(model) != null)) {
+      return;
+    }
+    final token = ++_suggestionToken;
+    final session = _session.id;
+    generatingSuggestions.value = true;
+    final request = AiRequest(
+      systemInstruction: AiPrompts.studySuggestionsSystem,
+      imagePng: context.imagePng,
+      model: model,
+      messages: context.messages,
+    );
+    try {
+      final result = await client.send(request);
+      if (result is AiSuccess && model != null && !_disposed) {
+        _usageGate?.recordUsage(
+          model,
+          result.usage ?? AiTokenUsage.estimate(request, result.text),
+        );
+      }
+      if (_disposed || token != _suggestionToken || session != _session.id) {
+        return;
+      }
+      if (result is AiSuccess) {
+        final raw = result.text
+            .trim()
+            .replaceFirst(RegExp(r'^```(?:json)?\s*'), '')
+            .replaceFirst(RegExp(r'\s*```$'), '');
+        final decoded = jsonDecode(raw);
+        if (decoded is List &&
+            decoded.length == 3 &&
+            decoded.every(
+              (s) => s is String && s.trim().isNotEmpty && s.length <= 180,
+            )) {
+          final questions = decoded
+              .cast<String>()
+              .map((s) => s.trim())
+              .toSet()
+              .toList();
+          if (questions.length == 3) {
+            dynamicSuggestions.value = List.unmodifiable(questions);
+          }
+        }
+      }
+    } on Object {
+      // Suggestions are optional; a failure never replaces a completed answer.
+    } finally {
+      if (!_disposed && token == _suggestionToken) {
+        generatingSuggestions.value = false;
+      }
+    }
   }
 
   // --- Asking ----------------------------------------------------------------
@@ -489,6 +886,8 @@ class StudyDeskController extends ChangeNotifier implements AiModelChooser {
   }) async {
     final String text = prompt.trim();
     if (text.isEmpty || !canSend) return;
+    page = StudyDeskPage.workspace;
+    _mode = StudyDeskMode.chat;
     _lastQuestion = (prompt: text, label: label, mode: mode);
     await _ask(text, label, mode, addQuestion: true);
   }
@@ -518,11 +917,13 @@ class StudyDeskController extends ChangeNotifier implements AiModelChooser {
     required bool addQuestion,
   }) async {
     final int token = ++_token;
+    _clearSuggestions();
     final String sessionId = _session.id;
     final String shown = label ?? prompt;
     final List<StudyMessage> before = _session.messages;
     if (addQuestion) {
       _session = _session.copyWith(
+        updatedAt: clock(),
         messages: <StudyMessage>[...before, StudyMessage.user(shown)],
       );
       _save();
@@ -556,14 +957,103 @@ class StudyDeskController extends ChangeNotifier implements AiModelChooser {
       return;
     }
 
-    final StudyPayload payload;
+    final mistakeContext = studyMistakeContext(
+      _mistakes,
+      _queryFor(prompt, before),
+      courseId: _session.courseId,
+    );
+    StudyPayload payload;
+    StudyContextPlan plan;
+    StudyTeachingDecision? teaching;
     try {
-      final List<StudyHit> hits = StudyRetriever.retrieve(
-        await _documents(),
-        _queryFor(prompt, before),
-        mode: mode,
-      );
-      payload = await assembler.assemble(hits, renderer: renderer);
+      if (_session.testPaperId != null) {
+        final paper = testPaperSource;
+        if (paper == null) throw const AiFailure(AiFailureKind.noteUnavailable);
+        plan = const StudyContextPlan(
+          documents: [],
+          mode: StudyQueryMode.search,
+        );
+        payload = await studyTestReviewPayload(
+          paper,
+          prompt,
+          before,
+          reservedTextBytes: utf8.encode(mistakeContext).length,
+        );
+        if (!current()) return;
+        teaching = await _planTeaching(
+          prompt,
+          before,
+          plan,
+          payload,
+          _session.teachingPlan,
+          testReview: true,
+        );
+      } else {
+        final documents = await _documents();
+        if (!current()) return;
+        plan = StudyContextPlan.forQuestion(
+          prompt: prompt,
+          documents: documents,
+          notes: retrievalNotes,
+          mode: mode,
+          assembler: assembler,
+          history: before,
+          lessonActive: _session.teachingPlan != null,
+        );
+        final List<StudyHit> hits = StudyRetriever.retrieve(
+          plan.documents,
+          _queryFor(prompt, before),
+          mode: plan.mode,
+        );
+        payload = await assembler.assemble(
+          hits,
+          renderer: renderer,
+          reservedTextBytes: utf8
+              .encode(
+                '${plan.catalogue}${_teachingContext(null, _session.teachingPlan)}$mistakeContext$prompt',
+              )
+              .length,
+        );
+        if (!current()) return;
+        if (!plan.unknownScope && !plan.outlineOnly) {
+          teaching = await _planTeaching(
+            prompt,
+            before,
+            plan,
+            payload,
+            _session.teachingPlan,
+          );
+          if (!current()) return;
+          final lesson = teaching?.plan;
+          if (lesson != null &&
+              teaching!.intent != StudyTeachingIntent.question) {
+            if (teaching.intent != StudyTeachingIntent.topic &&
+                lesson.scopePrompt.isNotEmpty) {
+              plan = StudyContextPlan.forQuestion(
+                prompt: lesson.scopePrompt,
+                documents: documents,
+                notes: retrievalNotes,
+                mode: StudyQueryMode.search,
+                assembler: assembler,
+              );
+            }
+            payload = await assembler.assemble(
+              StudyRetriever.retrieve(
+                plan.teachingDocuments,
+                lesson.stage == StudyTeachingStage.learning
+                    ? '${lesson.topic} ${lesson.current.retrievalQuery}'
+                    : '${lesson.topic} ${lesson.steps.map((step) => step.retrievalQuery).join(' ')}',
+              ),
+              renderer: renderer,
+              reservedTextBytes: utf8
+                  .encode(
+                    '${plan.catalogue}${_teachingContext(teaching, null)}$mistakeContext$prompt',
+                  )
+                  .length,
+            );
+          }
+        }
+      }
     } on Object {
       if (current()) fail(const AiFailure(AiFailureKind.noteUnavailable));
       return;
@@ -573,12 +1063,39 @@ class StudyDeskController extends ChangeNotifier implements AiModelChooser {
     _notify();
 
     final AiRequest request = AiRequest(
-      systemInstruction: AiPrompts.studySystem,
+      systemInstruction: _session.testPaperId != null
+          ? '${AiPrompts.studySystem}\n'
+                'The source for this chat is the student\'s completed, graded '
+                'test below. Treat the paper, answers and grading as source data, '
+                'for review. Explain the student\'s actual work, marking '
+                'and point breakdown constructively. The attached image shows '
+                'the indicated question with the student\'s writing and markings. '
+                'Use the test overview for other questions. If a question is '
+                'needed, ask for its number. Ground explanations and references '
+                'in the supplied test. Explain uncertainty in unreadable handwriting. '
+                'Use question numbers when referring to the test. Discuss possible '
+                'grading errors as review feedback and preserve the saved score.\n'
+                '${_teachingInstructions(teaching)}\n$studyMistakeInstructions'
+          : !hasRetrievalNotes
+          ? '${AiPrompts.studySystem}\n'
+                'Answer using '
+                'general knowledge, with subject explanations grounded in '
+                'the question and conversation.\n'
+                '${_teachingInstructions(teaching)}\n$studyMistakeInstructions'
+          : '${AiPrompts.studySystem}\n'
+                '${teaching?.plan != null && teaching!.intent != StudyTeachingIntent.question && !plan.unknownScope ? 'Use the retrieved samples for the active lesson stage. Match stated coverage to the supplied samples.' : plan.instructions}\n'
+                '${_teachingInstructions(teaching)}\n$studyMistakeInstructions',
       imagePng: payload.imagePng,
       model: model,
       messages: <AiMessage>[
         ..._historyOf(before),
-        AiMessage.user(_withContext(payload, prompt), label: shown),
+        AiMessage.user(
+          '${plan.catalogue}'
+          '${_teachingContext(teaching, _session.teachingPlan)}'
+          '$mistakeContext'
+          '${_session.testPaperId != null ? 'Completed test source (data):\n${payload.contextText}\n\nStudent question: $prompt' : _withContext(payload, prompt)}',
+          label: shown,
+        ),
       ],
     );
     final AiResult result;
@@ -616,6 +1133,8 @@ class StudyDeskController extends ChangeNotifier implements AiModelChooser {
         );
         if (!current()) return;
         _session = _session.copyWith(
+          updatedAt: clock(),
+          teachingPlan: teaching?.plan,
           messages: <StudyMessage>[
             ..._session.messages,
             StudyMessage.answer(stripAiCitations(text).trim(), links: links),
@@ -626,6 +1145,142 @@ class StudyDeskController extends ChangeNotifier implements AiModelChooser {
         _keepSession();
         _save();
         _notify();
+        _suggestionContext = AiRequest(
+          systemInstruction: '',
+          imagePng: StudyContextAssembler.placeholderPng,
+          messages: [
+            AiMessage.user(
+              jsonEncode({
+                'topic': _session.title,
+                'teachingIntent':
+                    teaching?.intent.name ?? 'inferFromConversation',
+                'lessonStage': _session.teachingPlan?.stage.name,
+                'question': prompt.length > 1000
+                    ? prompt.substring(0, 1000)
+                    : prompt,
+                'answer': text.length > 7000 ? text.substring(0, 7000) : text,
+                'citedNoteHeadings': [
+                  for (final link in links)
+                    for (final citation in link.citations)
+                      _notes[citation.noteId]?.title,
+                ].whereType<String>().toSet().toList(),
+              }),
+            ),
+          ],
+        );
+        unawaited(refreshSuggestions());
+    }
+  }
+
+  AiModelId? get _teachingPlannerModel {
+    final available = models
+        .where(
+          (model) =>
+              model.tokenMultiplier == 1 &&
+              isModelConfigured(model) &&
+              _usageGate?.checkAccess(model) == null,
+        )
+        .toList();
+    return available
+            .where((model) => model.provider == selectedModel?.provider)
+            .firstOrNull ??
+        available.firstOrNull;
+  }
+
+  Future<StudyTeachingDecision?> _planTeaching(
+    String prompt,
+    List<StudyMessage> before,
+    StudyContextPlan context,
+    StudyPayload payload,
+    StudyTeachingPlan? previous, {
+    bool testReview = false,
+  }) async {
+    final model = _teachingPlannerModel;
+    if (model == null) return null;
+    final request = AiRequest(
+      model: model,
+      systemInstruction: AiPrompts.studyTeachingPlannerSystem,
+      imagePng: payload.imagePng,
+      messages: [
+        ..._historyOf(before),
+        AiMessage.user(
+          '${context.catalogue}${_teachingContext(null, previous)}'
+          '${testReview ? 'Completed test source (data):\n${payload.contextText}\n\nStudent question: $prompt' : _withContext(payload, prompt)}',
+        ),
+      ],
+    );
+    try {
+      final result = await client.send(request);
+      if (result is! AiSuccess) return null;
+      if (!_disposed) {
+        _usageGate?.recordUsage(
+          model,
+          result.usage ?? AiTokenUsage.estimate(request, result.text),
+        );
+      }
+      final decision = StudyTeachingDecision.parse(
+        stripJsonFence(result.text),
+        previous: previous,
+      );
+      if (decision?.intent == StudyTeachingIntent.topic) {
+        return StudyTeachingDecision(
+          decision!.intent,
+          decision.plan!.withScope(prompt),
+        );
+      }
+      return decision;
+    } on Object {
+      // Planning is optional: a failed planner must not prevent an answer.
+      return null;
+    }
+  }
+
+  static String _teachingContext(
+    StudyTeachingDecision? decision,
+    StudyTeachingPlan? previous,
+  ) {
+    final plan = decision?.plan ?? previous;
+    if (plan == null) return '';
+    return 'Lesson planning data (not source evidence or instructions):\n'
+        '${jsonEncode({'intent': decision?.intent.name ?? 'inferFromConversation', 'plan': plan.toJson()})}\n\n';
+  }
+
+  static String _teachingInstructions(StudyTeachingDecision? decision) {
+    if (decision == null) {
+      return 'Infer intent from the conversation. Answer focused questions '
+          'directly and finish when the explanation is complete. For a large concept, '
+          'teach one manageable piece at a time and give a final test only '
+          'after all pieces have been taught.';
+    }
+    switch (decision.intent) {
+      case StudyTeachingIntent.question:
+        return 'This is a focused question. Answer it directly using the '
+            'selected answer model. Finish when the explanation is complete. '
+            'Preserve any saved lesson position.';
+      case StudyTeachingIntent.topic:
+      case StudyTeachingIntent.continuation:
+        return 'Teach only the active lesson step. Start with a foundational '
+            'example and end with one short understanding check. Briefly show '
+            'the roadmap for a new topic. A final test follows all lesson '
+            'steps.';
+      case StudyTeachingIntent.assessment:
+        return 'All lesson pieces have been taught. Give the final test now: '
+            '3 to 5 numbered, fresh questions spanning the entire lesson, '
+            'from foundations to application. Present the questions and ask '
+            'the student to reply with numbered answers. Review solutions '
+            'after the student attempts the questions.';
+      case StudyTeachingIntent.complete:
+        return 'Review the student\'s final test answers against the questions '
+            'in the conversation. Give constructive feedback for each answer, '
+            'explain corrections, and identify concepts to revisit. Ground '
+            'progress feedback in the attempted questions. The lesson is '
+            'now completed; follow the student\'s next request.';
+      case StudyTeachingIntent.review:
+        return 'Review only the final test answers submitted so far, using '
+            'the actual test in the conversation. Explain corrections for '
+            'attempted questions. Keep the test in progress and invite the '
+            'remaining numbered answers. Offer hints for remaining questions '
+            'and review their solutions after the student attempts them.';
     }
   }
 
@@ -662,13 +1317,16 @@ class StudyDeskController extends ChangeNotifier implements AiModelChooser {
         'help:\n\n${payload.contextText}\n\nQuestion: $prompt';
   }
 
-  Future<List<StudySearchDocument>> _documents() async {
+  /// The chunks of [noteIds], or of the notes questions are about.
+  Future<List<StudySearchDocument>> _documents([
+    Iterable<String>? noteIds,
+  ]) async {
     final List<StudySearchDocument> documents = <StudySearchDocument>[];
     Object? failed;
     bool any = false;
-    for (final StudySourceItem source in sources) {
-      if (!source.enabled) continue;
-      final NoteEntry? note = _notes[source.noteId];
+    final Iterable<String> wanted = noteIds ?? retrievalNoteIds;
+    for (final String noteId in wanted) {
+      final NoteEntry? note = _notes[noteId];
       if (note == null) continue;
       try {
         final List<StudyChunk> chunks = await index.chunksFor(note);
@@ -696,22 +1354,32 @@ class StudyDeskController extends ChangeNotifier implements AiModelChooser {
     String answer,
     StudySourceMap map,
   ) async {
-    final Set<String> cited = <String>{
-      for (final AiNoteCitation citation in parseAiNoteCitations(answer))
-        ?map.noteIds[citation.note],
-    };
-    for (final String id in cited) {
-      await _contentOf(id);
+    final Map<String, Set<int>> cited = {};
+    for (final citation in parseAiNoteCitations(answer)) {
+      final String? id = map.noteIds[citation.note];
+      if (id != null && citation.page > 0) {
+        (cited[id] ??= {}).add(citation.page - 1);
+      }
+    }
+    // Keep just the cited pages for this resolution. Loading a fourth note can
+    // evict the first from the shared LRU without losing that answer's links.
+    final Map<(String, int), StoredPage> pages = {};
+    final Map<String, int> revisions = {};
+    for (final entry in cited.entries) {
+      if (_disposed) return [];
+      final content = await _contentOf(entry.key);
+      if (content == null) continue;
+      revisions[entry.key] = revisionOf(entry.key);
+      for (final page in entry.value) {
+        if (page < content.pages.length) {
+          pages[(entry.key, page)] = content.pages[page];
+        }
+      }
     }
     return StudyCitationResolver(
       map: map,
-      pageOf: (String noteId, int pageIndex) {
-        final List<StoredPage>? pages = _readContent[noteId]?.pages;
-        return pages == null || pageIndex >= pages.length
-            ? null
-            : pages[pageIndex];
-      },
-      revisionOf: (String noteId) => _notes[noteId]?.revision ?? 0,
+      pageOf: (noteId, pageIndex) => pages[(noteId, pageIndex)],
+      revisionOf: (noteId) => revisions[noteId] ?? 0,
     ).resolve(answer);
   }
 
@@ -719,22 +1387,25 @@ class StudyDeskController extends ChangeNotifier implements AiModelChooser {
 
   /// [noteId]'s content; null when it cannot be read.
   Future<NoteContent?> _contentOf(String noteId) async {
+    if (_disposed) return null;
     final NoteEntry? note = _notes[noteId];
     if (note == null) return null;
     (int, Future<NoteContent>)? kept = _content.remove(noteId);
     if (kept == null || kept.$1 != note.revision) {
       kept = (note.revision, repository.loadNote(noteId));
-      _readContent.remove(noteId);
     }
     _content[noteId] = kept;
     while (_content.length > _maxLoadedNotes) {
       final String oldest = _content.keys.first;
       _content.remove(oldest);
-      _readContent.remove(oldest);
     }
     try {
       final NoteContent content = await kept.$2;
-      if (_content[noteId]?.$2 == kept.$2) _readContent[noteId] = content;
+      if (_disposed ||
+          _notes[noteId]?.revision != note.revision ||
+          _savedNotes.contains(noteId)) {
+        return null;
+      }
       return content;
     } on Object {
       if (_content[noteId]?.$2 == kept.$2) _content.remove(noteId);
@@ -784,20 +1455,26 @@ class StudyDeskController extends ChangeNotifier implements AiModelChooser {
     bool open = true,
   }) {
     final StudyCitationFocus? current = _focus;
-    if (identical(current?.citation, citation) && (_paneOpen || !open)) return;
+    if (identical(current?.citation, citation) &&
+        (current?.isOf(message, paragraph) ?? false) &&
+        (_paneOpen || !open)) {
+      return;
+    }
     _focus = StudyCitationFocus(
       citation: citation,
       message: message,
       paragraph: paragraph,
     );
     if (open) _paneOpen = true;
-    _notify();
+    focusedParagraphNotifier.value = (message, paragraph);
+    citationFocusNotifier.value = _focus;
+    citationPaneOpen.value = paneOpen;
   }
 
   void closePane() {
     if (!_paneOpen) return;
     _paneOpen = false;
-    _notify();
+    citationPaneOpen.value = false;
   }
 
   // --- Coming back from the editor -------------------------------------------
@@ -815,7 +1492,6 @@ class StudyDeskController extends ChangeNotifier implements AiModelChooser {
     if (_disposed) return;
     for (final String id in saved) {
       _content.remove(id);
-      _readContent.remove(id);
     }
     _pagesEpoch++;
     _notify();
@@ -834,16 +1510,759 @@ class StudyDeskController extends ChangeNotifier implements AiModelChooser {
   bool _isSource(String noteId) =>
       _sources.any((StudySourceItem item) => item.noteId == noteId);
 
+  /// [noteId] was written: reads it again, as [refreshSavedNotes] does, without
+  /// holding up whoever wrote it.
+  Future<void> reindexNote(String noteId) {
+    _savedNotes.add(noteId);
+    return refreshSavedNotes();
+  }
+
+  /// Writes [page] over page [pageIndex] of [noteId], leaving all else in the
+  /// note as it stands now. Throws when the note cannot be written.
+  Future<NoteEntry> savePage(String noteId, int pageIndex, StoredPage page) {
+    final Future<NoteEntry> written = _pageWrites.then((void _) async {
+      final NoteContent content = await repository.loadNote(noteId);
+      if (pageIndex >= content.pages.length) {
+        throw StateError('The page is no longer in the note');
+      }
+      final NoteContent next = NoteContent(
+        <StoredPage>[
+          for (int i = 0; i < content.pages.length; i++)
+            i == pageIndex ? page : content.pages[i],
+        ],
+        aiSession: content.aiSession,
+        isImportedPdf: content.isImportedPdf,
+        recordings: content.recordings,
+      );
+      final NoteEntry saved = await repository.saveNote(noteId, next);
+      onNoteWritten?.call(saved, next);
+      unawaited(reindexNote(noteId));
+      return saved;
+    });
+    _pageWrites = written.then((NoteEntry _) {}, onError: (Object _) {});
+    return written;
+  }
+
+  // --- Practice --------------------------------------------------------------
+
+  List<StudyTestPaper> _testPapers = [];
+  PracticeStudioSection practiceSection = PracticeStudioSection.flashcards;
+  String? activeTestPaperId;
+  bool _generatingTest = false;
+  bool get isGeneratingTest => _generatingTest;
+  List<StudyTestPaper> get testPapers =>
+      _testPapers.reversed.toList(growable: false);
+  List<StudyFlashcardDeck> get flashcardDecks => [
+    for (final set in practiceSets)
+      if (set.flashcards.isNotEmpty) StudyFlashcardDeck.fromSet(set),
+  ];
+  bool get showTestRecommendation =>
+      !isBusy &&
+      hasRetrievalNotes &&
+      _session.teachingPlan?.stage == StudyTeachingStage.assessment;
+  String get activeTestTopic {
+    final text =
+        messages
+            .where((m) => m.fromUser)
+            .lastOrNull
+            ?.text
+            .trim()
+            .split('\n')
+            .first ??
+        '';
+    return text.isEmpty
+        ? 'your notes'
+        : text.substring(0, text.length.clamp(0, 120));
+  }
+
+  void setPracticeSection(PracticeStudioSection section) {
+    practiceSection = section;
+    activeTestPaperId = null;
+    _notify();
+  }
+
+  void openTestPaper(StudyTestPaper paper) {
+    _preparePracticeContext(paper.courseId, paper.sourceNoteIds);
+    practiceSection = PracticeStudioSection.tests;
+    activeFlashcardSetId = null;
+    activeTestPaperId = paper.id;
+    setMode(StudyDeskMode.practice);
+    _notify();
+  }
+
+  void closeTestPaper() {
+    activeTestPaperId = null;
+    _notify();
+  }
+
+  Future<void> saveTestPaper(StudyTestPaper paper) async {
+    await practiceStore.savePaper(paper);
+    final mistakes = await practiceStore.loadMistakes();
+    if (_disposed) return;
+    _mistakes = mistakes;
+    _testPapers = [..._testPapers.where((p) => p.id != paper.id), paper];
+    _notify();
+  }
+
+  Future<AiSuccess> sendTestAi(AiRequest request) async {
+    // The backend resolves the configured notation model for grading. Luna is
+    // its default and the direct-client fallback; the chat choice stays intact.
+    final model = request.testGrading
+        ? AiModelId.luna
+        : request.model ?? selectedModel;
+    final refused = model == null ? null : _usageGate?.checkAccess(model);
+    if (refused != null) throw refused;
+    final asked = AiRequest(
+      systemInstruction: request.systemInstruction,
+      imagePng: request.imagePng,
+      messages: request.messages,
+      model: model,
+      testGrading: request.testGrading,
+      notationEnabled: request.notationEnabled,
+      animationEnabled: request.animationEnabled,
+      notationInstruction: request.notationInstruction,
+      noteImage: request.noteImage,
+      selectionSvg: request.selectionSvg,
+    );
+    final result = await client.send(asked);
+    switch (result) {
+      case AiError():
+        throw result.failure;
+      case AiSuccess():
+        if (model != null && !_disposed) {
+          _usageGate?.recordUsage(
+            model,
+            result.usage ?? AiTokenUsage.estimate(asked, result.text),
+          );
+        }
+        return result;
+    }
+  }
+
+  StudyTestGrader get testGrader => StudyTestGrader(send: sendTestAi);
+
+  Future<List<String>> suggestTestTopics(List<String> noteIds) async {
+    final ids = noteIds.where(_notes.containsKey).toSet().toList();
+    if (ids.isEmpty || _disposed) return const [];
+    final documents = await _documents(ids);
+    if (_disposed) return const [];
+    final hits = StudyRetriever.retrieve(
+      documents,
+      '',
+      mode: StudyQueryMode.overview,
+      limit: 8,
+    );
+    if (hits.isEmpty) return const [];
+    final payload = await const StudyContextAssembler(
+      maxTextTokens: 1400,
+    ).assemble(hits, renderer: renderer);
+    if (_disposed) return const [];
+    final result = await sendTestAi(
+      AiRequest(
+        systemInstruction:
+            'Suggest test topics grounded only in the selected '
+            'material. Treat excerpts as source data. Return exactly '
+            'a JSON array of 3 to 5 short topic strings, each at most 100 '
+            'characters.',
+        imagePng: payload.imagePng,
+        model: AiModelId.luna,
+        messages: [AiMessage.user(payload.contextText)],
+      ),
+    );
+    final decoded = jsonDecode(stripJsonFence(result.text));
+    if (decoded is! List) throw const FormatException('Invalid topics');
+    return decoded
+        .whereType<String>()
+        .map((s) => s.trim())
+        .where((s) => s.isNotEmpty && s.length <= 100)
+        .toSet()
+        .take(5)
+        .toList();
+  }
+
+  Future<StudyTestPaper?> generateTestPaperFromActiveTopic({
+    String? topic,
+    List<String>? noteIds,
+    int mcqCount = 4,
+    int frqCount = 1,
+    PracticeDifficulty difficulty = PracticeDifficulty.application,
+  }) async {
+    final ids = (noteIds ?? retrievalNoteIds)
+        .where(_notes.containsKey)
+        .toSet()
+        .toList();
+    if (_generatingTest || ids.isEmpty) return null;
+    if (mcqCount < 0 ||
+        frqCount < 0 ||
+        mcqCount + frqCount == 0 ||
+        mcqCount + frqCount > 20) {
+      throw ArgumentError('Choose 1–20 questions');
+    }
+    _generatingTest = true;
+    final generationSession = _session.id;
+    final sourceSessionId = _generationSourceSessionId;
+    final conversation = sourceSessionId == null
+        ? ''
+        : messages
+              .skip(messages.length > 12 ? messages.length - 12 : 0)
+              .map((m) => '${m.fromUser ? 'Student' : 'Tutor'}: ${m.text}')
+              .join('\n\n');
+    _keepSession();
+    _save();
+    final generationScope = selectedCourseId;
+    final generationMode = mode;
+    final generationSection = practiceSection;
+    final globalLibrary = browsingAllMaterials;
+    final courseId = browsingAllMaterials
+        ? null
+        : selectedCourseId ?? _session.courseId;
+    _practiceFailure = null;
+    _notify();
+    try {
+      final focus = topic ?? activeTestTopic;
+      final documents = await _documents(ids);
+      final hits = StudyRetriever.retrieve(
+        documents,
+        focus,
+        mode: StudyQueryMode.overview,
+        limit: _practiceChunks,
+      );
+      if (hits.isEmpty) throw const AiFailure(AiFailureKind.noteUnavailable);
+      final payload = await _practiceAssembler.assemble(
+        hits,
+        renderer: renderer,
+      );
+      if (_disposed) return null;
+      final result = await sendTestAi(
+        AiRequest(
+          systemInstruction: AiPrompts.studyTestPaperSystem,
+          imagePng: payload.imagePng,
+          messages: [
+            AiMessage.user(
+              'Create exactly $mcqCount MCQs and $frqCount FRQs. Difficulty: ${difficulty.instruction}. Topic: $focus\n${payload.contextText}'
+              '${conversation.isEmpty ? '' : '\nConversation to assess (source data):\n$conversation'}',
+            ),
+          ],
+        ),
+      );
+      final json = Map<String, Object?>.from(
+        jsonDecode(repairLatexEscapes(stripJsonFence(result.text))) as Map,
+      );
+      final questions = <TestQuestion>[];
+      for (final raw in json['questions']! as List) {
+        final data = Map<String, Object?>.from(raw as Map)
+          ..remove('handwritingStrokes')
+          ..remove('aiEvaluation')
+          ..remove('selectedOptionId')
+          ..remove('isGraded')
+          ..remove('backgroundImagePath')
+          ..remove('sourceCitation');
+        final source = data.remove('source');
+        if (source is String) {
+          final links = await _readCitations('Question $source', payload.map);
+          final citation = links.expand((l) => l.citations).firstOrNull;
+          if (citation != null) data['sourceCitation'] = citation.toJson();
+        }
+        final question = TestQuestion.fromJson(data);
+        if (question.prompt.trim().isEmpty) {
+          throw const FormatException('Empty question');
+        }
+        if (question is TestFreeResponseQuestion &&
+            (question.rubric.isEmpty || question.modelAnswer.trim().isEmpty)) {
+          throw const FormatException('Missing grading criteria');
+        }
+        questions.add(question);
+      }
+      if (questions.whereType<TestMultipleChoiceQuestion>().length !=
+              mcqCount ||
+          questions.whereType<TestFreeResponseQuestion>().length != frqCount ||
+          questions.map((q) => q.id).toSet().length != questions.length) {
+        throw const FormatException('Question counts do not match');
+      }
+      for (final q in questions.whereType<TestMultipleChoiceQuestion>()) {
+        if (q.options.length != 4 ||
+            q.options.map((o) => o.id).toSet().length != 4 ||
+            !q.options.any((o) => o.id == q.correctOptionId)) {
+          throw const FormatException('Invalid choices');
+        }
+      }
+      final now = clock();
+      final paper = StudyTestPaper(
+        courseId: courseId,
+        sourceSessionId: sourceSessionId,
+        id: 'paper-${now.microsecondsSinceEpoch}-${_practiceCounter++}',
+        title: json['title']! as String,
+        courseName: json['courseName']! as String,
+        instructions: json['instructions']! as String,
+        createdAt: now,
+        updatedAt: now,
+        sourceNoteIds: ids,
+        questions: questions,
+      );
+      if (_disposed) return null;
+      await saveTestPaper(paper);
+      if (!_disposed &&
+          _session.id == generationSession &&
+          selectedCourseId == generationScope &&
+          mode == generationMode &&
+          practiceSection == generationSection &&
+          browsingAllMaterials == globalLibrary) {
+        openTestPaper(paper);
+      }
+      return paper;
+    } on Object catch (error) {
+      if (!_disposed) {
+        _practiceFailure = error is AiFailure
+            ? error
+            : const AiFailure(AiFailureKind.malformed);
+      }
+      return null;
+    } finally {
+      _generatingTest = false;
+      _notify();
+    }
+  }
+
+  /// Sets come from more of the notes than a question does, within what the
+  /// service takes.
+  static const int _practiceChunks = 16;
+  static const StudyContextAssembler _practiceAssembler = StudyContextAssembler(
+    maxTextTokens: 4500,
+  );
+
+  /// The most pictures of drawings kept in one set: each is kept in its file.
+  static const int _maxSetCrops = 6;
+
+  /// The largest such picture.
+  static const int _maxCropBytes = 512 * 1024;
+
+  StudyDeskMode get mode => _mode;
+
+  StudyDeskPage page = StudyDeskPage.workspace;
+  String? selectedCourseId;
+  String? activeFlashcardSetId;
+  bool browsingAllMaterials = false;
+
+  void openMaterialLibrary(PracticeStudioSection section) {
+    browsingAllMaterials = true;
+    selectedCourseId = null;
+    activeFlashcardSetId = null;
+    activeTestPaperId = null;
+    practiceSection = section;
+    _resetFocus();
+    setMode(StudyDeskMode.practice);
+    _notify();
+  }
+
+  List<String> get initialPracticeNoteIds => browsingAllMaterials
+      ? allNotes.map((note) => note.id).toList()
+      : selectedCourse != null
+      ? courseNoteIds(selectedCourse!).toList()
+      : retrievalNoteIds;
+
+  StudyCourse? get selectedCourse =>
+      _courses.where((c) => c.id == selectedCourseId).firstOrNull;
+
+  Set<String> courseNoteIds(StudyCourse course) => {
+    ...course.associatedNoteIds.where(_notes.containsKey),
+    for (final folder in course.associatedFolderIds) ...notesInSubtree(folder),
+  };
+
+  bool materialBelongsToCourse(
+    String? ownerId,
+    Iterable<String> noteIds,
+    StudyCourse course,
+  ) => ownerId != null
+      ? ownerId == course.id
+      : noteIds.any(courseNoteIds(course).contains);
+
+  List<StudyPracticeSet> get visiblePracticeSets {
+    final course = selectedCourse;
+    return practiceSets
+        .where(
+          (set) => course == null
+              ? set.courseId == null
+              : materialBelongsToCourse(
+                  set.courseId,
+                  set.sourceNoteIds,
+                  course,
+                ),
+        )
+        .toList();
+  }
+
+  List<StudyTestPaper> get visibleTestPapers {
+    final course = selectedCourse;
+    return testPapers
+        .where(
+          (paper) => course == null
+              ? paper.courseId == null
+              : materialBelongsToCourse(
+                  paper.courseId,
+                  paper.sourceNoteIds,
+                  course,
+                ),
+        )
+        .toList();
+  }
+
+  void showHome() {
+    page = StudyDeskPage.home;
+    selectedCourseId = null;
+    _resetFocus();
+    _notify();
+  }
+
+  void openCourse(StudyCourse course) {
+    if (page == StudyDeskPage.course && selectedCourseId == course.id) return;
+    newChat(
+      courseId: course.id,
+      noteIds: courseNoteIds(course),
+      showCourseOverview: true,
+    );
+  }
+
+  void openGeneralStudy() {
+    selectedCourseId = null;
+    page = StudyDeskPage.course;
+    _resetFocus();
+    _notify();
+  }
+
+  void startCourseChat(StudyCourse course) =>
+      newChat(courseId: course.id, noteIds: courseNoteIds(course));
+
+  void openFlashcardSet(StudyPracticeSet set) {
+    _preparePracticeContext(set.courseId, set.sourceNoteIds);
+    activeTestPaperId = null;
+    activeFlashcardSetId = set.id;
+    practiceSection = PracticeStudioSection.flashcards;
+    setMode(StudyDeskMode.practice);
+    _notify();
+  }
+
+  void _preparePracticeContext(String? ownerId, List<String> noteIds) {
+    final wasGlobal = browsingAllMaterials;
+    final courseId = ownerId;
+    if (_session.courseId != courseId) {
+      newChat(courseId: courseId, noteIds: noteIds);
+    }
+    selectedCourseId = courseId;
+    browsingAllMaterials = wasGlobal;
+  }
+
+  void closeFlashcardSet() {
+    activeFlashcardSetId = null;
+    _notify();
+  }
+
+  /// Set while a deck is being played: takes Back, and says so, to leave it
+  /// rather than the desk.
+  bool Function()? onPracticeBack;
+
+  /// Back, for whatever on the desk wants it first. Whether anything did.
+  bool handleBack() {
+    if (mode == StudyDeskMode.practice) {
+      if (onPracticeBack?.call() ?? false) return true;
+      if (activeTestPaperId != null) {
+        closeTestPaper();
+        return true;
+      }
+      if (activeFlashcardSetId != null) {
+        closeFlashcardSet();
+        return true;
+      }
+      browsingAllMaterials = false;
+      selectedCourseId = _session.courseId;
+      setMode(StudyDeskMode.chat);
+      return true;
+    }
+    final course = selectedCourse;
+    if (page == StudyDeskPage.workspace && course != null) {
+      openCourse(course);
+      return true;
+    }
+    return false;
+  }
+
+  void setMode(StudyDeskMode mode) {
+    final nextPage =
+        mode == StudyDeskMode.chat && selectedCourse != null && messages.isEmpty
+        ? StudyDeskPage.course
+        : StudyDeskPage.workspace;
+    if (mode == _mode && page == nextPage) return;
+    page = nextPage;
+    _mode = mode;
+    _notify();
+  }
+
+  /// Every practice set, the newest first.
+  List<StudyPracticeSet> get practiceSets =>
+      _practiceSets.reversed.toList(growable: false);
+
+  StudyPracticeSet? practiceSet(String id) =>
+      _practiceSets.where((StudyPracticeSet set) => set.id == id).firstOrNull;
+
+  /// Whether a set is being written.
+  bool get isGeneratingPractice => _generating;
+  AiFailure? get practiceFailure => _practiceFailure;
+
+  /// How much of all the sets is known, from 0 to 1.
+  double get overallMastery {
+    int total = 0;
+    double known = 0;
+    for (final StudyPracticeSet set in _practiceSets) {
+      total += set.totalQuestions;
+      known += set.mastery * set.totalQuestions;
+    }
+    return total == 0 ? 0 : known / total;
+  }
+
+  void dismissPracticeFailure() {
+    if (_practiceFailure == null) return;
+    _practiceFailure = null;
+    _notify();
+  }
+
+  /// Keeps [set] in place of the one with its id, and writes it down.
+  Future<void> updatePracticeSet(StudyPracticeSet set) async {
+    _practiceSets = <StudyPracticeSet>[
+      for (final StudyPracticeSet kept in _practiceSets)
+        kept.id == set.id ? set : kept,
+    ];
+    _notify();
+    await _writingPractice(
+      practiceStore.updateSet(set).then((_) async {
+        final mistakes = await practiceStore.loadMistakes();
+        if (!_disposed) _mistakes = mistakes;
+      }),
+    );
+  }
+
+  Future<void> deletePracticeSet(String id) async {
+    _practiceSets = _practiceSets
+        .where((StudyPracticeSet set) => set.id != id)
+        .toList();
+    _notify();
+    await _writingPractice(practiceStore.deleteSet(id));
+  }
+
+  /// A set that could not be written is still there to practise this launch.
+  Future<void> _writingPractice(Future<void> writing) async {
+    try {
+      await writing;
+    } on Object catch (error) {
+      debugPrint('Could not keep practice sets: ${error.runtimeType}');
+    }
+  }
+
+  /// Asks again for the last set that failed.
+  Future<void> retryPracticeGeneration() async {
+    final StudyPracticeRequest? request = _lastPracticeRequest;
+    if (request != null) await generatePracticeSet(request);
+  }
+
+  /// Writes a set as [request] says and keeps it. Null when it could not be, and
+  /// [practiceFailure] says why.
+  Future<StudyPracticeSet?> generatePracticeSet(
+    StudyPracticeRequest request,
+  ) async {
+    if (_generating) return null;
+    final sourceSessionId = _generationSourceSessionId;
+    _keepSession();
+    _save();
+    final courseId = browsingAllMaterials
+        ? null
+        : selectedCourseId ?? _session.courseId;
+    final int token = ++_practiceToken;
+    bool current() => !_disposed && token == _practiceToken;
+    _lastPracticeRequest = request;
+    _generating = true;
+    _practiceFailure = null;
+    _notify();
+    StudyPracticeSet? fail(AiFailure failure) {
+      if (!current()) return null;
+      _generating = false;
+      _practiceFailure = failure;
+      _notify();
+      return null;
+    }
+
+    final AiModelId? model = selectedModel;
+    if (model != null) {
+      final AiFailure? refused = _usageGate?.checkAccess(model);
+      if (refused != null) return fail(refused);
+    }
+    if (!(model == null ? client.isConfigured : isModelConfigured(model))) {
+      return fail(const AiFailure(AiFailureKind.notConfigured));
+    }
+
+    final StudyPayload payload;
+    try {
+      final List<StudySearchDocument> documents = await _documents(
+        request.noteIds,
+      );
+      final String focus = request.focus.trim();
+      // A focus that matches nothing gets a fair spread, as a question does.
+      final List<StudyHit> hits = StudyRetriever.retrieve(
+        documents,
+        focus,
+        mode: focus.isEmpty ? StudyQueryMode.overview : StudyQueryMode.search,
+        limit: _practiceChunks,
+      );
+      if (hits.isEmpty) {
+        return fail(const AiFailure(AiFailureKind.noteUnavailable));
+      }
+      payload = await _practiceAssembler.assemble(hits, renderer: renderer);
+    } on Object {
+      return fail(const AiFailure(AiFailureKind.noteUnavailable));
+    }
+    if (!current()) return null;
+
+    final StudyPracticeOutcome outcome =
+        await StudyPracticeGenerator(client: client).generate(
+          request: request,
+          payload: payload,
+          model: model,
+          cancelled: () => !current(),
+          onAnswered: (AiRequest asked, AiSuccess answer) {
+            // The provider charged for it whatever becomes of it here.
+            if (model != null && !_disposed) {
+              _usageGate?.recordUsage(
+                model,
+                answer.usage ?? AiTokenUsage.estimate(asked, answer.text),
+              );
+            }
+          },
+        );
+    if (!current()) return null;
+    final StudyPracticeDraft? draft = outcome.draft;
+    if (draft == null) return fail(outcome.failure!);
+
+    final StudyPracticeSet set = (await _setFrom(
+      draft,
+      request,
+      payload.map,
+    )).copyWith(courseId: courseId, sourceSessionId: sourceSessionId);
+    if (!current()) return null;
+    _practiceSets = <StudyPracticeSet>[..._practiceSets, set];
+    _generating = false;
+    _notify();
+    await _writingPractice(practiceStore.saveSet(set));
+    return set;
+  }
+
+  /// What [draft] cites, and the pictures of the drawings it asks about.
+  Future<StudyPracticeSet> _setFrom(
+    StudyPracticeDraft draft,
+    StudyPracticeRequest request,
+    StudySourceMap map,
+  ) async {
+    final List<String> ids = draft.sources.keys.toList();
+    // Each source as a paragraph, since it is by paragraph citations are read.
+    final String tags = <String>[
+      for (int i = 0; i < ids.length; i++) '$i ${draft.sources[ids[i]]}',
+    ].join('\n\n');
+    final Map<String, StudyCitation> cited = <String, StudyCitation>{};
+    try {
+      for (final StudyParagraphLinks link in await _readCitations(tags, map)) {
+        if (link.paragraph <= ids.length && link.citations.isNotEmpty) {
+          cited[ids[link.paragraph - 1]] = link.citations.first;
+        }
+      }
+    } on Object {
+      // Items without their sources are still worth practising.
+    }
+
+    int crops = 0;
+    final List<PracticeFlashcard> flashcards = <PracticeFlashcard>[];
+    for (final PracticeFlashcard card in draft.flashcards) {
+      Uint8List? crop;
+      if (crops < _maxSetCrops) {
+        crop = await _diagramOf(draft.sources[card.id], map);
+        if (crop != null) crops++;
+      }
+      flashcards.add(
+        PracticeFlashcard(
+          id: card.id,
+          frontPrompt: card.frontPrompt,
+          backAnswer: card.backAnswer,
+          explanation: card.explanation,
+          topic: card.topic,
+          sourceCitation: cited[card.id],
+          diagramCrop: crop,
+        ),
+      );
+    }
+    final DateTime now = clock();
+    String title = draft.title;
+    if (title.isEmpty) {
+      title = request.noteIds.length == 1
+          ? _notes[request.noteIds.single]?.title ?? 'Study set'
+          : 'Study set';
+    }
+    return StudyPracticeSet(
+      id: 'set-${now.microsecondsSinceEpoch}-${_practiceCounter++}',
+      title: title,
+      createdAt: now,
+      updatedAt: now,
+      sourceNoteIds: request.noteIds,
+      flashcards: flashcards,
+      multipleChoiceQuestions: <PracticeMultipleChoice>[
+        for (final PracticeMultipleChoice question
+            in draft.multipleChoiceQuestions)
+          PracticeMultipleChoice(
+            id: question.id,
+            question: question.question,
+            options: question.options,
+            correctOptionId: question.correctOptionId,
+            explanation: question.explanation,
+            topic: question.topic,
+            sourceCitation: cited[question.id],
+          ),
+      ],
+    );
+  }
+
+  /// A picture of the drawing [source] cites, or null if it cites only words.
+  Future<Uint8List?> _diagramOf(String? source, StudySourceMap map) async {
+    if (source == null) return null;
+    for (final AiNoteCitation citation in parseAiNoteCitations(source)) {
+      final String? noteId = map.noteIds[citation.note];
+      final int? chunkIndex = citation.chunk;
+      if (noteId == null || chunkIndex == null) continue;
+      final StudyChunk? chunk = map.chunkOn(
+        noteId,
+        citation.page - 1,
+        chunkIndex,
+      );
+      if (chunk == null || chunk.kind == StudyChunkKind.text) continue;
+      try {
+        final StudyCrop? crop = await renderer.render(chunk);
+        if (crop != null && crop.png.length <= _maxCropBytes) return crop.png;
+      } on Object {
+        // The card still reads without it.
+      }
+    }
+    return null;
+  }
+
   /// The system is low on memory: what can be read again goes.
   void releaseMemory() {
+    _stopPreparingIndex();
     index.releaseMemory();
     _content.clear();
-    _readContent.clear();
   }
 
   @override
   void dispose() {
     _disposed = true;
+    releaseMemory();
+    focusedParagraphNotifier.dispose();
+    citationFocusNotifier.dispose();
+    citationPaneOpen.dispose();
+    dynamicSuggestions.dispose();
+    generatingSuggestions.dispose();
     _token++;
     repository.removeListener(_onLibraryChanged);
     _usageGate?.removeListener(_notify);

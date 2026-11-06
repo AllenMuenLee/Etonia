@@ -20,18 +20,58 @@ preview, and send full-rate actual samples to the existing `InkController`.
    Dart.
 5. Dart feeds actual batches into the same stroke, erase, smoothing,
    hold-to-shape, and persistence code used by the Flutter fallback.
-6. On up, native code retains the finished wet stroke while Dart commits the
-   canonical stroke. Flutter removes the native preview only when the third
-   frame after the commit frame begins. The engine queues at most two built
-   frames for the raster thread and frees a slot only once one is rasterized,
-   so by then the commit frame has been drawn (however long a long stroke kept
-   the raster thread busy) and the display has had a vsync to show it.
-   Removing it at the next frame instead flashed bare paper after long
-   strokes. Cancel and rejected gestures clear immediately.
+6. On up, the stroke joins the document and the undo history at once, but
+   Flutter does not paint it: the finished stroke stays on the overlay (see
+   Holding finished strokes). When Flutter takes it over, it paints the stroke
+   first, and removes the native copy only when the third frame after that
+   paint begins. The engine queues at most two built frames for the raster
+   thread and frees a slot only once one is rasterized, so by then the paint
+   has been drawn (however long a full page kept the raster thread busy) and
+   the display has had a vsync to show it. Removing it at the next frame
+   instead flashed bare paper. Cancel and rejected gestures clear immediately.
 
 If the native channel is absent, registration fails quietly and `InkCanvas`
 keeps using Flutter pointer events. This is the expected path for desktop, web,
 and widget tests.
+
+## Holding finished strokes
+
+Writing on repaints nothing in Flutter: the overlay keeps every finished stroke
+of a run of writing, and `CompletedStrokesPainter` skips them
+(`InkController.isStrokeNativeHeld`). Only pixels are deferred. The document,
+undo history, search, recognition, and saving all see the stroke when it
+commits, through `completedStrokesListenable`. The page's layers listen to
+`completedPaintListenable` instead, which stays quiet for a held commit.
+
+`_settleNativeInk` in `InkCanvas` is the only way out. It paints the held
+strokes in Flutter and then removes them from the overlay, so for those frames
+both draw them and they never leave the screen. It runs when:
+
+- anything changes the page's ink: undo, redo, erase, a selection, a paste, an
+  AI notation. `_CompletedNotifier` sees every such change, so a new one
+  cannot forget this;
+- a finger, mouse, wheel, or trackpad presses anywhere, or the pen presses off
+  this page, since that may scroll the page or cover it. The press comes
+  before the touch slop, so Flutter has the strokes before the page moves;
+- the page moves, its size changes, or what lies over it changes;
+- the tool or pen stops being one the overlay draws, or replay starts;
+- the app leaves the foreground or the window changes size;
+- the pen rests for 400 ms, or 64 strokes are held.
+
+A stroke is not held at all if Flutter would draw it differently: one off the
+page or its visible part, touching a sticky note (which lies above ink), or
+touching the toolbars (which lie above ink too). It goes to Flutter at once
+and takes the held strokes with it.
+
+Each stroke has its own number, sent to Dart as `pointer`, because the
+platforms reuse pointer ids. `finishPreview` removes one stroke, and a new
+stroke no longer clears the previous one. `clearLivePreview` drops only the
+stroke in progress.
+
+Known limits: a flick that passes the touch slop within the few frames of a
+hand-off leaves the native copy where it was for those frames, a few pixels
+from the moving page. Anything that appears over the page by itself, with no
+press, lies under held ink until the pen has rested.
 
 ## Platform files
 
@@ -68,7 +108,7 @@ model over the same samples they send to Dart, rather than a platform brush:
   does, and a dot drawn at full width.
 
 On lift the native layer swaps to that finished geometry, so the hand-off to
-Flutter's committed stroke shows no change.
+Flutter's stroke, when it comes, shows no change.
 
 - **Android** (`NativeInkModel.kt`) feeds the model's points to Jetpack Ink's
   `InProgressStrokesView` as `StrokeInput`s in canvas pixels, with a
@@ -93,7 +133,7 @@ Dart model drifts from it, and `NativeInkModelTest` (run with
 pen-model change to both native files, then regenerate the fixture with
 `UPDATE_NATIVE_INK_FIXTURE=1`.
 
-The native preview is only the latency-critical wet layer. Actual coalesced
+The native layer only ever draws; it owns no ink. Actual coalesced
 samples still feed the shared Dart document model so files, undo, selection,
 shape recognition, and cross-platform rendering keep one representation.
 Finished Flutter ink uses continuously tangent quadratic paths (and adaptively

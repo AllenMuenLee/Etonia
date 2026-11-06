@@ -32,16 +32,18 @@ class FileStudyDeskStore implements StudyDeskStore {
   FileStudyDeskStore(this.file);
 
   final File file;
-  Future<void> _writes = Future<void>.value();
+  late final _SnapshotWriter<StudyDeskState> _writer = _SnapshotWriter(
+    _writeSnapshot,
+  );
 
   @override
   Future<StudyDeskState?> read() async {
     try {
       if (!await file.exists()) return null;
-      final Object? json = jsonDecode(await file.readAsString());
-      return json is Map<String, Object?>
-          ? StudyDeskState.fromJson(json)
-          : null;
+      final String encoded = await file.readAsString();
+      return encoded.length >= _offMainCharacters
+          ? await compute(_decodeDesk, encoded, debugLabel: 'study.readDesk')
+          : _decodeDesk(encoded);
     } on Object {
       // A damaged desk costs the chats, never the notes: it starts over.
       return null;
@@ -49,13 +51,83 @@ class FileStudyDeskStore implements StudyDeskStore {
   }
 
   @override
-  Future<void> write(StudyDeskState state) {
-    final String encoded = jsonEncode(state.toJson());
-    return _writes = _writes.catchError((Object _) {}).then((void _) async {
-      final File temporary = File('${file.path}.tmp');
-      await temporary.writeAsString(encoded, flush: true);
-      await temporary.rename(file.path);
-    });
+  Future<void> write(StudyDeskState state) => _writer.write(state);
+
+  Future<void> _writeSnapshot(StudyDeskState state) async {
+    // Estimate directly from the immutable models: toJson itself allocates a
+    // full object graph, so that conversion belongs in the worker too.
+    int size = state.sources.length * 64 + state.courses.length * 256;
+    for (final session in state.sessions) {
+      size += 256 + (session.sources?.length ?? 0) * 64;
+      for (final message in session.messages) {
+        size += 128 + message.text.length;
+        for (final link in message.links) {
+          for (final citation in link.citations) {
+            size +=
+                128 +
+                citation.strokeKeys.length * 64 +
+                citation.strokeIndices.length * 8 +
+                citation.rings.length * 64;
+          }
+        }
+        if (size >= _offMainCharacters) break;
+      }
+      if (size >= _offMainCharacters) break;
+    }
+    final String encoded = size >= _offMainCharacters
+        ? await compute(_encodeDesk, state, debugLabel: 'study.writeDesk')
+        : _encodeDesk(state);
+    final File temporary = File('${file.path}.tmp');
+    await temporary.writeAsString(encoded, flush: true);
+    await temporary.rename(file.path);
+  }
+}
+
+const int _offMainCharacters = 8 * 1024;
+
+StudyDeskState? _decodeDesk(String encoded) {
+  final Object? json = jsonDecode(encoded);
+  return json is Map<String, Object?> ? StudyDeskState.fromJson(json) : null;
+}
+
+String _encodeDesk(StudyDeskState state) => jsonEncode(state.toJson());
+
+// Full snapshots supersede each other. Keep one active write and only the
+// newest pending snapshot, so bursts cannot retain a queue of encoded history.
+// Every caller completes after the latest snapshot in its batch is durable.
+class _SnapshotWriter<T extends Object> {
+  _SnapshotWriter(this.persist);
+
+  final Future<void> Function(T) persist;
+  T? _pending;
+  Future<void>? _writing;
+
+  bool get isIdle => _writing == null;
+  Future<void> get settled => _writing ?? Future<void>.value();
+
+  Future<void> write(T snapshot) {
+    _pending = snapshot;
+    if (_writing case final Future<void> writing) return writing;
+    final done = Completer<void>();
+    _writing = done.future;
+    unawaited(_drain(done));
+    return done.future;
+  }
+
+  Future<void> _drain(Completer<void> done) async {
+    try {
+      while (_pending != null) {
+        final T snapshot = _pending!;
+        _pending = null;
+        await persist(snapshot);
+      }
+      _writing = null;
+      done.complete();
+    } on Object catch (error, stack) {
+      _pending = null;
+      _writing = null;
+      done.completeError(error, stack);
+    }
   }
 }
 
@@ -84,10 +156,11 @@ class FileStudyChunkCache implements StudyChunkDiskCache {
   FileStudyChunkCache(this.directory);
 
   final Directory directory;
+  final Map<String, _SnapshotWriter<(int, List<StudyChunk>)>> _writers = {};
 
   /// Moves on whenever the chunks of the same revision would come out
   /// differently, so that older ones are not used.
-  static const int version = 2;
+  static const int version = 3;
 
   File _file(String noteId) => File('${directory.path}/$noteId.json');
 
@@ -97,25 +170,16 @@ class FileStudyChunkCache implements StudyChunkDiskCache {
       final File file = _file(noteId);
       if (!await file.exists()) return null;
       final String encoded = await file.readAsString();
-      final Map<String, Object?> json = encoded.length >= _offMainCharacters
-          ? await compute(_decode, encoded, debugLabel: 'study.readChunks')
-          : _decode(encoded);
-      if (json['version'] != version || json['revision'] != revision) {
-        return null;
-      }
-      return <StudyChunk>[
-        for (final Object? chunk in json['chunks']! as List)
-          StudyChunk.fromJson(chunk! as Map<String, Object?>),
-      ];
+      return encoded.length >= _offMainCharacters
+          ? await compute(_decodeChunks, (
+              encoded,
+              revision,
+            ), debugLabel: 'study.readChunks')
+          : _decodeChunks((encoded, revision));
     } on Object {
       return null;
     }
   }
-
-  static const int _offMainCharacters = 8 * 1024;
-
-  static Map<String, Object?> _decode(String encoded) =>
-      jsonDecode(encoded) as Map<String, Object?>;
 
   @override
   Future<void> write(
@@ -123,28 +187,53 @@ class FileStudyChunkCache implements StudyChunkDiskCache {
     int revision,
     List<StudyChunk> chunks,
   ) async {
+    final writer = _writers.putIfAbsent(
+      noteId,
+      () => _SnapshotWriter((snapshot) => _writeSnapshot(noteId, snapshot)),
+    );
     try {
-      await directory.create(recursive: true);
-      final File file = _file(noteId);
-      final File temporary = File('${file.path}.tmp');
-      await temporary.writeAsString(
-        jsonEncode(<String, Object?>{
-          'version': version,
-          'revision': revision,
-          'chunks': <Object?>[
-            for (final StudyChunk chunk in chunks) chunk.toJson(),
-          ],
-        }),
-      );
-      await temporary.rename(file.path);
+      await writer.write((revision, chunks));
     } on Object {
       // Worked out again next time.
+    } finally {
+      if (writer.isIdle && identical(_writers[noteId], writer)) {
+        _writers.remove(noteId);
+      }
     }
+  }
+
+  Future<void> _writeSnapshot(
+    String noteId,
+    (int, List<StudyChunk>) snapshot,
+  ) async {
+    final String encoded =
+        estimatedStudyChunkBytes(snapshot.$2) >= _offMainCharacters
+        ? await compute(
+            _encodeChunks,
+            snapshot,
+            debugLabel: 'study.writeChunks',
+          )
+        : _encodeChunks(snapshot);
+    await directory.create(recursive: true);
+    final File file = _file(noteId);
+    final File temporary = File('${file.path}.tmp');
+    await temporary.writeAsString(encoded);
+    await temporary.rename(file.path);
   }
 
   @override
   Future<void> retain(Set<String> noteIds) async {
     try {
+      // An already active rename must finish before pruning its destination.
+      // The index invalidates builds before calling retain, preventing their
+      // later completion from scheduling another write for a removed note.
+      final removed = [
+        for (final entry in _writers.entries)
+          if (!noteIds.contains(entry.key)) entry.value,
+      ];
+      for (final writer in removed) {
+        await writer.settled;
+      }
       if (!await directory.exists()) return;
       await for (final FileSystemEntity entity in directory.list()) {
         final String name = entity.uri.pathSegments.last;
@@ -156,6 +245,58 @@ class FileStudyChunkCache implements StudyChunkDiskCache {
       // Tried again on the next launch.
     }
   }
+}
+
+List<StudyChunk>? _decodeChunks((String, int) input) {
+  final json = jsonDecode(input.$1) as Map<String, Object?>;
+  if (json['version'] != FileStudyChunkCache.version ||
+      json['revision'] != input.$2) {
+    return null;
+  }
+  return [
+    for (final chunk in json['chunks']! as List)
+      StudyChunk.fromJson(chunk! as Map<String, Object?>),
+  ];
+}
+
+String _encodeChunks((int, List<StudyChunk>) snapshot) => jsonEncode({
+  'version': FileStudyChunkCache.version,
+  'revision': snapshot.$1,
+  'chunks': [for (final chunk in snapshot.$2) chunk.toJson()],
+});
+
+// A conservative accounting estimate, not an exact VM heap measurement. Include
+// strings, list slots, lines and stroke references without allocating JSON.
+int estimatedStudyChunkBytes(List<StudyChunk> chunks) {
+  int bytes = 64;
+  for (final chunk in chunks) {
+    bytes +=
+        256 +
+        chunk.noteId.length * 2 +
+        chunk.strokeIndices.length * 8 +
+        (chunk.sourceSection?.title.length ?? 0) * 2;
+    bytes +=
+        128 +
+        2 *
+            (chunk.handwriting.length +
+                chunk.alternatives.length +
+                chunk.typed.length +
+                chunk.svgText.length);
+    for (final strings in [
+      chunk.stickyIds,
+      chunk.imageIds,
+      chunk.anchors,
+      chunk.tags,
+    ]) {
+      for (final text in strings) {
+        bytes += 40 + text.length * 2;
+      }
+    }
+    for (final line in chunk.lines) {
+      bytes += 64 + line.text.length * 2;
+    }
+  }
+  return bytes;
 }
 
 /// The chunk cache of [repository], or null for a library with no disk.

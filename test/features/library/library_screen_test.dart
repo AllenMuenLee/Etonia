@@ -656,34 +656,38 @@ void main() {
     expect((await repository.list(null)).notes.single.title, 'Final essay');
   });
 
-  testWidgets('New note offers a PDF import, a template, and quick start', (
-    WidgetTester tester,
-  ) async {
-    await _pumpLibrary(tester, _repository());
-    expect(find.byTooltip('Import PDF'), findsNothing);
+  testWidgets(
+    'New note offers test and PDF imports, a template, and quick start',
+    (WidgetTester tester) async {
+      await _pumpLibrary(tester, _repository());
+      expect(find.byTooltip('Import PDF'), findsNothing);
 
-    final Rect button = tester.getRect(find.byTooltip('New note'));
+      final Rect button = tester.getRect(find.byTooltip('New note'));
 
-    await tester.tap(find.byTooltip('New note'));
-    await tester.pumpAndSettle();
-    expect(find.text('Import editable PDF'), findsNothing);
-    // Top to bottom, with the quickest last, nearest the button.
-    final List<double> rows = <String>['Import PDF', 'Template…', 'Quick start']
-        .map(
-          (String label) =>
-              tester.getCenter(find.widgetWithText(MenuItemButton, label)).dy,
-        )
-        .toList();
-    expect(rows[0], lessThan(rows[1]));
-    expect(rows[1], lessThan(rows[2]));
-    final Finder menu = find
-        .ancestor(
-          of: find.widgetWithText(MenuItemButton, 'Quick start'),
-          matching: find.byType(Material),
-        )
-        .first;
-    expect(tester.getRect(menu).right, moreOrLessEquals(button.right));
-  });
+      await tester.tap(find.byTooltip('New note'));
+      await tester.pumpAndSettle();
+      expect(find.text('Import editable PDF'), findsNothing);
+      expect(find.text('Import test'), findsOneWidget);
+      // Top to bottom, with the quickest last, nearest the button.
+      final List<double> rows =
+          <String>['Import PDF', 'Template…', 'Quick start']
+              .map(
+                (String label) => tester
+                    .getCenter(find.widgetWithText(MenuItemButton, label))
+                    .dy,
+              )
+              .toList();
+      expect(rows[0], lessThan(rows[1]));
+      expect(rows[1], lessThan(rows[2]));
+      final Finder menu = find
+          .ancestor(
+            of: find.widgetWithText(MenuItemButton, 'Quick start'),
+            matching: find.byType(Material),
+          )
+          .first;
+      expect(tester.getRect(menu).right, moreOrLessEquals(button.right));
+    },
+  );
 
   testWidgets('the template dialog moves with the keyboard, frame by frame', (
     WidgetTester tester,
@@ -1253,6 +1257,95 @@ void main() {
     await tester.pumpAndSettle();
     expect(_items(find.text('Physics')), findsOneWidget);
   });
+
+  for (final viewport in [TestViewport.tabletLandscape, TestViewport.compact]) {
+    testWidgets(
+      'scrolled folder headers stay visible and collapse in place at $viewport',
+      (tester) async {
+        final repository = _repository();
+        final course = await repository.createFolder('A Course');
+        for (var i = 0; i < 24; i++) {
+          await repository.createFolder(
+            'Lesson ${i.toString().padLeft(2, '0')}',
+            parentId: course.id,
+          );
+        }
+        final next = await repository.createFolder('Z Next course');
+        await _pumpLibrary(tester, repository, viewport: viewport);
+        if (viewport == TestViewport.compact) {
+          await tester.tap(find.byTooltip('Folders'));
+          await tester.pumpAndSettle();
+        }
+        await tester.tap(find.byTooltip('Expand A Course'));
+        await tester.pumpAndSettle();
+        final tree = find.byKey(const ValueKey('library-folder-tree-scroll'));
+        final header = find.byKey(ValueKey('sidebar-folder-${course.id}'));
+        await tester.drag(tree, const Offset(0, -400));
+        await tester.pumpAndSettle();
+        expect(header.hitTestable(), findsOneWidget);
+        expect(
+          tester.getTopLeft(header).dy,
+          closeTo(tester.getTopLeft(tree).dy, 1),
+        );
+        await tester.tap(
+          find.descendant(of: header, matching: find.text('A Course')),
+        );
+        await tester.pumpAndSettle();
+        expect(find.byTooltip('Expand A Course'), findsOneWidget);
+        expect(_sidebar(find.text('Lesson 00')), findsNothing);
+        expect(
+          find.byKey(ValueKey('sidebar-folder-${next.id}')).hitTestable(),
+          findsOneWidget,
+        );
+        expect(tester.takeException(), isNull);
+      },
+    );
+  }
+
+  testWidgets(
+    'nested folder header identifies the current branch and collapses it',
+    (tester) async {
+      final repository = _repository();
+      final course = await repository.createFolder('Course');
+      final unit = await repository.createFolder('A Unit', parentId: course.id);
+      for (var i = 0; i < 24; i++) {
+        await repository.createFolder(
+          'Topic ${i.toString().padLeft(2, '0')}',
+          parentId: unit.id,
+        );
+      }
+      final next = await repository.createFolder(
+        'Z Next unit',
+        parentId: course.id,
+      );
+      await _pumpLibrary(tester, repository);
+      await tester.tap(find.byTooltip('Expand Course'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byTooltip('Expand A Unit'));
+      await tester.pumpAndSettle();
+      final tree = find.byKey(const ValueKey('library-folder-tree-scroll'));
+      final header = find.byKey(ValueKey('sidebar-folder-${unit.id}'));
+      await tester.drag(tree, const Offset(0, -400));
+      await tester.pumpAndSettle();
+      expect(header.hitTestable(), findsOneWidget);
+      expect(
+        tester.getTopLeft(header).dy,
+        closeTo(tester.getTopLeft(tree).dy + AppSizes.minTouchTarget, 1),
+      );
+      await tester.tap(
+        find.descendant(of: header, matching: find.text('A Unit')),
+      );
+      await tester.pumpAndSettle();
+      expect(_sidebar(find.text('Topic 00')), findsNothing);
+      expect(find.byTooltip('Expand A Unit'), findsOneWidget);
+      expect(find.byTooltip('Collapse Course'), findsOneWidget);
+      expect(
+        find.byKey(ValueKey('sidebar-folder-${next.id}')).hitTestable(),
+        findsOneWidget,
+      );
+      expect(tester.takeException(), isNull);
+    },
+  );
 
   testWidgets('subfolders are made in the open folder', (
     WidgetTester tester,

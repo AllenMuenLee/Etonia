@@ -6,6 +6,7 @@ import 'dart:io';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart';
+import 'package:flutter/scheduler.dart';
 
 import '../../app/theme/app_tokens.dart';
 import '../../app/theme/app_icons.dart';
@@ -93,6 +94,7 @@ import 'widgets/page_controls.dart';
 import 'widgets/selection_action_bar.dart';
 import 'widgets/recording_options.dart';
 import 'widgets/recording_transcript_sheet.dart';
+import 'widgets/tool_options_bar.dart';
 import 'widgets/tool_palette.dart';
 import 'widgets/toolbar_layout.dart';
 import 'widgets/writing_surface_frame.dart';
@@ -122,6 +124,7 @@ class EditorScreen extends StatefulWidget {
     this.inkController,
     this.title = 'Untitled note',
     this.onBack,
+    this.onImportConversationToStudyDesk,
     this.onTitlePressed,
     this.penConfig = const PenConfig(),
     this.eraserConfig = const EraserConfig(),
@@ -164,7 +167,20 @@ class EditorScreen extends StatefulWidget {
     this.audioRecorder,
     this.audioPlayer,
     this.recordingTranscriber,
+    this.pageUnderlayBuilder,
+    this.pageOverlayBuilder,
+    this.inputExclusions,
+    this.readOnly = false,
+    this.allowPageManagement = true,
+    this.showAppBar = true,
   });
+
+  final Widget Function(BuildContext context, int index)? pageUnderlayBuilder;
+  final Widget Function(BuildContext context, int index)? pageOverlayBuilder;
+  final ValueGetter<List<Rect>>? inputExclusions;
+  final bool readOnly;
+  final bool allowPageManagement;
+  final bool showAppBar;
 
   /// The user's plan and AI credits: which models the assistant may use,
   /// and what each answer costs. Without one, nothing is metered and the
@@ -211,6 +227,7 @@ class EditorScreen extends StatefulWidget {
 
   /// Called by the navigation control, to leave the editor.
   final VoidCallback? onBack;
+  final ValueChanged<List<AiMessage>>? onImportConversationToStudyDesk;
 
   /// Called by the title, to rename the note.
   final VoidCallback? onTitlePressed;
@@ -410,6 +427,10 @@ class EditorScreenState extends State<EditorScreen>
     null,
   );
 
+  /// The maximum Y coordinate the top of the note may reach when scrolled
+  /// down, in viewport pixels.
+  final ValueNotifier<double> _topScrollLimit = ValueNotifier<double>(0);
+
   /// The region the palette was last laid out in, which a drag snaps to.
   Rect _paletteRegion = Rect.zero;
   EditorLayout? _lastLayout;
@@ -480,6 +501,7 @@ class EditorScreenState extends State<EditorScreen>
         ? body.localToGlobal(Offset.zero)
         : Offset.zero;
     return <Rect>[
+      ...?widget.inputExclusions?.call(),
       if (_toolbarShown.value) paletteRect.shift(origin),
       if (_pageOverviewOpen.value) _pageOverviewRect.shift(origin),
       layout.history.shift(origin),
@@ -512,7 +534,57 @@ class EditorScreenState extends State<EditorScreen>
   bool get _paletteExpanded => _paletteController.expanded.value;
 
   void _onToolbarShownChanged() {
+    _onToolbarStateChanged();
     if (mounted) setState(() {});
+  }
+
+  void _onToolbarStateChanged() {
+    final EditorLayout? layout = _lastLayout;
+    if (layout != null) {
+      _updateTopScrollLimit(layout);
+    }
+  }
+
+  void _updateTopScrollLimit(EditorLayout layout) {
+    final double limit = _computeTopScrollLimit(layout);
+    if (_topScrollLimit.value == limit) return;
+    if (WidgetsBinding.instance.schedulerPhase ==
+        SchedulerPhase.persistentCallbacks) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted && _topScrollLimit.value != limit) {
+          _topScrollLimit.value = limit;
+        }
+      });
+    } else {
+      _topScrollLimit.value = limit;
+    }
+  }
+
+  double _computeTopScrollLimit(EditorLayout layout) {
+    const double margin = AppSpacing.md;
+    double limit = layout.history.bottom + margin;
+
+    if (_toolbarShown.value && layout.paletteEdge == PaletteEdge.top) {
+      final double toolbarHeight = ToolPalette.sizeFor(
+        Axis.horizontal,
+        expanded: _paletteExpanded,
+        tools: _paletteTools,
+      ).height;
+      final double toolbarBottom = layout.paletteOrigin.dy + toolbarHeight;
+      limit = math.max(limit, toolbarBottom + margin);
+
+      final bool hasSubtoolbar = ToolPalette.showsOptions(
+        _tool.value,
+        _toolOptionsShown,
+      );
+      if (hasSubtoolbar) {
+        final double subtoolbarBottom =
+            toolbarBottom + ToolPalette.optionsGap + ToolOptionsBar.thickness;
+        limit = math.max(limit, subtoolbarBottom + margin);
+      }
+    }
+
+    return limit;
   }
 
   void _claimStylusGestures() {
@@ -616,7 +688,7 @@ class EditorScreenState extends State<EditorScreen>
   /// which stay out of the way of placing a note: they close and the press
   /// places it.
   bool _isPageInputBlocked() {
-    if (_scrolling || _anyPageBusy()) {
+    if (widget.readOnly || _scrolling || _anyPageBusy()) {
       return true;
     }
     final ToolPaletteController palette = _paletteController;
@@ -1110,6 +1182,7 @@ class EditorScreenState extends State<EditorScreen>
     ink.completedStrokesListenable.addListener(_appendPageNearEnd);
     ink.completedStrokesListenable.addListener(_onInkForRecognition);
     ink.completedStrokesListenable.addListener(_onInkForAiContext);
+    ink.eraserListenable.addListener(_onEraserForInk);
     ink.addStrokeReplacementListener(_ai.followReplacedStrokes);
     ink.addStrokeReplacementListener(_followRecognizedStrokes);
     final List<(Stroke, String?)> locations = _strokeLocations(ink);
@@ -1140,6 +1213,14 @@ class EditorScreenState extends State<EditorScreen>
   }
 
   void _detachInk(InkController ink) {
+    // Left in the middle of an erase. Only the words of this page need it;
+    // the rest is about whichever page is current, which may be another now.
+    if (_inkChangedInErase) {
+      _inkChangedInErase = false;
+      final NotePage? page = _pageFor(ink);
+      if (page != null) _document.reconcileRecognizedWords(page);
+    }
+    ink.eraserListenable.removeListener(_onEraserForInk);
     ink.selectionListenable.removeListener(_onSelectionChanged);
     ink.completedStrokesListenable.removeListener(_appendPageNearEnd);
     ink.completedStrokesListenable.removeListener(_onInkForRecognition);
@@ -1176,8 +1257,30 @@ class EditorScreenState extends State<EditorScreen>
     }
   }
 
+  /// Whether ink changed during the erase under way, which [_onEraserForInk]
+  /// answers for when it ends. An eraser changes the page on nearly every
+  /// move, and what follows from a change looks at every stroke on the page:
+  /// too much for each move, and needed only for where the erase ends up. It
+  /// makes no ink to read, and nothing that can reach further down the page.
+  bool _inkChangedInErase = false;
+
+  /// Leaves the rest of a change to the end of an erase, if one is under way.
+  bool _deferToEndOfErase() {
+    if (_inkController.activeErase == null) return false;
+    _inkChangedInErase = true;
+    return true;
+  }
+
+  void _onEraserForInk() {
+    if (!_inkChangedInErase || _inkController.activeErase != null) return;
+    _inkChangedInErase = false;
+    _appendPageNearEnd();
+    _onInkForRecognition();
+  }
+
   void _onInkForRecognition() {
     _handwritingFindTarget.value = null;
+    if (_deferToEndOfErase()) return;
     final InkController ink = _inkController;
     final NotePage? page = _pageFor(ink);
     if (page == null) return;
@@ -1310,11 +1413,12 @@ class EditorScreenState extends State<EditorScreen>
 
   void _onScrollStart(Set<int> pointers) {
     // Native wet ink is painted in a root-view overlay, not inside the page
-    // transform. Its normal pointer-up handoff is asynchronous, so a preview
-    // that is still waiting to be removed would otherwise stay pinned to the
-    // screen while the committed Flutter stroke moves with the page.
+    // transform, so a stroke still being drawn cannot go along with the page.
+    // Finished strokes are not cleared here: the press that began this scroll
+    // already told each canvas to draw them, and clearing them before that
+    // reaches the screen would blink them off.
     if (widget.enableNativeInk) {
-      NativeInkBridge.instance.clearAllPreviews();
+      NativeInkBridge.instance.clearLivePreview();
     }
     _scrolling = true;
     _scrollSettle?.cancel();
@@ -1415,7 +1519,7 @@ class EditorScreenState extends State<EditorScreen>
   /// The column was pulled up past its last page: a new page goes after
   /// it, below, and the view stays where it is.
   void _addPageAtEnd() {
-    if (_anyPageBusy()) {
+    if (!widget.allowPageManagement || widget.readOnly || _anyPageBusy()) {
       return;
     }
     _document.appendPage();
@@ -1426,6 +1530,8 @@ class EditorScreenState extends State<EditorScreen>
   /// on finds the new page waiting, with no pull to make. An infinite page
   /// grows instead.
   void _appendPageNearEnd() {
+    if (!widget.allowPageManagement || widget.readOnly) return;
+    if (_deferToEndOfErase()) return;
     if (_document.currentIndex != _document.pageCount - 1 ||
         _viewportSize.isEmpty) {
       return;
@@ -1839,6 +1945,7 @@ class EditorScreenState extends State<EditorScreen>
       defaultInk: userPenStyle.ink,
       defaultWidth: userPenStyle.width,
       animate: animate,
+      skipInvalidElements: true,
     );
   }
 
@@ -2005,6 +2112,7 @@ class EditorScreenState extends State<EditorScreen>
   /// Pasted ink arrives selected, so pasting switches to the Select tool.
   /// Nothing happens while the clipboard is empty.
   void _paste() {
+    if (widget.readOnly) return;
     if (_inkController.canPaste) {
       _tool.value = EditorTool.select;
       _selectionCarry.clearSelection(except: _inkController);
@@ -2013,6 +2121,7 @@ class EditorScreenState extends State<EditorScreen>
   }
 
   void _undo() {
+    if (widget.readOnly) return;
     _pastePrompt.value = null;
     _document.undo();
   }
@@ -2081,12 +2190,14 @@ class EditorScreenState extends State<EditorScreen>
   }
 
   void _redo() {
+    if (widget.readOnly) return;
     _pastePrompt.value = null;
     _document.redo();
   }
 
   /// Pastes with the copies centered where the pointer was held.
   void _pasteAt(Offset position) {
+    if (widget.readOnly) return;
     _pastePrompt.value = null;
     _selectionCarry.clearSelection(except: _inkController);
     _inkController.paste(at: InkVector(position.dx, position.dy));
@@ -2106,6 +2217,7 @@ class EditorScreenState extends State<EditorScreen>
   }
 
   void _cut() {
+    if (widget.readOnly) return;
     final InkSelection? selection = _stableSelection();
     if (selection?.includesPdf == true) {
       unawaited(_copyPdfSelection(selection!, cut: true));
@@ -2241,7 +2353,7 @@ class EditorScreenState extends State<EditorScreen>
     }
     final Rect bounds = excerpt.logicalBounds;
     return NoteImageElement(
-      id: 'pdf-excerpt-${DateTime.now().microsecondsSinceEpoch.toRadixString(36)}',
+      id: NoteImageElement.newId('pdf-excerpt'),
       assetId: assetId,
       pixelSize: excerpt.pixelSize,
       center: InkVector(bounds.center.dx, bounds.center.dy),
@@ -2393,6 +2505,7 @@ class EditorScreenState extends State<EditorScreen>
     if (tool != EditorTool.ai) {
       _writingTool = tool;
     }
+    _onToolbarStateChanged();
   }
 
   /// A press anywhere in the chat, on its text or its composer, takes up the
@@ -2887,6 +3000,7 @@ class EditorScreenState extends State<EditorScreen>
     _ai.paragraphFocus.addListener(_onParagraphFocusChanged);
     _palettePlacement.addListener(_onPalettePlacementChanged);
     _toolbarShown.addListener(_onToolbarShownChanged);
+    _toolOptionsShown.addListener(_onToolbarStateChanged);
     _toolbarLayout.addListener(_onPalettePlacementChanged);
     _paletteController.expanded.addListener(_onPalettePlacementChanged);
     _paletteController.expanded.addListener(_rememberToolbar);
@@ -2966,7 +3080,10 @@ class EditorScreenState extends State<EditorScreen>
     );
   }
 
-  void _onPalettePlacementChanged() => setState(() {});
+  void _onPalettePlacementChanged() {
+    _onToolbarStateChanged();
+    setState(() {});
+  }
 
   void _onPaletteDragStart(Offset center) {
     _paletteController.closeAll();
@@ -3031,6 +3148,12 @@ class EditorScreenState extends State<EditorScreen>
         _onToolbarShownChanged,
       );
       _toolbarShown.addListener(_onToolbarShownChanged);
+    }
+    if (oldWidget.toolOptionsShown != widget.toolOptionsShown) {
+      (oldWidget.toolOptionsShown ?? _ownedToolOptionsShown)?.removeListener(
+        _onToolbarStateChanged,
+      );
+      _toolOptionsShown.addListener(_onToolbarStateChanged);
     }
     if (oldWidget.assetReader != widget.assetReader ||
         oldWidget.pdfRasterizer != widget.pdfRasterizer ||
@@ -3103,6 +3226,8 @@ class EditorScreenState extends State<EditorScreen>
     _document.removeListener(_onDocumentChanged);
     _ai.removeListener(_onAiChanged);
     _ai.paragraphFocus.removeListener(_onParagraphFocusChanged);
+    _toolOptionsShown.removeListener(_onToolbarStateChanged);
+    _topScrollLimit.dispose();
     _palettePlacement.removeListener(_onPalettePlacementChanged);
     _toolbarShown.removeListener(_onToolbarShownChanged);
     _toolbarLayout.removeListener(_onPalettePlacementChanged);
@@ -3226,10 +3351,10 @@ class EditorScreenState extends State<EditorScreen>
     final AiParagraphRef? ref = _ai.paragraphFocus.value?.ref;
     if (ref == _revealedParagraph) return;
     _revealedParagraph = ref;
-    if (ref == null || _scrolling || _anyPageBusy()) return;
+    if (ref == null || !_ai.isOpen || _scrolling || _anyPageBusy()) return;
     // The mark is laid out with the next frame.
     WidgetsBinding.instance.addPostFrameCallback((Duration _) {
-      if (mounted && !_scrolling && !_anyPageBusy()) {
+      if (mounted && _ai.isOpen && !_scrolling && !_anyPageBusy()) {
         _showFocusedParagraphOnNote();
       }
     });
@@ -3277,6 +3402,11 @@ class EditorScreenState extends State<EditorScreen>
       onNewChat: _useCurrentSelection,
       onAddToContext: _addSelectionToAi,
       onShowOnNote: _showFocusedParagraphOnNote,
+      onImportToStudyDesk: widget.onImportConversationToStudyDesk == null
+          ? null
+          : () => widget.onImportConversationToStudyDesk!(
+              List<AiMessage>.of(_ai.messages),
+            ),
       composerKey: _aiComposerKey,
       onOpenPlans: widget.subscription == null ? null : _openPlans,
       showHandwritingCalibrationNotice: _showHandwritingCalibrationNotice,
@@ -3490,7 +3620,7 @@ class EditorScreenState extends State<EditorScreen>
       // on every frame of the keyboard's slide and make it stutter.
       resizeToAvoidBottomInset: false,
       // Under tabs, the bar is theirs, and shared by every pane.
-      appBar: _chromeScope != null
+      appBar: !widget.showAppBar || _chromeScope != null
           ? null
           : EditorAppBar(
               title: widget.title,
@@ -3574,6 +3704,7 @@ class EditorScreenState extends State<EditorScreen>
               paletteTools: _paletteTools,
             );
             _lastLayout = layout;
+            _updateTopScrollLimit(layout);
             final List<NotePage> pages = _document.pages;
             final int current = _document.currentIndex;
             final bool infiniteCanvas =
@@ -3641,6 +3772,7 @@ class EditorScreenState extends State<EditorScreen>
                                 pages[current],
                               ))
                             : const ValueKey<String>('page-viewport'),
+                        topScrollLimit: infiniteCanvas ? null : _topScrollLimit,
                         pages: <PageGeometry>[
                           for (final int i in shown) geometries[i],
                         ],
@@ -3671,7 +3803,10 @@ class EditorScreenState extends State<EditorScreen>
                         fingersNavigate: _stylusOnly,
                         pointerClaims: _pointerClaims,
                         // A whiteboard has no end to pull past.
-                        onPullToAddPage: infiniteCanvas ? null : _addPageAtEnd,
+                        onPullToAddPage:
+                            infiniteCanvas || !widget.allowPageManagement
+                            ? null
+                            : _addPageAtEnd,
                         pullToAddDistance: 180,
                         pageBuilder:
                             (
@@ -3740,6 +3875,11 @@ class EditorScreenState extends State<EditorScreen>
                                         carry: _selectionCarry,
                                       ),
                                     // On the paper, under the ink.
+                                    if (widget.pageUnderlayBuilder != null)
+                                      widget.pageUnderlayBuilder!(
+                                        context,
+                                        index,
+                                      ),
                                     AiCitationHighlight(
                                       assistant: _ai,
                                       page: page.ink,
@@ -3752,63 +3892,74 @@ class EditorScreenState extends State<EditorScreen>
                                         pageIndex: index,
                                         page: page.ink,
                                       ),
-                                    InkCanvas(
-                                      controller: page.ink,
-                                      visible: visible,
-                                      enableNativeInk: widget.enableNativeInk,
-                                      tool: _tool,
-                                      penSettings: _penSettings,
-                                      eraserSettings: _eraserSettings,
-                                      penConfig: widget.penConfig,
-                                      eraserConfig: widget.eraserConfig,
-                                      shapeConfig: widget.shapeConfig,
-                                      isInputBlocked: _isPageInputBlocked,
-                                      // A pen set down while the page still
-                                      // coasts from a pinch or fling stops it
-                                      // there and writes, rather than being
-                                      // dropped as part of the scroll.
-                                      onStylusDown: () {
-                                        if (_scrolling) {
-                                          context
-                                              .findAncestorStateOfType<
-                                                PageViewportState
-                                              >()
-                                              ?.yieldToPen();
-                                        }
-                                      },
-                                      pastePrompt: _pastePrompt,
-                                      stylusOnly: _stylusOnly,
-                                      ruler: _ruler,
-                                      pointerClaims: _pointerClaims,
-                                      aiActive: _aiActive,
-                                      onAiSelection: (InkVector? tap) =>
-                                          _onAiSelection(tap, page.ink),
-                                      selectablePdfBounds:
-                                          page.pdfSource == null
-                                          ? null
-                                          : Offset.zero &
-                                                page.pdfSource!.pageSize,
-                                      selectPdf: _selectPdf,
-                                      stickySettings: _stickySettings,
-                                      onStickyPlaced: _onStickyPlaced,
-                                      textSettings: _textSettings,
-                                      onTextSelected: (TextSettings settings) {
-                                        _textSettings.value = settings;
-                                      },
-                                      carry: _selectionCarry,
-                                      exclusionRects: _nativeExclusionRects,
-                                      exclusionsChanged:
-                                          _paletteController.popoverChanged,
-                                      replay: _strokeReplay,
-                                      onReplayStrokeTapped: _seekToStroke,
-                                      // The page the selection is on is the
-                                      // current one; the view stays put.
-                                      onSelectionCarried: () => context
-                                          .findAncestorStateOfType<
-                                            PageViewportState
-                                          >()
-                                          ?.touchPage(slot),
+                                    _InkInputRegion(
+                                      exclusions: widget.inputExclusions,
+                                      child: InkCanvas(
+                                        controller: page.ink,
+                                        visible: visible,
+                                        enableNativeInk:
+                                            widget.enableNativeInk &&
+                                            !widget.readOnly,
+                                        tool: _tool,
+                                        penSettings: _penSettings,
+                                        eraserSettings: _eraserSettings,
+                                        penConfig: widget.penConfig,
+                                        eraserConfig: widget.eraserConfig,
+                                        shapeConfig: widget.shapeConfig,
+                                        isInputBlocked: _isPageInputBlocked,
+                                        // A pen set down while the page still
+                                        // coasts from a pinch or fling stops it
+                                        // there and writes, rather than being
+                                        // dropped as part of the scroll.
+                                        onStylusDown: () {
+                                          if (_scrolling) {
+                                            context
+                                                .findAncestorStateOfType<
+                                                  PageViewportState
+                                                >()
+                                                ?.yieldToPen();
+                                          }
+                                        },
+                                        pastePrompt: _pastePrompt,
+                                        stylusOnly: _stylusOnly,
+                                        ruler: _ruler,
+                                        pointerClaims: _pointerClaims,
+                                        aiActive: _aiActive,
+                                        onAiSelection: (InkVector? tap) =>
+                                            _onAiSelection(tap, page.ink),
+                                        selectablePdfBounds:
+                                            page.pdfSource == null
+                                            ? null
+                                            : Offset.zero &
+                                                  page.pdfSource!.pageSize,
+                                        selectPdf: _selectPdf,
+                                        stickySettings: _stickySettings,
+                                        onStickyPlaced: _onStickyPlaced,
+                                        textSettings: _textSettings,
+                                        onTextSelected:
+                                            (TextSettings settings) {
+                                              _textSettings.value = settings;
+                                            },
+                                        carry: _selectionCarry,
+                                        exclusionRects: _nativeExclusionRects,
+                                        exclusionsChanged:
+                                            _paletteController.popoverChanged,
+                                        replay: _strokeReplay,
+                                        onReplayStrokeTapped: _seekToStroke,
+                                        // The page the selection is on is the
+                                        // current one; the view stays put.
+                                        onSelectionCarried: () => context
+                                            .findAncestorStateOfType<
+                                              PageViewportState
+                                            >()
+                                            ?.touchPage(slot),
+                                      ),
                                     ),
+                                    if (widget.pageOverlayBuilder != null)
+                                      widget.pageOverlayBuilder!(
+                                        context,
+                                        index,
+                                      ),
                                     AiContextSelection(
                                       assistant: _ai,
                                       page: page.ink,
@@ -3875,7 +4026,9 @@ class EditorScreenState extends State<EditorScreen>
                                       controller: _inkController,
                                       crossPageListenable: _selectionCarry,
                                       selectionResolver: _stableSelection,
-                                      onAiPressed: _openAi,
+                                      onAiPressed: widget.allowPageManagement
+                                          ? _openAi
+                                          : null,
                                       onCopy: _copy,
                                       onCut: _cut,
                                       onDuplicate: () => _selectionCarry
@@ -3899,47 +4052,50 @@ class EditorScreenState extends State<EditorScreen>
                     ),
                   ),
                 ),
-                _PaintTranslatedPositioned(
-                  key: const ValueKey<String>('history-position'),
-                  origin: layout.history.topLeft,
-                  child: FloatingHistoryControls(
-                    height: layout.history.height,
-                    width: layout.history.width,
-                    children: <Widget>[
-                      HistoryControls(
-                        controller: _inkController,
-                        onUndo: _undo,
-                        onRedo: _redo,
-                      ),
-                      PageNavigationControls(
-                        onOpenOverview: _togglePageOverview,
-                        overviewOpen: _pageOverviewOpen,
-                      ),
-                    ],
-                  ),
-                ),
-                _PaintTranslatedPositioned(
-                  key: const ValueKey<String>('page-controls-position'),
-                  origin: layout.pageControls.topLeft,
-                  child: FloatingPageControls(
-                    height: layout.pageControls.height,
-                    width: layout.pageControls.width,
-                    child: PageControls(
-                      document: _document,
-                      onOpenSettings: _openPageSettings,
-                      canFind: _canFind,
-                      onFind: _openHandwritingFind,
-                      onInsertPdf: _canUseDocumentIo ? _insertPdf : null,
-                      onExitFullscreen: exitFullscreen,
+                if (!widget.readOnly)
+                  _PaintTranslatedPositioned(
+                    key: const ValueKey<String>('history-position'),
+                    origin: layout.history.topLeft,
+                    child: FloatingHistoryControls(
+                      height: layout.history.height,
+                      width: layout.history.width,
+                      children: <Widget>[
+                        HistoryControls(
+                          controller: _inkController,
+                          onUndo: _undo,
+                          onRedo: _redo,
+                        ),
+                        if (widget.allowPageManagement)
+                          PageNavigationControls(
+                            onOpenOverview: _togglePageOverview,
+                            overviewOpen: _pageOverviewOpen,
+                          ),
+                      ],
                     ),
                   ),
-                ),
+                if (widget.allowPageManagement)
+                  _PaintTranslatedPositioned(
+                    key: const ValueKey<String>('page-controls-position'),
+                    origin: layout.pageControls.topLeft,
+                    child: FloatingPageControls(
+                      height: layout.pageControls.height,
+                      width: layout.pageControls.width,
+                      child: PageControls(
+                        document: _document,
+                        onOpenSettings: _openPageSettings,
+                        canFind: _canFind,
+                        onFind: _openHandwritingFind,
+                        onInsertPdf: _canUseDocumentIo ? _insertPdf : null,
+                        onExitFullscreen: exitFullscreen,
+                      ),
+                    ),
+                  ),
                 // Only the toolbar listens to which editor shows it, so
                 // switching tabs never builds this editor again.
                 EditorToolbarSlot(
                   builder: (GlobalKey? toolbarKey) {
                     _claimStylusGestures();
-                    if (!_toolbarShown.value) {
+                    if (!_toolbarShown.value || widget.readOnly) {
                       return const SizedBox.shrink();
                     }
                     return _PalettePositioner(
@@ -5176,5 +5332,34 @@ class EditorLayout {
         tools: paletteTools,
       ),
     );
+  }
+}
+
+class _InkInputRegion extends SingleChildRenderObjectWidget {
+  const _InkInputRegion({required this.exclusions, required super.child});
+  final ValueGetter<List<Rect>>? exclusions;
+  @override
+  RenderObject createRenderObject(BuildContext context) =>
+      _InkInputRegionBox(exclusions);
+  @override
+  void updateRenderObject(
+    BuildContext context,
+    covariant _InkInputRegionBox renderObject,
+  ) {
+    renderObject.exclusions = exclusions;
+  }
+}
+
+class _InkInputRegionBox extends RenderProxyBox {
+  _InkInputRegionBox(this.exclusions);
+  ValueGetter<List<Rect>>? exclusions;
+  @override
+  bool hitTest(BoxHitTestResult result, {required Offset position}) {
+    final areas = exclusions;
+    if (areas != null) {
+      final global = localToGlobal(position);
+      if (areas().any((rect) => rect.contains(global))) return false;
+    }
+    return super.hitTest(result, position: position);
   }
 }

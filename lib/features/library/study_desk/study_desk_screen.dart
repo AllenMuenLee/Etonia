@@ -1,5 +1,6 @@
 import 'dart:async';
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:speech_to_text/speech_recognition_error.dart';
@@ -9,6 +10,7 @@ import 'package:speech_to_text/speech_to_text.dart';
 import '../../../app/theme/app_icons.dart';
 import '../../../app/theme/app_tokens.dart';
 import '../../../shared/layout/breakpoints.dart';
+import '../../../shared/navigation/app_sheets.dart';
 import '../../../shared/widgets/app_controls.dart';
 import '../../../shared/widgets/etonia_mark.dart';
 import '../../../shared/widgets/pressable.dart';
@@ -16,11 +18,21 @@ import '../../editor/ai/ai_citation.dart';
 import '../../editor/ai/ai_client.dart';
 import '../../editor/document_io/document_platform.dart';
 import '../../editor/widgets/ai_assistant_panel.dart';
+import '../../editor/ink/pen_settings.dart';
 import '../../editor/widgets/ai_citation_highlight.dart';
+import 'practice/study_practice_studio_view.dart';
+import 'practice/study_practice_generator.dart';
+import 'practice/study_generate_test_sheet.dart';
+import 'practice/study_practice_models.dart';
+import 'practice/study_test_paper_player.dart';
 import 'study_citation_preview.dart';
 import 'study_desk_controller.dart';
 import 'study_desk_models.dart';
+import 'study_desk_overview.dart';
+import 'study_desk_widgets.dart';
 import 'study_source_picker.dart';
+import 'study_history_sidebar.dart';
+import 'study_diagram_card.dart';
 
 /// The Study Desk's body: the notes on the desk and the chat about them, with the
 /// page a citation points at beside the chat where there is room for it, and
@@ -33,7 +45,14 @@ class StudyDeskScreen extends StatefulWidget {
     required this.onEditCitation,
     required this.onAddSources,
     this.onOpenPlans,
+    this.onLeave,
     this.pdfRasterizer,
+    this.isOpenInEditor,
+    this.penSettings,
+    this.stylusOnly,
+    this.exportSink = const SystemExportSink(),
+    this.onOpenTestAsNote,
+    this.onSaveTestToLibrary,
   });
 
   final StudyDeskController controller;
@@ -43,7 +62,19 @@ class StudyDeskScreen extends StatefulWidget {
   final ValueChanged<StudyCitation> onEditCitation;
   final VoidCallback onAddSources;
   final VoidCallback? onOpenPlans;
+  final VoidCallback? onLeave;
   final PdfRasterizer? pdfRasterizer;
+
+  /// Whether a note is open in an editor tab, and so is edited there.
+  final bool Function(String noteId)? isOpenInEditor;
+  final ValueListenable<PenSettings>? penSettings;
+  final ValueListenable<bool>? stylusOnly;
+  final ExportSink exportSink;
+
+  /// Makes a note of a test's PDF, to write the answers on, and opens it.
+  final Future<void> Function(Uint8List pdf, String title)? onOpenTestAsNote;
+
+  final Future<void> Function(Uint8List pdf, String title)? onSaveTestToLibrary;
 
   static const String composerHint = 'Ask about your notes';
 
@@ -65,10 +96,20 @@ class _StudyDeskScreenState extends State<StudyDeskScreen> {
   final ScrollController _scroll = ScrollController();
   final GlobalKey _transcriptKey = GlobalKey();
 
+  /// So that the pane keeps what is being written as the window changes shape
+  /// and it moves from beside the chat to over it.
+  final GlobalKey _paneKey = GlobalKey();
+
+  /// Built the first time it is shown, and kept, as the chat is, after that.
+  bool _practiceBuilt = false;
+
   /// The cited paragraphs built now, to find the one being read.
   final Map<(int, int), BuildContext> _paragraphs =
       <(int, int), BuildContext>{};
-  int _focusUpdate = 0;
+  Timer? _focusDebounce;
+  bool? _historyOpen;
+  double _layoutWidth = 0;
+  bool _smoothNextScroll = false;
 
   final SpeechToText _speech = SpeechToText();
   bool _listening = false;
@@ -80,12 +121,13 @@ class _StudyDeskScreenState extends State<StudyDeskScreen> {
   /// Set when the pane is shut by hand: reading on no longer opens it, though a
   /// chip does. Only where the pane sits beside the chat.
   bool _paneDismissed = false;
+  bool _testSourceDismissed = false;
+  int _shownReviewRevision = 0;
 
   StudyDeskController get _controller => widget.controller;
 
   bool get _sideBySide =>
-      WindowSizeClass.fromWidth(MediaQuery.sizeOf(context).width) ==
-      WindowSizeClass.expanded;
+      WindowSizeClass.fromWidth(_layoutWidth) == WindowSizeClass.expanded;
 
   @override
   void initState() {
@@ -95,6 +137,7 @@ class _StudyDeskScreenState extends State<StudyDeskScreen> {
     _scroll.addListener(_scheduleFocusUpdate);
     _shownMessages = _controller.messages.length;
     _shownSession = _controller.sessionId;
+    _shownReviewRevision = _controller.testReviewOpenRevision;
     _scrollToEnd();
     unawaited(_controller.load());
   }
@@ -115,6 +158,7 @@ class _StudyDeskScreenState extends State<StudyDeskScreen> {
     _text.dispose();
     _composerFocus.dispose();
     _scroll.dispose();
+    _focusDebounce?.cancel();
     unawaited(_speech.cancel());
     super.dispose();
   }
@@ -126,6 +170,16 @@ class _StudyDeskScreenState extends State<StudyDeskScreen> {
 
   void _onControllerChanged() {
     if (!mounted) return;
+    final reviewOpened =
+        _shownReviewRevision != _controller.testReviewOpenRevision;
+    _shownReviewRevision = _controller.testReviewOpenRevision;
+    if (reviewOpened) {
+      _testSourceDismissed = false;
+      _historyOpen = false;
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted && !_sideBySide) _openMarkedPaper();
+      });
+    }
     final int count = _controller.messages.length;
     final bool newSession = _shownSession != _controller.sessionId;
     final bool grew = count > _shownMessages;
@@ -133,17 +187,34 @@ class _StudyDeskScreenState extends State<StudyDeskScreen> {
     _shownSession = _controller.sessionId;
     setState(() {});
     if (newSession) {
+      _text.value = TextEditingValue(text: _controller.draft);
       _paneDismissed = false;
+      _testSourceDismissed = false;
       _paragraphs.clear();
     }
-    if (grew || newSession || _controller.partialAnswer != null) _scrollToEnd();
+    if (grew || newSession || _controller.partialAnswer != null) {
+      _scrollToEnd(animate: _smoothNextScroll && grew);
+      if (grew) _smoothNextScroll = false;
+    }
     if (grew) _scheduleFocusUpdate();
   }
 
-  void _scrollToEnd() {
+  void _scrollToEnd({bool animate = false}) {
     WidgetsBinding.instance.addPostFrameCallback((Duration _) {
       if (mounted && _scroll.hasClients) {
-        _scroll.jumpTo(_scroll.position.maxScrollExtent);
+        if (_controller.messages.isEmpty && _controller.partialAnswer == null) {
+          _scroll.jumpTo(0);
+        } else if (animate && !MediaQuery.disableAnimationsOf(context)) {
+          unawaited(
+            _scroll.animateTo(
+              _scroll.position.maxScrollExtent,
+              duration: const Duration(milliseconds: 300),
+              curve: Curves.easeOutCubic,
+            ),
+          );
+        } else {
+          _scroll.jumpTo(_scroll.position.maxScrollExtent);
+        }
       }
     });
   }
@@ -151,17 +222,26 @@ class _StudyDeskScreenState extends State<StudyDeskScreen> {
   /// Works out the paragraph being read once the scroll is laid out. Only the
   /// latest asked for runs.
   void _scheduleFocusUpdate() {
-    final int update = ++_focusUpdate;
-    WidgetsBinding.instance.addPostFrameCallback((Duration _) {
-      if (mounted && update == _focusUpdate) _updateFocusedParagraph();
+    _focusDebounce?.cancel();
+    _focusDebounce = Timer(const Duration(milliseconds: 150), () {
+      if (!mounted ||
+          !_scroll.hasClients ||
+          _scroll.position.isScrollingNotifier.value) {
+        return;
+      }
+      _updateFocusedParagraph();
     });
-    WidgetsBinding.instance.ensureVisualUpdate();
   }
 
   /// As in the editor's chat, the cited paragraph nearest the line being read
   /// is the focused one. Where the pane sits beside the chat, this opens it
   /// too; over the chat, there is nothing to scroll while it is open.
   void _updateFocusedParagraph() {
+    // Out of sight, there is nothing being read.
+    if (_controller.mode != StudyDeskMode.chat ||
+        _controller.page != StudyDeskPage.workspace) {
+      return;
+    }
     final RenderObject? transcript = _transcriptKey.currentContext
         ?.findRenderObject();
     if (transcript is! RenderBox || !transcript.hasSize) return;
@@ -211,6 +291,13 @@ class _StudyDeskScreenState extends State<StudyDeskScreen> {
     _controller.closePane();
   }
 
+  /// Opens a card or question's citation in the pane, belonging to no paragraph
+  /// of the chat.
+  void _viewPracticeCitation(StudyCitation citation) {
+    _paneDismissed = false;
+    _controller.focusCitation(citation, message: -1, paragraph: 0);
+  }
+
   KeyEventResult _onComposerKey(FocusNode node, KeyEvent event) {
     if (event is! KeyDownEvent ||
         event.logicalKey != LogicalKeyboardKey.enter) {
@@ -228,6 +315,7 @@ class _StudyDeskScreenState extends State<StudyDeskScreen> {
   void _send() {
     final String text = _text.text.trim();
     if (text.isEmpty || !_controller.canSend) return;
+    _smoothNextScroll = true;
     _text.clear();
     if (_listening) unawaited(_speech.stop());
     unawaited(_controller.send(text));
@@ -298,7 +386,6 @@ class _StudyDeskScreenState extends State<StudyDeskScreen> {
   @override
   Widget build(BuildContext context) {
     final AppColors colors = AppColors.of(context);
-    final StudyCitationFocus? focus = _controller.focus;
     // With the whole window to itself, the chat keeps to a width lines can be
     // read at, in the middle of whatever room it has.
     final Widget chat = Align(
@@ -308,82 +395,374 @@ class _StudyDeskScreenState extends State<StudyDeskScreen> {
         constraints: const BoxConstraints(
           maxWidth: StudyDeskScreen.readingWidth,
         ),
-        child: _buildChat(context),
+        child:
+            _controller.page == StudyDeskPage.course &&
+                _controller.selectedCourse != null
+            ? StudyDeskOverview(
+                key: ValueKey(_controller.selectedCourseId),
+                controller: _controller,
+                onOpenSource: _openSource,
+                onAddSources: widget.onAddSources,
+                composer: _composer(),
+                onCreate: (kind) => unawaited(_createMaterial(kind)),
+              )
+            : _buildChat(context),
       ),
     );
-    final Widget? pane = _controller.paneOpen && focus != null
-        ? StudyCitationPreview(
-            controller: _controller,
-            citation: focus.citation,
-            pdfRasterizer: widget.pdfRasterizer,
-            onEdit: widget.onEditCitation,
-            onClose: _closePane,
-          )
-        : null;
-    return KeyedSubtree(
-      key: const ValueKey<String>('study-desk-screen'),
-      child: _sideBySide
-          ? Row(
-              crossAxisAlignment: CrossAxisAlignment.stretch,
-              children: <Widget>[
-                Expanded(child: chat),
-                if (pane != null) ...<Widget>[
-                  VerticalDivider(
-                    width: AppSizes.hairline,
-                    color: colors.divider,
-                  ),
-                  Expanded(child: pane),
-                ],
-              ],
-            )
-          : Stack(fit: StackFit.expand, children: <Widget>[chat, ?pane]),
+    final bool practising = _controller.mode == StudyDeskMode.practice;
+    if (practising) _practiceBuilt = true;
+    final Widget main = Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: <Widget>[
+        _workspaceToolbar(),
+        Expanded(
+          // Both stay built: the chat comes back scrolled as it was left, and a
+          // quiz as far as it had got.
+          child: IndexedStack(
+            index: practising ? 1 : 0,
+            sizing: StackFit.expand,
+            children: <Widget>[
+              chat,
+              if (_practiceBuilt)
+                StudyPracticeStudioView(
+                  controller: _controller,
+                  showPlayerBackButton: false,
+                  onViewCitation: _viewPracticeCitation,
+                  onAddSources: widget.onAddSources,
+                  onOpenPlans: widget.onOpenPlans,
+                  exportSink: widget.exportSink,
+                  onOpenTestAsNote: widget.onOpenTestAsNote,
+                  onSaveTestToLibrary: widget.onSaveTestToLibrary,
+                )
+              else
+                const SizedBox.shrink(),
+            ],
+          ),
+        ),
+      ],
     );
+    final workspace = ListenableBuilder(
+      listenable: Listenable.merge([
+        _controller.citationFocusNotifier,
+        _controller.citationPaneOpen,
+      ]),
+      child: main,
+      builder: (context, stableMain) {
+        return LayoutBuilder(
+          builder: (context, constraints) {
+            _layoutWidth = constraints.maxWidth;
+            final focus = _controller.focus;
+            final testSource = _controller.testPaperSource;
+            final Widget? pane =
+                !practising &&
+                    testSource != null &&
+                    !_testSourceDismissed &&
+                    _sideBySide
+                ? _markedPaper(
+                    testSource,
+                    () => setState(() => _testSourceDismissed = true),
+                  )
+                : _controller.paneOpen && focus != null
+                ? StudyCitationPreview(
+                    key: _paneKey,
+                    controller: _controller,
+                    citation: focus.citation,
+                    pdfRasterizer: widget.pdfRasterizer,
+                    onEdit: widget.onEditCitation,
+                    onClose: _closePane,
+                    isOpenInEditor: widget.isOpenInEditor,
+                    penSettings: widget.penSettings,
+                    stylusOnly: widget.stylusOnly,
+                  )
+                : null;
+            final wide = constraints.maxWidth >= 900;
+            final showHistory = _historyOpen ?? (wide && testSource == null);
+            final sidebar = StudyHistorySidebar(
+              controller: _controller,
+              onClose: () => setState(() => _historyOpen = false),
+              onAddSources: widget.onAddSources,
+              onBack: () {
+                if (!_controller.handleBack()) widget.onLeave?.call();
+              },
+              onCreateMaterial: (kind) => unawaited(_createMaterial(kind)),
+              closeOnSelection: !wide,
+              exportSink: widget.exportSink,
+            );
+            final content = Row(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                if (wide && showHistory)
+                  Container(
+                    width: 272,
+                    foregroundDecoration: BoxDecoration(
+                      border: BorderDirectional(
+                        end: BorderSide(
+                          color: colors.divider,
+                          width: AppSizes.hairline,
+                        ),
+                      ),
+                    ),
+                    child: sidebar,
+                  ),
+                Expanded(
+                  child:
+                      pane != null &&
+                          constraints.maxWidth >= Breakpoints.expanded
+                      ? StudyResizableSplit(
+                          leading: stableMain!,
+                          trailing: pane,
+                        )
+                      : stableMain!,
+                ),
+              ],
+            );
+            return KeyedSubtree(
+              key: const ValueKey<String>('study-desk-screen'),
+              child: Material(
+                color: colors.background,
+                child: Stack(
+                  fit: StackFit.expand,
+                  children: [
+                    content,
+                    if (!wide && showHistory) ...[
+                      ModalBarrier(
+                        dismissible: true,
+                        color: colors.shadow.withValues(alpha: .35),
+                        onDismiss: () => setState(() => _historyOpen = false),
+                      ),
+                      Align(
+                        alignment: AlignmentDirectional.centerStart,
+                        child: SizedBox(
+                          width: constraints.maxWidth.clamp(0, 320),
+                          child: sidebar,
+                        ),
+                      ),
+                    ],
+                    if (pane != null &&
+                        constraints.maxWidth < Breakpoints.expanded)
+                      pane,
+                  ],
+                ),
+              ),
+            );
+          },
+        );
+      },
+    );
+    return workspace;
+  }
+
+  Widget _workspaceToolbar() => LayoutBuilder(
+    builder: (context, constraints) {
+      final historyVisible = _historyOpen ?? _layoutWidth >= 900;
+      return Padding(
+        padding: const EdgeInsets.symmetric(
+          horizontal: AppSpacing.sm,
+          vertical: AppSpacing.xs,
+        ),
+        child: Row(
+          children: [
+            if (!historyVisible)
+              IconButton(
+                key: const ValueKey('study-toggle-history'),
+                tooltip: 'Open history',
+                icon: const Icon(AppIcons.sidebar),
+                onPressed: () => setState(() => _historyOpen = true),
+              ),
+            Expanded(
+              child: Text(
+                _controller.browsingAllMaterials &&
+                        _controller.mode == StudyDeskMode.practice
+                    ? _controller.practiceSection == PracticeStudioSection.tests
+                          ? 'Tests'
+                          : 'Flashcards'
+                    : _controller.selectedCourse?.name ?? 'Study Desk',
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: Theme.of(context).textTheme.titleMedium,
+              ),
+            ),
+          ],
+        ),
+      );
+    },
+  );
+
+  void _openSource(String noteId) {
+    _viewPracticeCitation(
+      StudyCitation(
+        noteId: noteId,
+        pageIndex: 0,
+        revision: _controller.revisionOf(noteId),
+      ),
+    );
+  }
+
+  Future<void> _createMaterial(StudyMaterialKind kind) async {
+    final course = _controller.selectedCourse;
+    if (MediaQuery.sizeOf(context).width < 900) _historyOpen = false;
+    if (kind == StudyMaterialKind.chats) {
+      if (course != null) {
+        _controller.startCourseChat(course);
+      } else {
+        _controller.newChat(noteIds: const []);
+      }
+      return;
+    }
+    _controller.closeFlashcardSet();
+    _controller.closeTestPaper();
+    _controller.setPracticeSection(
+      kind == StudyMaterialKind.tests
+          ? PracticeStudioSection.tests
+          : PracticeStudioSection.flashcards,
+    );
+    _controller.setMode(StudyDeskMode.practice);
+    if (kind == StudyMaterialKind.tests) {
+      await showAppSheet<void>(
+        context: context,
+        motionKey: 'study-generate-test',
+        builder: (_) => StudyGenerateTestSheet(controller: _controller),
+      );
+    } else {
+      final request = await showAppSheet<StudyPracticeRequest>(
+        context: context,
+        motionKey: 'study-generate',
+        builder: (_) => StudyGenerateSheet(controller: _controller),
+      );
+      if (request != null && mounted) {
+        unawaited(_controller.generatePracticeSet(request));
+      }
+    }
   }
 
   Widget _buildChat(BuildContext context) {
     final StudyDeskController controller = _controller;
+    final testSource = controller.testPaperSource;
     final List<StudyMessage> messages = controller.messages;
-    final bool hasSources = controller.sources.isNotEmpty;
     final String? partial = controller.partialAnswer;
     final AiFailure? failure = controller.failure;
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: <Widget>[
-        StudySourceStrip(controller: controller, thumbnail: widget.thumbnail),
+        if (controller.currentSession.testPaperId != null)
+          ListTile(
+            key: const ValueKey('study-test-source'),
+            leading: const Icon(Icons.assignment_turned_in_outlined),
+            title: Text(
+              controller.testPaperSource?.title ?? 'Test unavailable',
+            ),
+            subtitle: Text(
+              testSource != null
+                  ? '${testSource.totalScore?.toStringAsFixed(0) ?? 0} / ${testSource.totalPoints} points · View marked paper'
+                  : 'The source test could not be loaded.',
+            ),
+            onTap: controller.testPaperSource == null ? null : _openMarkedPaper,
+          ),
         Expanded(
-          child: !hasSources && messages.isEmpty
-              ? _NoSources(onAddSources: widget.onAddSources)
-              : ListView(
-                  key: _transcriptKey,
-                  controller: _scroll,
-                  padding: const EdgeInsets.all(AppSpacing.md),
-                  children: <Widget>[
-                    for (int i = 0; i < messages.length; i++)
-                      Padding(
-                        padding: const EdgeInsets.only(bottom: AppSpacing.md),
-                        child: messages[i].fromUser
-                            ? _Question(text: messages[i].text)
-                            : _Answer(
-                                key: ValueKey<String>(
-                                  'study-answer-${controller.sessionId}-$i',
-                                ),
-                                message: messages[i],
-                                index: i,
-                                controller: controller,
-                                register:
-                                    ((int, int) ref, BuildContext context) =>
-                                        _paragraphs[ref] = context,
-                                unregister:
-                                    ((int, int) ref, BuildContext context) {
-                                      if (identical(
-                                        _paragraphs[ref],
-                                        context,
-                                      )) {
-                                        _paragraphs.remove(ref);
-                                      }
-                                    },
-                                onCitation: _openCitation,
+          child: NotificationListener<ScrollNotification>(
+            onNotification: (notification) {
+              if (notification.depth == 0) {
+                if (notification is ScrollStartNotification) {
+                  _focusDebounce?.cancel();
+                }
+                if (notification is ScrollEndNotification) {
+                  _scheduleFocusUpdate();
+                }
+              }
+              return false;
+            },
+            child: ListView.builder(
+              key: _transcriptKey,
+              controller: _scroll,
+              padding: const EdgeInsets.all(AppSpacing.md),
+              itemCount: messages.length + 2,
+              itemBuilder: (context, index) {
+                if (index == 0) {
+                  return controller.currentSession.testPaperId != null
+                      ? const SizedBox.shrink()
+                      : Padding(
+                          padding: const EdgeInsets.only(bottom: AppSpacing.md),
+                          child: StudyChatSources(
+                            controller: controller,
+                            onOpenSource: _openSource,
+                            onAddSources: widget.onAddSources,
+                          ),
+                        );
+                }
+                final i = index - 1;
+                if (messages.isEmpty && !controller.isBusy && failure == null) {
+                  return _ChatWelcome(
+                    controller: controller,
+                    onStarter: controller.showStarters
+                        ? (starter) => unawaited(
+                            controller.send(
+                              starter.prompt,
+                              label: starter.label,
+                              mode: starter.mode,
+                            ),
+                          )
+                        : null,
+                  );
+                }
+                if (i < messages.length) {
+                  return Padding(
+                    padding: const EdgeInsets.only(bottom: AppSpacing.md),
+                    child: messages[i].fromUser
+                        ? _Question(text: messages[i].text)
+                        : _Answer(
+                            key: ValueKey<String>(
+                              'study-answer-${controller.sessionId}-$i',
+                            ),
+                            message: messages[i],
+                            index: i,
+                            controller: controller,
+                            register: ((int, int) ref, BuildContext context) =>
+                                _paragraphs[ref] = context,
+                            unregister: ((int, int) ref, BuildContext context) {
+                              if (identical(_paragraphs[ref], context)) {
+                                _paragraphs.remove(ref);
+                              }
+                            },
+                            onCitation: _openCitation,
+                          ),
+                  );
+                }
+                return Column(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    if (controller.showTestRecommendation)
+                      Card(
+                        child: Padding(
+                          padding: const EdgeInsets.all(16),
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              const Icon(AppIcons.studyDesk),
+                              Text(
+                                'Ready for a quick test on ${controller.activeTestTopic}?',
                               ),
+                              const Text(
+                                'Generated from your notes: 4 MCQs and 1 FRQ with a handwriting canvas.',
+                              ),
+                              FilledButton(
+                                onPressed: controller.isGeneratingTest
+                                    ? null
+                                    : () => unawaited(
+                                        _createMaterial(
+                                          StudyMaterialKind.tests,
+                                        ),
+                                      ),
+                                child: Text(
+                                  controller.isGeneratingTest
+                                      ? 'Generating test…'
+                                      : 'Generate Test & Start Now',
+                                ),
+                              ),
+                              if (controller.practiceFailure != null)
+                                Text(controller.practiceFailure!.message),
+                            ],
+                          ),
+                        ),
                       ),
                     if (partial != null && partial.isNotEmpty)
                       Padding(
@@ -403,73 +782,136 @@ class _StudyDeskScreenState extends State<StudyDeskScreen> {
                             ? widget.onOpenPlans
                             : null,
                       ),
+                    if (controller.showStarters)
+                      _Starters(
+                        onChosen: (starter) => unawaited(
+                          controller.send(
+                            starter.prompt,
+                            label: starter.label,
+                            mode: starter.mode,
+                          ),
+                        ),
+                      ),
+                    _Suggestions(
+                      controller: controller,
+                      onChosen: (question) {
+                        _text.text = question;
+                        _send();
+                      },
+                    ),
                   ],
-                ),
-        ),
-        if (controller.showStarters)
-          _Starters(
-            onChosen: (StudyStarter starter) => unawaited(
-              controller.send(
-                starter.prompt,
-                label: starter.label,
-                mode: starter.mode,
-              ),
+                );
+              },
             ),
           ),
-        _Composer(
-          text: _text,
-          focusNode: _composerFocus,
-          controller: controller,
-          listening: _listening,
-          onOpenPlans: widget.onOpenPlans,
-          onVoiceInput: () => unawaited(_toggleVoiceInput()),
-          onSend: _text.text.trim().isNotEmpty && controller.canSend
-              ? _send
-              : null,
         ),
+        Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 16),
+          child: Text(
+            controller.currentSession.testPaperId != null
+                ? 'Using your completed test and grading as the source'
+                : controller.sources.isEmpty
+                ? 'Searching your entire library'
+                : controller.activeCount == 1
+                ? '1 selected source'
+                : '${controller.activeCount} selected sources',
+            style: Theme.of(context).textTheme.labelSmall?.copyWith(
+              color: AppColors.of(context).textSecondary,
+            ),
+          ),
+        ),
+        _composer(),
       ],
     );
   }
+
+  Widget _composer() => _Composer(
+    text: _text,
+    focusNode: _composerFocus,
+    controller: _controller,
+    listening: _listening,
+    onOpenPlans: widget.onOpenPlans,
+    onVoiceInput: () => unawaited(_toggleVoiceInput()),
+    onSend: _text.text.trim().isNotEmpty && _controller.canSend ? _send : null,
+  );
+
+  Widget _markedPaper(StudyTestPaper paper, VoidCallback onClose) =>
+      StudyTestPaperPlayer(
+        key: ValueKey('review-source-${paper.id}'),
+        paper: paper,
+        controller: _controller,
+        manageBackNavigation: false,
+        closeTooltip: 'Close graded paper',
+        onClose: onClose,
+        onViewCitation: _viewPracticeCitation,
+        onSaveToLibrary: widget.onSaveTestToLibrary,
+      );
+
+  void _openMarkedPaper() {
+    final paper = _controller.testPaperSource;
+    if (paper == null) return;
+    if (_sideBySide) {
+      setState(() => _testSourceDismissed = false);
+    } else {
+      unawaited(
+        showModalBottomSheet<void>(
+          context: context,
+          isScrollControlled: true,
+          useSafeArea: true,
+          builder: (context) => FractionallySizedBox(
+            heightFactor: 0.95,
+            child: _markedPaper(paper, () => Navigator.of(context).pop()),
+          ),
+        ),
+      );
+    }
+  }
 }
 
-class _NoSources extends StatelessWidget {
-  const _NoSources({required this.onAddSources});
+class _ChatWelcome extends StatelessWidget {
+  const _ChatWelcome({required this.controller, this.onStarter});
 
-  final VoidCallback onAddSources;
+  final StudyDeskController controller;
+
+  final ValueChanged<StudyStarter>? onStarter;
 
   @override
   Widget build(BuildContext context) {
-    final AppColors colors = AppColors.of(context);
-    final TextTheme text = Theme.of(context).textTheme;
-    return Center(
-      child: Padding(
-        padding: const EdgeInsets.all(AppSpacing.lg),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: <Widget>[
-            Icon(AppIcons.studyDesk, size: 48, color: colors.textSecondary),
-            const SizedBox(height: AppSpacing.md),
-            Text(
-              'Study from your own notes',
-              textAlign: TextAlign.center,
-              style: text.titleMedium?.copyWith(color: colors.textPrimary),
+    final colors = AppColors.of(context);
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 24, horizontal: 8),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Container(width: 40, height: 4, color: colors.accent),
+          const SizedBox(height: 20),
+          Text(
+            'A LITTLE CURIOSITY GOES A LONG WAY',
+            style: Theme.of(context).textTheme.labelSmall?.copyWith(
+              color: colors.textSecondary,
+              letterSpacing: 1.5,
             ),
-            const SizedBox(height: AppSpacing.xs),
-            Text(
-              'Add notes or whole folders, then ask about them. Answers point '
-              'to the exact place on the page.',
-              textAlign: TextAlign.center,
-              style: text.bodyMedium?.copyWith(color: colors.textSecondary),
+          ),
+          const SizedBox(height: 12),
+          Text(
+            'Make space for\nyour next idea.',
+            style: Theme.of(context).textTheme.displaySmall?.copyWith(
+              fontWeight: FontWeight.w600,
+              letterSpacing: -1.2,
             ),
-            const SizedBox(height: AppSpacing.md),
-            FilledButton.icon(
-              key: const ValueKey<String>('study-empty-add-sources'),
-              onPressed: onAddSources,
-              icon: const Icon(AppIcons.add, size: 18),
-              label: const Text('Add Sources'),
-            ),
+          ),
+          const SizedBox(height: 12),
+          Text(
+            'Explore your notes, untangle a topic, or put what you know to the test.',
+            style: TextStyle(color: colors.textSecondary),
+          ),
+          const SizedBox(height: 24),
+          if (onStarter != null) _Starters(onChosen: onStarter!),
+          if (controller.suggestedClassFolders.isNotEmpty) ...[
+            const SizedBox(height: 32),
+            StudySuggestedClasses(controller: controller),
           ],
-        ),
+        ],
       ),
     );
   }
@@ -486,26 +928,30 @@ class _Question extends StatelessWidget {
     final TextTheme theme = Theme.of(context).textTheme;
     return Semantics(
       container: true,
-      child: Align(
-        alignment: AlignmentDirectional.centerEnd,
-        child: Padding(
-          padding: const EdgeInsetsDirectional.only(start: AppSpacing.xl),
-          child: DecoratedBox(
-            decoration: BoxDecoration(
-              color: colors.selected,
-              borderRadius: AppBorderRadius.large,
-            ),
-            child: Padding(
-              padding: const EdgeInsets.symmetric(
-                horizontal: AppSpacing.sm + 2,
-                vertical: AppSpacing.xs,
-              ),
-              child: Text(
-                text,
-                style: theme.bodyMedium?.copyWith(color: colors.textPrimary),
-              ),
-            ),
+      child: Container(
+        decoration: BoxDecoration(
+          color: colors.surfaceMuted,
+          border: BorderDirectional(
+            start: BorderSide(color: colors.accent, width: 3),
           ),
+        ),
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+              'YOUR QUESTION',
+              style: theme.labelSmall?.copyWith(
+                color: colors.textSecondary,
+                letterSpacing: 1.4,
+              ),
+            ),
+            const SizedBox(height: 8),
+            Text(
+              text,
+              style: theme.bodyMedium?.copyWith(color: colors.textPrimary),
+            ),
+          ],
         ),
       ),
     );
@@ -547,7 +993,7 @@ class _Answer extends StatelessWidget {
                 reference: (index, i + 1),
                 text: paragraphs[i],
                 citations: message.citationsOf(i + 1),
-                focused: controller.focus?.isOf(index, i + 1) ?? false,
+                controller: controller,
                 labelOf: controller.labelOf,
                 register: register,
                 unregister: unregister,
@@ -567,7 +1013,7 @@ class _Paragraph extends StatefulWidget {
     required this.reference,
     required this.text,
     required this.citations,
-    required this.focused,
+    required this.controller,
     required this.labelOf,
     required this.register,
     required this.unregister,
@@ -577,7 +1023,7 @@ class _Paragraph extends StatefulWidget {
   final (int, int) reference;
   final String text;
   final List<StudyCitation> citations;
-  final bool focused;
+  final StudyDeskController controller;
   final String Function(StudyCitation citation) labelOf;
   final void Function((int, int) ref, BuildContext context) register;
   final void Function((int, int) ref, BuildContext context) unregister;
@@ -588,7 +1034,7 @@ class _Paragraph extends StatefulWidget {
 }
 
 class _ParagraphState extends State<_Paragraph> {
-  static const double _markWidth = 3;
+  static const double _markWidth = 3.5;
 
   @override
   void initState() {
@@ -604,47 +1050,131 @@ class _ParagraphState extends State<_Paragraph> {
 
   @override
   Widget build(BuildContext context) {
-    final bool focused = widget.focused;
-    // The same mark as on the note, to tell which words it belongs to.
-    return DecoratedBox(
-      decoration: BoxDecoration(
-        color: focused
-            ? aiCitationHighlightColor.withValues(alpha: 0.22)
-            : null,
-        border: BorderDirectional(
-          start: BorderSide(
-            color: focused ? aiCitationHighlightColor : Colors.transparent,
-            width: _markWidth,
+    return ValueListenableBuilder<(int, int)?>(
+      valueListenable: widget.controller.focusedParagraphNotifier,
+      child: _content(context),
+      builder: (context, reference, child) {
+        final bool focused = reference == widget.reference;
+        // The same mark as on the note, to tell which words it belongs to.
+        return AnimatedContainer(
+          duration: AppMotion.resolve(
+            context,
+            const Duration(milliseconds: 220),
           ),
+          curve: Curves.easeOutCubic,
+          decoration: BoxDecoration(
+            color: focused
+                ? aiCitationHighlightColor.withValues(alpha: 0.16)
+                : Colors.transparent,
+            borderRadius: BorderRadius.circular(AppRadii.small),
+            border: BorderDirectional(
+              start: BorderSide(
+                color: focused ? aiCitationHighlightColor : Colors.transparent,
+                width: _markWidth,
+              ),
+            ),
+          ),
+          child: child,
+        );
+      },
+    );
+  }
+
+  Widget _content(BuildContext context) => Padding(
+    padding: const EdgeInsetsDirectional.only(
+      start: AppSpacing.xs,
+      bottom: AppSpacing.xs,
+    ),
+    child: Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: <Widget>[
+        AiAnswerMarkdown(widget.text),
+        for (final citation in widget.citations)
+          for (final diagram in citation.diagramCitations)
+            StudyDiagramCard(
+              controller: widget.controller,
+              citation: diagram,
+              onPressed: () => widget.onCitation(diagram),
+            ),
+        if (widget.citations.isNotEmpty)
+          SelectionContainer.disabled(
+            child: Wrap(
+              spacing: AppSpacing.xxs,
+              children: <Widget>[
+                for (final StudyCitation citation in widget.citations)
+                  _CitationChip(
+                    label: widget.labelOf(citation),
+                    onPressed: () => widget.onCitation(citation),
+                  ),
+              ],
+            ),
+          ),
+      ],
+    ),
+  );
+}
+
+class _Suggestions extends StatelessWidget {
+  const _Suggestions({required this.controller, required this.onChosen});
+  final StudyDeskController controller;
+  final ValueChanged<String> onChosen;
+
+  @override
+  Widget build(BuildContext context) => ValueListenableBuilder<List<String>>(
+    valueListenable: controller.dynamicSuggestions,
+    builder: (context, suggestions, _) => AnimatedSwitcher(
+      duration: AppMotion.resolve(context, AppMotion.fadeIn),
+      transitionBuilder: (child, animation) => FadeTransition(
+        opacity: animation,
+        child: SlideTransition(
+          position: Tween<Offset>(
+            begin: const Offset(0, 0.06),
+            end: Offset.zero,
+          ).animate(animation),
+          child: child,
         ),
       ),
-      child: Padding(
-        padding: const EdgeInsetsDirectional.only(
-          start: AppSpacing.xs,
-          bottom: AppSpacing.xs,
-        ),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: <Widget>[
-            AiAnswerMarkdown(widget.text),
-            if (widget.citations.isNotEmpty)
-              SelectionContainer.disabled(
-                child: Wrap(
-                  spacing: AppSpacing.xxs,
-                  children: <Widget>[
-                    for (final StudyCitation citation in widget.citations)
-                      _CitationChip(
-                        label: widget.labelOf(citation),
-                        onPressed: () => widget.onCitation(citation),
+      child: suggestions.isEmpty
+          ? const SizedBox.shrink()
+          : Column(
+              key: ValueKey(suggestions.join('\n')),
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
+                  children: [
+                    Expanded(
+                      child: Text(
+                        'Explore next',
+                        style: Theme.of(context).textTheme.labelMedium,
+                      ),
+                    ),
+                    ValueListenableBuilder<bool>(
+                      valueListenable: controller.generatingSuggestions,
+                      builder: (context, busy, _) => IconButton(
+                        tooltip: 'Refresh suggestions',
+                        onPressed: busy
+                            ? null
+                            : () => unawaited(controller.refreshSuggestions()),
+                        icon: const Icon(Icons.refresh),
+                      ),
+                    ),
+                  ],
+                ),
+                Wrap(
+                  spacing: AppSpacing.xs,
+                  runSpacing: AppSpacing.xs,
+                  children: [
+                    for (final question in suggestions)
+                      ActionChip(
+                        label: Text(question, softWrap: true),
+                        onPressed: () => onChosen(question),
                       ),
                   ],
                 ),
-              ),
-          ],
-        ),
-      ),
-    );
-  }
+              ],
+            ),
+    ),
+  );
 }
 
 class _CitationChip extends StatelessWidget {
@@ -818,15 +1348,22 @@ class _Starters extends StatelessWidget {
       padding: const EdgeInsets.symmetric(horizontal: AppSpacing.md),
       child: Wrap(
         spacing: AppSpacing.xs,
+        runSpacing: AppSpacing.xs,
+        alignment: WrapAlignment.start,
         children: <Widget>[
           for (final StudyStarter starter in StudyStarter.all)
-            ActionChip(
-              label: Text(
+            OutlinedButton(
+              style: OutlinedButton.styleFrom(
+                backgroundColor: colors.surfaceMuted,
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(AppRadii.small),
+                ),
+              ),
+              onPressed: () => onChosen(starter),
+              child: Text(
                 starter.label,
                 style: TextStyle(color: colors.textPrimary),
               ),
-              backgroundColor: colors.surfaceMuted,
-              onPressed: () => onChosen(starter),
             ),
         ],
       ),
@@ -860,95 +1397,103 @@ class _Composer extends StatelessWidget {
     final AppColors colors = AppColors.of(context);
     final TextTheme theme = Theme.of(context).textTheme;
     final bool hasModels = controller.models.isNotEmpty;
-    OutlineInputBorder border(Color color, double width) => OutlineInputBorder(
-      borderRadius: AppBorderRadius.circular(AppRadii.large + 6),
-      borderSide: BorderSide(color: color, width: width),
-    );
     return Padding(
+      key: const ValueKey('study-composer-bar'),
       padding: const EdgeInsetsDirectional.fromSTEB(
         AppSpacing.md,
         AppSpacing.xs,
-        AppSpacing.xs,
+        AppSpacing.md,
         AppSpacing.sm,
       ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        mainAxisSize: MainAxisSize.min,
-        children: <Widget>[
-          if (hasModels)
-            Align(
-              alignment: AlignmentDirectional.centerStart,
-              child: AiModelSelector(
-                controller: controller,
-                onOpenPlans: onOpenPlans,
-              ),
-            ),
-          Row(
-            crossAxisAlignment: CrossAxisAlignment.end,
-            children: <Widget>[
-              Expanded(
-                child: TextField(
-                  key: const ValueKey<String>('study-composer'),
-                  controller: text,
-                  focusNode: focusNode,
-                  minLines: 1,
-                  maxLines: 5,
-                  keyboardType: TextInputType.multiline,
-                  textInputAction: TextInputAction.newline,
-                  textCapitalization: TextCapitalization.sentences,
-                  style: theme.bodyMedium?.copyWith(color: colors.textPrimary),
-                  cursorColor: colors.accent,
-                  decoration: InputDecoration(
-                    hintText: controller.activeCount == 0
-                        ? 'Add or tick a note to ask about it'
-                        : StudyDeskScreen.composerHint,
-                    hintMaxLines: 1,
-                    hintStyle: theme.bodyMedium?.copyWith(
-                      color: colors.textSecondary,
-                    ),
-                    isDense: true,
-                    constraints: const BoxConstraints(
-                      minHeight: AppSizes.minTouchTarget,
-                    ),
-                    contentPadding: const EdgeInsets.symmetric(
-                      horizontal: AppSpacing.md,
-                      vertical: AppSpacing.sm,
-                    ),
-                    border: border(Colors.transparent, AppSizes.hairline),
-                    enabledBorder: border(
-                      Colors.transparent,
-                      AppSizes.hairline,
-                    ),
-                    focusedBorder: border(
-                      colors.focus,
-                      AppSizes.focusRingWidth,
+      child: DecoratedBox(
+        decoration: BoxDecoration(
+          color: colors.surface,
+          borderRadius: BorderRadius.circular(AppRadii.medium),
+          border: Border.all(color: colors.divider),
+        ),
+        child: Padding(
+          padding: const EdgeInsets.all(AppSpacing.xs),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              TextField(
+                key: const ValueKey<String>('study-composer'),
+                controller: text,
+                focusNode: focusNode,
+                minLines: 1,
+                maxLines: 5,
+                keyboardType: TextInputType.multiline,
+                textInputAction: TextInputAction.newline,
+                textCapitalization: TextCapitalization.sentences,
+                style: theme.bodyMedium?.copyWith(color: colors.textPrimary),
+                cursorColor: colors.accent,
+                decoration: InputDecoration(
+                  filled: false,
+                  hintText: controller.currentSession.testPaperId != null
+                      ? 'Ask about your test'
+                      : StudyDeskScreen.composerHint,
+                  hintMaxLines: 2,
+                  hintStyle: theme.bodyMedium?.copyWith(
+                    color: colors.textSecondary,
+                  ),
+                  contentPadding: const EdgeInsets.symmetric(
+                    horizontal: AppSpacing.xs,
+                    vertical: AppSpacing.sm,
+                  ),
+                  border: InputBorder.none,
+                  enabledBorder: InputBorder.none,
+                  focusedBorder: OutlineInputBorder(
+                    borderRadius: AppBorderRadius.medium,
+                    borderSide: BorderSide(
+                      color: colors.focus,
+                      width: AppSizes.focusRingWidth,
                     ),
                   ),
                 ),
               ),
-              const SizedBox(width: AppSpacing.xxs),
-              CompactIconButton(
-                tooltip: listening ? 'Stop voice input' : 'Start voice input',
-                onPressed: onVoiceInput,
-                icon: listening
-                    ? AppIcons.microphoneActive
-                    : AppIcons.microphone,
-                background: listening ? colors.danger : AppGlass.muted(colors),
-                foreground: listening ? colors.onAccent : colors.textPrimary,
-                size: 40,
-              ),
-              const SizedBox(width: AppSpacing.xxs),
-              CompactIconButton(
-                tooltip: 'Send',
-                onPressed: onSend,
-                icon: AppIcons.send,
-                background: colors.accent,
-                foreground: colors.onAccent,
-                size: 40,
+              const SizedBox(height: AppSpacing.xxs),
+              Row(
+                children: [
+                  Expanded(
+                    child: Align(
+                      alignment: AlignmentDirectional.centerStart,
+                      child: hasModels
+                          ? AiModelSelector(
+                              controller: controller,
+                              onOpenPlans: onOpenPlans,
+                            )
+                          : const SizedBox.shrink(),
+                    ),
+                  ),
+                  CompactIconButton(
+                    tooltip: listening
+                        ? 'Stop voice input'
+                        : 'Start voice input',
+                    onPressed: onVoiceInput,
+                    icon: listening
+                        ? AppIcons.microphoneActive
+                        : AppIcons.microphone,
+                    background: listening ? colors.danger : colors.surfaceMuted,
+                    foreground: listening
+                        ? colors.onAccent
+                        : colors.textPrimary,
+                    size: 36,
+                  ),
+                  const SizedBox(width: AppSpacing.xxs),
+                  CompactIconButton(
+                    tooltip: 'Send',
+                    onPressed: onSend,
+                    icon: AppIcons.send,
+                    background: colors.accent,
+                    foreground: colors.onAccent,
+                    size: 36,
+                  ),
+                ],
               ),
             ],
           ),
-        ],
+        ),
       ),
     );
   }

@@ -30,16 +30,16 @@ const int _rows = 24;
 const int _strokesPerRow = 30;
 const int _pointsPerStroke = 60;
 
-/// A page of [_rows] x [_strokesPerRow] short, curly strokes, like lines of
+/// A page of [rows] x [strokesPerRow] short, curly strokes, like lines of
 /// handwriting.
-List<Stroke> _page() {
+List<Stroke> _page({int rows = _rows, int strokesPerRow = _strokesPerRow}) {
   final math.Random random = math.Random(1);
   const StrokeStyle style = StrokeStyle(ink: InkPalette.ink, width: 3);
-  const double cellWidth = _pageWidth / _strokesPerRow;
-  const double rowHeight = _pageHeight / _rows;
+  final double cellWidth = _pageWidth / strokesPerRow;
+  final double rowHeight = _pageHeight / rows;
   return <Stroke>[
-    for (int row = 0; row < _rows; row++)
-      for (int column = 0; column < _strokesPerRow; column++)
+    for (int row = 0; row < rows; row++)
+      for (int column = 0; column < strokesPerRow; column++)
         Stroke.fromPoints(
           style: style,
           points: <InkVector>[
@@ -71,17 +71,28 @@ List<InkVector> _gesture() {
 }
 
 void main() {
-  final List<Stroke> page = _page();
   final List<InkVector> gesture = _gesture();
 
-  for (final EraserSettings settings in const <EraserSettings>[
-    EraserSettings(mode: EraserMode.area, size: 24),
-    EraserSettings(mode: EraserMode.area, size: 80),
-    EraserSettings(mode: EraserMode.stroke, size: 24),
+  for (final (
+        List<Stroke> page,
+        EraserSettings settings,
+      ) in <(List<Stroke>, EraserSettings)>[
+    (_page(), const EraserSettings(mode: EraserMode.area, size: 24)),
+    (_page(), const EraserSettings(mode: EraserMode.area, size: 80)),
+    (_page(), const EraserSettings(mode: EraserMode.stroke, size: 24)),
+    // The density at which a move must stay under a millisecond.
+    (
+      _page(rows: 100, strokesPerRow: 100),
+      const EraserSettings(mode: EraserMode.area, size: 24),
+    ),
+    (
+      _page(rows: 100, strokesPerRow: 100),
+      const EraserSettings(mode: EraserMode.stroke, size: 24),
+    ),
   ]) {
-    final String name = settings.mode == EraserMode.area
-        ? 'area, ${settings.size.round()} px'
-        : 'stroke';
+    final String name =
+        '${page.length} strokes, '
+        '${settings.mode == EraserMode.area ? 'area, ${settings.size.round()} px' : 'stroke'}';
 
     test('eraser gesture: $name', () {
       final List<int> moveMicros = <int>[];

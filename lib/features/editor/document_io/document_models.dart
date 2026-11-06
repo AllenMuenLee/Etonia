@@ -52,6 +52,17 @@ class NoteImageElement {
     this.aiGenerated = false,
   });
 
+  /// A unique id for a new image element.
+  static String newId([String prefix = 'image']) {
+    _idCount++;
+    final String time = DateTime.now().microsecondsSinceEpoch.toRadixString(36);
+    final String random = _random.nextInt(1 << 32).toRadixString(36);
+    return '$prefix-$time-$_idCount-$random';
+  }
+
+  static int _idCount = 0;
+  static final math.Random _random = math.Random();
+
   final String id;
   final String assetId;
   final Size pixelSize;

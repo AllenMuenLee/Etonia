@@ -257,8 +257,9 @@ class NativeInkBridge {
     }
   }
 
-  /// The document has incorporated the final actual samples, so the native
-  /// transient overlay can disappear without exposing a frame-sized gap.
+  /// Flutter is drawing the stroke of native [pointer], or it is not ink at
+  /// all, so the overlay can let that one stroke go. Native gives each stroke
+  /// its own pointer, so this cannot touch any other.
   Future<void> finishPreview(int surfaceId, int pointer) async {
     if (_platformMissing) {
       return;
@@ -275,17 +276,19 @@ class NativeInkBridge {
     }
   }
 
-  /// Clears any transient native ink preview across all surfaces immediately.
-  Future<void> clearAllPreviews() async {
+  /// Drops the stroke being drawn, if any, and the rest of its gesture.
+  /// Finished strokes stay until [finishPreview]: Flutter may not be drawing
+  /// them yet.
+  Future<void> clearLivePreview() async {
     if (_platformMissing) {
       return;
     }
     try {
-      await _channel.invokeMethod<void>('clearAllPreviews');
+      await _channel.invokeMethod<void>('clearLivePreview');
     } on MissingPluginException {
       _platformMissing = true;
     } on PlatformException catch (error) {
-      debugPrint('Could not clear native ink previews: ${error.message}');
+      debugPrint('Could not clear native ink preview: ${error.message}');
     }
   }
 

@@ -1,5 +1,6 @@
 import 'dart:math' as math;
 
+import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:greatnote/features/editor/ai/ai_notation.dart';
@@ -8,6 +9,7 @@ import 'package:greatnote/features/editor/ai/notation_layout.dart';
 import 'package:greatnote/features/editor/editor_screen.dart';
 import 'package:greatnote/features/editor/handwriting/handwriting_indexer.dart';
 import 'package:greatnote/features/editor/handwriting/recognized_handwriting.dart';
+import 'package:greatnote/features/editor/ink/ink_canvas.dart';
 import 'package:greatnote/features/editor/ink/ink_palette.dart';
 import 'package:greatnote/features/editor/ink/ink_controller.dart';
 import 'package:greatnote/features/editor/ink/ink_sample.dart';
@@ -264,6 +266,54 @@ void main() {
     // prove that separate pool entries were selected instead of averaged.
     expect(first.single.points.last.x, 60);
     expect(second.single.points.last.x, 40);
+  });
+
+  testWidgets('words of erased ink go when the erase ends, not on each move', (
+    WidgetTester tester,
+  ) async {
+    final Stroke stroke = _stroke(100, 300, 600, 300);
+    final NoteDocument document = NoteDocument(
+      pages: <NotePage>[
+        NotePage(
+          ink: InkController(strokes: <Stroke>[stroke]),
+          recognizedWords: <RecognizedInkWord>[
+            RecognizedInkWord.fromStrokes(
+              text: 'hello',
+              confidence: 0.95,
+              strokes: <Stroke>[stroke],
+            ),
+          ],
+        ),
+      ],
+    );
+    addTearDown(document.dispose);
+    await pumpApp(tester, home: EditorScreen(document: document));
+    await tester.tap(find.byTooltip('Eraser'));
+    await tester.pumpAndSettle();
+
+    final InkController ink = document.current.ink;
+    final RenderBox page = tester.renderObject<RenderBox>(
+      find.byType(InkCanvas).first,
+    );
+    // Straight across the stroke, near its start.
+    final TestGesture gesture = await tester.startGesture(
+      page.localToGlobal(const Offset(200, 250)),
+      kind: PointerDeviceKind.stylus,
+    );
+    await gesture.moveTo(
+      page.localToGlobal(const Offset(200, 350)),
+      timeStamp: const Duration(milliseconds: 8),
+    );
+    await tester.pump();
+
+    expect(ink.strokes, isNot(contains(stroke)));
+    expect(ink.activeErase, isNotNull);
+    expect(document.current.recognizedWords, hasLength(1));
+
+    await gesture.up();
+    await tester.pump();
+    expect(ink.activeErase, isNull);
+    expect(document.current.recognizedWords, isEmpty);
   });
 
   testWidgets('find icon remains available for recognized metadata', (

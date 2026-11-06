@@ -2,6 +2,7 @@ import 'dart:convert';
 import 'dart:io';
 import 'dart:ui' as ui;
 
+import 'package:flutter/gestures.dart' show PointerDeviceKind;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -15,6 +16,8 @@ import 'package:greatnote/features/editor/document_io/document_platform.dart';
 import 'package:greatnote/features/editor/document_io/svg_document.dart';
 import 'package:greatnote/features/editor/editor_screen.dart';
 import 'package:greatnote/features/editor/ink/eraser_settings.dart';
+import 'package:greatnote/features/editor/ink/ink_canvas.dart';
+import 'package:greatnote/features/editor/ink/ink_controller.dart';
 import 'package:greatnote/features/editor/ink/ink_palette.dart';
 import 'package:greatnote/features/editor/ink/ink_sample.dart';
 import 'package:greatnote/features/editor/ink/stroke.dart';
@@ -25,13 +28,18 @@ import 'package:greatnote/features/library/library_models.dart';
 import 'package:greatnote/features/library/library_screen.dart';
 import 'package:greatnote/features/library/note_content.dart';
 import 'package:greatnote/features/library/note_repository.dart';
+import 'package:greatnote/features/library/study_desk/practice/study_practice_generator.dart';
+import 'package:greatnote/features/library/study_desk/practice/study_practice_models.dart';
 import 'package:greatnote/features/library/study_desk/study_citation_preview.dart';
+import 'package:greatnote/features/library/study_desk/study_desk_controller.dart';
 import 'package:greatnote/features/library/study_desk/study_desk_models.dart';
 import 'package:greatnote/features/library/study_desk/study_desk_screen.dart';
 import 'package:greatnote/features/library/study_desk/study_desk_store.dart';
+import 'package:greatnote/features/library/study_desk/study_in_situ_toolbar.dart';
 import 'package:greatnote/features/library/study_desk/study_rag_index.dart';
 
 import '../../helpers/ai_fakes.dart';
+import '../../helpers/document_io_fakes.dart';
 import '../../helpers/pump_app.dart';
 
 final DateTime _now = DateTime(2026, 11, 3, 9);
@@ -1151,8 +1159,15 @@ void main() {
       );
       await tester.pumpAndSettle();
       expect(find.byType(StudyDeskScreen), findsOneWidget);
+      if (find
+          .byKey(const ValueKey('study-quick-chat'))
+          .evaluate()
+          .isNotEmpty) {
+        await tester.tap(find.byKey(const ValueKey('study-quick-chat')));
+        await tester.pumpAndSettle();
+      }
       await tester.tap(
-        find.byKey(const ValueKey<String>('study-empty-add-sources')),
+        find.byKey(const ValueKey<String>('study-chat-add-source')),
       );
       await tester.pumpAndSettle();
       await tester.tap(
@@ -1204,7 +1219,9 @@ void main() {
         ),
       );
       await openDeskWithNote(tester);
-      await tester.tap(find.byKey(const ValueKey<String>('study-leave')));
+      await tester.tap(
+        find.byKey(const ValueKey<String>('study-sidebar-back')),
+      );
       await tester.pumpAndSettle();
       expect(
         find.descendant(of: row, matching: find.text('1')),
@@ -1219,9 +1236,9 @@ void main() {
       expect(find.byTooltip('Sort'), findsOneWidget);
       await openDeskWithNote(tester);
       expect(find.byTooltip('Sort'), findsNothing);
-      expect(find.text('1 source'), findsOneWidget);
+      expect(find.text('1 selected source'), findsOneWidget);
       expect(
-        find.byKey(const ValueKey<String>('study-add-sources')),
+        find.byKey(const ValueKey<String>('study-chat-add-source')),
         findsOneWidget,
       );
       expect(
@@ -1251,12 +1268,18 @@ void main() {
         find.byKey(const ValueKey<String>('library-sidebar')),
         findsNothing,
       );
-      expect(find.byType(TextField), findsOneWidget, reason: 'The composer.');
+      expect(
+        find.byType(TextField),
+        findsOneWidget,
+        reason: 'The sidebar search opens from its icon.',
+      );
       final Size window = TestViewport.tabletLandscape.size;
       expect(tester.getSize(find.byType(StudyDeskScreen)).width, window.width);
       expect(tester.getTopLeft(find.byType(StudyDeskScreen)).dx, 0);
 
-      await tester.tap(find.byKey(const ValueKey<String>('study-leave')));
+      await tester.tap(
+        find.byKey(const ValueKey<String>('study-sidebar-back')),
+      );
       await tester.pumpAndSettle();
       expect(find.byType(StudyDeskScreen), findsNothing);
       expect(find.text('Inside'), findsOneWidget, reason: 'Where it was left.');
@@ -1266,7 +1289,7 @@ void main() {
       );
     });
 
-    testDesk('the chat keeps a reading width, in the middle of the window', (
+    testDesk('the chat keeps a reading width, centered beside the sidebar', (
       WidgetTester tester,
     ) async {
       await pumpLibrary(tester);
@@ -1275,7 +1298,13 @@ void main() {
         find.byKey(const ValueKey<String>('study-chat-column')),
       );
       expect(chat.width, StudyDeskScreen.readingWidth);
-      expect(chat.center.dx, TestViewport.tabletLandscape.size.width / 2);
+      final sidebar = tester.getRect(
+        find.byKey(const ValueKey('study-navigation-sidebar')),
+      );
+      expect(
+        chat.center.dx,
+        (sidebar.right + TestViewport.tabletLandscape.size.width) / 2,
+      );
     });
 
     testDesk('the system bars go for the desk, and return with the library', (
@@ -1313,14 +1342,18 @@ void main() {
       await answer(tester, 'In phases. [[N1:P2:L4-L7]]');
       await tester.tap(find.text('Cell Biology · p.2'));
       await tester.pumpAndSettle();
-      await tester.tap(find.byKey(const ValueKey<String>('study-edit-note')));
+      await tester.tap(
+        find.byKey(const ValueKey<String>('study-open-in-editor')),
+      );
       await tester.pumpAndSettle();
       expect(modes.last, isNot(away));
       await tester.tap(find.byTooltip('Back to ${StudyDesk.title}'));
       await tester.pumpAndSettle();
       expect(modes.last, away);
 
-      await tester.tap(find.byKey(const ValueKey<String>('study-leave')));
+      await tester.tap(
+        find.byKey(const ValueKey<String>('study-sidebar-back')),
+      );
       await tester.pumpAndSettle();
       expect(modes.last, 'SystemUiMode.edgeToEdge');
     });
@@ -1335,8 +1368,15 @@ void main() {
         find.byKey(const ValueKey<String>('sidebar-study-desk')),
       );
       await tester.pumpAndSettle();
+      if (find
+          .byKey(const ValueKey('study-quick-chat'))
+          .evaluate()
+          .isNotEmpty) {
+        await tester.tap(find.byKey(const ValueKey('study-quick-chat')));
+        await tester.pumpAndSettle();
+      }
       await tester.tap(
-        find.byKey(const ValueKey<String>('study-empty-add-sources')),
+        find.byKey(const ValueKey<String>('study-chat-add-source')),
       );
       await tester.pumpAndSettle();
       await tester.tap(
@@ -1396,8 +1436,15 @@ void main() {
         find.byKey(const ValueKey<String>('sidebar-study-desk')),
       );
       await tester.pumpAndSettle();
+      if (find
+          .byKey(const ValueKey('study-quick-chat'))
+          .evaluate()
+          .isNotEmpty) {
+        await tester.tap(find.byKey(const ValueKey('study-quick-chat')));
+        await tester.pumpAndSettle();
+      }
       await tester.tap(
-        find.byKey(const ValueKey<String>('study-empty-add-sources')),
+        find.byKey(const ValueKey<String>('study-chat-add-source')),
       );
       await tester.pumpAndSettle();
       await tester.tap(
@@ -1434,35 +1481,22 @@ void main() {
       await answer(tester, 'Also answered.');
     });
 
-    testDesk('a note left unticked is not asked about, but stays on the desk', (
-      WidgetTester tester,
+    testDesk('source labels open the note and the x removes it', (
+      tester,
     ) async {
-      await _storeNote(repository, 'Contract Law', <StoredPage>[
-        _writtenPage(<String>['mitosis offer']),
-      ]);
       await pumpLibrary(tester);
       await openDeskWithNote(tester);
-      await tester.tap(
-        find.descendant(
-          of: find.byKey(ValueKey<String>('study-source-${note.id}')),
-          matching: find.byType(Checkbox),
-        ),
-      );
-      await tester.pump();
-      expect(find.text('0 sources'), findsOneWidget);
-      expect(
-        find.byKey(ValueKey<String>('study-source-${note.id}')),
-        findsOneWidget,
-      );
-      // With nothing in context, nothing can be asked.
-      await tester.enterText(
-        find.byKey(const ValueKey<String>('study-composer')),
-        'mitosis',
-      );
-      await tester.pump();
-      await tester.tap(find.byTooltip('Send'), warnIfMissed: false);
-      await tester.pump();
-      expect(client.requests, isEmpty);
+      final chip = find.byKey(ValueKey('study-chat-source-${note.id}'));
+      await tester.tap(chip);
+      await tester.pumpAndSettle();
+      final desk = tester
+          .widget<StudyDeskScreen>(find.byType(StudyDeskScreen))
+          .controller;
+      expect(desk.sources.single.noteId, note.id);
+      expect(desk.paneOpen, isTrue);
+      await tester.tap(find.byTooltip('Remove source'));
+      await tester.pumpAndSettle();
+      expect(desk.sources, isEmpty);
     });
 
     testDesk('Enter sends; Shift with Enter does not', (
@@ -1511,7 +1545,7 @@ void main() {
       expect(sent.label, 'Summarize key concepts');
       expect(sent.text, contains('[Source N1:'));
       await answer(tester, 'A summary.');
-      expect(find.text('Summarize key concepts'), findsOneWidget);
+      expect(find.text('Summarize key concepts'), findsNWidgets(2));
       expect(
         find.byKey(const ValueKey<String>('study-starters')),
         findsNothing,
@@ -1649,8 +1683,15 @@ void main() {
         find.byKey(const ValueKey<String>('sidebar-study-desk')),
       );
       await tester.pumpAndSettle();
+      if (find
+          .byKey(const ValueKey('study-quick-chat'))
+          .evaluate()
+          .isNotEmpty) {
+        await tester.tap(find.byKey(const ValueKey('study-quick-chat')));
+        await tester.pumpAndSettle();
+      }
       await tester.tap(
-        find.byKey(const ValueKey<String>('study-empty-add-sources')),
+        find.byKey(const ValueKey<String>('study-chat-add-source')),
       );
       await tester.pumpAndSettle();
       await tester.tap(
@@ -1697,7 +1738,9 @@ void main() {
       await tester.tap(find.text('Cell Biology · p.2'));
       await tester.pumpAndSettle();
 
-      await tester.tap(find.byKey(const ValueKey<String>('study-edit-note')));
+      await tester.tap(
+        find.byKey(const ValueKey<String>('study-open-in-editor')),
+      );
       await tester.pumpAndSettle();
 
       final EditorScreen editor = tester.widget(find.byType(EditorScreen));
@@ -1738,7 +1781,7 @@ void main() {
       expect(find.byType(StudyDeskScreen), findsOneWidget);
       expect(tester.takeException(), isNull);
       expect(find.textContaining('In phases.'), findsOneWidget);
-      expect(find.text('1 source'), findsOneWidget);
+      expect(find.text('1 selected source'), findsOneWidget);
       expect(
         find.byTooltip('Sort'),
         findsNothing,
@@ -1776,7 +1819,9 @@ void main() {
       await answer(tester, 'In phases. [[N1:P2:L4-L7]]');
       await tester.tap(find.text('Cell Biology · p.2'));
       await tester.pumpAndSettle();
-      await tester.tap(find.byKey(const ValueKey<String>('study-edit-note')));
+      await tester.tap(
+        find.byKey(const ValueKey<String>('study-open-in-editor')),
+      );
       await tester.pumpAndSettle();
       expect(
         tester
@@ -1804,7 +1849,809 @@ void main() {
       expect(find.byType(StudyDeskScreen), findsNothing);
     });
 
-    testDesk('New Chat keeps the sources, and clears the transcript', (
+    group('Writing on the page in place', () {
+      Finder key(String name) => find.byKey(ValueKey<String>(name));
+
+      InkController ink(WidgetTester tester) =>
+          tester.widget<InkCanvas>(find.byType(InkCanvas)).controller;
+
+      Future<void> openPane(WidgetTester tester) async {
+        await pumpLibrary(tester);
+        await openDeskWithNote(tester);
+        await ask(tester, 'Explain mitosis3');
+        await answer(tester, 'In phases. [[N1:P2:L4-L7]]');
+        await tester.tap(find.text('Cell Biology · p.2'));
+        await tester.pumpAndSettle();
+      }
+
+      Future<void> startEditing(WidgetTester tester) async {
+        await openPane(tester);
+        await tester.tap(key('study-edit-note'));
+        await tester.pumpAndSettle();
+      }
+
+      /// A stroke with [kind] across the middle of the view.
+      Future<void> draw(
+        WidgetTester tester, {
+        PointerDeviceKind kind = PointerDeviceKind.touch,
+      }) async {
+        final Offset start = tester.getCenter(key('study-inspection-pane'));
+        final TestGesture pen = await tester.startGesture(start, kind: kind);
+        for (int i = 1; i <= 6; i++) {
+          await pen.moveBy(const Offset(14, 6));
+          await tester.pump(const Duration(milliseconds: 16));
+        }
+        await pen.up();
+        await tester.pump(const Duration(milliseconds: 16));
+      }
+
+      /// Done or Revert, through a save that takes real and pretended time.
+      Future<void> finish(WidgetTester tester, String button) async {
+        await tester.tap(key(button));
+        for (int i = 0; i < 8; i++) {
+          await tester.pump(const Duration(milliseconds: 250));
+        }
+        await tester.pumpAndSettle();
+      }
+
+      testDesk('Edit Note stays on the desk, with the tools at hand', (
+        WidgetTester tester,
+      ) async {
+        await startEditing(tester);
+        expect(find.byType(EditorScreen), findsNothing);
+        expect(find.byType(StudyDeskScreen), findsOneWidget);
+        expect(find.byType(InkCanvas), findsOneWidget);
+        expect(find.byType(StudyInSituToolbar), findsOneWidget);
+        expect(key('study-edit-done'), findsOneWidget);
+        expect(key('study-edit-revert'), findsOneWidget);
+        expect(key('study-edit-note'), findsNothing);
+        for (final String tool in <String>[
+          'pen',
+          'highlighter',
+          'eraser',
+          'lasso',
+          'undo',
+          'redo',
+          'clear',
+        ]) {
+          expect(key('study-tool-$tool'), findsOneWidget, reason: tool);
+        }
+        expect(ink(tester).strokes, hasLength(8));
+      });
+
+      testDesk('what is drawn joins the page, and can be undone', (
+        WidgetTester tester,
+      ) async {
+        await startEditing(tester);
+        await draw(tester);
+        expect(ink(tester).strokes, hasLength(9));
+        await tester.tap(key('study-tool-undo'));
+        await tester.pump();
+        expect(ink(tester).strokes, hasLength(8));
+        await tester.tap(key('study-tool-redo'));
+        await tester.pump();
+        expect(ink(tester).strokes, hasLength(9));
+      });
+
+      testDesk('a stylus writes too', (WidgetTester tester) async {
+        await startEditing(tester);
+        await draw(tester, kind: PointerDeviceKind.stylus);
+        expect(ink(tester).strokes, hasLength(9));
+      });
+
+      testDesk('Done saves the page, and leaves the desk as it was', (
+        WidgetTester tester,
+      ) async {
+        await startEditing(tester);
+        final int revision = (await repository.allNotes()).single.revision;
+        final Stroke first = (await repository.loadNote(
+          note.id,
+        )).pages.first.strokes.single;
+        await draw(tester);
+        await finish(tester, 'study-edit-done');
+
+        expect(key('study-edit-note'), findsOneWidget);
+        expect(find.byType(InkCanvas), findsNothing);
+        expect(find.byType(StudyInSituToolbar), findsNothing);
+        // The pane is still open, and the chat still there.
+        expect(key('study-inspection-pane'), findsOneWidget);
+        expect(find.textContaining('In phases.'), findsOneWidget);
+
+        final NoteContent saved = await repository.loadNote(note.id);
+        expect(saved.pages, hasLength(2));
+        expect(saved.pages[1].strokes, hasLength(9));
+        // What was read of the page stays, or questions could no longer find it.
+        expect(saved.pages[1].recognizedWords, hasLength(8));
+        expect(saved.pages[1].recognizedWords.first.text, 'mitosis0');
+        // Only the page written on has changed.
+        expect(aiStrokeKey(saved.pages[0].strokes.single), aiStrokeKey(first));
+        expect(
+          (await repository.allNotes()).single.revision,
+          greaterThan(revision),
+        );
+        // What it cited is still found, and the new stroke is not among it.
+        final StudyDeskController desk = tester
+            .widget<StudyDeskScreen>(find.byType(StudyDeskScreen))
+            .controller;
+        expect(desk.revisionOf(note.id), greaterThan(revision));
+        expect(
+          _rows(desk.focus!.citation.strokesOn(saved.pages[1], revision + 1)),
+          <int>[3, 4, 5, 6],
+        );
+      });
+
+      testDesk('Done with nothing written saves nothing', (
+        WidgetTester tester,
+      ) async {
+        await startEditing(tester);
+        final int revision = (await repository.allNotes()).single.revision;
+        await finish(tester, 'study-edit-done');
+        expect((await repository.allNotes()).single.revision, revision);
+        expect(key('study-edit-note'), findsOneWidget);
+      });
+
+      testDesk('Revert puts the page back, and saves nothing', (
+        WidgetTester tester,
+      ) async {
+        await startEditing(tester);
+        final int revision = (await repository.allNotes()).single.revision;
+        await draw(tester);
+        await finish(tester, 'study-edit-revert');
+
+        expect(key('study-edit-note'), findsOneWidget);
+        expect((await repository.allNotes()).single.revision, revision);
+        expect(
+          (await repository.loadNote(note.id)).pages[1].strokes,
+          hasLength(8),
+        );
+        // Writing again starts from the page as it was.
+        await tester.tap(key('study-edit-note'));
+        await tester.pumpAndSettle();
+        expect(ink(tester).strokes, hasLength(8));
+      });
+
+      testDesk('shutting the pane keeps what was written', (
+        WidgetTester tester,
+      ) async {
+        await startEditing(tester);
+        await draw(tester);
+        await tester.tap(key('study-inspection-close'));
+        for (int i = 0; i < 8; i++) {
+          await tester.pump(const Duration(milliseconds: 250));
+        }
+        await tester.pumpAndSettle();
+        expect(key('study-inspection-pane'), findsNothing);
+        expect(
+          (await repository.loadNote(note.id)).pages[1].strokes,
+          hasLength(9),
+        );
+      });
+
+      testDesk('two fingers move the page, and leave no mark', (
+        WidgetTester tester,
+      ) async {
+        await startEditing(tester);
+        final Offset centre = tester.getCenter(key('study-inspection-pane'));
+        final Matrix4 before = tester
+            .widget<InteractiveViewer>(find.byType(InteractiveViewer))
+            .transformationController!
+            .value
+            .clone();
+        final TestGesture one = await tester.startGesture(
+          centre - const Offset(40, 0),
+          pointer: 21,
+        );
+        await one.moveBy(const Offset(4, 0));
+        await tester.pump(const Duration(milliseconds: 16));
+        final TestGesture two = await tester.startGesture(
+          centre + const Offset(40, 0),
+          pointer: 22,
+        );
+        await tester.pump(const Duration(milliseconds: 16));
+        // Drag together, then spread apart.
+        for (int i = 0; i < 6; i++) {
+          await one.moveBy(const Offset(-6, 12));
+          await two.moveBy(const Offset(6, 12));
+          await tester.pump(const Duration(milliseconds: 16));
+        }
+        await one.up();
+        await two.up();
+        await tester.pump(const Duration(milliseconds: 16));
+
+        expect(ink(tester).strokes, hasLength(8));
+        expect(ink(tester).activeStroke, isNull);
+        final Matrix4 after = tester
+            .widget<InteractiveViewer>(find.byType(InteractiveViewer))
+            .transformationController!
+            .value;
+        expect(
+          after.getMaxScaleOnAxis(),
+          greaterThan(before.getMaxScaleOnAxis()),
+        );
+        expect(after.getTranslation().y, isNot(before.getTranslation().y));
+
+        // One finger writes again once they have lifted.
+        await draw(tester);
+        expect(ink(tester).strokes, hasLength(9));
+      });
+
+      testDesk('the eraser and the lasso work on the page', (
+        WidgetTester tester,
+      ) async {
+        await startEditing(tester);
+        await tester.tap(key('study-tool-eraser'));
+        await tester.pumpAndSettle();
+        expect(key('study-eraser-stroke'), findsOneWidget);
+        await tester.tap(key('study-eraser-stroke'));
+        await tester.pump();
+
+        final InkController page = ink(tester);
+        expect(
+          page.startErase(
+            pointer: 41,
+            position: const InkVector(150, 200),
+            settings: const EraserSettings(mode: EraserMode.stroke, size: 20),
+          ),
+          isTrue,
+        );
+        page.endErase(41);
+        await tester.pump();
+        expect(page.strokes, hasLength(7));
+
+        await tester.tap(key('study-tool-lasso'));
+        await tester.pumpAndSettle();
+        expect(key('study-tool-duplicate'), findsNothing);
+        page.includeStrokesInSelection(<Stroke>[page.strokes.first]);
+        await tester.pumpAndSettle();
+        await tester.tap(key('study-tool-duplicate'));
+        await tester.pumpAndSettle();
+        expect(page.strokes, hasLength(8));
+        await tester.tap(key('study-tool-delete'));
+        await tester.pumpAndSettle();
+        expect(page.strokes, hasLength(7));
+      });
+
+      testDesk('Clear takes back only what was written just now', (
+        WidgetTester tester,
+      ) async {
+        await startEditing(tester);
+        final InkController page = ink(tester);
+        await tester.tap(key('study-tool-clear'));
+        await tester.pump();
+        expect(page.strokes, hasLength(8), reason: 'Nothing to clear yet.');
+        await draw(tester);
+        await tester.tap(key('study-tool-highlighter'));
+        await tester.pumpAndSettle();
+        await draw(tester);
+        expect(page.strokes.last.style.isHighlighter, isTrue);
+        expect(page.strokes, hasLength(10));
+
+        await tester.tap(key('study-tool-clear'));
+        await tester.pump();
+        expect(page.strokes, hasLength(8));
+        await tester.tap(key('study-tool-undo'));
+        await tester.pump();
+        expect(page.strokes, hasLength(10), reason: 'One step takes it back.');
+      });
+
+      testDesk('the pane stays on its page as the chat moves on', (
+        WidgetTester tester,
+      ) async {
+        await startEditing(tester);
+        await draw(tester);
+        final InkController page = ink(tester);
+        final StudyDeskController desk = tester
+            .widget<StudyDeskScreen>(find.byType(StudyDeskScreen))
+            .controller;
+        desk.focusCitation(
+          StudyCitation(noteId: note.id, pageIndex: 0, revision: 0),
+          message: 1,
+          paragraph: 1,
+        );
+        await tester.pumpAndSettle();
+        expect(find.text('Page 2 of 2'), findsOneWidget);
+        expect(identical(ink(tester), page), isTrue);
+        expect(page.strokes, hasLength(9));
+
+        await finish(tester, 'study-edit-done');
+        // Done, it goes to what the chat has moved on to.
+        expect(find.text('Page 1 of 2'), findsOneWidget);
+        expect(
+          (await repository.loadNote(note.id)).pages[1].strokes,
+          hasLength(9),
+        );
+      });
+
+      testDesk('a note open in an editor tab is edited there', (
+        WidgetTester tester,
+      ) async {
+        await openPane(tester);
+        await tester.tap(key('study-open-in-editor'));
+        await tester.pumpAndSettle();
+        await tester.tap(find.byTooltip('Back to ${StudyDesk.title}'));
+        await tester.pumpAndSettle();
+        expect(find.byType(StudyDeskScreen), findsOneWidget);
+
+        await tester.tap(key('study-edit-note'));
+        await tester.pumpAndSettle();
+        expect(
+          find.byType(EditorScreen),
+          findsOneWidget,
+          reason: 'The tab would save over anything written in the pane.',
+        );
+        expect(find.byType(StudyInSituToolbar), findsNothing);
+      });
+
+      testWidgets('Edit Note does not ask to leave for the editor', (
+        WidgetTester tester,
+      ) async {
+        await prepare();
+        final StudyDeskController desk = StudyDeskController(
+          repository: repository,
+          client: client,
+          store: InMemoryStudyDeskStore(),
+          clock: () => _now,
+        );
+        addTearDown(desk.dispose);
+        await desk.load();
+        await tester.pump();
+        int editorOpened = 0;
+        setViewportSize(tester, TestViewport.tabletLandscape.size);
+        await tester.pumpWidget(
+          GreatnoteApp(
+            themeMode: ThemeMode.light,
+            home: Scaffold(
+              body: StudyCitationPreview(
+                controller: desk,
+                citation: StudyCitation(
+                  noteId: note.id,
+                  pageIndex: 1,
+                  revision: note.revision,
+                ),
+                onEdit: (StudyCitation _) => editorOpened++,
+                onClose: () {},
+                textRecognizer: null,
+                enableNativeInk: false,
+              ),
+            ),
+          ),
+        );
+        await tester.pumpAndSettle();
+        await tester.tap(key('study-edit-note'));
+        await tester.pumpAndSettle();
+        expect(editorOpened, 0);
+        expect(find.byType(InkCanvas), findsOneWidget);
+        await tester.tap(key('study-edit-revert'));
+        await tester.pumpAndSettle();
+        await tester.tap(key('study-open-in-editor'));
+        await tester.pumpAndSettle();
+        expect(editorOpened, 1);
+      });
+
+      testWidgets('a whiteboard page goes back where it belongs', (
+        WidgetTester tester,
+      ) async {
+        await prepare();
+        // Ink far from the origin: the pane shows the board cut to its ink.
+        const PageSetup board = PageSetup(size: PageSize.infinite);
+        final NoteEntry boardNote = await _storeNote(
+          repository,
+          'Board',
+          <StoredPage>[
+            StoredPage(
+              setup: board,
+              strokes: <Stroke>[_line(5000, 7000, 5200, 7000, id: 'far')],
+            ),
+          ],
+        );
+        final StudyDeskController desk = StudyDeskController(
+          repository: repository,
+          client: client,
+          store: InMemoryStudyDeskStore(),
+          clock: () => _now,
+        );
+        addTearDown(desk.dispose);
+        await desk.load();
+        await tester.pump();
+        setViewportSize(tester, TestViewport.tabletLandscape.size);
+        await tester.pumpWidget(
+          GreatnoteApp(
+            themeMode: ThemeMode.light,
+            home: Scaffold(
+              body: StudyCitationPreview(
+                controller: desk,
+                citation: StudyCitation(
+                  noteId: boardNote.id,
+                  pageIndex: 0,
+                  revision: boardNote.revision,
+                ),
+                onEdit: (StudyCitation _) {},
+                onClose: () {},
+                textRecognizer: null,
+                enableNativeInk: false,
+              ),
+            ),
+          ),
+        );
+        await tester.pumpAndSettle();
+        await tester.tap(key('study-edit-note'));
+        await tester.pumpAndSettle();
+        final Offset frame = ink(tester).strokes.single.bounds.topLeft;
+        expect(frame.dx, lessThan(4000), reason: 'Shown cut to its ink.');
+
+        await draw(tester);
+        expect(ink(tester).strokes, hasLength(2));
+        final Offset drawnAt = ink(tester).strokes.last.bounds.topLeft;
+        await finish(tester, 'study-edit-done');
+
+        final List<Stroke> saved = (await repository.loadNote(
+          boardNote.id,
+        )).pages.single.strokes;
+        expect(saved, hasLength(2));
+        // The old ink is exactly where it was, and the new is beside it.
+        expect(saved.first.bounds.left, closeTo(5000, 3));
+        expect(saved.first.bounds.top, closeTo(7000, 3));
+        final Offset shift = Offset(5000 - frame.dx, 7000 - frame.dy);
+        expect(
+          saved.last.bounds.left,
+          closeTo(drawnAt.dx + shift.dx - (5000 - saved.first.bounds.left), 5),
+        );
+      });
+    });
+
+    group('Practice Studio', () {
+      Finder key(String name) => find.byKey(ValueKey<String>(name));
+
+      String setAnswer({String source = '[[N1:P2:L1-L2]]'}) =>
+          jsonEncode(<String, Object?>{
+            'title': 'Mitosis Set',
+            'flashcards': <Object?>[
+              <String, Object?>{
+                'topic': 'Cells',
+                'frontPrompt': 'What is mitosis?',
+                'backAnswer': 'Cell division.',
+                'source': source,
+              },
+            ],
+            'multipleChoiceQuestions': <Object?>[
+              <String, Object?>{
+                'question': 'How many phases?',
+                'options': <Object?>[
+                  for (final String id in <String>['A', 'B', 'C', 'D'])
+                    <String, Object?>{'id': id, 'text': 'Choice $id'},
+                ],
+                'correctOptionId': 'A',
+                'explanation': 'Counted in the notes.',
+              },
+            ],
+          });
+
+      Future<void> generateDeck(WidgetTester tester) async {
+        if (key('study-nav-flashcards').evaluate().isEmpty) {
+          await tester.tap(key('study-toggle-history'));
+          await tester.pumpAndSettle();
+        }
+        await tester.tap(key('study-nav-flashcards'));
+        await tester.pumpAndSettle();
+        await tester.tap(key('practice-generate'));
+        await tester.pumpAndSettle();
+        await tester.tap(key('generate-submit'));
+        await tester.pump(const Duration(milliseconds: 500));
+        await tester.pump(const Duration(milliseconds: 500));
+        client.answer(setAnswer());
+        await tester.pumpAndSettle();
+        expect(
+          find.descendant(
+            of: key('study-practice-studio'),
+            matching: find.text('Mitosis Set'),
+          ),
+          findsOneWidget,
+        );
+      }
+
+      Future<void> openDeckAction(WidgetTester tester, String action) async {
+        await tester.tap(find.byTooltip('Deck actions'));
+        await tester.pumpAndSettle();
+        await tester.tap(find.text(action));
+        await tester.pumpAndSettle();
+      }
+
+      testDesk('sidebar libraries open and Back restores the chat', (
+        WidgetTester tester,
+      ) async {
+        await pumpLibrary(tester);
+        await openDeskWithNote(tester);
+        await ask(tester, 'Explain mitosis3');
+        await answer(tester, 'In phases. [[N1:P2:L4-L7]]');
+        expect(key('study-practice-studio'), findsNothing);
+
+        if (key('study-nav-flashcards').evaluate().isEmpty) {
+          await tester.tap(key('study-toggle-history'));
+          await tester.pumpAndSettle();
+        }
+        await tester.tap(key('study-nav-flashcards'));
+        await tester.pumpAndSettle();
+        expect(key('study-practice-studio'), findsOneWidget);
+        expect(key('study-composer'), findsNothing);
+
+        if (key('study-sidebar-back').evaluate().isEmpty) {
+          await tester.tap(key('study-toggle-history'));
+          await tester.pumpAndSettle();
+        }
+        await tester.tap(key('study-sidebar-back'));
+        await tester.pumpAndSettle();
+        expect(key('study-composer'), findsOneWidget);
+        expect(find.textContaining('In phases.'), findsOneWidget);
+      });
+
+      testDesk('a card leads to its place in the note, beside the player', (
+        WidgetTester tester,
+      ) async {
+        await pumpLibrary(tester);
+        await openDeskWithNote(tester);
+        await generateDeck(tester);
+        await openDeckAction(tester, 'Practice Flashcards');
+        await tester.tap(key('flashcard-drag'));
+        await tester.pumpAndSettle();
+        await tester.tap(key('flashcard-view-in-note'));
+        await tester.pumpAndSettle();
+
+        expect(key('study-inspection-pane'), findsOneWidget);
+        expect(find.text('Page 2 of 2'), findsOneWidget);
+        expect(key('study-flashcard-player'), findsOneWidget);
+        expect(find.byType(AiCitationMarks), findsOneWidget);
+      });
+
+      testDesk(
+        'Back shuts the pane, then the player, then returns to chat before leaving',
+        (WidgetTester tester) async {
+          await pumpLibrary(tester);
+          await openDeskWithNote(tester);
+          await generateDeck(tester);
+          await openDeckAction(tester, 'Practice Flashcards');
+          await tester.tap(key('flashcard-drag'));
+          await tester.pumpAndSettle();
+          await tester.tap(key('flashcard-view-in-note'));
+          await tester.pumpAndSettle();
+
+          await tester.binding.handlePopRoute();
+          await tester.pumpAndSettle();
+          expect(key('study-inspection-pane'), findsNothing);
+          expect(key('study-flashcard-player'), findsOneWidget);
+
+          await tester.binding.handlePopRoute();
+          await tester.pumpAndSettle();
+          expect(key('study-flashcard-player'), findsNothing);
+          expect(find.byType(StudyDeskScreen), findsOneWidget);
+          expect(
+            find.descendant(
+              of: key('study-practice-studio'),
+              matching: find.text('Mitosis Set'),
+            ),
+            findsOneWidget,
+          );
+
+          await tester.binding.handlePopRoute();
+          await tester.pumpAndSettle();
+          expect(find.byKey(const ValueKey('study-composer')), findsOneWidget);
+          await tester.binding.handlePopRoute();
+          await tester.pumpAndSettle();
+          expect(find.byType(StudyDeskScreen), findsNothing);
+        },
+      );
+
+      testDesk(
+        'a test opens as a note to write on, and Back comes to the desk',
+        (WidgetTester tester) async {
+          setViewportSize(tester, TestViewport.tabletLandscape.size);
+          await tester.pumpWidget(
+            GreatnoteApp(
+              themeMode: ThemeMode.light,
+              home: LibraryScreen(
+                repository: repository,
+                clock: () => _now,
+                aiClient: client,
+                pdfRasterizer: FakePdfRasterizer(),
+              ),
+            ),
+          );
+          await tester.pumpAndSettle();
+          await openDeskWithNote(tester);
+          await generateDeck(tester);
+          final int notesBefore = (await repository.allNotes()).length;
+
+          await openDeckAction(tester, 'Export Test PDF');
+          await tester.tap(key('export-as-note'));
+          for (int i = 0; i < 200; i++) {
+            await tester.runAsync(
+              () => Future<void>.delayed(const Duration(milliseconds: 5)),
+            );
+            await tester.pump(const Duration(milliseconds: 50));
+            if (find.byType(EditorScreen).evaluate().isNotEmpty) break;
+          }
+          await tester.pumpAndSettle();
+
+          expect(find.byType(EditorScreen), findsOneWidget);
+          final List<NoteEntry> notes = await repository.allNotes();
+          expect(notes, hasLength(notesBefore + 1));
+          expect(notes.map((NoteEntry n) => n.title), contains('Mitosis Set'));
+
+          await tester.tap(find.byTooltip('Back to ${StudyDesk.title}'));
+          await tester.pumpAndSettle();
+          expect(find.byType(StudyDeskScreen), findsOneWidget);
+          expect(key('study-practice-studio'), findsOneWidget);
+        },
+      );
+
+      testWidgets('a card about a drawing keeps a picture of it', (
+        WidgetTester tester,
+      ) async {
+        repository = InMemoryNoteRepository(clock: () => _now);
+        client = FakeAiClient();
+        addTearDown(repository.dispose);
+        final NoteEntry drawn = await _storeNote(
+          repository,
+          'Drawings',
+          <StoredPage>[_mixedPage()],
+        );
+        final _CountingRenderer renderer = _CountingRenderer();
+        final StudyDeskController desk = StudyDeskController(
+          repository: repository,
+          client: client,
+          store: InMemoryStudyDeskStore(),
+          renderer: renderer,
+          clock: () => _now,
+        );
+        addTearDown(desk.dispose);
+        await desk.load();
+        final List<StudyChunk> chunks = await desk.index.chunksFor(drawn);
+        final StudyChunk diagram = chunks.firstWhere(
+          (StudyChunk c) => c.kind != StudyChunkKind.text,
+        );
+        final StudyChunk words = chunks.firstWhere(
+          (StudyChunk c) => c.kind == StudyChunkKind.text,
+        );
+        final Future<StudyPracticeSet?> asked = desk.generatePracticeSet(
+          StudyPracticeRequest(
+            noteIds: <String>[drawn.id],
+            types: PracticeQuestionTypes.flashcards,
+            itemCount: 5,
+          ),
+        );
+        for (int i = 0; i < 20 && client.requests.isEmpty; i++) {
+          await tester.pump(const Duration(milliseconds: 20));
+        }
+        client.answer(
+          jsonEncode(<String, Object?>{
+            'title': 'Drawn',
+            'flashcards': <Object?>[
+              <String, Object?>{
+                'frontPrompt': 'What does this box hold?',
+                'backAnswer': 'A ribosome.',
+                'source': '[[N1:P1:C${diagram.chunkIndex}]]',
+              },
+              <String, Object?>{
+                'frontPrompt': 'Name the phases.',
+                'backAnswer': 'Mitosis has phases.',
+                'source': 'N1:P1:C${words.chunkIndex}',
+              },
+            ],
+          }),
+        );
+        final StudyPracticeSet set = (await asked)!;
+        expect(set.flashcards[0].isDiagram, isTrue);
+        expect(set.flashcards[0].sourceCitation!.pageIndex, 0);
+        expect(set.flashcards[1].isDiagram, isFalse);
+        expect(set.flashcards[1].sourceCitation, isNotNull);
+      });
+
+      testDesk('everything fits on a phone', (WidgetTester tester) async {
+        await pumpLibrary(tester, viewport: TestViewport.compact);
+        await tester.tap(find.byTooltip('Folders'));
+        await tester.pumpAndSettle();
+        await tester.tap(
+          find.byKey(const ValueKey<String>('sidebar-study-desk')),
+        );
+        await tester.pumpAndSettle();
+        await tester.tap(key('study-chat-add-source'));
+        await tester.pumpAndSettle();
+        await tester.tap(
+          find.byKey(ValueKey<String>('study-pick-note-${note.id}')),
+        );
+        await tester.pump();
+        await tester.tap(key('study-source-done'));
+        await tester.pumpAndSettle();
+
+        // The toolbar over a page.
+        await ask(tester, 'Explain mitosis3');
+        await answer(tester, 'In phases. [[N1:P2:L4-L7]]');
+        await tester.tap(find.text('Cell Biology · p.2'));
+        await tester.pumpAndSettle();
+        await tester.tap(key('study-edit-note'));
+        await tester.pumpAndSettle();
+        expect(find.byType(StudyInSituToolbar), findsOneWidget);
+        await tester.tap(key('study-edit-revert'));
+        await tester.pumpAndSettle();
+        await tester.tap(key('study-inspection-close'));
+        await tester.pumpAndSettle();
+
+        // The hub, its sheets, and both players: an overflow fails the test.
+        if (key('study-nav-flashcards').evaluate().isEmpty) {
+          await tester.tap(key('study-toggle-history'));
+          await tester.pumpAndSettle();
+        }
+        await tester.tap(key('study-nav-flashcards'));
+        await tester.pumpAndSettle();
+        await tester.tap(key('practice-generate'));
+        await tester.pumpAndSettle();
+        await tester.tap(key('generate-submit'));
+        await tester.pump(const Duration(milliseconds: 500));
+        await tester.pump(const Duration(milliseconds: 500));
+        client.answer(setAnswer());
+        await tester.pumpAndSettle();
+
+        await openDeckAction(tester, 'Export Test PDF');
+        expect(key('study-export-sheet'), findsOneWidget);
+        Navigator.of(tester.element(key('study-export-sheet'))).pop();
+        await tester.pumpAndSettle();
+
+        await openDeckAction(tester, 'Edit / Manage');
+        await tester.tap(key('manage-done'));
+        await tester.pumpAndSettle();
+
+        await openDeckAction(tester, 'Practice Flashcards');
+        expect(key('study-flashcard-player'), findsOneWidget);
+        if (key('study-sidebar-back').evaluate().isEmpty) {
+          await tester.tap(key('study-toggle-history'));
+          await tester.pumpAndSettle();
+        }
+        await tester.tap(key('study-sidebar-back'));
+        await tester.pumpAndSettle();
+
+        final desk = tester
+            .widget<StudyDeskScreen>(find.byType(StudyDeskScreen))
+            .controller;
+        final paper = StudyTestPaper.fromLegacy(desk.practiceSets.single)
+            .copyWith(
+              questions: const [
+                TestMultipleChoiceQuestion(
+                  id: 'mcq',
+                  prompt: 'Which phase follows metaphase?',
+                  options: [
+                    PracticeChoiceOption(id: 'A', text: 'Anaphase'),
+                    PracticeChoiceOption(id: 'B', text: 'Prophase'),
+                  ],
+                  correctOptionId: 'A',
+                ),
+                TestFreeResponseQuestion(
+                  id: 'frq',
+                  prompt: 'Explain cell division.',
+                  subParts: ['(a) Describe the stages [10 Pts]'],
+                  rubric: ['Correct sequence'],
+                ),
+              ],
+            );
+        await desk.saveTestPaper(paper);
+        desk.setPracticeSection(PracticeStudioSection.tests);
+        await tester.pumpAndSettle();
+        await tester.tap(key('study-paper-${paper.id}'));
+        await tester.pumpAndSettle();
+        expect(find.text('Test Paper'), findsOneWidget);
+        await tester.drag(find.byType(ListView).last, const Offset(0, -650));
+        await tester.pumpAndSettle();
+        expect(find.text('Grade now'), findsOneWidget);
+        await tester.tap(key('study-toggle-history'));
+        await tester.pumpAndSettle();
+        if (key('study-sidebar-back').evaluate().isEmpty) {
+          await tester.tap(key('study-toggle-history'));
+          await tester.pumpAndSettle();
+        }
+        await tester.tap(key('study-sidebar-back'));
+        await tester.pumpAndSettle();
+      });
+    });
+
+    testDesk('New Chat resets sources and clears the transcript', (
       WidgetTester tester,
     ) async {
       await pumpLibrary(tester);
@@ -1814,7 +2661,7 @@ void main() {
       await tester.tap(find.byKey(const ValueKey<String>('study-new-chat')));
       await tester.pumpAndSettle();
       expect(find.textContaining('In phases.'), findsNothing);
-      expect(find.text('1 source'), findsOneWidget);
+      expect(find.text('Searching your entire library'), findsOneWidget);
       expect(
         find.byKey(const ValueKey<String>('study-starters')),
         findsOneWidget,

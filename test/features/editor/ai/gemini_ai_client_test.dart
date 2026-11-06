@@ -473,7 +473,7 @@ void main() {
     expect(
       (latestParts[0]! as Map<String, Object?>)['text'],
       allOf(
-        contains('you are not shown the whole sheet'),
+        contains('The selected part is supplied as an image and as SVG'),
         contains('"logical_aspect_ratio":1.5'),
         contains('"focus_bounds":{"left":0.1,"top":0.2,'),
         contains('"note_logical_width":300.0'),

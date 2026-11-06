@@ -13,6 +13,7 @@ import {
   providerAnswer,
   providerRequest,
   readProviderStream,
+  requestModel,
   reservationCap,
   stepMessage,
   twoStep,
@@ -39,6 +40,49 @@ const config = {
   outputMicroPerKilo: 10000,
   maxOutputTokens: 8192,
 };
+
+Deno.test("chat instructions focus on the answer without exposing the drawing workflow", () => {
+  for (const provider of ["openai", "claude", "gemini"] as const) {
+    const request = providerRequest(
+      { ...config, provider },
+      {
+        ...input,
+        notationInstruction: "DRAWING_ONLY_INSTRUCTIONS",
+        selectedSvg,
+        notationContext: { width: 800, height: 1100, left: 0, top: 0, right: 1, bottom: 1 },
+      },
+      8192,
+      "server-key",
+      { step: "text" },
+    );
+    const body = JSON.stringify(request.body);
+    assert(body.includes("complete explanation in the message desc"));
+    assert(body.includes("subject title"));
+    assert(!/separate step|drawing|notation|annotation|do not|never|cannot/i.test(body));
+    assert(!body.includes("data-etonia-kind"));
+  }
+});
+
+Deno.test("test grading uses the server notation model in a single metered pass", () => {
+  const grading = validateInput({
+    ...input,
+    task: "testGrading",
+    selectedSvg,
+    notationContext: { width: 800, height: 1100, left: 0, top: 0, right: 1, bottom: 1 },
+  });
+  assert.equal(requestModel(grading, "haiku"), "haiku");
+  assert.equal(requestModel(grading, undefined), "luna");
+  assert.equal(requestModel(validateInput(input), "haiku"), "sol");
+  assert.equal(twoStep(config, grading), false);
+  const sent = providerRequest(config, grading, 8192, "server-key").body as any;
+  assert.equal(sent.stream, false);
+  assert.ok(sent.messages.at(-1).content.some((part: any) =>
+    part.type === "text" && part.text.includes('data-etonia-kind="existing-ink"')
+  ));
+  assert.ok(!sent.messages[0].content.includes("A separate step draws"));
+  assert.throws(() => validateInput({ ...input, task: "unknown" }));
+  assert.throws(() => requestModel(grading, "client-model"));
+});
 
 Deno.test("AI accepts complete conversation history and rejects documents and URLs", () => {
   assert.deepEqual(validateInput(input), input);
@@ -340,7 +384,7 @@ Deno.test("with Notation on, the chosen model writes the words and a second mode
       step: "text",
     },
   );
-  assert(JSON.stringify(text.body.system).includes("Answer fully"));
+  assert(JSON.stringify(text.body.system).includes("Answer the question fully"));
   assert.equal(text.body.output_config, undefined);
   assert.equal((text.body.messages as unknown[]).length, 1);
 
@@ -396,7 +440,7 @@ Deno.test("with Notation on, the chosen model writes the words and a second mode
       assert(body.includes("Interact with the selected SVG"));
       assert(body.includes("annotate the note or add animation to it"));
       assert(body.includes("annotate directly on the user's strokes"));
-      assert(body.includes("do not redraw or replace their note"));
+      assert(body.includes("preserve their original note and keep it readable"));
       assert(body.includes("Set data-etonia-paragraph"));
       // How to annotate is the model's choice.
       assert(!body.includes("default is static"));
@@ -437,14 +481,20 @@ Deno.test("with Notation on, the chosen model writes the words and a second mode
   assert(combined.includes("Words &amp; symbols."));
   assert(!combined.includes("Draft."));
   assert(combineSteps("Words.", `\`\`\`svg\n${drawn}\n\`\`\``).includes("<path"));
+  assert(combineSteps("Words.", `<?xml version="1.0"?>\n${drawn}`).includes("<path"));
 
   // A drawing that cannot be read, or none, becomes a message-only SVG.
-  for (const broken of [undefined, "", "<svg><path", "Sorry."]) {
+  for (const broken of [undefined, "", "<svg", "Sorry."]) {
     const fallback = combineSteps("Words.", broken);
     assert(fallback.startsWith("<svg"));
     assert(fallback.includes('data-etonia-role="message">Words.</desc>'));
     assert(!fallback.includes("<path"));
   }
+  const truncated = drawn.replace(/<\/svg>$/, '<path d="M1');
+  const recoverable = combineSteps("Words.", truncated);
+  assert(recoverable.includes('<path d="M0 0L10 10"/>'));
+  assert(recoverable.includes('data-etonia-role="message">Words.</desc>'));
+  assert(recoverable.endsWith('<path d="M1'));
 });
 Deno.test("the fixed instructions are a cacheable prefix, billed at the cached rate", () => {
   const notationContext = {
@@ -572,18 +622,18 @@ Deno.test("the fixed instructions are a cacheable prefix, billed at the cached r
   assert.equal(claudeUsage.cacheWrites, 200);
 });
 Deno.test("credit budget and usage include image allowance and reasoning tokens", () => {
-  assert.throws(() => outputBudget(config, input, 1, false));
-  assert(outputBudget(config, input, 5000000, false) <= 8192);
+  assert.equal(outputBudget(config, input, 1, false), config.maxOutputTokens);
+  assert.equal(outputBudget(config, input, 5000000, false), config.maxOutputTokens);
   assert.equal(outputBudget(config, input, 0, true), config.maxOutputTokens);
   assert.equal(
     outputBudget({ ...config, maxOutputTokens: 64000 }, input, 0, true),
     16384,
   );
-  // A cap-sized hold always affords the full output.
+  // A remaining balance above 0 affords the full output.
   const cap = reservationCap(config, input);
   assert.equal(outputBudget(config, input, cap, false), config.maxOutputTokens);
-  // With Notation on, the hold also covers the cheaper drawing model, and
-  // the answer is left what remains, which still affords its full output.
+  // With Notation on, the drawing model handles the drawing pass, and
+  // the answer affords its full text output cap.
   const drawer = {
     ...config,
     inputMicroPerKilo: 100,
@@ -613,7 +663,7 @@ Deno.test("credit budget and usage include image allowance and reasoning tokens"
   const left = answerReserve(both, drawer, noted);
   assert.equal(outputBudget(config, noted, left, false, true), 8192);
   assert.equal(outputBudget(config, noted, 0, true, true), 8192);
-  assert.throws(() => outputBudget(config, noted, answerReserve(0, drawer, noted), false, true));
+  assert.equal(outputBudget(config, noted, answerReserve(0, drawer, noted), false, true), 8192);
   // A sixth of the $0.50 free credit still pays for a Sonnet-priced
   // notation request with a realistic note: the crop's allowance must not
   // swallow the whole balance before any output is afforded.
@@ -844,6 +894,8 @@ Deno.test("the service numbers an answer's paragraphs as the app does", () => {
     ["One.\n\n```\ncode\n\nmore code\n```\n\nThree.", 3],
     ["One.\n\n$$\na\n\nb\n$$\n\nThree.", 3],
     ["One.\n\n$$a$$\n\nThree.", 3],
+    ['One.\n\n<svg viewBox="0 0 10 10">\n\n<circle r="2"/>\n</svg>\n\nThree.', 3],
+    ['One.\n\n```svg\n<svg>\n\n</svg>\n```\n\nThree.', 3],
     ["One.\n\n[[L5-L9]]\n\nTwo.", 2],
     ["[[L5-L9]]\n\nOne.", 1],
     ["One.\n\n[[C 1 2 3 4]]\n\nTwo.", 2],

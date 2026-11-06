@@ -7,6 +7,7 @@ import 'package:flutter/foundation.dart';
 import '../../../app/theme/app_tokens.dart';
 import 'ink_controller.dart';
 import 'ink_sample.dart';
+import 'ink_tile_cache.dart';
 import 'ink_selection.dart';
 import 'notation_playback.dart';
 import 'pencil_texture.dart';
@@ -97,7 +98,7 @@ class StickyNotesPainter extends CustomPainter {
     this.visible,
   }) : super(
          repaint: Listenable.merge(<Listenable>[
-           controller.completedStrokesListenable,
+           controller.completedPaintListenable,
            controller.stickyEditingListenable,
            ?visible,
          ]),
@@ -174,30 +175,125 @@ void paintStickyEditingOutline(
 /// notation still being drawn, which belong to [NotationPlaybackPainter].
 /// Repaints only when the collection, the set of selected strokes, or the
 /// playback's strokes change hands; never for a playback frame.
+///
+/// Given [tiles], and with enough ink on the page to be worth it, the ink goes
+/// through them: see [InkTileCache].
 class CompletedStrokesPainter extends CustomPainter {
   CompletedStrokesPainter({
     required this.controller,
     required this.brightness,
     this.visible,
+    this.viewport,
     this.replay,
     this.replayHighlight,
+    this.tiles,
+    this.scale,
+    this.pixelRatio = 1,
+    this.zooming,
   }) : super(
          repaint: Listenable.merge(<Listenable>[
-           controller.completedStrokesListenable,
+           controller.completedPaintListenable,
            controller.notationPlaybackListenable,
            ?visible,
            ?replay,
+           if (tiles == null) ?scale,
+           ?zooming,
+           ?tiles,
          ]),
-       );
+       ) {
+    tiles?.watchScale(scale, pixelRatio);
+  }
 
   final InkController controller;
   final Brightness brightness;
   final ValueListenable<Rect>? visible;
+  final ValueListenable<Rect>? viewport;
   final StrokeReplayController? replay;
   final Color? replayHighlight;
+  final InkTileCache? tiles;
+
+  /// Screen pixels per page unit, for [tiles].
+  final ValueListenable<double>? scale;
+
+  /// Device pixels per screen pixel, for [tiles].
+  final double pixelRatio;
+
+  /// Whether the user is actively changing the zoom.
+  final ValueListenable<bool>? zooming;
+
+  /// Paints the ink through [tiles], if they should be used at all now.
+  bool _paintTiles(Canvas canvas, Size size) {
+    final InkTileCache? tiles = this.tiles;
+    final Rect? area = visible?.value;
+    final double? screenScale = scale?.value;
+    if (tiles == null ||
+        area == null ||
+        screenScale == null ||
+        !(screenScale > 0) ||
+        (replay?.isActive ?? false)) {
+      return false;
+    }
+    final List<Stroke> strokes = controller.strokes;
+    if (!InkTileCache.worthwhile(strokes)) {
+      return false;
+    }
+    final List<int> selected = controller.selection?.indices ?? const <int>[];
+    final bool playing = controller.notationPlaybacks.isNotEmpty;
+    tiles.paint(
+      canvas,
+      area: area.intersect(Offset.zero & size),
+      pixelsPerUnit: screenScale * pixelRatio,
+      brightness: brightness,
+      holdScale: zooming?.value ?? false,
+      pageBounds: Offset.zero & size,
+      focusArea: viewport?.value,
+      strokes: strokes,
+      index: controller.strokeIndex,
+      include: (int index, Stroke stroke) =>
+          !_isSelected(selected, index) &&
+          !(playing && controller.isPlayingStroke(stroke)) &&
+          !controller.isStrokeHidden(stroke) &&
+          !controller.isStrokeNativeHeld(stroke),
+      includesAll:
+          selected.isEmpty &&
+          !playing &&
+          !controller.hasHiddenStrokes &&
+          !controller.hasNativeHeldStrokes,
+      paintStroke: (Canvas canvas, Stroke stroke) => _paintStroke(
+        canvas,
+        style: stroke.style,
+        path: stroke.path,
+        origin: stroke.points.first,
+        isDot: stroke.isDot,
+        brightness: brightness,
+        outline: stroke.outline,
+      ),
+    );
+    return true;
+  }
+
+  /// Whether [index] is among [selected], which ascends.
+  static bool _isSelected(List<int> selected, int index) {
+    int low = 0;
+    int high = selected.length;
+    while (low < high) {
+      final int middle = (low + high) >> 1;
+      final int value = selected[middle];
+      if (value == index) return true;
+      if (value < index) {
+        low = middle + 1;
+      } else {
+        high = middle;
+      }
+    }
+    return false;
+  }
 
   @override
   void paint(Canvas canvas, Size size) {
+    if (_paintTiles(canvas, size)) {
+      return;
+    }
     final List<Stroke> strokes = controller.strokes;
     final List<int> selected = controller.selection?.indices ?? const <int>[];
     final bool playing = controller.notationPlaybacks.isNotEmpty;
@@ -214,7 +310,8 @@ class CompletedStrokesPainter extends CustomPainter {
         continue;
       }
       if ((playing && controller.isPlayingStroke(stroke)) ||
-          controller.isStrokeHidden(stroke)) {
+          controller.isStrokeHidden(stroke) ||
+          controller.isStrokeNativeHeld(stroke)) {
         continue;
       }
       _paintReplayStroke(canvas, stroke);
@@ -285,8 +382,13 @@ class CompletedStrokesPainter extends CustomPainter {
     return oldDelegate.controller != controller ||
         oldDelegate.brightness != brightness ||
         oldDelegate.visible != visible ||
+        oldDelegate.viewport != viewport ||
         oldDelegate.replay != replay ||
-        oldDelegate.replayHighlight != replayHighlight;
+        oldDelegate.replayHighlight != replayHighlight ||
+        oldDelegate.tiles != tiles ||
+        oldDelegate.scale != scale ||
+        oldDelegate.pixelRatio != pixelRatio ||
+        oldDelegate.zooming != zooming;
   }
 }
 
@@ -303,7 +405,7 @@ class NotationPlaybackPainter extends CustomPainter {
         repaint: Listenable.merge(<Listenable>[
           controller.notationPlaybackListenable,
           controller.notationFrameListenable,
-          controller.completedStrokesListenable,
+          controller.completedPaintListenable,
         ]),
       );
 

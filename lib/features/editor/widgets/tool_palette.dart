@@ -263,7 +263,8 @@ class ToolPalette extends StatelessWidget {
   static const double _padding = AppSpacing.xxs;
 
   /// The gap between the palette and the options bar beside it.
-  static const double _optionsGap = AppSpacing.xxs;
+  static const double optionsGap = AppSpacing.xxs;
+  static const double _optionsGap = optionsGap;
 
   static const double _buttonStep = 44;
 

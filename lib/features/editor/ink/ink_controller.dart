@@ -103,7 +103,16 @@ class InkController {
   late InkHistory _history = InkHistory(limit: historyLimit);
 
   final _Notifier _activeChanged = _Notifier();
-  final _Notifier _completedChanged = _Notifier();
+  late final _Notifier _completedChanged = _CompletedNotifier(this);
+  final _Notifier _completedPaintChanged = _Notifier();
+
+  /// Committed strokes the platform layer is still drawing, which the
+  /// finished-ink layer leaves out until they are released.
+  final Set<Stroke> _nativeHeld = Set<Stroke>.identity();
+
+  /// The next [_completedChanged] is the commit of a held stroke: nothing on
+  /// the page needs repainting for it.
+  bool _committingHeld = false;
   final _Notifier _eraserChanged = _Notifier();
   final _Notifier _selectionChanged = _Notifier();
   final _Notifier _revisionChanged = _Notifier();
@@ -180,6 +189,36 @@ class InkController {
   /// layer, so the completed layer has to stop or start painting them. It
   /// does not fire for lasso moves or transform previews.
   Listenable get completedStrokesListenable => _completedChanged;
+
+  /// Fires with [completedStrokesListenable] whenever what the page's layers
+  /// paint may have changed, and when held strokes are released. It stays
+  /// quiet for a stroke committed under [nativeHoldTest], since the platform
+  /// layer is drawing that one; any other change releases them first.
+  Listenable get completedPaintListenable => _completedPaintChanged;
+
+  /// Asked about a page stroke as it commits: true leaves the platform layer
+  /// drawing it, and [completedPaintListenable] quiet. The stroke joins the
+  /// document, the history, and everything else that reads it as usual.
+  bool Function(Stroke stroke)? nativeHoldTest;
+
+  /// Whether the finished-ink layer should leave [stroke] to the platform.
+  bool isStrokeNativeHeld(Stroke stroke) => _nativeHeld.contains(stroke);
+
+  /// Whether [isStrokeNativeHeld] holds for any stroke.
+  bool get hasNativeHeldStrokes => _nativeHeld.isNotEmpty;
+
+  /// Hands the held strokes back to the finished-ink layer. Without [notify],
+  /// for a canvas going away: its layers are going too, and the next canvas
+  /// paints everything anyway.
+  void releaseNativeHeld({bool notify = true}) {
+    if (_disposed || _nativeHeld.isEmpty) {
+      return;
+    }
+    _nativeHeld.clear();
+    if (notify) {
+      _completedPaintChanged.notify();
+    }
+  }
 
   /// Fires when an erase gesture starts, moves, or ends.
   Listenable get eraserListenable => _eraserChanged;
@@ -615,7 +654,8 @@ class InkController {
   }
 
   void _revisionBumped() {
-    _strokeIndex = null;
+    // The page's index needs no help: [_index] notices a collection replaced
+    // or grown, and an erase keeps it up to date as it goes.
     _stickyStrokeIndices.clear();
     _documentRevision++;
     _revisionChanged.notify();
@@ -875,6 +915,10 @@ class InkController {
       final List<int> out = _scribbledOut(stroke, _strokes, scribble);
       if (out.isEmpty) {
         _strokes.add(stroke);
+        if (nativeHoldTest?.call(stroke) ?? false) {
+          _nativeHeld.add(stroke);
+          _committingHeld = true;
+        }
       } else {
         _recordErasedStrokes(<Stroke>[
           for (final int index in out) _strokes[index],
@@ -2579,7 +2623,7 @@ class InkController {
       for (int i = 0; i < clipboard.images.length; i++)
         clipboard.images[i]
             .copyWith(
-              id: '${clipboard.images[i].id}-paste-${_pasteCount + 1}-$i',
+              id: NoteImageElement.newId(),
             )
             .transformed(transform),
     ];
@@ -3266,33 +3310,37 @@ class InkController {
         return;
       }
       final StickyNoteElement note = _stickies[index];
-      final List<Stroke>? result = _eraseIn(
+      final List<StrokeSplice>? splices = _eraseIn(
         note.strokes,
+        _stickyIndexFor(note),
         erase,
         note.toLocal(from),
         note.toLocal(to),
         erase.radius / note.scale,
-        spatialIndex: _stickyIndexFor(note),
       );
-      if (result != null) {
+      if (splices != null) {
         _stickies = List<StickyNoteElement>.of(_stickies)
-          ..[index] = note.copyWith(strokes: result);
+          ..[index] = note.copyWith(strokes: _spliced(note.strokes, splices));
         _stickyStrokeIndices.remove(note.id);
         erase._changedInk = true;
         _completedChanged.notify();
       }
       return;
     }
-    final List<Stroke>? result = _eraseIn(
+    final StrokeSpatialIndex index = _index;
+    final List<StrokeSplice>? splices = _eraseIn(
       _strokes,
+      index,
       erase,
       from,
       to,
       erase.radius,
     );
-    if (result != null) {
-      _strokes = result;
-      _strokeIndex = null;
+    if (splices != null) {
+      // A new list, not an edit: whoever holds [strokes] across a save keeps
+      // the ink as it was when they took it.
+      _strokes = _spliced(_strokes, splices);
+      index.apply(_strokes, splices);
       // Cut-off pieces of notation ink stay put, as ordinary ink.
       _syncPlaybacks();
       erase._changedInk = true;
@@ -3321,16 +3369,17 @@ class InkController {
     }
   }
 
-  /// [strokes] after an eraser of [radius] sweeps from [from] to [to], or
-  /// null when none of them is touched.
-  List<Stroke>? _eraseIn(
+  /// What an eraser of [radius] sweeping from [from] to [to] does to
+  /// [strokes], in document order, or null when none of them is touched.
+  /// Only the strokes [index] finds near the sweep are looked at.
+  List<StrokeSplice>? _eraseIn(
     List<Stroke> strokes,
+    StrokeSpatialIndex index,
     EraseGesture erase,
     InkVector from,
     InkVector to,
-    double radius, {
-    StrokeSpatialIndex? spatialIndex,
-  }) {
+    double radius,
+  ) {
     // The box around the capsule. Stroke bounds already include half the
     // stroke width, so a stroke that fails this test is out of reach.
     final double left = math.min(from.x, to.x) - radius;
@@ -3338,47 +3387,60 @@ class InkController {
     final double top = math.min(from.y, to.y) - radius;
     final double bottom = math.max(from.y, to.y) + radius;
 
-    final StrokeSpatialIndex? index =
-        spatialIndex ?? (identical(strokes, _strokes) ? _index : null);
-    final Iterable<int>? candidates = index?.query(
+    final List<int> candidates = index.query(
       Rect.fromLTRB(left, top, right, bottom),
     );
-    final Iterator<int>? candidate = candidates?.iterator;
-    bool hasCandidate = candidate?.moveNext() ?? false;
-
     // Stays null, and the collection untouched, until a stroke changes.
-    List<Stroke>? result;
-    for (int i = 0; i < strokes.length; i++) {
+    List<StrokeSplice>? splices;
+    for (int c = 0; c < candidates.length; c++) {
+      final int i = candidates[c];
       final Stroke stroke = strokes[i];
       final Rect bounds = stroke.bounds;
-      List<Stroke>? replacement;
-      final bool shouldTest =
-          candidate == null || (hasCandidate && candidate.current == i);
-      if (candidate != null && shouldTest) {
-        hasCandidate = candidate.moveNext();
-      }
-      if (shouldTest &&
-          !_hidden.contains(stroke) &&
-          bounds.left <= right &&
+      if (bounds.left <= right &&
           bounds.right >= left &&
           bounds.top <= bottom &&
-          bounds.bottom >= top) {
-        replacement = _erased(stroke, erase, from, to, radius);
-      }
-      if (replacement == null) {
-        result?.add(stroke);
-      } else {
-        (result ??= strokes.sublist(0, i)).addAll(replacement);
+          bounds.bottom >= top &&
+          !_hidden.contains(stroke)) {
+        final List<Stroke>? replacement = _erased(
+          stroke,
+          erase,
+          from,
+          to,
+          radius,
+        );
+        if (replacement != null) {
+          (splices ??= <StrokeSplice>[]).add(StrokeSplice(i, replacement));
+        }
       }
     }
-    return result;
+    return splices;
   }
 
-  /// The index of [_strokes], rebuilt whenever the collection is replaced or
-  /// grows in place, so it never answers with stale document indices.
+  /// A copy of [strokes] with [splices], in ascending order, made to it.
+  static List<Stroke> _spliced(
+    List<Stroke> strokes,
+    List<StrokeSplice> splices,
+  ) {
+    final List<Stroke> result = <Stroke>[];
+    int from = 0;
+    for (final StrokeSplice splice in splices) {
+      result
+        ..addAll(strokes.getRange(from, splice.index))
+        ..addAll(splice.pieces);
+      from = splice.index + 1;
+    }
+    return result..addAll(strokes.getRange(from, strokes.length));
+  }
+
+  /// The index of [strokes], for whoever needs to find the ink in an area
+  /// without looking at all of it. Up to date whenever it is asked for:
+  /// strokes added since are taken in, and an erase keeps it current. Only a
+  /// collection replaced outright, as by undo, makes it build again.
+  StrokeSpatialIndex get strokeIndex => _index;
+
   StrokeSpatialIndex get _index {
     final StrokeSpatialIndex? index = _strokeIndex;
-    if (index != null && index.indexes(_strokes)) {
+    if (index != null && index.catchUp(_strokes)) {
       return index;
     }
     return _strokeIndex = StrokeSpatialIndex(_strokes);
@@ -3465,6 +3527,7 @@ class InkController {
     finishNotationPlayback();
     _activeChanged.dispose();
     _completedChanged.dispose();
+    _completedPaintChanged.dispose();
     _eraserChanged.dispose();
     _selectionChanged.dispose();
     _revisionChanged.dispose();
@@ -3958,4 +4021,24 @@ class StickyDragGesture {
 
 class _Notifier extends ChangeNotifier {
   void notify() => notifyListeners();
+}
+
+/// Every change to the document passes through here, so nothing can alter the
+/// page without first handing held strokes back to the finished-ink layer.
+class _CompletedNotifier extends _Notifier {
+  _CompletedNotifier(this._controller);
+
+  final InkController _controller;
+
+  @override
+  void notify() {
+    // Cleared first: a listener may change the document in turn.
+    final bool heldCommit = _controller._committingHeld;
+    _controller._committingHeld = false;
+    if (!heldCommit) {
+      _controller._nativeHeld.clear();
+      _controller._completedPaintChanged.notify();
+    }
+    super.notify();
+  }
 }

@@ -1,10 +1,11 @@
-import 'dart:ui' show Rect;
+import 'dart:ui' show Offset, Rect, Size;
 
 import 'package:flutter/foundation.dart';
 
 import '../../editor/ai/ai_citation.dart';
 import '../../editor/ink/stroke.dart';
 import '../note_content.dart';
+import 'study_teaching_plan.dart';
 
 /// The workspace's user-facing name, in this one place.
 abstract final class StudyDesk {
@@ -54,6 +55,20 @@ class StudyChunkLine {
   };
 }
 
+/// A PDF bookmark mapped to the note's pages, stored on its first chunk.
+@immutable
+class StudySourceSection {
+  const StudySourceSection(this.title, this.endPageIndex);
+
+  final String title;
+  final int endPageIndex;
+
+  factory StudySourceSection.fromJson(Map<String, Object?> json) =>
+      StudySourceSection(json['title']! as String, json['end']! as int);
+
+  Map<String, Object?> toJson() => {'title': title, 'end': endPageIndex};
+}
+
 /// A paragraph-sized patch of one page, and all that makes it findable. Holds
 /// plain data only, so it can cross isolates and be kept on disk.
 @immutable
@@ -76,6 +91,7 @@ class StudyChunk {
     this.svgText = '',
     this.tags = const <String>[],
     this.lowConfidence = false,
+    this.sourceSection,
   });
 
   factory StudyChunk.fromJson(Map<String, Object?> json) {
@@ -119,6 +135,12 @@ class StudyChunk {
       svgText: json['svg'] as String? ?? '',
       tags: strings('tags'),
       lowConfidence: json['low'] == true,
+      sourceSection: switch (json['section']) {
+        final Map<String, Object?> section => StudySourceSection.fromJson(
+          section,
+        ),
+        _ => null,
+      },
     );
   }
 
@@ -163,6 +185,8 @@ class StudyChunk {
   /// Ink that reads poorly, or not at all, even though it is no drawing.
   final bool lowConfidence;
 
+  final StudySourceSection? sourceSection;
+
   /// Whether a model has to see this to use it: its words do not carry it.
   bool get needsPicture => kind != StudyChunkKind.text || lowConfidence;
 
@@ -187,6 +211,7 @@ class StudyChunk {
     if (svgText.isNotEmpty) 'svg': svgText,
     if (tags.isNotEmpty) 'tags': tags,
     if (lowConfidence) 'low': true,
+    if (sourceSection != null) 'section': sourceSection!.toJson(),
   };
 }
 
@@ -232,12 +257,32 @@ class StudyCitation {
     this.strokeKeys = const <String>[],
     this.strokeIndices = const <int>[],
     this.rings = const <Rect>[],
+    this.kind,
+    this.bounds,
+    this.diagramBounds = const <Rect>[],
   });
 
   factory StudyCitation.fromJson(Map<String, Object?> json) => StudyCitation(
     noteId: json['noteId']! as String,
     pageIndex: json['page']! as int,
     revision: json['revision'] as int? ?? 0,
+    kind: StudyChunkKind.values
+        .where((kind) => kind.name == json['kind'])
+        .firstOrNull,
+    diagramBounds: <Rect>[
+      for (final region in json['diagramBounds'] as List? ?? const [])
+        if (region case [final num l, final num t, final num r, final num b])
+          Rect.fromLTRB(l.toDouble(), t.toDouble(), r.toDouble(), b.toDouble()),
+    ],
+    bounds: switch (json['bounds']) {
+      [final num l, final num t, final num r, final num b] => Rect.fromLTRB(
+        l.toDouble(),
+        t.toDouble(),
+        r.toDouble(),
+        b.toDouble(),
+      ),
+      _ => null,
+    },
     strokeKeys: <String>[
       for (final Object? id in (json['keys'] as List?) ?? const <Object?>[])
         id! as String,
@@ -276,6 +321,59 @@ class StudyCitation {
 
   /// Details to ring, in page coordinates.
   final List<Rect> rings;
+  final StudyChunkKind? kind;
+  final Rect? bounds;
+
+  /// Kept separately when one paragraph cites words and several diagrams on
+  /// the same page, so each crop still opens at its own original location.
+  final List<Rect> diagramBounds;
+
+  static Rect pageBounds(StoredPage page) {
+    if (page.pdfSource case final source?) {
+      return Offset.zero & source.pageSize;
+    }
+    if (page.isBoard) {
+      return page.contentBounds ?? (Offset.zero & const Size(640, 480));
+    }
+    return Offset.zero &
+        (page.setup.customSize ??
+            page.setup.size.fixedSize ??
+            page.extent ??
+            const Size(640, 480));
+  }
+
+  /// Page-sized regions are navigation targets, rather than details to ring.
+  static bool coversPage(Rect region, StoredPage page) {
+    final Rect paper = pageBounds(page);
+    if (paper.isEmpty || !region.overlaps(paper)) return false;
+    final Rect covered = region.intersect(paper);
+    return covered.width >= paper.width * 0.9 &&
+        covered.height >= paper.height * 0.9;
+  }
+
+  List<Rect> ringsOn(StoredPage page) => [
+    for (final ring in rings)
+      if (!coversPage(ring, page)) ring,
+  ];
+
+  List<StudyCitation> get diagramCitations => [
+    for (final region in <Rect>{
+      ...diagramBounds,
+      if (diagramBounds.isEmpty &&
+          kind != null &&
+          kind != StudyChunkKind.text &&
+          bounds != null)
+        bounds!,
+    })
+      StudyCitation(
+        noteId: noteId,
+        pageIndex: pageIndex,
+        revision: revision,
+        kind: StudyChunkKind.diagram,
+        bounds: region,
+        rings: [region],
+      ),
+  ];
 
   /// This, as marks for the note at [currentRevision].
   AiNoteMarks marks(int currentRevision) => AiNoteMarks(
@@ -296,6 +394,16 @@ class StudyCitation {
     noteId: noteId,
     pageIndex: pageIndex,
     revision: revision,
+    kind: kind ?? other.kind,
+    diagramBounds: <Rect>{
+      ...diagramCitations.map((c) => c.bounds!),
+      ...other.diagramCitations.map((c) => c.bounds!),
+    }.toList(),
+    bounds: bounds == null
+        ? other.bounds
+        : other.bounds == null
+        ? bounds
+        : bounds!.expandToInclude(other.bounds!),
     strokeKeys: <String>{...strokeKeys, ...other.strokeKeys}.toList(),
     strokeIndices: <int>{...strokeIndices, ...other.strokeIndices}.toList(),
     rings: <Rect>[...rings, ...other.rings],
@@ -305,6 +413,10 @@ class StudyCitation {
     'noteId': noteId,
     'page': pageIndex,
     'revision': revision,
+    if (kind != null) 'kind': kind!.name,
+    if (bounds != null) 'bounds': _rectJson(bounds!),
+    if (diagramBounds.isNotEmpty)
+      'diagramBounds': [for (final region in diagramBounds) _rectJson(region)],
     if (strokeKeys.isNotEmpty) 'keys': strokeKeys,
     if (strokeIndices.isNotEmpty) 'indices': strokeIndices,
     if (rings.isNotEmpty)
@@ -386,6 +498,48 @@ class StudyMessage {
   };
 }
 
+/// A class and the library material normally studied in it.
+@immutable
+class StudyCourse {
+  const StudyCourse({
+    required this.id,
+    required this.name,
+    required this.colorHex,
+    required this.createdAt,
+    this.associatedFolderIds = const <String>[],
+    this.associatedNoteIds = const <String>[],
+  });
+
+  final String id;
+  final String name;
+  final String colorHex;
+  final DateTime createdAt;
+  final List<String> associatedFolderIds;
+  final List<String> associatedNoteIds;
+
+  factory StudyCourse.fromJson(Map<String, Object?> json) => StudyCourse(
+    id: json['id']! as String,
+    name: json['name']! as String,
+    colorHex: json['colorHex'] as String? ?? '#6750A4',
+    createdAt: DateTime.fromMillisecondsSinceEpoch(json['createdAt']! as int),
+    associatedFolderIds: List<String>.from(
+      json['folderIds'] as List? ?? const [],
+    ),
+    associatedNoteIds: List<String>.from(json['noteIds'] as List? ?? const []),
+  );
+
+  Map<String, Object?> toJson() => <String, Object?>{
+    'id': id,
+    'name': name,
+    'colorHex': colorHex,
+    'createdAt': createdAt.millisecondsSinceEpoch,
+    'folderIds': associatedFolderIds,
+    'noteIds': associatedNoteIds,
+  };
+}
+
+const Object _unchangedCourse = Object();
+
 /// One conversation on the desk.
 @immutable
 class StudySession {
@@ -393,11 +547,37 @@ class StudySession {
     required this.id,
     required this.created,
     this.messages = const <StudyMessage>[],
-  });
+    String? title,
+    DateTime? updatedAt,
+    this.courseId,
+    this.isPinned = false,
+    this.sources,
+    this.teachingPlan,
+    this.testPaperId,
+    // The public argument is `title`; the nullable override stays private.
+    // ignore: prefer_initializing_formals
+  }) : _title = title,
+       updatedAt = updatedAt ?? created;
 
   factory StudySession.fromJson(Map<String, Object?> json) => StudySession(
     id: json['id']! as String,
     created: DateTime.fromMillisecondsSinceEpoch(json['created']! as int),
+    updatedAt: DateTime.fromMillisecondsSinceEpoch(
+      (json['updatedAt'] ?? json['created'])! as int,
+    ),
+    title: json['title'] as String?,
+    courseId: json['courseId'] as String?,
+    isPinned: json['isPinned'] == true,
+    teachingPlan: StudyTeachingPlan.tryRead(json['teachingPlan']),
+    testPaperId: json['testPaperId'] as String?,
+    sources: json['sources'] is List
+        ? <StudySourceItem>[
+            for (final source in json['sources']! as List)
+              StudySourceItem.fromJson(
+                Map<String, Object?>.from(source as Map),
+              ),
+          ]
+        : null,
     messages: <StudyMessage>[
       for (final Object? message
           in (json['messages'] as List?) ?? const <Object?>[])
@@ -407,10 +587,21 @@ class StudySession {
 
   final String id;
   final DateTime created;
+  DateTime get createdAt => created;
+  final DateTime updatedAt;
+  final String? _title;
+  final String? courseId;
+  final bool isPinned;
+
+  /// Null only for legacy conversations, which used the desk's shared sources.
+  final List<StudySourceItem>? sources;
   final List<StudyMessage> messages;
+  final StudyTeachingPlan? teachingPlan;
+  final String? testPaperId;
 
   /// Its first question, in a few words.
   String get title {
+    if (_title != null && _title.trim().isNotEmpty) return _title;
     for (final StudyMessage message in messages) {
       if (!message.fromUser) continue;
       final String text = message.text.replaceAll(RegExp(r'\s+'), ' ').trim();
@@ -419,15 +610,41 @@ class StudySession {
     return 'New chat';
   }
 
-  StudySession copyWith({List<StudyMessage>? messages}) => StudySession(
+  StudySession copyWith({
+    List<StudyMessage>? messages,
+    String? title,
+    DateTime? updatedAt,
+    Object? courseId = _unchangedCourse,
+    bool? isPinned,
+    List<StudySourceItem>? sources,
+    StudyTeachingPlan? teachingPlan,
+    String? testPaperId,
+  }) => StudySession(
     id: id,
     created: created,
+    title: title ?? _title,
+    updatedAt: updatedAt ?? this.updatedAt,
+    courseId: identical(courseId, _unchangedCourse)
+        ? this.courseId
+        : courseId as String?,
+    isPinned: isPinned ?? this.isPinned,
+    sources: sources ?? this.sources,
     messages: messages ?? this.messages,
+    teachingPlan: teachingPlan ?? this.teachingPlan,
+    testPaperId: testPaperId ?? this.testPaperId,
   );
 
   Map<String, Object?> toJson() => <String, Object?>{
     'id': id,
     'created': created.millisecondsSinceEpoch,
+    'updatedAt': updatedAt.millisecondsSinceEpoch,
+    if (_title != null) 'title': _title,
+    if (courseId != null) 'courseId': courseId,
+    'isPinned': isPinned,
+    if (teachingPlan != null) 'teachingPlan': teachingPlan!.toJson(),
+    if (testPaperId != null) 'testPaperId': testPaperId,
+    if (sources != null)
+      'sources': [for (final source in sources!) source.toJson()],
     'messages': <Object?>[
       for (final StudyMessage message in messages) message.toJson(),
     ],
@@ -441,9 +658,14 @@ class StudyDeskState {
     this.sources = const <StudySourceItem>[],
     this.sessions = const <StudySession>[],
     this.currentSessionId,
+    this.courses = const <StudyCourse>[],
   });
 
   factory StudyDeskState.fromJson(Map<String, Object?> json) => StudyDeskState(
+    courses: <StudyCourse>[
+      for (final course in json['courses'] as List? ?? const [])
+        StudyCourse.fromJson(Map<String, Object?>.from(course as Map)),
+    ],
     sources: <StudySourceItem>[
       for (final Object? source
           in (json['sources'] as List?) ?? const <Object?>[])
@@ -460,9 +682,11 @@ class StudyDeskState {
   final List<StudySourceItem> sources;
   final List<StudySession> sessions;
   final String? currentSessionId;
+  final List<StudyCourse> courses;
 
   Map<String, Object?> toJson() => <String, Object?>{
-    'schema': 1,
+    'schema': 2,
+    'courses': [for (final course in courses) course.toJson()],
     'sources': <Object?>[
       for (final StudySourceItem source in sources) source.toJson(),
     ],

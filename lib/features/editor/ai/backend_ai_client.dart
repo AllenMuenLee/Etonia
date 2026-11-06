@@ -128,6 +128,7 @@ class BackendAiClient implements AiModelRouter {
       final Map<String, Object?> body = <String, Object?>{
         'requestId': _requestId(),
         'model': (request.model ?? defaultModel).name,
+        if (request.testGrading) 'task': 'testGrading',
         'prompt': latest.text,
         if (history.isNotEmpty) 'history': history,
         // The fixed instruction, the same for every request, so providers

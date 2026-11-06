@@ -137,27 +137,13 @@ abstract final class NotationFont {
         final double gesture = rune * 0.071 + column * 1.37 + row * 2.11;
         final ({List<List<InkVector>> strokes, double width}) shaped = style
             .shape(char, glyph.strokes, glyph.width, seed: gesture);
-        final double baselineDrift = style.baselineJitter * math.sin(gesture);
-        final double stretch = 1 + style.sizeJitter * math.sin(gesture * 1.73);
-        final double rotation = 0.018 * math.sin(gesture * 0.83);
-        final double cosine = math.cos(rotation);
-        final double sine = math.sin(rotation);
         final List<List<InkVector>> letter = <List<InkVector>>[
-          for (int stroke = 0; stroke < shaped.strokes.length; stroke++)
+          for (final List<InkVector> stroke in shaped.strokes)
             <InkVector>[
-              for (final InkVector point in shaped.strokes[stroke])
-                _handPoint(
-                  point,
-                  origin: origin,
-                  top: top,
-                  x: x,
-                  glyphWidth: shaped.width,
-                  scale: scale,
-                  stretch: stretch,
-                  cosine: cosine,
-                  sine: sine,
-                  baselineDrift: baselineDrift,
-                  gesture: gesture + stroke * 0.91,
+              for (final InkVector point in stroke)
+                InkVector(
+                  origin.x + (x + point.x) * scale,
+                  top + point.y * scale,
                 ),
             ],
         ];
@@ -167,7 +153,7 @@ abstract final class NotationFont {
             previous,
             letter,
             fromTop: _joinsFromTop.contains(previousChar ?? ' '),
-            baseline: top + (capHeight + baselineDrift) * scale,
+            baseline: top + capHeight * scale,
             xHeight: style.xHeight * capHeight * scale,
           );
           if (join != null) strokes.add(join);
@@ -249,36 +235,6 @@ abstract final class NotationFont {
               start! * (t * t * t);
         }(),
     ];
-  }
-
-  /// Gives each letter the small inconsistencies of a real hand: a slight
-  /// turn, size, and drift off the baseline, and a very small pen wobble.
-  /// The variation is derived from the text itself rather than randomness,
-  /// so a note lays out identically every time it is opened.
-  static InkVector _handPoint(
-    InkVector point, {
-    required InkVector origin,
-    required double top,
-    required double x,
-    required double glyphWidth,
-    required double scale,
-    required double stretch,
-    required double cosine,
-    required double sine,
-    required double baselineDrift,
-    required double gesture,
-  }) {
-    final double centerX = glyphWidth / 2;
-    final double dx = (point.x - centerX) * stretch;
-    final double dy = (point.y - capHeight) * stretch;
-    final double turnedX = dx * cosine - dy * sine;
-    final double turnedY = dx * sine + dy * cosine + capHeight;
-    final double wobbleX = 0.05 * math.sin(gesture + point.y * 0.79);
-    final double wobbleY = 0.05 * math.sin(gesture * 1.19 + point.x * 0.67);
-    return InkVector(
-      origin.x + (x + centerX + turnedX + wobbleX) * scale,
-      top + (turnedY + baselineDrift + wobbleY) * scale,
-    );
   }
 
   static final Map<String, _Glyph> _glyphs = _build();

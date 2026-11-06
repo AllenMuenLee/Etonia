@@ -37,6 +37,7 @@ class StudyPageData {
     required this.strokes,
     required this.boxes,
     required this.words,
+    this.sourceSection,
   });
 
   /// [pdfText] is what the PDF under the page says, if it is on one.
@@ -44,12 +45,14 @@ class StudyPageData {
     StoredPage page,
     int pageIndex, {
     List<PdfTextRun> pdfText = const <PdfTextRun>[],
+    StudySourceSection? sourceSection,
   }) {
     final Map<String, ui.Rect> stickyBounds = <String, ui.Rect>{
       for (final sticky in page.stickyNotes) sticky.id: sticky.bounds,
     };
     return StudyPageData(
       pageIndex: pageIndex,
+      sourceSection: sourceSection,
       strokes: <StudyStrokeData>[
         for (int i = 0; i < page.strokes.length; i++)
           StudyStrokeData.of(page.strokes[i], i),
@@ -150,6 +153,7 @@ class StudyPageData {
   final List<StudyStrokeData> strokes;
   final List<StudyBoxData> boxes;
   final List<StudyWordData> words;
+  final StudySourceSection? sourceSection;
 
   /// About what this would take as JSON.
   int get estimatedBytes {
@@ -251,12 +255,14 @@ class StudyNoteData {
     String noteId,
     NoteContent content, {
     Map<int, List<PdfTextRun>> pdfText = const <int, List<PdfTextRun>>{},
+    Map<int, StudySourceSection> sections = const {},
   }) => StudyNoteData(noteId, <StudyPageData>[
     for (int i = 0; i < content.pages.length; i++)
       StudyPageData.of(
         content.pages[i],
         i,
         pdfText: pdfText[i] ?? const <PdfTextRun>[],
+        sourceSection: sections[i],
       ),
   ]);
 
@@ -330,7 +336,15 @@ abstract final class StudyChunker {
           });
     return <StudyChunk>[
       for (int i = 0; i < kept.length; i++)
-        _chunkOf(noteId, page.pageIndex, i + 1, kept[i], placed, page.boxes),
+        _chunkOf(
+          noteId,
+          page.pageIndex,
+          i + 1,
+          kept[i],
+          placed,
+          page.boxes,
+          i == 0 ? page.sourceSection : null,
+        ),
     ];
   }
 
@@ -410,6 +424,7 @@ abstract final class StudyChunker {
     _Cluster cluster,
     List<_PlacedWord> everyWord,
     List<StudyBoxData> everyBox,
+    StudySourceSection? sourceSection,
   ) {
     final List<StudyStrokeData> strokes = <StudyStrokeData>[
       for (final _Element element in cluster.elements)
@@ -528,6 +543,7 @@ abstract final class StudyChunker {
       ].where((String text) => text.isNotEmpty).join(' '),
       tags: visual || lowConfidence ? _structureOf(ink) : const <String>[],
       lowConfidence: lowConfidence,
+      sourceSection: sourceSection,
     );
   }
 
@@ -736,19 +752,34 @@ class _Shape {
 // Chunks kept by revision.
 // ---------------------------------------------------------------------------
 
-/// Each note's chunks, by its id and revision, in memory and on disk, so a note
-/// that has not changed is never read again.
+/// Reuses each note's chunks by id and revision, with bounded memory retention
+/// and an optional disk cache for entries that leave memory.
 class StudyRagIndex {
-  StudyRagIndex({required this.repository, this.diskCache, this.pdfText});
+  StudyRagIndex({
+    required this.repository,
+    this.diskCache,
+    this.pdfText,
+    this.pdfOutline,
+    this.maxMemoryNotes = 24,
+    this.maxMemoryBytes = 8 * 1024 * 1024,
+  }) : assert(maxMemoryNotes >= 0),
+       assert(maxMemoryBytes >= 0);
 
   final NoteRepository repository;
   final StudyChunkDiskCache? diskCache;
 
   /// Reads a PDF's words. Without one, every PDF page counts as a scan.
   final PdfTextExtractor? pdfText;
+  final PdfOutlineReader? pdfOutline;
 
-  final Map<String, (int, List<StudyChunk>)> _memory =
-      <String, (int, List<StudyChunk>)>{};
+  // Estimated retained size, rather than encoded file size. Oversized notes
+  // remain available to the caller and on disk without occupying this LRU.
+  final int maxMemoryNotes;
+  final int maxMemoryBytes;
+  final Map<String, (int, List<StudyChunk>, int)> _memory = {};
+  int _memoryBytes = 0;
+  int _memoryEpoch = 0;
+  final Map<String, int> _latestRevision = {};
   final Map<(String, int), Future<List<StudyChunk>>> _building =
       <(String, int), Future<List<StudyChunk>>>{};
 
@@ -762,35 +793,60 @@ class StudyRagIndex {
 
   /// [note]'s chunks at its current revision, kept if already worked out.
   Future<List<StudyChunk>> chunksFor(NoteEntry note) {
-    final (int, List<StudyChunk>)? kept = _memory[note.id];
+    final kept = _memory.remove(note.id);
     if (kept != null && kept.$1 == note.revision) {
+      _memory[note.id] = kept;
       return SynchronousFuture<List<StudyChunk>>(kept.$2);
     }
+    if (kept != null) _memoryBytes -= kept.$3;
     final (String, int) key = (note.id, note.revision);
-    return _building[key] ??= _build(note).whenComplete(() {
+    final pending = _building[key];
+    if (pending != null) return pending;
+    _latestRevision[note.id] = math.max(
+      _latestRevision[note.id] ?? note.revision,
+      note.revision,
+    );
+    return _building[key] = _build(note, _memoryEpoch).whenComplete(() {
       // In a block: returned, the future removed would wait on itself.
       _building.remove(key);
+      if (!_building.keys.any((key) => key.$1 == note.id)) {
+        _latestRevision.remove(note.id);
+      }
     });
   }
 
-  Future<List<StudyChunk>> _build(NoteEntry note) async {
-    final List<StudyChunk> chunks =
-        await diskCache?.read(note.id, note.revision) ?? await _read(note);
-    _memory[note.id] = (note.revision, chunks);
+  Future<List<StudyChunk>> _build(NoteEntry note, int epoch) async {
+    final cached = await diskCache?.read(note.id, note.revision);
+    final (chunks, complete) = cached != null
+        ? (cached, true)
+        : await _read(note, epoch);
+    if (complete &&
+        epoch == _memoryEpoch &&
+        _latestRevision[note.id] == note.revision) {
+      final int bytes = estimatedStudyChunkBytes(chunks);
+      if (maxMemoryNotes > 0 && bytes <= maxMemoryBytes) {
+        final previous = _memory.remove(note.id);
+        if (previous != null) _memoryBytes -= previous.$3;
+        _memory[note.id] = (note.revision, chunks, bytes);
+        _memoryBytes += bytes;
+        while (_memory.length > maxMemoryNotes ||
+            _memoryBytes > maxMemoryBytes) {
+          _memoryBytes -= _memory.remove(_memory.keys.first)!.$3;
+        }
+      }
+    }
     return chunks;
   }
 
-  Future<List<StudyChunk>> _read(NoteEntry note) async {
+  Future<(List<StudyChunk>, bool)> _read(NoteEntry note, int epoch) async {
     reads++;
     final NoteContent content = await repository.loadNote(note.id);
-    final (Map<int, List<PdfTextRun>> text, bool complete) = await _pdfTextOf(
-      note.id,
-      content,
-    );
+    final (text, sections, complete) = await _pdfTextOf(note.id, content);
     final StudyNoteData data = StudyNoteData.of(
       note.id,
       content,
       pdfText: text,
+      sections: sections,
     );
     final List<StudyChunk> chunks = data.estimatedBytes >= offMainBytes
         ? await compute(
@@ -800,28 +856,31 @@ class StudyRagIndex {
           )
         : StudyChunker.chunkNote(data);
     // What could not be read this time is not remembered as having no words.
-    if (complete) unawaited(diskCache?.write(note.id, note.revision, chunks));
-    return chunks;
+    if (complete &&
+        epoch == _memoryEpoch &&
+        _latestRevision[note.id] == note.revision) {
+      await diskCache?.write(note.id, note.revision, chunks);
+    }
+    return (chunks, complete);
   }
 
   /// What the PDFs under [content]'s pages say, by page of the note, and
   /// whether all of them could be read. A note's pages may come from several
   /// PDFs, and each is opened once.
-  Future<(Map<int, List<PdfTextRun>>, bool)> _pdfTextOf(
-    String noteId,
-    NoteContent content,
-  ) async {
+  Future<(Map<int, List<PdfTextRun>>, Map<int, StudySourceSection>, bool)>
+  _pdfTextOf(String noteId, NoteContent content) async {
     final PdfTextExtractor? extractor = pdfText;
     final Map<int, List<PdfTextRun>> text = <int, List<PdfTextRun>>{};
-    if (extractor == null) return (text, true);
-    final Map<String, Map<int, int>> byAsset = <String, Map<int, int>>{};
+    final sections = <int, StudySourceSection>{};
+    if (extractor == null) return (text, sections, true);
+    final byAsset = <String, Map<int, List<int>>>{};
     for (int i = 0; i < content.pages.length; i++) {
       final PdfPageSource? source = content.pages[i].pdfSource;
       if (source == null) continue;
-      (byAsset[source.assetId] ??= <int, int>{})[source.pageIndex] = i;
+      ((byAsset[source.assetId] ??= {})[source.pageIndex] ??= []).add(i);
     }
     bool complete = true;
-    for (final MapEntry<String, Map<int, int>> asset in byAsset.entries) {
+    for (final asset in byAsset.entries) {
       try {
         final NoteAssetData data = await repository.readAsset(
           noteId,
@@ -831,24 +890,123 @@ class StudyRagIndex {
           data.bytes,
           asset.value.keys.toSet(),
         );
-        read.forEach((int pdfPage, List<PdfTextRun> runs) {
-          text[asset.value[pdfPage]!] = runs;
-        });
+        for (final page in asset.value.entries) {
+          final runs = read[page.key];
+          if (runs == null) {
+            complete = false;
+            continue;
+          }
+          for (final notePage in page.value) {
+            text[notePage] = runs;
+          }
+        }
+        final outlineReader =
+            pdfOutline ??
+            (extractor is PdfOutlineReader
+                ? extractor as PdfOutlineReader
+                : null);
+        if (outlineReader != null) {
+          try {
+            sections.addAll(
+              _mapSections(
+                await outlineReader.readOutline(data.bytes),
+                asset.value,
+              ),
+            );
+          } on Object {
+            complete = false;
+          }
+        }
       } on Object {
         // Its pages are shown to the model as pictures instead, for now.
         complete = false;
       }
     }
-    return (text, complete);
+    return (text, sections, complete);
+  }
+
+  static final _sectionTitle = RegExp(
+    r'^(?:(?:chapter|unit|part)\s+)?(\d+|[ivxlcdm]+)\s*[:.\-–—]?\s+\S',
+    caseSensitive: false,
+  );
+
+  static bool _isSectionTitle(String title) =>
+      _sectionTitle.hasMatch(title) &&
+      !RegExp(
+        r'^chapter\s+(?:\d+|[ivxlcdm]+)\s+in\s+review\b',
+        caseSensitive: false,
+      ).hasMatch(title);
+
+  static Map<int, StudySourceSection> _mapSections(
+    List<PdfOutlineEntry> outline,
+    Map<int, List<int>> notePages,
+  ) {
+    // Find chapters at one sibling level; a book may wrap them in parts.
+    final members = <int, (String, int)>{};
+    void visit(List<PdfOutlineEntry> siblings, int? parentEnd) {
+      final hasSections = siblings.any((entry) => _isSectionTitle(entry.title));
+      for (int i = 0; i < siblings.length; i++) {
+        final entry = siblings[i];
+        final start = entry.pageIndex;
+        final end =
+            siblings
+                .skip(i + 1)
+                .map((e) => e.pageIndex)
+                .whereType<int>()
+                .where((p) => start == null || p > start)
+                .firstOrNull ??
+            parentEnd;
+        final numberedChildren = entry.children.any(
+          (e) => _isSectionTitle(e.title),
+        );
+        if (start != null &&
+            _isSectionTitle(entry.title) &&
+            !numberedChildren) {
+          for (final page in notePages.entries) {
+            if (page.key < start || (end != null && page.key >= end)) continue;
+            for (final notePage in page.value) {
+              members[notePage] = (entry.title, start);
+            }
+          }
+        } else if (!hasSections || _isSectionTitle(entry.title)) {
+          visit(entry.children, end);
+        }
+      }
+    }
+
+    visit(outline, null);
+    final pages = members.keys.toList()..sort();
+    final result = <int, StudySourceSection>{};
+    for (int i = 0; i < pages.length; i++) {
+      final start = pages[i];
+      int end = start;
+      while (i + 1 < pages.length &&
+          pages[i + 1] == end + 1 &&
+          members[pages[i + 1]] == members[start]) {
+        end = pages[++i];
+      }
+      result[start] = StudySourceSection(members[start]!.$1, end);
+    }
+    return result;
   }
 
   /// Lets go of everything kept for every note but [noteIds].
   Future<void> retain(Set<String> noteIds) async {
-    _memory.removeWhere((String id, _) => !noteIds.contains(id));
+    // Also invalidate completions that were started before this pruning pass.
+    _memoryEpoch++;
+    _memory.removeWhere((String id, kept) {
+      if (noteIds.contains(id)) return false;
+      _memoryBytes -= kept.$3;
+      return true;
+    });
     await diskCache?.retain(noteIds);
   }
 
-  void releaseMemory() => _memory.clear();
+  void releaseMemory() {
+    _memoryEpoch++;
+    _memory.clear();
+    _memoryBytes = 0;
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -1044,7 +1202,7 @@ abstract final class StudyRetriever {
     StudyQueryMode mode = StudyQueryMode.search,
     int limit = maxChunks,
   }) {
-    if (documents.isEmpty) return const <StudyHit>[];
+    if (documents.isEmpty || limit <= 0) return const <StudyHit>[];
     if (mode == StudyQueryMode.overview) {
       return _spread(documents, limit);
     }
@@ -1116,8 +1274,7 @@ abstract final class StudyRetriever {
         .toList(growable: false);
   }
 
-  /// Takes the richest chunks of each note in turn, so that one long note does
-  /// not crowd out the rest.
+  /// Samples across each note's pages, taking notes in turn.
   static List<StudyHit> _spread(
     List<StudySearchDocument> documents,
     int limit,
@@ -1135,16 +1292,39 @@ abstract final class StudyRetriever {
           chunk.anchors.length * 8;
     }
 
-    for (final List<StudySearchDocument> list in byNote.values) {
-      list.sort(
-        (StudySearchDocument a, StudySearchDocument b) =>
-            richness(b).compareTo(richness(a)),
-      );
+    final samples = <List<StudySearchDocument>>[];
+    for (final list in byNote.values) {
+      final byPage = <int, StudySearchDocument>{};
+      for (final document in list) {
+        final previous = byPage[document.chunk.pageIndex];
+        if (previous == null || richness(document) > richness(previous)) {
+          byPage[document.chunk.pageIndex] = document;
+        }
+      }
+      final pages = byPage.keys.toList()..sort();
+      final count = math.min(limit, pages.length);
+      final sample = <StudySearchDocument>[];
+      for (int i = 0; i < count; i++) {
+        final start = i * pages.length ~/ count;
+        final end = (i + 1) * pages.length ~/ count;
+        var best = byPage[pages[start]]!;
+        for (int j = start + 1; j < end; j++) {
+          final candidate = byPage[pages[j]]!;
+          if (richness(candidate) > richness(best)) best = candidate;
+        }
+        sample.add(best);
+      }
+      if (sample.length < limit) {
+        final remaining = list.where((d) => !sample.contains(d)).toList()
+          ..sort((a, b) => richness(b).compareTo(richness(a)));
+        sample.addAll(remaining.take(limit - sample.length));
+      }
+      samples.add(sample);
     }
     final List<StudyHit> hits = <StudyHit>[];
     for (int round = 0; hits.length < limit; round++) {
       bool any = false;
-      for (final List<StudySearchDocument> list in byNote.values) {
+      for (final List<StudySearchDocument> list in samples) {
         if (round < list.length && hits.length < limit) {
           // First found ranks highest, so it is never trimmed by the budget.
           hits.add(StudyHit(list[round], 1 / (1 + hits.length)));
@@ -1366,6 +1546,7 @@ class StudyContextAssembler {
   Future<StudyPayload> assemble(
     List<StudyHit> hits, {
     StudyChunkRenderer? renderer,
+    int reservedTextBytes = 0,
   }) async {
     final Map<String, int> noteNumbers = <String, int>{};
     for (final StudyHit hit in hits) {
@@ -1396,7 +1577,14 @@ class StudyContextAssembler {
         noteNumbers[hit.chunk.noteId]!,
         panels[hit.chunk],
       );
-      final String fitted = _fit(block, maxTextTokens - tokens);
+      final String fitted = _fit(
+        _fit(block, maxTextTokens - tokens),
+        maxTotalBytes -
+            reservedTextBytes -
+            utf8.encode(text.toString()).length -
+            2,
+        bytes: true,
+      );
       if (fitted.isEmpty) continue;
       text
         ..write(fitted)
@@ -1405,7 +1593,7 @@ class StudyContextAssembler {
       sent.add(hit.chunk);
     }
     // Lines to cite in a picture go after all words, within what is left over.
-    int bytes = utf8.encode(text.toString()).length;
+    int bytes = reservedTextBytes + utf8.encode(text.toString()).length;
     for (final StudyCrop crop in crops) {
       final String? svg = crop.svg;
       if (svg == null || svg.length > maxSvgCharacters) continue;
@@ -1487,16 +1675,18 @@ class StudyContextAssembler {
     return out.toString();
   }
 
-  /// [block] cut to [budget] tokens, or nothing when too little of it would
-  /// remain to be of use.
-  static String _fit(String block, int budget) {
-    if (estimateTokens(block) <= budget) return block;
+  /// [block] cut to [budget] tokens or UTF-8 bytes, or nothing when too little
+  /// of it would remain to be of use.
+  static String _fit(String block, int budget, {bool bytes = false}) {
+    int measure(String value) =>
+        bytes ? utf8.encode(value).length : estimateTokens(value);
+    if (measure(block) <= budget) return block;
     if (budget < 24) return '';
     int low = 0;
     int high = block.length;
     while (low < high) {
       final int middle = (low + high + 1) ~/ 2;
-      if (estimateTokens(block.substring(0, middle)) <= budget) {
+      if (measure(block.substring(0, middle)) <= budget) {
         low = middle;
       } else {
         high = middle - 1;
@@ -1881,6 +2071,9 @@ class StudyCitationResolver {
       pageIndex: citation.pageIndex,
       revision: citation.revision,
       strokeKeys: citation.strokeKeys,
+      kind: citation.kind,
+      bounds: citation.bounds,
+      diagramBounds: citation.diagramBounds,
       strokeIndices: citation.strokeIndices,
       rings: citation.rings.take(AiSourceMap.maxCircles).toList(),
     );
@@ -1912,18 +2105,29 @@ class StudyCitationResolver {
             map.onlyCropOn(noteId, pageIndex) ??
             _pageRect(page),
       );
-      if (ring != null) rings.add(ring);
+      if (ring != null && !StudyCitation.coversPage(ring, page)) {
+        rings.add(ring);
+      }
     } else if (chunk != null) {
       indices.addAll(
         chunk.strokeIndices.where((int i) => i < page.strokes.length),
       );
       // What no stroke can mark: a picture, a sticky note, typed text.
-      if (chunk.otherBounds case final ui.Rect other) rings.add(other);
+      if (chunk.otherBounds case final ui.Rect other
+          when !StudyCitation.coversPage(other, page)) {
+        rings.add(other);
+      }
     }
     return StudyCitation(
       noteId: noteId,
       pageIndex: pageIndex,
       revision: revisionOf(noteId),
+      kind: chunk?.kind,
+      bounds: chunk?.logicalBounds,
+      diagramBounds: [
+        if (chunk != null && chunk.kind != StudyChunkKind.text)
+          chunk.logicalBounds,
+      ],
       strokeKeys: <String>[
         for (final int i in indices) aiStrokeKey(page.strokes[i]),
       ],
@@ -1932,17 +2136,5 @@ class StudyCitationResolver {
     );
   }
 
-  static ui.Rect _pageRect(StoredPage page) {
-    final PdfPageSource? pdf = page.pdfSource;
-    if (pdf != null) return ui.Offset.zero & pdf.pageSize;
-    if (page.isBoard) {
-      return page.contentBounds ?? (ui.Offset.zero & const ui.Size(640, 480));
-    }
-    final ui.Size size =
-        page.setup.customSize ??
-        page.setup.size.fixedSize ??
-        page.extent ??
-        const ui.Size(640, 480);
-    return ui.Offset.zero & size;
-  }
+  static ui.Rect _pageRect(StoredPage page) => StudyCitation.pageBounds(page);
 }

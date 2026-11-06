@@ -13,6 +13,20 @@ Future<void> main() {
       if (data == null) {
         return;
       }
+      final Object? studyResourceMetrics = data['study_desk_resource_stats'];
+      if (studyResourceMetrics != null) {
+        await Directory('build').create(recursive: true);
+        await File('build/study_desk_resource_stats.json').writeAsString(
+          const JsonEncoder.withIndent('  ').convert(studyResourceMetrics),
+        );
+      }
+      final Object? studyDeskMetrics = data['study_desk_frame_stats'];
+      if (studyDeskMetrics != null) {
+        await Directory('build').create(recursive: true);
+        await File('build/study_desk_frame_stats.json').writeAsString(
+          const JsonEncoder.withIndent('  ').convert(studyDeskMetrics),
+        );
+      }
       final Object? loadingMetrics = data['loading_palette_metrics'];
       if (loadingMetrics != null) {
         await Directory('build').create(recursive: true);

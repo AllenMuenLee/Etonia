@@ -21,6 +21,7 @@ class _FirstPage {
   ValueListenable<Rect>? visible;
   ValueListenable<Rect>? paintArea;
   ValueListenable<double>? scale;
+  ValueListenable<bool>? zooming;
 }
 
 Widget _column(
@@ -59,6 +60,7 @@ Widget _column(
                         first.visible = visible;
                         first.paintArea = PageViewport.paintAreaOf(context);
                         first.scale = PageViewport.scaleOf(context);
+                        first.zooming = PageViewport.zoomingOf(context);
                       }
                       return const SizedBox.expand();
                     },
@@ -101,7 +103,7 @@ Future<void> _pinch(
 
 /// Counts its paints, and marks a square on the page to find on screen.
 class _SquarePainter extends CustomPainter {
-  _SquarePainter(this.onPaint);
+  _SquarePainter(this.onPaint, {super.repaint});
 
   final VoidCallback onPaint;
   static const Rect square = Rect.fromLTWH(380, 400, 60, 60);
@@ -152,7 +154,7 @@ bool _covers(Rect outer, Rect inner) =>
     outer.bottom >= inner.bottom;
 
 void main() {
-  group('while a zoom is under way the pages are only a picture', () {
+  group('viewport content remains live during zoom', () {
     late int paints;
     late GlobalKey shown;
     late GlobalKey<PageViewportState> viewport;
@@ -185,9 +187,14 @@ void main() {
                           int index,
                           ValueListenable<Rect> visible,
                         ) {
-                          return CustomPaint(
-                            painter: _SquarePainter(() => paints++),
-                            size: Size.infinite,
+                          return Builder(
+                            builder: (BuildContext context) => CustomPaint(
+                              painter: _SquarePainter(
+                                () => paints++,
+                                repaint: PageViewport.zoomingOf(context),
+                              ),
+                              size: Size.infinite,
+                            ),
                           );
                         },
                   ),
@@ -200,14 +207,14 @@ void main() {
       await tester.pump();
     }
 
-    testWidgets('nothing paints between the first frame and the stop', (
+    testWidgets('content follows each zoom frame and repaints on release', (
       WidgetTester tester,
     ) async {
       await pumpColumn(tester);
       final List<int> during = <int>[];
       await _pinch(tester, 8, 12, () => during.add(paints));
-      // The picture is taken once, in the first frame of the zoom.
-      expect(during.toSet(), hasLength(1));
+      expect(during.toSet(), hasLength(12));
+      expect(find.byType(SnapshotWidget), findsNothing);
 
       final int settled = paints;
       await tester.pump(_stopped);
@@ -217,7 +224,7 @@ void main() {
       expect(paints, settled + 1);
     });
 
-    testWidgets('the picture stays exactly where the page has gone', (
+    testWidgets('settling keeps content aligned with the live zoom', (
       WidgetTester tester,
     ) async {
       await pumpColumn(tester);
@@ -238,7 +245,7 @@ void main() {
       }
       final int paintsBefore = paints;
       final Rect picture = await _redBounds(tester, shown);
-      expect(paints, paintsBefore, reason: 'still the picture');
+      expect(paints, paintsBefore, reason: 'reading pixels does not repaint');
 
       // Painted for real, from the same place, it must land in the same spot.
       await left.up();
@@ -253,52 +260,84 @@ void main() {
     });
   });
 
-  testWidgets('zooming in paints once, for the picture, until the zoom stops', (
+  testWidgets('scale follows every zoom frame while paint coverage is reused', (
     WidgetTester tester,
   ) async {
     final _FirstPage first = _FirstPage();
     await tester.pumpWidget(_column(first, 1));
-
-    final double scaleBefore = first.scale!.value;
-    int moved = 0;
-    void onMoved() => moved++;
-    first.visible!.addListener(onMoved);
-    int paints = 0;
-    void painted() => paints++;
-    Rect? pictured;
-    double? picturedScale;
-
+    double previous = first.scale!.value;
     await _pinch(tester, 8, 10, () {
-      if (pictured == null) {
-        // The first frame takes the picture, reaching past the view.
-        pictured = first.paintArea!.value;
-        picturedScale = first.scale!.value;
-        expect(_covers(pictured!, first.visible!.value), isTrue);
-        expect(pictured, isNot(first.visible!.value));
-        first.paintArea!.addListener(painted);
-        first.scale!.addListener(painted);
-      }
+      expect(first.scale!.value, greaterThan(previous));
+      expect(_covers(first.paintArea!.value, first.visible!.value), isTrue);
+      expect(first.zooming!.value, isTrue);
+      previous = first.scale!.value;
     });
-
-    expect(moved, greaterThan(5), reason: 'the view follows the fingers');
-    expect(paints, 0);
-    expect(first.paintArea!.value, pictured);
-    expect(first.scale!.value, picturedScale);
-
-    await tester.pump(_stopped);
     await tester.pump(_frame);
-
-    expect(paints, 2, reason: 'once, for the area and its scale');
-    expect(first.paintArea!.value, first.visible!.value);
-    expect(first.scale!.value, greaterThan(scaleBefore));
-
-    first.paintArea!.removeListener(painted);
-    first.scale!.removeListener(painted);
-    first.visible!.removeListener(onMoved);
+    expect(
+      first.zooming!.value,
+      isFalse,
+      reason: 'release settles immediately',
+    );
+    expect(first.scale!.value, previous);
+    expect(_covers(first.paintArea!.value, first.visible!.value), isTrue);
   });
 
-  testWidgets('zooming out keeps the view painted, painting ahead of it only '
-      'now and then', (WidgetTester tester) async {
+  testWidgets('reversing a pinch updates vectors without a stale scale', (
+    WidgetTester tester,
+  ) async {
+    final _FirstPage first = _FirstPage();
+    await tester.pumpWidget(_column(first, 1));
+    final TestGesture left = await tester.startGesture(
+      const Offset(200, 300),
+      pointer: 1,
+      kind: PointerDeviceKind.touch,
+    );
+    final TestGesture right = await tester.startGesture(
+      const Offset(400, 300),
+      pointer: 2,
+      kind: PointerDeviceKind.touch,
+    );
+    final double start = first.scale!.value;
+    await left.moveBy(const Offset(-40, 0));
+    await right.moveBy(const Offset(40, 0));
+    await tester.pump(_frame);
+    expect(first.scale!.value, greaterThan(start));
+    await left.moveBy(const Offset(60, 0));
+    await right.moveBy(const Offset(-60, 0));
+    await tester.pump(_frame);
+    expect(first.scale!.value, lessThan(start));
+    expect(_covers(first.paintArea!.value, first.visible!.value), isTrue);
+    await left.cancel();
+    await right.cancel();
+    await tester.pump(_frame);
+    expect(first.zooming!.value, isFalse);
+  });
+
+  testWidgets('trackpad zoom follows the scale and settles on release', (
+    WidgetTester tester,
+  ) async {
+    final _FirstPage first = _FirstPage();
+    await tester.pumpWidget(_column(first, 1));
+    final double initialScale = first.scale!.value;
+    final TestGesture gesture = await tester.createGesture(
+      kind: PointerDeviceKind.trackpad,
+    );
+    await gesture.panZoomStart(const Offset(300, 300));
+    for (final double scale in <double>[1.2, 1.5, 0.8]) {
+      await gesture.panZoomUpdate(const Offset(300, 300), scale: scale);
+      await tester.pump(_frame);
+      expect(first.scale!.value, closeTo(initialScale * scale, 1e-6));
+      expect(first.zooming!.value, isTrue);
+      expect(_covers(first.paintArea!.value, first.visible!.value), isTrue);
+    }
+    await gesture.panZoomEnd();
+    await tester.pump(_frame);
+    expect(first.zooming!.value, isFalse);
+  });
+
+  testWidgets('zooming out maintains paint coverage with fewer area updates', (
+    WidgetTester tester,
+  ) async {
     final _FirstPage first = _FirstPage();
     await tester.pumpWidget(_column(first, 4));
 
@@ -311,12 +350,12 @@ void main() {
       expect(_covers(first.paintArea!.value, first.visible!.value), isTrue);
     });
 
+    expect(paints, lessThan(moves));
     expect(paints, greaterThan(0));
-    expect(paints, lessThan(moves ~/ 4));
 
     await tester.pump(_stopped);
     await tester.pump(_frame);
-    expect(first.paintArea!.value, first.visible!.value);
+    expect(_covers(first.paintArea!.value, first.visible!.value), isTrue);
 
     first.paintArea!.removeListener(painted);
   });
@@ -340,31 +379,42 @@ void main() {
     await left.moveBy(const Offset(-20, 0));
     await right.moveBy(const Offset(20, 0));
     await tester.pump(_frame);
-    expect(first.paintArea!.value, isNot(first.visible!.value));
+    expect(_covers(first.paintArea!.value, first.visible!.value), isTrue);
+    expect(first.zooming!.value, isTrue);
 
     // The fingers stay down but the zoom has stopped.
     await tester.pump(_stopped);
     await tester.pump(_frame);
-    expect(first.paintArea!.value, first.visible!.value);
+    expect(first.zooming!.value, isFalse);
+    expect(first.paintArea!.value, isNot(first.visible!.value));
+    expect(_covers(first.paintArea!.value, first.visible!.value), isTrue);
 
     await left.up();
     await right.up();
     await tester.pump(_stopped);
   });
 
-  testWidgets('scrolling still paints along with the view', (
-    WidgetTester tester,
-  ) async {
+  testWidgets('scrolling paints ahead of the view, and again only once the '
+      'view leaves what was painted', (WidgetTester tester) async {
     final _FirstPage first = _FirstPage();
     final GlobalKey<PageViewportState> key = GlobalKey<PageViewportState>();
     await tester.pumpWidget(_column(first, 1, viewportKey: key));
 
     final Rect before = first.paintArea!.value;
-    key.currentState!.scrollBy(const Offset(0, 50));
-    await tester.pump(_frame);
+    expect(_covers(before, first.visible!.value), isTrue);
+    expect(before, isNot(first.visible!.value), reason: 'painted ahead');
 
+    // A little scroll stays within it: nothing paints again.
+    key.currentState!.scrollBy(const Offset(0, 10));
+    await tester.pump(_frame);
+    expect(first.paintArea!.value, before);
+    expect(_covers(first.paintArea!.value, first.visible!.value), isTrue);
+
+    // A longer one leaves it, and the area follows the view.
+    key.currentState!.scrollBy(const Offset(0, 400));
+    await tester.pump(_frame);
     expect(first.paintArea!.value, isNot(before));
-    expect(first.paintArea!.value, first.visible!.value);
+    expect(_covers(first.paintArea!.value, first.visible!.value), isTrue);
   });
 
   group('zooming out shows what was off screen', () {
@@ -450,8 +500,8 @@ void main() {
       }
       final int paintsBefore = paints();
       final Rect picture = await _redBounds(tester, shown);
-      expect(paints(), paintsBefore, reason: 'still the picture');
-      expect(picture.isFinite, isTrue, reason: 'brought into view unpainted');
+      expect(paints(), paintsBefore, reason: 'reading pixels does not repaint');
+      expect(picture.isFinite, isTrue, reason: 'vectors brought into view');
 
       await left.up();
       await right.up();

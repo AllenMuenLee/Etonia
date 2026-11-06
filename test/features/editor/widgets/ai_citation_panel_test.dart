@@ -369,4 +369,38 @@ void main() {
       findsNothing,
     );
   });
+
+  testWidgets('highlight is turned off when closing the AI tool', (
+    WidgetTester tester,
+  ) async {
+    await pumpEditor(tester);
+    await ask(
+      tester,
+      'One.\n\nTwo.',
+      citations: const <int, String>{1: '[[L5]]'},
+    );
+
+    expect(
+      find.byKey(const ValueKey<String>('ai-citation-highlight-layer')),
+      findsOneWidget,
+    );
+
+    // Closing the AI tool turns off the highlight on the canvas.
+    assistant.close();
+    await tester.pump();
+
+    expect(
+      find.byKey(const ValueKey<String>('ai-citation-highlight-layer')),
+      findsNothing,
+    );
+
+    // Re-opening turns it back on.
+    assistant.show();
+    await tester.pump();
+
+    expect(
+      find.byKey(const ValueKey<String>('ai-citation-highlight-layer')),
+      findsOneWidget,
+    );
+  });
 }

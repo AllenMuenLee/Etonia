@@ -51,11 +51,10 @@ String aiNoteMetadata(NoteImage note) {
   );
   text.write(
     blank
-        ? 'Nothing on it was selected: the attached image is blank paper, '
-              'not the user\'s work, and you are not shown the sheet.'
+        ? 'The attached image is blank paper. Use the supplied page metadata '
+              'to place new content in confirmed free space.'
         : 'The selected part is supplied as an image and as SVG in these '
-              'same page logical coordinates; you are not shown the whole '
-              'sheet.',
+              'same page logical coordinates.',
   );
   final bounds = note.normalizedFocusBounds;
   Object? focus;
@@ -92,7 +91,8 @@ String aiNoteMetadata(NoteImage note) {
     ];
     text.write(
       ' nearby_content: [left, top, right, bottom] boxes round other '
-      'content near the selection, nearest first. You cannot see them.',
+      'content near the selection, nearest first. Use these bounds to '
+      'preserve the surrounding content.',
     );
   }
   List<Object?>? yourNotes;
@@ -108,8 +108,8 @@ String aiNoteMetadata(NoteImage note) {
         ],
     ];
     text.write(
-      ' your_notes: boxes round what you already drew here. Never write or '
-      'draw over them or repeat what they say; add only what is new.',
+      ' your_notes: boxes round what you already drew here. Preserve these '
+      'regions and add new information in other available space.',
     );
   }
   List<Object?>? freeAreas;
@@ -136,15 +136,15 @@ String aiNoteMetadata(NoteImage note) {
     );
     text.write(
       blank
-          ? 'Write and draw only inside these free areas, never on or '
-                'pointing at the user\'s content. $_stickyHowTo'
+          ? 'Place new text and geometry inside these confirmed free areas. '
+                '$_stickyHowTo'
           : 'Decide if the annotation needs a separate blank space, or you '
                 'can annotate on the user\'s content. The coordinates match '
                 'the selected SVG. $_stickyHowTo',
     );
   } else {
     text.write(
-      ' No blank space is provided: annotate on the user\'s content, or use '
+      ' Available placement: annotate on the user\'s content, or use '
       'a sticky note. The coordinates match the selected SVG. $_stickyHowTo',
     );
   }
@@ -161,7 +161,7 @@ const String _stickyHowTo =
     'logical units (width 120 to 640, height 90 to 480), just big enough, '
     'and coordinate_space "sticky_normalized": every coordinate is then 0 '
     'to 1 over the note, kept a little inside. The app places it beside '
-    'the selection; that notation cannot also mark the paper.';
+    'the selection; place all elements of this notation inside that sticky note.';
 
 /// [box] as the model is told it: note coordinates and logical size.
 Map<String, Object?> _box(

@@ -255,6 +255,9 @@ class PdfrxRasterizer
     final pdfrx.PdfDocument document = await _openForRendering(
       bytes,
       'greatnote-text-${bytes.length}-${identityHashCode(bytes)}',
+      // Unloaded progressive page proxies return empty text. Indexing must
+      // load the pages before deciding that they are scans.
+      useProgressiveLoading: false,
     );
     try {
       final Map<int, List<PdfTextRun>> text = <int, List<PdfTextRun>>{};
@@ -331,22 +334,42 @@ class PdfrxRasterizer
   /// thumbnail, waiting on the last. Any page still renders by its number.
   static Future<pdfrx.PdfDocument> _openForRendering(
     Uint8List bytes,
-    String sourceName,
-  ) => pdfrx.PdfDocument.openData(
-    bytes,
-    sourceName: sourceName,
-    passwordProvider: () => null,
-    useProgressiveLoading: true,
-  );
+    String sourceName, {
+    bool useProgressiveLoading = true,
+  }) {
+    // The Windows custom-file bridge can lose a wake-up on large byte-backed
+    // PDFs. The bytes are already resident: use PDFium's memory path there.
+    if (Platform.isWindows) {
+      return pdfrx.PdfDocument.openCustom(
+        read: (buffer, position, size) {
+          final length = math.min(size, bytes.length - position);
+          if (length <= 0) return 0;
+          buffer.setRange(0, length, bytes, position);
+          return length;
+        },
+        fileSize: bytes.length,
+        sourceName: sourceName,
+        passwordProvider: () => null,
+        maxSizeToCacheOnMemory: bytes.length,
+        useProgressiveLoading: useProgressiveLoading,
+      );
+    }
+    return pdfrx.PdfDocument.openData(
+      bytes,
+      sourceName: sourceName,
+      passwordProvider: () => null,
+      useProgressiveLoading: useProgressiveLoading,
+    );
+  }
 
   @override
   Future<PdfInspection> inspect(Uint8List bytes) async {
     pdfrx.PdfDocument? document;
     try {
-      document = await pdfrx.PdfDocument.openData(
+      document = await _openForRendering(
         bytes,
-        sourceName: 'greatnote-import-${bytes.length}',
-        passwordProvider: () => null,
+        'greatnote-import-${bytes.length}',
+        useProgressiveLoading: false,
       );
       return PdfInspection(
         isEncrypted: document.isEncrypted,
@@ -375,10 +398,8 @@ class PdfrxRasterizer
     );
     pdfrx.PdfImage? rendered;
     try {
-      if (pageIndex < 0 || pageIndex >= document.pages.length) {
-        throw RangeError.index(pageIndex, document.pages, 'pageIndex');
-      }
-      rendered = await document.pages[pageIndex].render(
+      final page = await _loadedPdfrxPage(document, pageIndex);
+      rendered = await page.render(
         fullWidth: pixelWidth.toDouble(),
         fullHeight: pixelHeight.toDouble(),
         width: pixelWidth,
@@ -483,10 +504,8 @@ Future<pdfrx.PdfImage> _renderPdfrxBitmap(
   int pixelHeight, {
   PdfPixelRegion? region,
 }) async {
-  if (pageIndex < 0 || pageIndex >= document.pages.length) {
-    throw RangeError.index(pageIndex, document.pages, 'pageIndex');
-  }
-  final pdfrx.PdfImage? rendered = await document.pages[pageIndex].render(
+  final page = await _loadedPdfrxPage(document, pageIndex);
+  final pdfrx.PdfImage? rendered = await page.render(
     x: region?.x ?? 0,
     y: region?.y ?? 0,
     fullWidth: pixelWidth.toDouble(),
@@ -499,6 +518,19 @@ Future<pdfrx.PdfImage> _renderPdfrxBitmap(
     throw StateError('The PDF page could not be rendered.');
   }
   return rendered;
+}
+
+Future<pdfrx.PdfPage> _loadedPdfrxPage(
+  pdfrx.PdfDocument document,
+  int pageIndex,
+) async {
+  if (pageIndex < 0 || pageIndex >= document.pages.length) {
+    throw RangeError.index(pageIndex, document.pages, 'pageIndex');
+  }
+  if (!document.pages[pageIndex].isLoaded) {
+    await document.reloadPages(pageNumbersToReload: [pageIndex + 1]);
+  }
+  return document.pages[pageIndex];
 }
 
 Future<ui.Image> _renderPdfrxImage(
@@ -611,10 +643,18 @@ class SystemExportSink implements ExportSink {
   @override
   Future<void> share(File file, {ui.Rect? sharePositionOrigin}) async {
     final bool svg = file.path.toLowerCase().endsWith('.svg');
+    final bool markdown = file.path.toLowerCase().endsWith('.md');
     await SharePlus.instance.share(
       ShareParams(
         files: <XFile>[
-          XFile(file.path, mimeType: svg ? 'image/svg+xml' : 'application/pdf'),
+          XFile(
+            file.path,
+            mimeType: svg
+                ? 'image/svg+xml'
+                : markdown
+                ? 'text/markdown'
+                : 'application/pdf',
+          ),
         ],
         sharePositionOrigin: sharePositionOrigin,
       ),

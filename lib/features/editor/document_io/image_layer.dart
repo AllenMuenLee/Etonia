@@ -70,7 +70,7 @@ class _PageImageLayerState extends State<PageImageLayer> {
   Widget build(BuildContext context) {
     return AnimatedBuilder(
       animation: Listenable.merge(<Listenable>[
-        widget.controller.completedStrokesListenable,
+        widget.controller.completedPaintListenable,
         widget.controller.selectionListenable,
         widget.controller.svgAnimationListenable,
         if (widget.carry != null) widget.carry!,
@@ -81,13 +81,28 @@ class _PageImageLayerState extends State<PageImageLayer> {
         final List<NoteImageElement> foreignImages =
             widget.carry?.foreignImagesFor(widget.controller) ??
             const <NoteImageElement>[];
+        final Set<Key> seenKeys = <Key>{};
+        Key keyFor(String id, [int? index]) {
+          final Key primary = ValueKey<String>(id);
+          if (seenKeys.add(primary)) {
+            return primary;
+          }
+          int disambiguator = index ?? 0;
+          while (true) {
+            final Key fallback = ValueKey<String>('$id-dup-$disambiguator');
+            if (seenKeys.add(fallback)) {
+              return fallback;
+            }
+            disambiguator++;
+          }
+        }
         return Stack(
           fit: StackFit.expand,
           clipBehavior: Clip.hardEdge,
           children: <Widget>[
             for (int i = 0; i < widget.controller.images.length; i++)
               _PlacedImage(
-                key: ValueKey(widget.controller.images[i].id),
+                key: keyFor(widget.controller.images[i].id, i),
                 element:
                     selected.contains(i) &&
                         widget.controller.activeTransform != null
@@ -101,10 +116,10 @@ class _PageImageLayerState extends State<PageImageLayer> {
                 maxDecodeDimension: widget.maxDecodeDimension,
                 animateSvg: widget.controller.svgAnimationsEnabled,
               ),
-            for (final NoteImageElement element in foreignImages)
+            for (int i = 0; i < foreignImages.length; i++)
               _PlacedImage(
-                key: ValueKey('foreign-${element.id}'),
-                element: element,
+                key: keyFor('foreign-${foreignImages[i].id}', i),
+                element: foreignImages[i],
                 selected: true,
                 cache: _cache,
                 cachePage: widget.cachePage,

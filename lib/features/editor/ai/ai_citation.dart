@@ -284,6 +284,7 @@ List<String> _blocks(String markdown) {
   final StringBuffer block = StringBuffer();
   bool inFence = false;
   bool inFormula = false;
+  bool inSvg = false;
   void flush() {
     if (block.isNotEmpty) blocks.add(block.toString());
     block.clear();
@@ -291,15 +292,23 @@ List<String> _blocks(String markdown) {
 
   for (final String line in markdown.split('\n')) {
     final String trimmed = line.trim();
+    if (!inFence &&
+        !inFormula &&
+        RegExp(r'<svg\b', caseSensitive: false).hasMatch(line)) {
+      inSvg = true;
+    }
     if (!inFormula && trimmed.startsWith('```')) {
       inFence = !inFence;
     } else if (!inFence && '\$\$'.allMatches(trimmed).length.isOdd) {
       inFormula = !inFormula;
     }
-    if (trimmed.isEmpty && !inFence && !inFormula) {
+    if (trimmed.isEmpty && !inFence && !inFormula && !inSvg) {
       flush();
     } else {
       block.writeln(line);
+    }
+    if (!inFence && RegExp(r'</svg\s*>', caseSensitive: false).hasMatch(line)) {
+      inSvg = false;
     }
   }
   flush();

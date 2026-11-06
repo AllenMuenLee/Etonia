@@ -343,7 +343,7 @@ class DocumentImporter {
       ),
     );
     final NoteImageElement element = NoteImageElement(
-      id: 'image-${DateTime.now().microsecondsSinceEpoch.toRadixString(36)}',
+      id: NoteImageElement.newId('image'),
       assetId: assetId,
       pixelSize: Size(
         normalized.width.toDouble(),
@@ -388,7 +388,7 @@ class DocumentImporter {
       ),
     );
     final NoteImageElement element = NoteImageElement(
-      id: 'svg-${DateTime.now().microsecondsSinceEpoch.toRadixString(36)}',
+      id: NoteImageElement.newId('svg'),
       assetId: '',
       pixelSize: intrinsic,
       center: InkVector(visiblePage.center.dx, visiblePage.center.dy),

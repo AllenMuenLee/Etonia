@@ -64,11 +64,11 @@ Deno.test("free credit: one time, Google accounts only, once per device", async 
     // Free credit pays for Haiku/Luna/Sonnet/Sol, never frontier models.
     await assert.rejects(() => reserve(user, req1, "opus"), /plan_required/);
     const held = (await reserve(user, req1, "haiku")).rows[0] as { r: any };
-    assert.deepEqual(held.r, { reserved: 500000, unlimited: false });
+    assert.deepEqual(held.r, { reserved: 0, unlimited: false });
     await settle(user, req1, 450000);
     assert.equal((await state(user)).remainingCreditsMicroUsd, 50000);
     await reserve(user, req2, "sonnet");
-    await settle(user, req2, 999999); // Capped at what was reserved.
+    await settle(user, req2, 999999);
     assert.equal((await state(user)).remainingCreditsMicroUsd, 0);
     await assert.rejects(
       () => reserve(user, "cccccccc-cccc-4ccc-8ccc-cccccccccccc", "luna"),
@@ -171,14 +171,14 @@ Deno.test("Postgres billing: permissions, ownership, renewals, expiry and atomic
     await apply(snapshot());
     assert.equal((await state()).plan, "pro1499");
     assert.equal((await state()).remainingCreditsMicroUsd, 5250000);
-    // Requests run alongside each other, each holding only its own cap.
+    // Requests run alongside each other without holding/draining the balance upfront.
     await reserve(req1, "sol", 1000000);
     await reserve(req2, "sol", 1000000);
-    assert.equal((await state()).remainingCreditsMicroUsd, 3250000);
+    assert.equal((await state()).remainingCreditsMicroUsd, 5250000);
     await settle();
-    assert.equal((await state()).remainingCreditsMicroUsd, 4150000);
+    assert.equal((await state()).remainingCreditsMicroUsd, 5150000);
     await settle();
-    assert.equal((await state()).remainingCreditsMicroUsd, 4150000);
+    assert.equal((await state()).remainingCreditsMicroUsd, 5150000);
     await settle(req2, true);
     assert.equal((await state()).remainingCreditsMicroUsd, 5150000);
     await apply(snapshot());
@@ -196,11 +196,11 @@ Deno.test("Postgres billing: permissions, ownership, renewals, expiry and atomic
     const after = crypto.randomUUID();
     await reserve(after, "sol", 1000);
     for (const id of [...running.slice(1), after]) await settle(id, true);
-    assert.equal((await state()).remainingCreditsMicroUsd, 5149000);
+    assert.equal((await state()).remainingCreditsMicroUsd, 5150000);
     await assert.rejects(() => apply(snapshot(), other), /purchase_owner/);
     const last = crypto.randomUUID();
-    await reserve(last); // Without a cap, the whole balance is held.
-    assert.equal((await state()).remainingCreditsMicroUsd, 0);
+    await reserve(last); // If remaining > 0, always accepted without pre-deducting balance.
+    assert.equal((await state()).remainingCreditsMicroUsd, 5150000);
     await apply(snapshot("renewal"));
     assert.equal((await state()).remainingCreditsMicroUsd, 5250000);
     await settle(last, true); // Old request must never add credits to a new grant.

@@ -937,7 +937,7 @@ class AiAssistantResponse {
     final String trimmed = source.trim();
     if (_looksLikeSvgResponse(trimmed)) {
       try {
-        final EditableSvg svg = EditableSvg.parse(trimmed, modelResponse: true);
+        final EditableSvg svg = EditableSvg.parseResponse(trimmed);
         return AiAssistantResponse(
           message: svg.message!,
           notation: svg.hasVisualContent ? AiNotation.vector(svg) : null,

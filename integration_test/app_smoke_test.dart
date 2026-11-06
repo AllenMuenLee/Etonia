@@ -290,6 +290,7 @@ class _CannedAiClient implements AiClient {
   Future<AiResult> send(
     AiRequest request, {
     AiPartialCallback? onPartial,
+    AiNotationPartialCallback? onNotation,
   }) async {
     requests.add(request);
     if (request.notationEnabled) {

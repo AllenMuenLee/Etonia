@@ -288,40 +288,31 @@ void main() {
     });
   }
 
-  test('the prompts teach the subject and keep their guard rails', () {
+  test('the prompts express teaching and response requirements positively', () {
     expect(AiQuickAction.explain.label, 'Explain this');
     expect(AiQuickAction.grade.label, 'Grade this');
     // Explain teaches the subject of the ink; it does not describe the
     // picture.
     expect(AiPrompts.explain, startsWith('Teach me the subject'));
     expect(AiPrompts.explain, contains('what each part or component is'));
-    expect(AiPrompts.explain, contains('Do not describe what the image'));
     // Unclear work is read the likeliest way and answered, not queried.
     expect(AiPrompts.explain, contains('go with the most likely reading'));
     expect(
       AiPrompts.grade,
-      'Review the selected handwritten work for correctness. State what is '
-      'correct, identify mistakes with specific explanations, and suggest '
-      'an improved answer. If no question, answer key, rubric, or point '
-      'total is visible, assume the most likely task, state that in one '
-      'short line, and give full formative feedback rather than inventing '
-      'an authoritative score.',
+      contains('Use a visible question, answer key, rubric'),
     );
-    expect(AiPrompts.system, contains('teach that subject'));
-    expect(AiPrompts.system, contains('do not describe the image'));
-    expect(AiPrompts.system, contains('Never ask the user to confirm'));
-    expect(AiPrompts.system, contains('do not invent facts'));
-    expect(
-      AiPrompts.system,
-      contains('never claim an official grade without a provided rubric'),
-    );
+    expect(AiPrompts.grade, contains('give full formative feedback'));
+    expect(AiPrompts.system, contains('Teach the subject'));
+    expect(AiPrompts.system, contains('most likely reading'));
+    expect(AiPrompts.system, contains('Ground claims in the supplied work'));
+    expect(AiPrompts.system, contains('use a provided rubric for scores'));
 
     final String drawing = AiPrompts.systemFor(notationEnabled: true);
     expect(drawing, contains('Interact with that SVG'));
     // The note stays the user's, and each stroke names its paragraph.
     expect(drawing, contains('existing-ink paths in the selected SVG'));
     expect(drawing, contains("annotate directly on the user's strokes"));
-    expect(drawing, contains("do not redraw the user's note"));
+    expect(drawing, contains("Preserve the user's original note"));
     expect(drawing, contains('data-etonia-paragraph="N"'));
     expect(drawing, contains('data-etonia-line'));
     // Words become the user's own handwriting, kept as SVG paths.
@@ -329,7 +320,45 @@ void main() {
     // How to annotate is the model's choice.
     expect(drawing, isNot(contains('sketching quickly')));
     expect(drawing, isNot(contains('margin note')));
+
+    final negativeDirective = RegExp(
+      r'\b(?:do not|don.t|never|avoid|must not|cannot|ban)\b',
+      caseSensitive: false,
+    );
+    for (final prompt in [
+      AiPrompts.system,
+      AiPrompts.textSystem,
+      AiPrompts.studySystem,
+      AiPrompts.studyTeachingPlannerSystem,
+      AiPrompts.studySuggestionsSystem,
+      AiPrompts.studyTestPaperSystem,
+      AiPrompts.studyTestGradingSystem,
+      AiPrompts.studyTestReferenceResponse,
+      AiPrompts.studyPracticeSystem,
+      AiPrompts.noSelection,
+      AiPrompts.explain,
+      AiPrompts.grade,
+      drawing,
+      AiPrompts.systemFor(notationEnabled: true, animationEnabled: true),
+    ]) {
+      expect(negativeDirective.hasMatch(prompt), isFalse, reason: prompt);
+    }
+    for (final prompt in [AiPrompts.textSystem, AiPrompts.studySystem]) {
+      expect(prompt, isNot(contains('Notation:')));
+      expect(prompt, isNot(contains('separate step')));
+      expect(prompt, isNot(contains('drawing label')));
+    }
   });
+
+  test(
+    'editor math guidance selects formulas and stays scoped to the editor',
+    () {
+      expect(AiPrompts.textSystem, contains(r'$\frac{1}{s}$'));
+      expect(AiPrompts.textSystem, contains('typeset mathematics'));
+      expect(AiPrompts.textSystem, contains('aligned or cases environments'));
+      expect(AiPrompts.studySystem, isNot(contains(r'$\frac{1}{s}$')));
+    },
+  );
 
   test('typed messages and follow-ups carry the history in order', () async {
     await rig.open();
@@ -1241,7 +1270,7 @@ void main() {
       expect(client.requests.single.systemInstruction, AiPrompts.textSystem);
       expect(
         client.requests.single.systemInstruction,
-        contains('include only title and the message desc'),
+        contains('The root contains only title and the message desc'),
       );
       expect(
         client.requests.single.notationInstruction,
@@ -1456,7 +1485,7 @@ void main() {
     expect(client.requests.single.noteImage, isNull);
     expect(
       client.requests.single.systemInstruction,
-      contains('Notation is off'),
+      contains('The root contains only title and the message desc'),
     );
     client.answerResponse(
       AiAssistantResponse(

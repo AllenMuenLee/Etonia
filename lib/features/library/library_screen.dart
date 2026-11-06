@@ -60,6 +60,8 @@ import 'study_desk/study_desk_controller.dart';
 import 'study_desk/study_desk_models.dart';
 import 'study_desk/study_desk_screen.dart';
 import 'study_desk/study_source_picker.dart';
+import 'study_desk/practice/import_test_paper_sheet.dart';
+import 'study_desk/practice/study_practice_models.dart';
 import 'toolbar_layout_store.dart';
 import '../editor/widgets/toolbar_layout.dart';
 import '../../shared/widgets/app_controls.dart';
@@ -502,6 +504,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
     usageGate: _subscription,
     pdfRasterizer: widget.pdfRasterizer,
     clock: widget.clock,
+    onNoteWritten: _onDeskWroteNote,
   )..load();
 
   /// Whether Recently Deleted is shown in place of a folder, and how many
@@ -1208,6 +1211,97 @@ class _LibraryScreenState extends State<LibraryScreen> {
     _thumbnails.capture(note, content.pages.first);
   }
 
+  /// A page of [note] was written from the desk: as after a save in its editor,
+  /// it is backed up and its card drawn again. The desk reads it again itself.
+  void _onDeskWroteNote(NoteEntry note, NoteContent content) {
+    if (!mounted) return;
+    _editedNotes.add(note.id);
+    _backUpLeftNotes();
+    if (content.pages.isNotEmpty) {
+      _thumbnails.capture(note, content.pages.first);
+    }
+  }
+
+  /// A test's PDF becomes a new note to write the answers on, and opens. Back
+  /// comes to the desk it was made on.
+  Future<void> _openTestAsNote(Uint8List pdf, String title) async {
+    _openedFromStudyDesk = true;
+    await _importPickedDocument(PickedDocument(name: '$title.pdf', bytes: pdf));
+    if (mounted && !_tabsShowing) _openedFromStudyDesk = false;
+  }
+
+  Future<void> _saveStudyTestToLibrary(Uint8List pdf, String title) async {
+    final folders = [..._studyDesk.allFolders]
+      ..sort((a, b) => a.name.toLowerCase().compareTo(b.name.toLowerCase()));
+    String folderPath(Folder folder) {
+      final names = [folder.name];
+      final seen = {folder.id};
+      var parent = _studyDesk.folderOf(folder.parentId);
+      while (parent != null && seen.add(parent.id)) {
+        names.insert(0, parent.name);
+        parent = _studyDesk.folderOf(parent.parentId);
+      }
+      return names.join(' / ');
+    }
+
+    final destination = await showDialog<String>(
+      context: context,
+      builder: (context) => SimpleDialog(
+        title: const Text('Add test to library'),
+        children: [
+          SimpleDialogOption(
+            key: const ValueKey('study-save-library-root'),
+            onPressed: () => Navigator.pop(context, ''),
+            child: const ListTile(
+              leading: Icon(Icons.local_library_outlined),
+              title: Text('Library'),
+            ),
+          ),
+          for (final folder in folders)
+            SimpleDialogOption(
+              key: ValueKey('study-save-folder-${folder.id}'),
+              onPressed: () => Navigator.pop(context, folder.id),
+              child: ListTile(
+                leading: const Icon(Icons.folder_outlined),
+                title: Text(folderPath(folder)),
+              ),
+            ),
+        ],
+      ),
+    );
+    if (destination == null || !mounted) return;
+    final cancellation = ImportCancellationToken();
+    NoteEntry? saved;
+    final result = await showDocumentIoProgress(
+      context,
+      title: 'Adding test to library',
+      onCancel: cancellation.cancel,
+      operation: (_) async {
+        saved =
+            await DocumentImporter(
+              rasterizer: widget.pdfRasterizer,
+              config: widget.documentIoConfig,
+            ).importPdfAsNote(
+              repository: _repository,
+              picked: PickedDocument(name: '$title.pdf', bytes: pdf),
+              folderId: destination.isEmpty ? null : destination,
+              cancellation: cancellation,
+            );
+      },
+    );
+    if (!mounted || result.cancelled) return;
+    if (result.error != null || saved == null) {
+      throw const DocumentImportException(
+        'Could not add the test to your library.',
+      );
+    }
+    _editedNotes.add(saved!.id);
+    _backUpLeftNotes();
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(content: Text('Test added to your library.')),
+    );
+  }
+
   Widget _noteTab(
     NoteEntry note,
     Widget Function(VoidCallback rename) tabs,
@@ -1239,6 +1333,19 @@ class _LibraryScreenState extends State<LibraryScreen> {
       stylusActions: _stylusActions,
       initialNotationEnabled: widget.initialNotationEnabled,
       tabsBuilder: tabs,
+      onImportConversationToStudyDesk: (messages) async {
+        await _studyDesk.load();
+        if (!mounted) return;
+        _studyDesk.importAssistantConversation(
+          messages: messages,
+          noteId: note.id,
+        );
+        await _openStudyDesk(startNewChat: false);
+        if (mounted) {
+          setState(() => _tabsShowing = false);
+          _syncStudyDeskBars();
+        }
+      },
       onBack: onBack,
       onRenamed: onRenamed,
       onSaved: _onNoteSaved,
@@ -1246,8 +1353,36 @@ class _LibraryScreenState extends State<LibraryScreen> {
   }
 
   /// Brings the Study Desk over the whole window.
-  void _openStudyDesk() {
+  Future<void> _importTest() async {
+    final paper = await showModalBottomSheet<StudyTestPaper>(
+      context: context,
+      isScrollControlled: true,
+      builder: (_) => ImportTestPaperSheet(
+        picker: widget.documentPicker,
+        rasterizer: widget.pdfRasterizer,
+      ),
+    );
+    if (paper == null || !mounted) return;
+    try {
+      await _studyDesk.load();
+      await _studyDesk.saveTestPaper(paper);
+      if (!mounted) return;
+      _studyDesk.openTestPaper(paper);
+      await _openStudyDesk(startNewChat: false);
+    } on Object {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Could not save the imported test.')),
+        );
+      }
+    }
+  }
+
+  Future<void> _openStudyDesk({bool startNewChat = true}) async {
     if (_studyDeskOpen) return;
+    await _studyDesk.load();
+    if (!mounted || _studyDeskOpen) return;
+    if (startNewChat) _studyDesk.newChat();
     _thumbnails.cancelPending();
     setState(() {
       _studyDeskPace = MotionMemory.instance.recall(('scene', 'study-desk'));
@@ -1968,6 +2103,8 @@ class _LibraryScreenState extends State<LibraryScreen> {
           _stopSelecting();
         } else if (_studyDeskOpen && _studyDesk.paneOpen) {
           _studyDesk.closePane();
+        } else if (_studyDeskOpen && _studyDesk.handleBack()) {
+          // A deck being played was left, and the desk stays.
         } else if (_studyDeskOpen) {
           _leaveStudyDesk();
         } else if (_inTrash) {
@@ -2011,16 +2148,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
   Widget _buildStudyDesk(BuildContext context) {
     return Scaffold(
       backgroundColor: Colors.transparent,
-      appBar: _StudyDeskBar(
-        desk: _studyDesk,
-        compact:
-            WindowSizeClass.fromWidth(MediaQuery.sizeOf(context).width) ==
-            WindowSizeClass.compact,
-        onLeave: _leaveStudyDesk,
-        onAddSources: _addSources,
-      ),
       body: SafeArea(
-        top: false,
         child: StudyDeskScreen(
           controller: _studyDesk,
           thumbnail: (NoteEntry note) =>
@@ -2029,6 +2157,14 @@ class _LibraryScreenState extends State<LibraryScreen> {
           onAddSources: _addSources,
           onOpenPlans: _openPlans,
           pdfRasterizer: widget.pdfRasterizer,
+          isOpenInEditor: (String noteId) =>
+              _openNotes.notes.any((NoteEntry note) => note.id == noteId),
+          penSettings: _penSettings,
+          stylusOnly: _stylusOnly,
+          exportSink: widget.exportSink,
+          onOpenTestAsNote: _openTestAsNote,
+          onSaveTestToLibrary: _saveStudyTestToLibrary,
+          onLeave: _leaveStudyDesk,
         ),
       ),
     );
@@ -2165,6 +2301,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
                 onQuickNote: _quickNote,
                 onNewNote: _newNote,
                 onImportPdf: _importPdf,
+                onImportTest: _importTest,
               ),
         body: drawer
             ? SafeArea(top: false, child: _buildBody(context, compact))
@@ -2951,161 +3088,6 @@ class _LibraryBar extends StatelessWidget implements PreferredSizeWidget {
   }
 }
 
-/// The top of the full-window Study Desk: the way out, its name, how many notes
-/// are in context, and what can be done from anywhere on it. Nothing else, so
-/// that nothing draws the eye from the work.
-class _StudyDeskBar extends StatelessWidget implements PreferredSizeWidget {
-  const _StudyDeskBar({
-    required this.desk,
-    required this.compact,
-    required this.onLeave,
-    required this.onAddSources,
-  });
-
-  final StudyDeskController desk;
-  final bool compact;
-  final VoidCallback onLeave;
-  final VoidCallback onAddSources;
-
-  @override
-  Size get preferredSize => const Size.fromHeight(AppSizes.appBarHeight);
-
-  @override
-  Widget build(BuildContext context) {
-    final AppColors colors = AppColors.of(context);
-    final TextTheme text = Theme.of(context).textTheme;
-    return GlassMaterial(
-      color: AppGlass.surface(colors),
-      child: SafeArea(
-        bottom: false,
-        child: SizedBox(
-          height: AppSizes.appBarHeight,
-          child: ListenableBuilder(
-            listenable: desk,
-            builder: (BuildContext context, Widget? _) {
-              final int active = desk.activeCount;
-              final List<StudySession> history = desk.history;
-              return Row(
-                children: <Widget>[
-                  IconButton(
-                    key: const ValueKey<String>('study-leave'),
-                    tooltip: 'Back to library',
-                    onPressed: onLeave,
-                    icon: const Icon(AppIcons.back),
-                  ),
-                  // The name gives way only to the count, never to empty space.
-                  Expanded(
-                    child: Row(
-                      children: <Widget>[
-                        Flexible(
-                          child: Padding(
-                            padding: const EdgeInsets.symmetric(
-                              horizontal: AppSpacing.xs,
-                            ),
-                            child: Semantics(
-                              header: true,
-                              child: Text(
-                                StudyDesk.title,
-                                style:
-                                    (compact
-                                            ? text.titleMedium
-                                            : text.titleLarge)
-                                        ?.copyWith(color: colors.textPrimary),
-                                maxLines: 1,
-                                overflow: TextOverflow.ellipsis,
-                              ),
-                            ),
-                          ),
-                        ),
-                        Semantics(
-                          label: active == 1
-                              ? '1 source in use'
-                              : '$active sources in use',
-                          excludeSemantics: true,
-                          child: DecoratedBox(
-                            key: const ValueKey<String>('study-source-count'),
-                            decoration: ShapeDecoration(
-                              shape: const StadiumBorder(),
-                              color: colors.selected,
-                            ),
-                            child: Padding(
-                              padding: const EdgeInsets.symmetric(
-                                horizontal: AppSpacing.xs,
-                                vertical: 2,
-                              ),
-                              // On a phone the number alone: the name comes first.
-                              child: Text(
-                                compact
-                                    ? '$active'
-                                    : (active == 1
-                                          ? '1 source'
-                                          : '$active sources'),
-                                style: text.labelMedium?.copyWith(
-                                  color: colors.textPrimary,
-                                ),
-                              ),
-                            ),
-                          ),
-                        ),
-                      ],
-                    ),
-                  ),
-                  if (history.isNotEmpty)
-                    PopupMenuButton<String>(
-                      tooltip: 'Recent chats',
-                      icon: const Icon(AppIcons.sort),
-                      onSelected: desk.openSession,
-                      itemBuilder: (BuildContext context) =>
-                          <PopupMenuEntry<String>>[
-                            for (final StudySession session in history)
-                              PopupMenuItem<String>(
-                                value: session.id,
-                                child: Text(
-                                  session.title,
-                                  maxLines: 1,
-                                  overflow: TextOverflow.ellipsis,
-                                ),
-                              ),
-                          ],
-                    ),
-                  if (compact) ...<Widget>[
-                    IconButton(
-                      key: const ValueKey<String>('study-add-sources'),
-                      tooltip: 'Add Sources',
-                      onPressed: onAddSources,
-                      icon: const Icon(AppIcons.add),
-                    ),
-                    IconButton(
-                      key: const ValueKey<String>('study-new-chat'),
-                      tooltip: 'New Chat',
-                      onPressed: desk.newChat,
-                      icon: const Icon(AppIcons.newNote),
-                    ),
-                  ] else ...<Widget>[
-                    TextButton.icon(
-                      key: const ValueKey<String>('study-add-sources'),
-                      onPressed: onAddSources,
-                      icon: const Icon(AppIcons.add, size: 18),
-                      label: const Text('Add Sources'),
-                    ),
-                    const SizedBox(width: AppSpacing.xxs),
-                    TextButton(
-                      key: const ValueKey<String>('study-new-chat'),
-                      onPressed: desk.newChat,
-                      child: const Text('New Chat'),
-                    ),
-                  ],
-                  const SizedBox(width: AppSpacing.xs),
-                ],
-              );
-            },
-          ),
-        ),
-      ),
-    );
-  }
-}
-
 class _SearchField extends StatelessWidget {
   const _SearchField({required this.controller, required this.focusNode});
 
@@ -3268,11 +3250,13 @@ class _NewNoteButton extends StatelessWidget {
     required this.onQuickNote,
     required this.onNewNote,
     required this.onImportPdf,
+    required this.onImportTest,
   });
 
   final VoidCallback onQuickNote;
   final VoidCallback onNewNote;
   final VoidCallback onImportPdf;
+  final VoidCallback onImportTest;
 
   @override
   Widget build(BuildContext context) {
@@ -3301,6 +3285,13 @@ class _NewNoteButton extends StatelessWidget {
         style: const MenuStyle(alignment: AlignmentDirectional.topStart),
         alignmentOffset: const Offset(0, AppSpacing.sm),
         menuChildren: <Widget>[
+          reads(
+            MenuItemButton(
+              leadingIcon: const Icon(Icons.assignment_outlined),
+              onPressed: onImportTest,
+              child: const Text('Import test'),
+            ),
+          ),
           reads(
             MenuItemButton(
               leadingIcon: const Icon(AppIcons.pdf),
@@ -4203,43 +4194,90 @@ class _FolderSidebar extends StatelessWidget {
     for (final Folder folder in folders.values) {
       children.putIfAbsent(folder.parentId, () => <Folder>[]).add(folder);
     }
-    final List<Widget> rows = <Widget>[];
-    void walk(String? parent, int depth) {
+    var rowIndex = 1;
+    List<Widget> branch(String? parent, int depth) {
+      final slivers = <Widget>[];
+      final pending = <WidgetBuilder>[];
+      void appendRows() {
+        if (pending.isEmpty) return;
+        final builders = List<WidgetBuilder>.of(pending);
+        slivers.add(
+          SliverList.builder(
+            itemCount: builders.length,
+            itemBuilder: (context, index) => builders[index](context),
+          ),
+        );
+        pending.clear();
+      }
+
       final List<Folder> here = List<Folder>.of(
         children[parent] ?? const <Folder>[],
       )..sort(LibrarySort.title.compareFolders);
       for (final Folder folder in here) {
         final bool hasChildren = children[folder.id]?.isNotEmpty ?? false;
         final bool open = hasChildren && expanded.contains(folder.id);
-        rows.add(
-          _target(
-            folder.id,
-            _SidebarRow(
-              key: ValueKey<String>('sidebar-folder-${folder.id}'),
-              depth: depth,
-              label: folder.name,
-              count: counts[folder.id] ?? 0,
-              selected: folder.id == openFolderId,
-              expanded: hasChildren ? open : null,
-              icon: Icon(
-                open ? AppIcons.folderOpen : AppIcons.folder,
-                color: resolveFolderColor(context, folder.color),
-                size: AppSizes.icon,
+        final rowOffset = AppSpacing.xxs + rowIndex++ * AppSizes.minTouchTarget;
+        Widget row(BuildContext context, bool pinned) {
+          void toggle() {
+            if (pinned) {
+              final position = Scrollable.of(context).position;
+              position.jumpTo(
+                rowOffset.clamp(
+                  position.minScrollExtent,
+                  position.maxScrollExtent,
+                ),
+              );
+            }
+            onToggle(folder.id);
+          }
+
+          return Material(
+            color: colors.background,
+            child: _target(
+              folder.id,
+              _SidebarRow(
+                key: ValueKey<String>('sidebar-folder-${folder.id}'),
+                depth: depth,
+                label: folder.name,
+                count: counts[folder.id] ?? 0,
+                selected: folder.id == openFolderId,
+                expanded: hasChildren ? open : null,
+                icon: Icon(
+                  open ? AppIcons.folderOpen : AppIcons.folder,
+                  color: resolveFolderColor(context, folder.color),
+                  size: AppSizes.icon,
+                ),
+                onTap: pinned ? toggle : () => onOpenFolder(folder.id),
+                onToggle: toggle,
+                actions: _ItemAction.forFolders,
+                onAction: (_ItemAction action) => onAction(folder, action),
               ),
-              onTap: () => onOpenFolder(folder.id),
-              onToggle: () => onToggle(folder.id),
-              actions: _ItemAction.forFolders,
-              onAction: (_ItemAction action) => onAction(folder, action),
             ),
-          ),
-        );
+          );
+        }
+
         if (open) {
-          walk(folder.id, depth + 1);
+          appendRows();
+          slivers.add(
+            SliverMainAxisGroup(
+              slivers: [
+                SliverPersistentHeader(
+                  pinned: true,
+                  delegate: _FolderHeaderDelegate(builder: row),
+                ),
+                ...branch(folder.id, depth + 1),
+              ],
+            ),
+          );
+        } else {
+          pending.add((context) => row(context, false));
         }
       }
+      appendRows();
+      return slivers;
     }
 
-    walk(null, 0);
+    final rows = branch(null, 0);
     return Semantics(
       key: const ValueKey<String>('library-sidebar'),
       container: true,
@@ -4307,48 +4345,59 @@ class _FolderSidebar extends StatelessWidget {
               ),
             ),
             Expanded(
-              child: ListView(
-                padding: const EdgeInsets.fromLTRB(
-                  AppSpacing.xs,
-                  AppSpacing.xxs,
-                  AppSpacing.xs,
-                  AppSpacing.lg,
-                ),
-                children: <Widget>[
-                  _target(
-                    null,
-                    _SidebarRow(
-                      key: const ValueKey<String>('sidebar-library'),
-                      depth: 0,
-                      label: 'Library',
-                      count: null,
-                      selected: libraryOpen,
-                      expanded: null,
-                      icon: Icon(
-                        AppIcons.library,
-                        color: colors.textSecondary,
-                        size: AppSizes.icon,
-                      ),
-                      onTap: () => onOpenFolder(null),
-                      onToggle: null,
-                      actions: const <_ItemAction>[],
-                      onAction: null,
+              child: CustomScrollView(
+                key: const ValueKey('library-folder-tree-scroll'),
+                slivers: [
+                  SliverPadding(
+                    padding: const EdgeInsets.fromLTRB(
+                      AppSpacing.xs,
+                      AppSpacing.xxs,
+                      AppSpacing.xs,
+                      AppSpacing.lg,
+                    ),
+                    sliver: SliverMainAxisGroup(
+                      slivers: <Widget>[
+                        SliverToBoxAdapter(
+                          child: _target(
+                            null,
+                            _SidebarRow(
+                              key: const ValueKey<String>('sidebar-library'),
+                              depth: 0,
+                              label: 'Library',
+                              count: null,
+                              selected: libraryOpen,
+                              expanded: null,
+                              icon: Icon(
+                                AppIcons.library,
+                                color: colors.textSecondary,
+                                size: AppSizes.icon,
+                              ),
+                              onTap: () => onOpenFolder(null),
+                              onToggle: null,
+                              actions: const <_ItemAction>[],
+                              onAction: null,
+                            ),
+                          ),
+                        ),
+                        ...rows,
+                        if (folders.isEmpty)
+                          SliverToBoxAdapter(
+                            child: Padding(
+                              padding: const EdgeInsetsDirectional.fromSTEB(
+                                AppSizes.minTouchTarget,
+                                AppSpacing.xs,
+                                AppSpacing.md,
+                                AppSpacing.xs,
+                              ),
+                              child: Text(
+                                'Folders you make appear here.',
+                                style: text.bodySmall,
+                              ),
+                            ),
+                          ),
+                      ],
                     ),
                   ),
-                  ...rows,
-                  if (folders.isEmpty)
-                    Padding(
-                      padding: const EdgeInsetsDirectional.fromSTEB(
-                        AppSizes.minTouchTarget,
-                        AppSpacing.xs,
-                        AppSpacing.md,
-                        AppSpacing.xs,
-                      ),
-                      child: Text(
-                        'Folders you make appear here.',
-                        style: text.bodySmall,
-                      ),
-                    ),
                 ],
               ),
             ),
@@ -4386,6 +4435,28 @@ class _FolderSidebar extends StatelessWidget {
       ),
     );
   }
+}
+
+class _FolderHeaderDelegate extends SliverPersistentHeaderDelegate {
+  _FolderHeaderDelegate({required this.builder});
+
+  final Widget Function(BuildContext context, bool pinned) builder;
+
+  @override
+  double get minExtent => AppSizes.minTouchTarget;
+
+  @override
+  double get maxExtent => AppSizes.minTouchTarget;
+
+  @override
+  Widget build(
+    BuildContext context,
+    double shrinkOffset,
+    bool overlapsContent,
+  ) => builder(context, shrinkOffset > 0);
+
+  @override
+  bool shouldRebuild(_FolderHeaderDelegate oldDelegate) => true;
 }
 
 /// The AI Quota card pinned in the sidebar: displays current plan,

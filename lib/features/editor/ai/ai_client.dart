@@ -104,12 +104,16 @@ class AiRequest {
     this.notationEnabled = false,
     this.animationEnabled = false,
     this.notationInstruction,
+    this.testGrading = false,
     this.model,
   }) : messages = List<AiMessage>.unmodifiable(messages);
 
   /// Which model answers, for a client that serves several
   /// ([AiModelRouter]). A client with one model ignores it.
   final AiModelId? model;
+
+  /// Grades and marks a test in one pass using the server's notation model.
+  final bool testGrading;
 
   final String systemInstruction;
 

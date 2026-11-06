@@ -848,6 +848,42 @@ void main() {
       },
     );
 
+    testWidgets(
+      'editor reciprocal and display equations render as mathematics',
+      (WidgetTester tester) async {
+        final (_, FakeAiClient client) = await _pumpOpen(tester);
+        await tester.tap(_quickAction('Explain this'));
+        await tester.pump();
+        expect(
+          client.requests.single.systemInstruction,
+          contains(r'$\frac{1}{s}$'),
+        );
+
+        client.answer(
+          r'The reciprocal is $\frac{1}{s}$.'
+          '\n\n'
+          r'$$'
+          '\n'
+          r'H(s) = \frac{1}{s + 1}'
+          '\n'
+          r'$$',
+        );
+        await tester.pumpAndSettle();
+
+        expect(
+          find.descendant(
+            of: find.byType(AiAnswerMarkdown),
+            matching: find.byWidgetPredicate(
+              (Widget widget) => widget.runtimeType.toString() == 'Math',
+            ),
+          ),
+          findsNWidgets(2),
+        );
+        expect(find.textContaining(r'\frac', findRichText: true), findsNothing);
+        expect(tester.takeException(), isNull);
+      },
+    );
+
     testWidgets('an answer has its Markdown and formulas rendered', (
       WidgetTester tester,
     ) async {
@@ -1027,6 +1063,45 @@ void main() {
       expect(controller.notationPreview, isEmpty);
       expect(controller.strokes.length, greaterThan(before));
       await tester.pumpAndSettle();
+      expect(tester.takeException(), isNull);
+    });
+
+    testWidgets('a malformed final SVG keeps its visible preview as ink', (
+      WidgetTester tester,
+    ) async {
+      final (InkController controller, FakeAiClient client) = await _pumpOpen(
+        tester,
+      );
+      final int before = controller.strokes.length;
+      _assistant(tester).setNotationEnabled(true);
+      await tester.pump();
+      await tester.tap(_quickAction('Explain this'));
+      await settleAi(tester);
+      final Size page = client.requests.single.noteImage!.logicalSize;
+      final String root =
+          '<svg viewBox="0 0 ${page.width} ${page.height}">'
+          '<desc data-etonia-role="message">Done.</desc>';
+      const String line =
+          '<path d="M100 90 L250 90" stroke="black" fill="none"/>';
+      client.streamNotation('$root$line');
+      await tester.pump(const Duration(seconds: 5));
+      expect(controller.notationPreview, isNotEmpty);
+      expect(controller.strokes.length, before);
+
+      // Missing metadata, a bad shape and a truncated last tag must not
+      // discard the line that the user has already seen draw successfully.
+      client.answerResponse(
+        AiAssistantResponse.parse(
+          '$root$line<path d="invalid path"/><path d="M1',
+        ),
+      );
+      await tester.pumpAndSettle();
+      expect(controller.notationPreview, isEmpty);
+      expect(controller.strokes.length, greaterThan(before));
+      expect(
+        _assistant(tester).messages.last.notationStatus,
+        AiNotationStatus.applied,
+      );
       expect(tester.takeException(), isNull);
     });
 

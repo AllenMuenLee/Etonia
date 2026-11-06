@@ -14,6 +14,8 @@ import 'eraser_settings.dart';
 import 'ink_controller.dart';
 import 'ink_painter.dart';
 import 'ink_sample.dart';
+import 'ink_tile_cache.dart';
+import '../../../shared/memory/memory_pressure.dart';
 import 'native_ink_bridge.dart';
 import 'notation_playback_layer.dart';
 import 'pen_settings.dart';
@@ -1532,10 +1534,27 @@ class _InkCanvasState extends State<InkCanvas> with WidgetsBindingObserver {
   bool _nativeRegistered = false;
   bool _nativeRegistering = false;
   bool _nativeSyncScheduled = false;
-  int _nativeHandoffGeneration = 0;
 
-  /// The native pointer whose wet ink is waiting for its stroke's frame.
-  int? _nativeHandoffPointer;
+  /// How long the pen rests before Flutter draws the strokes native holds.
+  static const Duration _nativeSettleDelay = Duration(milliseconds: 400);
+
+  /// Most finished strokes the overlay is asked to keep drawing at once.
+  static const int _maxHeldNativeStrokes = 64;
+
+  /// Native pointers of finished strokes only the overlay is drawing.
+  final List<int> _heldNativePointers = <int>[];
+
+  /// Native pointers of finished strokes waiting for Flutter's frame.
+  final Set<int> _nativeHandoffPointers = <int>{};
+  Timer? _nativeSettleTimer;
+  bool _nativeSettleRouted = false;
+
+  /// The stroke the controller was last told to leave to native, while a
+  /// native pointer-up commits it.
+  Stroke? _nativeHoldCandidate;
+
+  /// The page's position and what lies over it, when last told to native.
+  List<Object?>? _lastNativeGeometry;
   bool _dispatchingNative = false;
   List<RawInkSample>? _nativeSamples;
   List<Object?>? _lastNativeSurfaceSignature;
@@ -1611,11 +1630,17 @@ class _InkCanvasState extends State<InkCanvas> with WidgetsBindingObserver {
     return box is RenderBox && box.hasSize ? box.size : Size.zero;
   }
 
+  /// The page's finished ink, as textures. They live as long as the page is
+  /// built, and the system can have them back at any time.
+  final InkTileCache _inkTiles = InkTileCache();
+
   @override
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
+    MemoryPressure.instance.addListener(_inkTiles.clear);
     widget.tool.addListener(_onToolChanged);
+    widget.controller.completedPaintListenable.addListener(_settleNativeInk);
     widget.penSettings.addListener(_onNativeSettingsChanged);
     widget.stylusOnly?.addListener(_onNativeSettingsChanged);
     widget.exclusionsChanged?.addListener(_onNativeSettingsChanged);
@@ -1634,6 +1659,14 @@ class _InkCanvasState extends State<InkCanvas> with WidgetsBindingObserver {
   @override
   void didUpdateWidget(InkCanvas oldWidget) {
     super.didUpdateWidget(oldWidget);
+    if (oldWidget.controller != widget.controller) {
+      oldWidget.controller.completedPaintListenable.removeListener(
+        _settleNativeInk,
+      );
+      oldWidget.controller.releaseNativeHeld(notify: false);
+      _settleNativeInk();
+      widget.controller.completedPaintListenable.addListener(_settleNativeInk);
+    }
     if (oldWidget.controller != widget.controller && widget.carry != null) {
       oldWidget.controller.selectionListenable.removeListener(
         widget.carry!._onCanvasSelectionChanged,
@@ -1689,6 +1722,11 @@ class _InkCanvasState extends State<InkCanvas> with WidgetsBindingObserver {
     _leaveCarry(widget.carry);
     _holdTimer?.cancel();
     _shapeTimer?.cancel();
+    _nativeSettleTimer?.cancel();
+    _routeNativeSettle(false);
+    MemoryPressure.instance.removeListener(_inkTiles.clear);
+    _inkTiles.dispose();
+    widget.controller.completedPaintListenable.removeListener(_settleNativeInk);
     widget.tool.removeListener(_onToolChanged);
     widget.penSettings.removeListener(_onNativeSettingsChanged);
     widget.stylusOnly?.removeListener(_onNativeSettingsChanged);
@@ -1700,10 +1738,14 @@ class _InkCanvasState extends State<InkCanvas> with WidgetsBindingObserver {
     _rulerReadout.dispose();
     _nativePreviewActive.dispose();
     // The handoff's frames stop with this canvas, but the wet ink lives in the
-    // root view and would stay there, over whatever comes next.
-    final int? handoffPointer = _nativeHandoffPointer;
-    if (handoffPointer != null) {
-      NativeInkBridge.instance.finishPreview(_nativeSurfaceId, handoffPointer);
+    // root view and would stay there, over whatever comes next. The controller
+    // may be shown again by a later canvas, which has to draw what this held.
+    widget.controller.releaseNativeHeld(notify: false);
+    for (final int pointer in <int>[
+      ..._heldNativePointers,
+      ..._nativeHandoffPointers,
+    ]) {
+      NativeInkBridge.instance.finishPreview(_nativeSurfaceId, pointer);
     }
     if (_nativeRegistered || _nativeRegistering) {
       NativeInkBridge.instance.unregisterSurface(_nativeSurfaceId);
@@ -1717,6 +1759,14 @@ class _InkCanvasState extends State<InkCanvas> with WidgetsBindingObserver {
     // A rotation or resize moves the page under the pointer; end the gesture
     // on the old layout before the new one is applied.
     _endGesture();
+    _settleNativeInk();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state != AppLifecycleState.resumed) {
+      _settleNativeInk();
+    }
   }
 
   void _endGesture() {
@@ -1846,7 +1896,7 @@ class _InkCanvasState extends State<InkCanvas> with WidgetsBindingObserver {
       _ignoreNativePointer(nativePointer);
     }
     if (!_nativePenTool) {
-      NativeInkBridge.instance.clearAllPreviews();
+      _settleNativeInk();
       _nativePreviewActive.value = false;
     }
     _syncNativeSurface();
@@ -2157,9 +2207,11 @@ class _InkCanvasState extends State<InkCanvas> with WidgetsBindingObserver {
 
   Future<void> _syncNativeSurface() async {
     if (!widget.enableNativeInk || (widget.replay?.isActive ?? false)) {
+      _settleNativeInk();
       _nativePreviewEnabled = false;
       _nativePreviewActive.value = false;
       _lastNativeSurfaceSignature = null;
+      _lastNativeGeometry = null;
       if (_nativeRegistered || _nativeRegistering) {
         await NativeInkBridge.instance.unregisterSurface(_nativeSurfaceId);
       }
@@ -2207,7 +2259,7 @@ class _InkCanvasState extends State<InkCanvas> with WidgetsBindingObserver {
       writingStyle: style.writing.name,
       exclusionRects: exclusions,
     );
-    final List<Object?> signature = <Object?>[
+    final List<Object?> geometry = <Object?>[
       object.size.width,
       object.size.height,
       origin.dx,
@@ -2216,14 +2268,6 @@ class _InkCanvasState extends State<InkCanvas> with WidgetsBindingObserver {
       xBasis.dy,
       yBasis.dx,
       yBasis.dy,
-      enabled,
-      previewEnabled,
-      color.toARGB32(),
-      style.width,
-      pen.dynamics.pressure,
-      pen.dynamics.taper,
-      pen.stabilization,
-      style.writing.name,
       exclusions.length,
       for (final Rect r in exclusions) ...<Object?>[
         r.left,
@@ -2232,6 +2276,27 @@ class _InkCanvasState extends State<InkCanvas> with WidgetsBindingObserver {
         r.bottom,
       ],
     ];
+    final List<Object?> signature = <Object?>[
+      ...geometry,
+      enabled,
+      previewEnabled,
+      color.toARGB32(),
+      style.width,
+      pen.dynamics.pressure,
+      pen.dynamics.taper,
+      pen.stabilization,
+      style.writing.name,
+    ];
+    // Held strokes are only right where the page was when they were drawn,
+    // and only while nothing lies over them; and only opaque pen ink can be
+    // drawn over them without showing whose layer is on top.
+    if (!enabled ||
+        !previewEnabled ||
+        (_lastNativeGeometry != null &&
+            !listEquals(geometry, _lastNativeGeometry))) {
+      _settleNativeInk();
+    }
+    _lastNativeGeometry = geometry;
     if (_nativeRegistered) {
       if (listEquals(signature, _lastNativeSurfaceSignature)) {
         return;
@@ -2289,10 +2354,6 @@ class _InkCanvasState extends State<InkCanvas> with WidgetsBindingObserver {
         packet.phase == NativeInkPhase.up ||
         packet.phase == NativeInkPhase.cancel;
     if (packet.phase == NativeInkPhase.down) {
-      // A new native stroke supersedes any delayed removal for the previous
-      // pointer id. Native pointer ids may be reused between gestures.
-      _nativeHandoffGeneration++;
-      _nativeHandoffPointer = null;
       _ignoredNativePointers.remove(packet.pointer);
       if (!_nativePenTool || !_nativeHitsCanvas(packet)) {
         _ignoreNativePointer(packet.pointer);
@@ -2375,6 +2436,9 @@ class _InkCanvasState extends State<InkCanvas> with WidgetsBindingObserver {
             ),
           );
         case NativeInkPhase.up:
+          widget.controller.nativeHoldTest = _nativePreviewActive.value
+              ? _canHoldNativeStroke
+              : null;
           _onPointerUp(
             PointerUpEvent(
               timeStamp: sample.timestamp,
@@ -2386,6 +2450,7 @@ class _InkCanvasState extends State<InkCanvas> with WidgetsBindingObserver {
               pressureMax: 1,
             ),
           );
+          widget.controller.nativeHoldTest = null;
         case NativeInkPhase.cancel:
           _onPointerCancel(
             PointerCancelEvent(
@@ -2405,8 +2470,13 @@ class _InkCanvasState extends State<InkCanvas> with WidgetsBindingObserver {
     if (packet.phase == NativeInkPhase.up) {
       final bool previewWasActive = _nativePreviewActive.value;
       _nativePreviewActive.value = false;
-      if (previewWasActive) {
-        _finishNativePreviewAfterCommittedFrame(packet.pointer);
+      final Stroke? candidate = _nativeHoldCandidate;
+      _nativeHoldCandidate = null;
+      if (candidate != null &&
+          widget.controller.isStrokeNativeHeld(candidate)) {
+        _holdNativeStroke(packet.pointer);
+      } else if (previewWasActive) {
+        _finishNativePreviewsAfterCommittedFrame(<int>[packet.pointer]);
       } else {
         NativeInkBridge.instance.finishPreview(
           _nativeSurfaceId,
@@ -2431,37 +2501,150 @@ class _InkCanvasState extends State<InkCanvas> with WidgetsBindingObserver {
   /// it.
   static const int _nativeHandoffFrames = 3;
 
+  /// Whether [stroke], just committed by a native pointer-up, can stay native
+  /// for now. Flutter draws finished ink under sticky notes, inside the page,
+  /// and beneath the editor's UI; the overlay lies above all of that. A stroke
+  /// that would look any different once Flutter draws it goes to Flutter now.
+  bool _canHoldNativeStroke(Stroke stroke) {
+    final RenderObject? object = context.findRenderObject();
+    if (object is! RenderBox || !object.attached) {
+      return false;
+    }
+    final Rect bounds = stroke.bounds;
+    final Rect page = Offset.zero & object.size;
+    final Rect? visible = widget.visible?.value;
+    if (page.expandToInclude(bounds) != page ||
+        (visible != null && visible.expandToInclude(bounds) != visible)) {
+      return false;
+    }
+    for (final StickyNoteElement note in widget.controller.stickyNotes) {
+      if (note.bounds.overlaps(bounds)) {
+        return false;
+      }
+    }
+    final List<Rect> exclusions =
+        widget.exclusionRects?.call() ?? const <Rect>[];
+    if (exclusions.isNotEmpty) {
+      final Rect global = MatrixUtils.transformRect(
+        object.getTransformTo(null),
+        bounds,
+      );
+      for (final Rect rect in exclusions) {
+        if (rect.overlaps(global)) {
+          return false;
+        }
+      }
+    }
+    _nativeHoldCandidate = stroke;
+    return true;
+  }
+
+  /// Leaves the finished stroke of native [pointer] on the overlay. Writing
+  /// on repaints nothing in Flutter, however full the page.
+  void _holdNativeStroke(int pointer) {
+    _heldNativePointers.add(pointer);
+    if (_heldNativePointers.length >= _maxHeldNativeStrokes) {
+      _settleNativeInk();
+      return;
+    }
+    _routeNativeSettle(true);
+    _armNativeSettle();
+  }
+
+  void _armNativeSettle() {
+    _nativeSettleTimer?.cancel();
+    _nativeSettleTimer = Timer(_nativeSettleDelay, () {
+      // Mid-stroke, the pen has not rested.
+      if (_nativeLivePointer != null) {
+        _armNativeSettle();
+      } else {
+        _settleNativeInk();
+      }
+    });
+  }
+
+  /// Has Flutter draw every stroke held native, and then takes them off the
+  /// overlay. Both draw them for those frames, so they never leave the screen.
+  ///
+  /// This is the only way out for held strokes. Any change to the page's ink
+  /// comes here through [InkController.completedPaintListenable] before its
+  /// next paint, as do presses that may lead to one: whatever then happens to
+  /// a stroke happens in Flutter, and the document and undo history were never
+  /// waiting on any of this.
+  void _settleNativeInk() {
+    _nativeSettleTimer?.cancel();
+    _nativeSettleTimer = null;
+    _routeNativeSettle(false);
+    if (_heldNativePointers.isEmpty) {
+      return;
+    }
+    final List<int> pointers = List<int>.of(_heldNativePointers);
+    _heldNativePointers.clear();
+    widget.controller.releaseNativeHeld();
+    _finishNativePreviewsAfterCommittedFrame(pointers);
+  }
+
+  void _routeNativeSettle(bool on) {
+    if (on == _nativeSettleRouted) {
+      return;
+    }
+    _nativeSettleRouted = on;
+    final PointerRouter router = GestureBinding.instance.pointerRouter;
+    if (on) {
+      router.addGlobalRoute(_settleNativeInkForPointer);
+    } else {
+      router.removeGlobalRoute(_settleNativeInkForPointer);
+    }
+  }
+
+  /// A press on anything but this page, a finger anywhere, or a wheel may be
+  /// about to scroll the page or cover it. The overlay can do neither, so
+  /// Flutter takes over while the gesture is still within its touch slop.
+  void _settleNativeInkForPointer(PointerEvent event) {
+    final bool writing =
+        event is PointerDownEvent &&
+        (event.kind == PointerDeviceKind.stylus ||
+            event.kind == PointerDeviceKind.invertedStylus) &&
+        _hitsCanvasAt(event.position);
+    if (!writing &&
+        (event is PointerDownEvent ||
+            event is PointerPanZoomStartEvent ||
+            event is PointerSignalEvent)) {
+      _settleNativeInk();
+    }
+  }
+
   /// Keeps native wet ink over the page until the Flutter frame containing
-  /// the committed stroke is rasterized and on screen. Clearing earlier shows
+  /// the committed strokes is rasterized and on screen. Clearing earlier shows
   /// a frame of bare paper: the platform message arrives before Flutter's
   /// next paint, and that paint reaches the display a frame or more later.
-  void _finishNativePreviewAfterCommittedFrame(int pointer) {
-    final int generation = ++_nativeHandoffGeneration;
-    _nativeHandoffPointer = pointer;
+  void _finishNativePreviewsAfterCommittedFrame(List<int> pointers) {
+    _nativeHandoffPointers.addAll(pointers);
     final WidgetsBinding binding = WidgetsBinding.instance;
-    bool superseded() => !mounted || generation != _nativeHandoffGeneration;
     void finishAfterFrames(int frames) {
       // Scheduling a frame callback also schedules that frame.
       binding.scheduleFrameCallback((_) {
-        if (superseded()) {
+        if (!mounted) {
           return;
         }
         if (frames > 1) {
           finishAfterFrames(frames - 1);
         } else {
-          _nativeHandoffPointer = null;
-          NativeInkBridge.instance.finishPreview(_nativeSurfaceId, pointer);
+          for (final int pointer in pointers) {
+            _nativeHandoffPointers.remove(pointer);
+            NativeInkBridge.instance.finishPreview(_nativeSurfaceId, pointer);
+          }
         }
       });
     }
 
     binding.scheduleFrameCallback((_) {
-      if (superseded()) {
+      if (!mounted) {
         return;
       }
-      // This frame paints the committed stroke.
+      // This frame paints the committed strokes.
       binding.addPostFrameCallback((_) {
-        if (!superseded()) {
+        if (mounted) {
           finishAfterFrames(_nativeHandoffFrames);
         }
       });
@@ -2487,7 +2670,15 @@ class _InkCanvasState extends State<InkCanvas> with WidgetsBindingObserver {
     if (object is! RenderBox || !object.attached || packet.samples.isEmpty) {
       return false;
     }
-    final Offset global = object.localToGlobal(packet.samples.first.position);
+    return _hitsCanvasAt(object.localToGlobal(packet.samples.first.position));
+  }
+
+  /// Whether Flutter's own hit test finds this page at [global].
+  bool _hitsCanvasAt(Offset global) {
+    final RenderObject? object = context.findRenderObject();
+    if (object is! RenderBox || !object.attached) {
+      return false;
+    }
     final HitTestResult result = HitTestResult();
     WidgetsBinding.instance.hitTestInView(
       result,
@@ -3217,8 +3408,13 @@ class _InkCanvasState extends State<InkCanvas> with WidgetsBindingObserver {
                   controller: widget.controller,
                   brightness: brightness,
                   visible: paintArea,
+                  viewport: widget.visible,
                   replay: widget.replay,
                   replayHighlight: colors.accent,
+                  tiles: _inkTiles,
+                  scale: PageViewport.scaleOf(context),
+                  pixelRatio: MediaQuery.maybeDevicePixelRatioOf(context) ?? 1,
+                  zooming: PageViewport.zoomingOf(context),
                 ),
               ),
             ),
@@ -3397,7 +3593,7 @@ class _StickySemanticsState extends State<_StickySemantics> {
 
   static Listenable _merged(InkController controller) {
     return Listenable.merge(<Listenable>[
-      controller.completedStrokesListenable,
+      controller.completedPaintListenable,
       controller.stickyEditingListenable,
     ]);
   }

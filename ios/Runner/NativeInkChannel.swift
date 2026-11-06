@@ -11,6 +11,8 @@ final class NativeInkChannel: NSObject, UIPencilInteractionDelegate {
   private let rootView: () -> UIView?
   private var surfaces: [Int: InkSurface] = [:]
   private var active: ActiveStroke?
+  /// UITouch hashes can repeat; Dart addresses each stroke by its own number.
+  private var nextStrokeNumber = 1
   private weak var attachedRoot: UIView?
   private var recognizer: NativeInkRecognizer?
   private var overlay: NativeInkOverlay?
@@ -50,12 +52,13 @@ final class NativeInkChannel: NSObject, UIPencilInteractionDelegate {
       surfaces[surface.id] = surface
       attachIfNeeded()
       // Leaving the pen hides a stroke still in progress at once; the rest of
-      // its gesture is swallowed rather than starting a new one.
+      // its gesture is swallowed rather than starting a new one. Finished
+      // strokes stay until Dart says Flutter is drawing them.
       if !surface.enabled || !surface.previewEnabled {
         if let stroke = active, stroke.surface.id == surface.id {
           stroke.previewSuppressed = true
+          overlay?.cancelLive()
         }
-        overlay?.clear()
       }
       result(true)
     case "unregisterSurface":
@@ -67,21 +70,16 @@ final class NativeInkChannel: NSObject, UIPencilInteractionDelegate {
       }
       result(nil)
     case "finishPreview":
-      if let values = call.arguments as? [String: Any] {
-        let pointer = (values["pointer"] as? NSNumber)?.intValue ?? values["pointer"] as? Int
-        if let pointer, active?.pointer == pointer { active?.previewSuppressed = true }
-        if let pointer {
-          overlay?.finish(pointer: pointer)
-        } else {
-          overlay?.clear()
-        }
-      } else {
-        overlay?.clear()
+      if let values = call.arguments as? [String: Any],
+        let pointer = (values["pointer"] as? NSNumber)?.intValue
+      {
+        if active?.pointer == pointer { active?.previewSuppressed = true }
+        overlay?.finish(pointer: pointer)
       }
       result(nil)
-    case "clearAllPreviews":
+    case "clearLivePreview":
       active = nil
-      overlay?.clear()
+      overlay?.cancelLive()
       result(nil)
     default:
       result(FlutterMethodNotImplemented)
@@ -176,7 +174,8 @@ final class NativeInkChannel: NSObject, UIPencilInteractionDelegate {
         .filter({ $0.enabled && $0.contains(global) })
         .max(by: { $0.id < $1.id })
       else { return }
-      let pointer = touch.hash & 0x7FFF_FFFF
+      let pointer = nextStrokeNumber
+      nextStrokeNumber += 1
       let actual = samples(
         actualTouches(touch, event: event, coalesced: false), surface: surface, root: root)
       // The preview follows the very samples Dart receives, through the same
@@ -227,9 +226,8 @@ final class NativeInkChannel: NSObject, UIPencilInteractionDelegate {
       emit(surface: stroke.surface, pointer: stroke.pointer, phase: "up", samples: actual)
       active = nil
       // The finished wet stroke, both ends tapered as Flutter commits it,
-      // stays visible until Flutter confirms that its durable stroke has
-      // crossed a frame boundary. A new stroke clears the old one, so a
-      // timeout cannot expose blank paper.
+      // stays visible until Dart says Flutter is drawing it, however many
+      // strokes come after it.
 
     case .cancel:
       cancelActive(sendPacket: true)
@@ -472,14 +470,17 @@ private final class NativeInkOverlay: UIView {
 
   private static let chunkLength = 64
 
+  /// The stroke being drawn.
   private var pointer: Int?
-  private var ended = false
+  /// Finished strokes on screen, by pointer, until [finish].
+  private var retained: [Int: CAShapeLayer] = [:]
   private var canvasToRoot = CGAffineTransform.identity
   private var radius = 0.5
   private var color = UIColor.black.cgColor
   private var chunks: [CAShapeLayer] = []
   private var chunkStart = 0
   private let live = CAShapeLayer()
+  private var displayRateHint: CADisplayLink?
 
   override init(frame: CGRect) {
     super.init(frame: frame)
@@ -506,17 +507,36 @@ private final class NativeInkOverlay: UIView {
   override func touchesCancelled(_ touches: Set<UITouch>, with event: UIEvent?) {}
 
   func begin(pointer: Int, surface: InkSurface) {
-    clear()
+    cancelLive()
     self.pointer = pointer
     canvasToRoot = surface.canvasToRoot
     radius = Double(surface.strokeWidth) / 2
     color = surface.color.cgColor
     configure(live)
+    keepDisplayFast(true)
   }
+
+  /// Asks a ProMotion display to stay at its fastest while a stroke is drawn.
+  /// Flutter draws no frames then, so nothing else tells the system that the
+  /// screen is busy, and it may let the rate fall. The link only has to exist.
+  private func keepDisplayFast(_ fast: Bool) {
+    guard fast else {
+      displayRateHint?.invalidate()
+      displayRateHint = nil
+      return
+    }
+    guard displayRateHint == nil else { return }
+    let link = CADisplayLink(target: self, selector: #selector(displayRateHintFired))
+    link.preferredFrameRateRange = CAFrameRateRange(minimum: 80, maximum: 120, preferred: 120)
+    link.add(to: .main, forMode: .common)
+    displayRateHint = link
+  }
+
+  @objc private func displayRateHintFired() {}
 
   /// Draws the stroke so far, and on through [predicted] samples.
   func update(pointer: Int, model: InkStrokeModel, predicted: [InkSample]) {
-    guard self.pointer == pointer, !ended else { return }
+    guard self.pointer == pointer else { return }
     let stable = model.stable
     CATransaction.begin()
     CATransaction.setDisableActions(true)
@@ -538,18 +558,25 @@ private final class NativeInkOverlay: UIView {
   /// Replaces the wet stroke with [points], the stroke as Flutter commits
   /// it, both ends tapered, and keeps it until [finish].
   func showFinal(pointer: Int, points: InkPoints) {
-    guard self.pointer == pointer, !ended else { return }
-    ended = true
+    guard self.pointer == pointer else { return }
     CATransaction.begin()
     CATransaction.setDisableActions(true)
+    let finished = CAShapeLayer()
+    configure(finished)
+    finished.path = outline(points, from: 0, through: points.count - 1, tail: nil)
+    layer.insertSublayer(finished, below: live)
+    retained[pointer] = finished
     removeChunks()
-    live.path = outline(points, from: 0, through: points.count - 1, tail: nil)
+    live.path = nil
     CATransaction.commit()
+    self.pointer = nil
+    keepDisplayFast(false)
   }
 
-  func clear() {
+  /// Hides the stroke being drawn, leaving the finished ones.
+  func cancelLive() {
     pointer = nil
-    ended = false
+    keepDisplayFast(false)
     CATransaction.begin()
     CATransaction.setDisableActions(true)
     removeChunks()
@@ -557,10 +584,17 @@ private final class NativeInkOverlay: UIView {
     CATransaction.commit()
   }
 
+  /// Hides the stroke of [pointer], and no other.
   func finish(pointer: Int) {
-    if self.pointer == nil || self.pointer == pointer {
-      clear()
+    if self.pointer == pointer {
+      cancelLive()
+      return
     }
+    guard let finished = retained.removeValue(forKey: pointer) else { return }
+    CATransaction.begin()
+    CATransaction.setDisableActions(true)
+    finished.removeFromSuperlayer()
+    CATransaction.commit()
   }
 
   private func removeChunks() {
@@ -584,6 +618,7 @@ private final class NativeInkOverlay: UIView {
     CATransaction.setDisableActions(true)
     live.frame = bounds
     for chunk in chunks { chunk.frame = bounds }
+    for finished in retained.values { finished.frame = bounds }
     CATransaction.commit()
   }
 

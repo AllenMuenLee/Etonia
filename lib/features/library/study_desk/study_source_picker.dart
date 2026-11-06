@@ -10,163 +10,123 @@ import 'study_desk_models.dart';
 /// Builds a note's small picture, which the library draws and keeps.
 typedef StudyNoteThumbnailBuilder = Widget Function(NoteEntry note);
 
-/// The notes on the desk, along the top of the chat: each can be left out of
-/// questions with its checkbox, without taking it off the desk.
+class StudyChatSources extends StatelessWidget {
+  const StudyChatSources({
+    super.key,
+    required this.controller,
+    this.onOpenSource,
+    this.onAddSources,
+  });
+  final StudyDeskController controller;
+  final ValueChanged<String>? onOpenSource;
+  final VoidCallback? onAddSources;
+
+  @override
+  Widget build(BuildContext context) => ListenableBuilder(
+    listenable: controller,
+    builder: (context, _) => Column(
+      key: const ValueKey('study-chat-sources'),
+      mainAxisSize: MainAxisSize.min,
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text(
+          'Sources for this chat',
+          style: Theme.of(context).textTheme.labelMedium,
+        ),
+        const SizedBox(height: AppSpacing.xs),
+        LayoutBuilder(
+          builder: (context, constraints) => SingleChildScrollView(
+            key: const ValueKey('study-chat-source-row'),
+            scrollDirection: Axis.horizontal,
+            child: Row(
+              children: [
+                for (final source in controller.sources)
+                  Padding(
+                    padding: const EdgeInsetsDirectional.only(
+                      end: AppSpacing.xs,
+                    ),
+                    child: ConstrainedBox(
+                      constraints: BoxConstraints(
+                        maxWidth: constraints.maxWidth,
+                      ),
+                      child: InputChip(
+                        key: ValueKey('study-chat-source-${source.noteId}'),
+                        avatar: const Icon(AppIcons.note, size: 16),
+                        label: Text(
+                          controller.noteOf(source.noteId)?.title ?? 'Note',
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                        onPressed: () {
+                          if (onOpenSource != null) {
+                            onOpenSource!(source.noteId);
+                          } else {
+                            controller.focusCitation(
+                              StudyCitation(
+                                noteId: source.noteId,
+                                pageIndex: 0,
+                                revision: controller.revisionOf(source.noteId),
+                              ),
+                              message: -1,
+                              paragraph: 0,
+                            );
+                          }
+                        },
+                        onDeleted: () => controller.removeSource(source.noteId),
+                        deleteButtonTooltipMessage: 'Remove source',
+                      ),
+                    ),
+                  ),
+              ],
+            ),
+          ),
+        ),
+        const SizedBox(height: AppSpacing.xs),
+        TextButton.icon(
+          key: const ValueKey('study-chat-add-source'),
+          onPressed:
+              onAddSources ??
+              () => showStudySourcePicker(context, controller: controller),
+          icon: const Icon(AppIcons.add, size: 18),
+          label: const Text('Add source'),
+        ),
+      ],
+    ),
+  );
+}
+
 class StudySourceStrip extends StatelessWidget {
   const StudySourceStrip({
     super.key,
     required this.controller,
     required this.thumbnail,
   });
-
   final StudyDeskController controller;
   final StudyNoteThumbnailBuilder thumbnail;
-
   static const double height = 76;
 
   @override
-  Widget build(BuildContext context) {
-    final List<StudySourceItem> sources = controller.sources;
-    if (sources.isEmpty) return const SizedBox.shrink();
-    return SizedBox(
-      key: const ValueKey<String>('study-source-strip'),
-      height: height,
-      child: ListView.separated(
-        scrollDirection: Axis.horizontal,
-        padding: const EdgeInsets.symmetric(
-          horizontal: AppSpacing.md,
-          vertical: AppSpacing.xs,
-        ),
-        itemCount: sources.length,
-        separatorBuilder: (BuildContext context, int index) =>
-            const SizedBox(width: AppSpacing.xs),
-        itemBuilder: (BuildContext context, int index) {
-          final StudySourceItem source = sources[index];
-          final NoteEntry note = controller.noteOf(source.noteId)!;
-          return _SourceCard(
-            key: ValueKey<String>('study-source-${note.id}'),
-            note: note,
-            folder: controller.folderOf(note.folderId)?.name,
-            enabled: source.enabled,
-            thumbnail: thumbnail(note),
-            onChanged: (bool enabled) =>
-                controller.setSourceEnabled(note.id, enabled),
-            onRemove: () => controller.removeSource(note.id),
-          );
-        },
-      ),
-    );
-  }
-}
-
-class _SourceCard extends StatelessWidget {
-  const _SourceCard({
-    super.key,
-    required this.note,
-    required this.folder,
-    required this.enabled,
-    required this.thumbnail,
-    required this.onChanged,
-    required this.onRemove,
-  });
-
-  final NoteEntry note;
-  final String? folder;
-  final bool enabled;
-  final Widget thumbnail;
-  final ValueChanged<bool> onChanged;
-  final VoidCallback onRemove;
-
-  @override
-  Widget build(BuildContext context) {
-    final AppColors colors = AppColors.of(context);
-    final TextTheme text = Theme.of(context).textTheme;
-    return Material(
-      color: enabled ? colors.selected : colors.surfaceMuted,
-      borderRadius: AppBorderRadius.medium,
-      child: InkWell(
-        borderRadius: AppBorderRadius.medium,
-        onTap: () => onChanged(!enabled),
-        child: SizedBox(
-          width: 212,
-          child: Row(
-            children: <Widget>[
-              Semantics(
-                checked: enabled,
-                label: '${note.title}, in the questions',
-                child: Checkbox(
-                  value: enabled,
-                  onChanged: (bool? value) => onChanged(value ?? false),
-                  materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
-                ),
-              ),
-              Opacity(
-                opacity: enabled ? 1 : 0.5,
-                child: SizedBox(
-                  width: 32,
-                  height: 44,
-                  child: ExcludeSemantics(child: thumbnail),
-                ),
-              ),
-              const SizedBox(width: AppSpacing.xs),
-              Expanded(
-                child: Column(
-                  mainAxisAlignment: MainAxisAlignment.center,
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: <Widget>[
-                    Text(
-                      note.title,
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: text.labelLarge?.copyWith(
-                        color: colors.textPrimary,
-                      ),
-                    ),
-                    Text(
-                      folder ?? 'Library',
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: text.labelSmall?.copyWith(
-                        color: colors.textSecondary,
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-              IconButton(
-                tooltip: 'Take ${note.title} off the desk',
-                onPressed: onRemove,
-                iconSize: 16,
-                visualDensity: VisualDensity.compact,
-                icon: Icon(AppIcons.close, color: colors.textSecondary),
-              ),
-            ],
-          ),
-        ),
-      ),
-    );
-  }
+  Widget build(BuildContext context) =>
+      StudyChatSources(controller: controller);
 }
 
 /// Lets the user choose notes and whole folders for the desk, and makes the desk
-/// hold what was chosen. A note left ticked keeps its place in or out of context.
+/// add the chosen notes. Existing sources are removed only by their close button.
 Future<void> showStudySourcePicker(
   BuildContext context, {
   required StudyDeskController controller,
 }) async {
+  final sessionId = controller.sessionId;
   final Set<String>? chosen = await showAppSheet<Set<String>>(
     context: context,
     motionKey: 'study-sources',
     builder: (BuildContext context) =>
         StudySourcePicker(controller: controller),
   );
-  if (chosen == null) return;
+  if (chosen == null || controller.sessionId != sessionId) return;
   final Set<String> before = <String>{
     for (final StudySourceItem item in controller.sources) item.noteId,
   };
-  for (final String id in before.difference(chosen)) {
-    controller.removeSource(id);
-  }
   controller.addNotes(chosen.difference(before));
 }
 
@@ -210,7 +170,8 @@ class _StudySourcePickerState extends State<StudySourcePicker> {
       if (on) {
         _chosen.addAll(notes);
       } else {
-        _chosen.removeAll(notes);
+        final attached = widget.controller.sources.map((s) => s.noteId).toSet();
+        _chosen.removeAll(notes.where((id) => !attached.contains(id)));
       }
     });
   }
@@ -278,13 +239,15 @@ class _StudySourcePickerState extends State<StudySourcePicker> {
 
   Widget _noteRow(NoteEntry note, int depth, String? subtitle) {
     final AppColors colors = AppColors.of(context);
+    final attached = widget.controller.sources.any((s) => s.noteId == note.id);
     return _PickerRow(
       key: ValueKey<String>('study-pick-note-${note.id}'),
       depth: depth,
       value: _chosen.contains(note.id),
       icon: Icon(AppIcons.note, size: 18, color: colors.textSecondary),
       title: note.title,
-      subtitle: subtitle,
+      subtitle: attached ? 'Already added' : subtitle,
+      enabled: !attached,
       onChanged: (bool on) => _setAll(<String>[note.id], on),
     );
   }
@@ -302,7 +265,7 @@ class _StudySourcePickerState extends State<StudySourcePicker> {
     final List<Widget> rows = _tree(context);
     return SafeArea(
       child: Padding(
-        padding: const EdgeInsets.all(AppSpacing.md),
+        padding: const EdgeInsets.all(AppSpacing.lg),
         child: Column(
           key: const ValueKey<String>('study-source-picker'),
           crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -314,7 +277,12 @@ class _StudySourcePickerState extends State<StudySourcePicker> {
                 style: text.titleLarge?.copyWith(color: colors.textPrimary),
               ),
             ),
-            const SizedBox(height: AppSpacing.sm),
+            const SizedBox(height: AppSpacing.xs),
+            Text(
+              'Choose the notes you want to study.',
+              style: text.bodyMedium?.copyWith(color: colors.textSecondary),
+            ),
+            const SizedBox(height: AppSpacing.md),
             TextField(
               key: const ValueKey<String>('study-source-search'),
               controller: _search,
@@ -324,6 +292,13 @@ class _StudySourcePickerState extends State<StudySourcePicker> {
                 isDense: true,
                 prefixIcon: const Icon(AppIcons.search, size: 18),
                 hintText: 'Search notes',
+                suffixIcon: _query.isEmpty
+                    ? null
+                    : IconButton(
+                        tooltip: 'Clear search',
+                        onPressed: () => setState(_search.clear),
+                        icon: const Icon(AppIcons.clear, size: 18),
+                      ),
                 hintStyle: text.bodyMedium?.copyWith(
                   color: colors.textSecondary,
                 ),
@@ -376,8 +351,10 @@ class _StudySourcePickerState extends State<StudySourcePicker> {
                   : ListView(children: rows),
             ),
             const SizedBox(height: AppSpacing.sm),
-            Row(
-              mainAxisAlignment: MainAxisAlignment.end,
+            Wrap(
+              alignment: WrapAlignment.end,
+              spacing: AppSpacing.xs,
+              runSpacing: AppSpacing.xs,
               children: <Widget>[
                 TextButton(
                   onPressed: () => Navigator.of(context).pop(),
@@ -433,48 +410,58 @@ class _PickerRow extends StatelessWidget {
     final AppColors colors = AppColors.of(context);
     final TextTheme text = Theme.of(context).textTheme;
     void toggle() => onChanged(value != true);
-    return InkWell(
-      borderRadius: AppBorderRadius.medium,
-      onTap: !enabled ? null : (onOpen ?? toggle),
-      child: ConstrainedBox(
-        constraints: const BoxConstraints(minHeight: AppSizes.minTouchTarget),
-        child: Row(
-          children: <Widget>[
-            SizedBox(width: AppSpacing.md * depth),
-            Checkbox(
-              value: value,
-              tristate: tristate,
-              onChanged: enabled ? (_) => toggle() : null,
-            ),
-            icon,
-            const SizedBox(width: AppSpacing.xs),
-            Expanded(
-              child: Column(
-                mainAxisAlignment: MainAxisAlignment.center,
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: <Widget>[
-                  Text(
-                    title,
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: text.bodyMedium?.copyWith(color: colors.textPrimary),
-                  ),
-                  if (subtitle case final String subtitle)
+    return Material(
+      color: value == true ? colors.selected : Colors.transparent,
+      shape: const StadiumBorder(),
+      child: InkWell(
+        customBorder: const StadiumBorder(),
+        onTap: !enabled ? null : (onOpen ?? toggle),
+        child: ConstrainedBox(
+          constraints: const BoxConstraints(minHeight: 60),
+          child: Row(
+            children: <Widget>[
+              SizedBox(width: AppSpacing.md * depth),
+              Checkbox(
+                value: value,
+                tristate: tristate,
+                onChanged: enabled ? (_) => toggle() : null,
+              ),
+              icon,
+              const SizedBox(width: AppSpacing.xs),
+              Expanded(
+                child: Column(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: <Widget>[
                     Text(
-                      subtitle,
+                      title,
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,
-                      style: text.labelSmall?.copyWith(
-                        color: colors.textSecondary,
+                      style: text.bodyMedium?.copyWith(
+                        color: colors.textPrimary,
                       ),
                     ),
-                ],
+                    if (subtitle case final String subtitle)
+                      Text(
+                        subtitle,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: text.labelSmall?.copyWith(
+                          color: colors.textSecondary,
+                        ),
+                      ),
+                  ],
+                ),
               ),
-            ),
-            if (onOpen != null)
-              Icon(AppIcons.disclosure, size: 16, color: colors.textSecondary),
-            const SizedBox(width: AppSpacing.xs),
-          ],
+              if (onOpen != null)
+                Icon(
+                  AppIcons.disclosure,
+                  size: 16,
+                  color: colors.textSecondary,
+                ),
+              const SizedBox(width: AppSpacing.xs),
+            ],
+          ),
         ),
       ),
     );

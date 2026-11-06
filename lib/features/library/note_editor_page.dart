@@ -69,6 +69,7 @@ class NoteEditorPage extends StatefulWidget {
     this.tabsBuilder,
     this.onRenamed,
     this.onBack,
+    this.onImportConversationToStudyDesk,
     this.onSaved,
     this.arrived,
     this.citationMarks,
@@ -97,6 +98,7 @@ class NoteEditorPage extends StatefulWidget {
 
   /// Leaves the editor; by default the page's route is popped.
   final VoidCallback? onBack;
+  final ValueChanged<List<AiMessage>>? onImportConversationToStudyDesk;
 
   final NoteRepository repository;
   final NoteEntry note;
@@ -525,6 +527,14 @@ class _NoteEditorPageState extends State<NoteEditorPage> {
         document: document,
         title: _title,
         onBack: _leave,
+        onImportConversationToStudyDesk:
+            widget.onImportConversationToStudyDesk == null
+            ? null
+            : (messages) async {
+                await _editor.currentState?.finalizeRecording();
+                await _autosaver?.flush();
+                if (mounted) widget.onImportConversationToStudyDesk!(messages);
+              },
         onTitlePressed: _rename,
         tabs: tabs,
         aiClient: widget.aiClient,

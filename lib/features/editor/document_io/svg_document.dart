@@ -5,6 +5,7 @@ import 'package:flutter/foundation.dart';
 import 'package:xml/xml.dart';
 
 import '../ink/ink_palette.dart';
+import 'svg_repair.dart';
 
 /// A validated, self-contained SVG that remains editable as vector source.
 ///
@@ -49,6 +50,96 @@ class EditableSvg {
   final bool hasVisualContent;
 
   bool get isAnimated => stepCount > 0;
+
+  // The response contract contains metadata that is not needed to draw SVG.
+  // Keep renderable artwork, repairing syntax and metadata only on failure.
+  static EditableSvg parseResponse(String input) {
+    try {
+      return EditableSvg.parse(input, modelResponse: true);
+    } on FormatException catch (error) {
+      if (error.message == 'Unsafe SVG' ||
+          error.message == 'SVG is too large' ||
+          error.message == 'SVG is too complex') {
+        rethrow;
+      }
+    }
+    final String source = _stripFence(input);
+    XmlDocument readDocument() {
+      try {
+        return XmlDocument.parse(source);
+      } on Object {
+        try {
+          return XmlDocument.parse(
+            repairSvgXml(source, maxNodes: maxNodes, maxDepth: maxDepth),
+          );
+        } on Object {
+          throw const FormatException('Invalid SVG');
+        }
+      }
+    }
+
+    final XmlDocument document = readDocument();
+    final XmlElement root = document.rootElement;
+    if (root.name.local.toLowerCase() != 'svg') {
+      throw const FormatException('Invalid SVG');
+    }
+    final Rect viewBox = _readViewBox(root);
+    root.setAttribute('data-etonia-version', '1');
+    Rect bounds = viewBox;
+    try {
+      final Rect declared = _readBounds(root, viewBox);
+      if (declared.isFinite &&
+          !declared.isEmpty &&
+          viewBox.inflate(0.000001).contains(declared.topLeft) &&
+          viewBox.inflate(0.000001).contains(declared.bottomRight)) {
+        bounds = declared;
+      }
+    } on FormatException {
+      // An incorrect crop must not remove otherwise drawable artwork.
+    }
+    root.setAttribute('data-etonia-bounds', _rectText(bounds));
+    final List<XmlElement> elements = <XmlElement>[
+      root,
+      ...root.descendantElements,
+    ];
+    final bool badStep = elements.any((XmlElement element) {
+      final String? raw = element.getAttribute('data-etonia-step');
+      if (raw == null) return false;
+      final int? step = int.tryParse(raw);
+      return step == null || step < 1 || step > maxSteps;
+    });
+    final String? rawDuration = root.getAttribute('data-etonia-duration-ms');
+    final int? duration = int.tryParse(rawDuration ?? '');
+    if (badStep ||
+        (rawDuration != null &&
+            (duration == null || duration < 300 || duration > 20000))) {
+      for (final XmlElement element in elements) {
+        element.removeAttribute('data-etonia-step');
+      }
+      root.removeAttribute('data-etonia-duration-ms');
+    }
+    final XmlElement? message = root.childElements.where((XmlElement node) {
+      return node.name.local.toLowerCase() == 'desc' &&
+          node.getAttribute('data-etonia-role') == 'message';
+    }).firstOrNull;
+    if (message == null || message.innerText.trim().isEmpty) {
+      final XmlElement? description = root.childElements.where((
+        XmlElement node,
+      ) {
+        return node.name.local.toLowerCase() == 'desc' &&
+            node.getAttribute('data-etonia-role') == null &&
+            node.innerText.trim().isNotEmpty;
+      }).firstOrNull;
+      if (description != null) {
+        description.setAttribute('data-etonia-role', 'message');
+        message?.parent?.children.remove(message);
+      } else {
+        throw const FormatException('SVG response has no message');
+      }
+    }
+    // Re-run every safety, resource, size and geometry check after repair.
+    return EditableSvg.parse(root.toXmlString(), modelResponse: true);
+  }
 
   /// Parses and sanitizes an SVG. External resources and executable content
   /// are rejected rather than fetched or partially retained.

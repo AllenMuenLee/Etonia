@@ -133,7 +133,10 @@ void main() {
       final String notation = AiPrompts.systemFor(notationEnabled: true);
       expect(notation, contains('data-etonia-role="citation"'));
       expect(notation, contains('[[L12-L30]]'));
-      expect(notation, contains('[[C top left bottom right]]'));
+      expect(
+        notation,
+        contains('highlight the PDF element directly using its element lines'),
+      );
     });
   });
 

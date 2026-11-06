@@ -9,7 +9,6 @@ import {
   userFor,
 } from "../_shared/common.ts";
 import {
-  answerReserve,
   billingModel,
   combineSteps,
   configuredDrawingModel,
@@ -19,7 +18,7 @@ import {
   providerAnswer,
   providerRequest,
   readProviderStream,
-  reservationCap,
+  requestModel,
   stepMessage,
   twoStep,
   validateInput,
@@ -86,7 +85,8 @@ Deno.serve(endpoint(async (req) => {
   await rpc(db, "billing_rate_limit", { p_user: user });
   const input = validateInput(await readBody(req, null));
   const catalog = JSON.parse(secret("AI_MODEL_CONFIG"));
-  const model = modelConfig(catalog, input.model);
+  const modelAlias = requestModel(input, Deno.env.get("AI_NOTATION_MODEL"));
+  const model = modelConfig(catalog, modelAlias);
   const key = secret(providerKeys[model.provider]);
   // The answer model is user-selected. Notation/animation is controlled only
   // by the server environment, with Luna as the default.
@@ -96,11 +96,12 @@ Deno.serve(endpoint(async (req) => {
   const drawerKey = drawer ? secret(providerKeys[drawer.provider]) : "";
   // Live store verification fails closed, including renewals, refunds and expiry.
   await reconcile(db, user);
-  const reservation = await rpc(db, "ai_reserve", {
+  // Stop using reserve token thing: if remaining token balance > 0 (or model unlimited),
+  // always accept the request without holding/deducting balance upfront.
+  await rpc(db, "ai_reserve", {
     p_user: user,
     p_request: input.requestId,
-    p_model: billingModel(input.model, drawerAlias),
-    p_max: reservationCap(model, input, drawer),
+    p_model: billingModel(modelAlias, drawerAlias),
   });
   const settle = (cost: number, tokensIn = 0, tokensOut = 0, release = false) =>
     rpc(db, "ai_settle", {
@@ -151,12 +152,9 @@ Deno.serve(endpoint(async (req) => {
     };
   };
   try {
-    // The drawing step is paid for out of the hold too, so the answer gets
-    // what is left of it.
-    const answerHold = drawer && !reservation.unlimited
-      ? answerReserve(reservation.reserved, drawer, input)
-      : reservation.reserved;
-    const maxOutput = outputBudget(model, input, answerHold, reservation.unlimited, two);
+    // If the user's remaining token balance is above 0, always accept the request
+    // and provide the full model output budget without artificial hold throttling.
+    const maxOutput = outputBudget(model, two);
     const started = Date.now();
     const first = await ask(
       providerRequest(model, input, maxOutput, key, two ? { step: "text" } : undefined),
@@ -189,7 +187,7 @@ Deno.serve(endpoint(async (req) => {
             providerRequest(
               drawer,
               input,
-              outputBudget(drawer, input, 0, true),
+              outputBudget(drawer, false),
               drawerKey,
               {
                 step: "notation",

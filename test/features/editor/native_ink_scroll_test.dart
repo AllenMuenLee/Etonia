@@ -11,7 +11,7 @@ import 'package:greatnote/features/editor/page/page_setup.dart';
 import '../../helpers/pump_app.dart';
 
 void main() {
-  testWidgets('scrolling clears the screen-space native ink preview', (
+  testWidgets('scrolling drops only the native stroke being drawn', (
     WidgetTester tester,
   ) async {
     debugDefaultTargetPlatformOverride = TargetPlatform.android;
@@ -58,7 +58,8 @@ void main() {
     );
     await tester.pump();
 
-    expect(calls, contains('clearAllPreviews'));
+    expect(calls, contains('clearLivePreview'));
+    expect(calls, isNot(contains('finishPreview')));
 
     await first.up();
     await second.up();

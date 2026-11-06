@@ -15,10 +15,14 @@
         <meta-data
             android:name="io.flutter.embedding.android.EnableImpeller"
             android:value="false" />
+        <!-- PDFium's font callbacks belong to one engine's worker isolate.
+             Reuse that engine for PDF opens/shares from other tasks; singleTop
+             can create a second engine and cause a native callback SIGABRT.
+             MainActivity.onNewIntent forwards each new document to Dart. -->
         <activity
             android:name=".MainActivity"
             android:exported="true"
-            android:launchMode="singleTop"
+            android:launchMode="singleTask"
             android:taskAffinity=""
             android:theme="@style/LaunchTheme"
             android:configChanges="orientation|keyboardHidden|keyboard|screenSize|smallestScreenSize|locale|layoutDirection|fontScale|screenLayout|density|uiMode"

@@ -20,6 +20,44 @@ EditableSvg _svg(String body, {String animation = ''}) => EditableSvg.parse(
 
 void main() {
   group('SvgInkConverter', () {
+    test('keeps good shapes on both sides of a malformed shape', () {
+      final EditableSvg svg = _svg(
+        '<path d="M10 20 L90 20" stroke="black" fill="none"/>'
+        '<path d="invalid path"/>'
+        '<g transform="invalid(1)"><path d="M10 30 L90 30"/></g>'
+        '<path d="M10 40 L90 40" stroke="black" fill="none"/>',
+      );
+      expect(
+        () => SvgInkConverter.convert(
+          svg,
+          defaultInk: InkPalette.ink,
+          defaultWidth: 2,
+        ),
+        throwsFormatException,
+      );
+      final SvgInkConversion result = SvgInkConverter.convert(
+        svg,
+        defaultInk: InkPalette.ink,
+        defaultWidth: 2,
+        skipInvalidElements: true,
+      );
+      expect(result.traces, hasLength(2));
+      expect(result.traces.first.points.first.y, closeTo(20, 1));
+      expect(result.traces.last.points.first.y, closeTo(40, 1));
+    });
+
+    test('does not apply empty notation when every shape is invalid', () {
+      expect(
+        () => SvgInkConverter.convert(
+          _svg('<path d="invalid path"/>'),
+          defaultInk: InkPalette.ink,
+          defaultWidth: 2,
+          skipInvalidElements: true,
+        ),
+        throwsFormatException,
+      );
+    });
+
     test('turns every supported SVG contour into a native trace', () {
       final SvgInkConversion result = SvgInkConverter.convert(
         _svg('''

@@ -5,6 +5,7 @@ import 'package:greatnote/app/theme/app_tokens.dart';
 import 'package:greatnote/features/editor/ink/ink_canvas.dart';
 import 'package:greatnote/features/editor/ink/ink_controller.dart';
 import 'package:greatnote/features/editor/ink/ink_palette.dart';
+import 'package:greatnote/features/editor/ink/ink_painter.dart';
 import 'package:greatnote/features/editor/ink/ink_sample.dart';
 import 'package:greatnote/features/editor/ink/pen_settings.dart';
 import 'package:greatnote/features/editor/ink/stroke.dart';
@@ -40,6 +41,47 @@ void _expectFinite(Stroke stroke) {
 }
 
 void main() {
+  testWidgets(
+    'pinching keeps caching enabled without changing the stored stroke',
+    (WidgetTester tester) async {
+      final Stroke stroke = Stroke.fromPoints(
+        style: const StrokeStyle(ink: InkPalette.ink, width: 2),
+        points: const <InkVector>[InkVector(200, 200), InkVector(400, 200)],
+      );
+      final InkController controller = await pumpEditor(
+        tester,
+        strokes: <Stroke>[stroke],
+      );
+      final Finder completed = find.byWidgetPredicate(
+        (Widget widget) =>
+            widget is CustomPaint && widget.painter is CompletedStrokesPainter,
+      );
+      expect(tester.widget<CustomPaint>(completed.first).willChange, isFalse);
+      final double initialScale = canvasScale(tester);
+      final TestGesture left = await tester.startGesture(
+        pageToGlobal(tester, const Offset(200, 200)),
+        pointer: 1,
+        kind: PointerDeviceKind.touch,
+      );
+      final TestGesture right = await tester.startGesture(
+        pageToGlobal(tester, const Offset(400, 200)),
+        pointer: 2,
+        kind: PointerDeviceKind.touch,
+      );
+      await left.moveBy(const Offset(-20, 0));
+      await right.moveBy(const Offset(20, 0));
+      await tester.pump();
+      expect(canvasScale(tester), greaterThan(initialScale));
+      expect(tester.widget<CustomPaint>(completed.first).willChange, isFalse);
+      expect(controller.strokes.single, same(stroke));
+      await left.up();
+      await right.up();
+      await tester.pump();
+      expect(tester.widget<CustomPaint>(completed.first).willChange, isFalse);
+      expect(controller.strokes.single, same(stroke));
+    },
+  );
+
   testWidgets('drawing shows ink during the stroke and keeps it after', (
     WidgetTester tester,
   ) async {

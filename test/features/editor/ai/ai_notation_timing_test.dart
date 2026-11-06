@@ -302,16 +302,22 @@ void main() {
     expect(on, contains('(maximum 24)'));
     expect(on, contains('The steps loop until the user stops animation'));
     expect(on, contains('data-etonia-duration-ms on the root from 300'));
-    expect(on, contains('Do not use JavaScript'));
+    expect(
+      on,
+      contains('Express the complete animation through these step attributes'),
+    );
     for (final String gone in <String>['duration_ms', 'start_ms', 'end_ms']) {
       expect(on, isNot(contains(gone)));
     }
     final String staticOnly = AiPrompts.systemFor(notationEnabled: true);
-    expect(staticOnly, contains('Animation is disabled'));
-    expect(staticOnly, contains('omit data-etonia-step'));
+    expect(
+      staticOnly,
+      contains('Use static SVG geometry and text for every element'),
+    );
+    expect(staticOnly, isNot(contains('data-etonia-step')));
     expect(staticOnly, isNot(contains('Animation is enabled')));
     final String off = AiPrompts.systemFor(notationEnabled: false);
     expect(off, isNot(contains('data-etonia-step')));
-    expect(off, contains('return no visible SVG elements'));
+    expect(off, contains('The root contains only title and the message desc'));
   });
 }

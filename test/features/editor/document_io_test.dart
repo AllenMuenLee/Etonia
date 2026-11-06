@@ -2,6 +2,7 @@ import 'dart:convert';
 import 'dart:typed_data';
 import 'dart:ui';
 
+import 'package:flutter/material.dart' hide Image;
 import 'package:flutter_test/flutter_test.dart';
 import 'package:image/image.dart' as image;
 import 'package:greatnote/app/greatnote_app.dart';
@@ -10,6 +11,7 @@ import 'package:greatnote/features/editor/document_io/document_importer.dart';
 import 'package:greatnote/features/editor/document_io/document_io_config.dart';
 import 'package:greatnote/features/editor/document_io/document_models.dart';
 import 'package:greatnote/features/editor/document_io/document_platform.dart';
+import 'package:greatnote/features/editor/document_io/image_layer.dart';
 import 'package:greatnote/features/editor/document_io/pdf_exporter.dart';
 import 'package:greatnote/features/editor/document_io/pdf_page_layer.dart';
 import 'package:greatnote/features/editor/document_io/pdf_selection_image.dart';
@@ -182,8 +184,48 @@ void main() {
     );
     expect(controller.clipboard!.images, const <NoteImageElement>[excerpt]);
     expect(controller.paste(at: const InkVector(200, 200)), isTrue);
-    expect(controller.images.single.center, const InkVector(200, 200));
+    expect(controller.images.first.center, const InkVector(200, 200));
+    expect(controller.paste(at: const InkVector(300, 300)), isTrue);
+    expect(controller.images.length, 2);
+    expect(controller.images[0].id, isNot(controller.images[1].id));
   });
+
+  testWidgets(
+    'PageImageLayer handles duplicate image IDs gracefully without throwing duplicate key errors',
+    (WidgetTester tester) async {
+      const NoteImageElement image1 = NoteImageElement(
+        id: 'dup-id',
+        assetId: 'asset-1',
+        pixelSize: Size(100, 100),
+        center: InkVector(50, 50),
+        size: Size(100, 100),
+      );
+      const NoteImageElement image2 = NoteImageElement(
+        id: 'dup-id',
+        assetId: 'asset-2',
+        pixelSize: Size(100, 100),
+        center: InkVector(150, 150),
+        size: Size(100, 100),
+      );
+      final InkController controller = InkController(
+        images: const <NoteImageElement>[image1, image2],
+      );
+      addTearDown(controller.dispose);
+
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Scaffold(
+            body: PageImageLayer(
+              controller: controller,
+              readAsset: (String id) async => Uint8List(0),
+            ),
+          ),
+        ),
+      );
+
+      expect(tester.takeException(), isNull);
+    },
+  );
 
   test('without its paper, a lasso selects the editable ink alone', () {
     final Stroke stroke = Stroke.fromPoints(

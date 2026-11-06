@@ -206,7 +206,7 @@ class _AiNoteMarksLayerState extends State<AiNoteMarksLayer> {
 /// Marks on [page] what the paragraph last read in the chat is tied to:
 /// highlights the ink it cites and the strokes drawn for it, and rings the
 /// details of a picture or printed page it names. A picture is never
-/// highlighted. Stays on whether or not the chat is open.
+/// highlighted. Only shown while the AI assistant is open.
 ///
 /// Goes under the ink, as a highlighter's mark does, so the ink stays as dark
 /// and as readable as it was. It is never part of the ink.
@@ -271,6 +271,7 @@ class _AiCitationHighlightState extends State<AiCitationHighlight> {
   /// Scrolls so that all that is marked here is in view. Returns false when
   /// this page cannot tell.
   bool _reveal() {
+    if (!widget.assistant.isOpen) return false;
     final AiParagraphLinks? links =
         widget.assistant.paragraphFocus.value?.links;
     if (links == null || !mounted) return false;
@@ -294,11 +295,13 @@ class _AiCitationHighlightState extends State<AiCitationHighlight> {
       child: ExcludeSemantics(
         child: ListenableBuilder(
           listenable: Listenable.merge(<Listenable>[
+            widget.assistant.placement,
             widget.assistant.paragraphFocus,
             widget.page.documentRevisionListenable,
             widget.page.hiddenStrokesListenable,
           ]),
           builder: (BuildContext context, Widget? _) {
+            if (!widget.assistant.isOpen) return const SizedBox.expand();
             final AiParagraphLinks? links =
                 widget.assistant.paragraphFocus.value?.links;
             if (links == null) return const SizedBox.expand();

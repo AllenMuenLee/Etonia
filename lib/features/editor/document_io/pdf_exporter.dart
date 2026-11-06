@@ -5,6 +5,7 @@ import 'dart:typed_data';
 import 'dart:ui' as ui;
 
 import 'package:flutter/material.dart' show Brightness;
+import 'package:flutter/widgets.dart' show Matrix4;
 import 'package:path_provider/path_provider.dart';
 import 'package:pdf/pdf.dart';
 import 'package:pdf/widgets.dart' as pw;
@@ -589,6 +590,19 @@ Future<Uint8List> _encodePng(ui.Image image) async {
   }
 }
 
+/// Runs [paint] in page space: origin at the top-left, y growing down, as
+/// on screen. PDF's own space grows up from the bottom-left, so the canvas
+/// is flipped first; without it every page-space mark lands upside down.
+void _paintTopDown(PdfGraphics canvas, PdfPoint size, void Function() paint) {
+  canvas
+    ..saveContext()
+    ..setTransform(
+      Matrix4(1, 0, 0, 0, 0, -1, 0, 0, 0, 0, 1, 0, 0, size.y, 0, 1),
+    );
+  paint();
+  canvas.restoreContext();
+}
+
 Future<Uint8List> _generateInIsolate(_PreparedExport prepared) =>
     Isolate.run(() => _generatePdf(prepared));
 
@@ -613,12 +627,16 @@ Future<Uint8List> _generatePdf(_PreparedExport export) async {
         pw.Positioned.fill(
           child: pw.CustomPaint(
             painter: (PdfGraphics canvas, PdfPoint size) {
-              _paintRules(
+              _paintTopDown(
                 canvas,
-                prepared.background,
-                scale,
-                export.pageConfig,
                 size,
+                () => _paintRules(
+                  canvas,
+                  prepared.background,
+                  scale,
+                  export.pageConfig,
+                  size,
+                ),
               );
             },
           ),
@@ -665,7 +683,11 @@ Future<Uint8List> _generatePdf(_PreparedExport export) async {
       pw.Positioned.fill(
         child: pw.CustomPaint(
           painter: (PdfGraphics canvas, PdfPoint size) {
-            _paintPreparedStrokes(canvas, prepared.strokes, scale);
+            _paintTopDown(
+              canvas,
+              size,
+              () => _paintPreparedStrokes(canvas, prepared.strokes, scale),
+            );
           },
         ),
       ),
@@ -674,9 +696,11 @@ Future<Uint8List> _generatePdf(_PreparedExport export) async {
         pw.Positioned.fill(
           child: pw.CustomPaint(
             painter: (PdfGraphics canvas, PdfPoint size) {
-              for (final _PreparedSticky note in prepared.stickies) {
-                _paintPreparedSticky(canvas, note, scale);
-              }
+              _paintTopDown(canvas, size, () {
+                for (final _PreparedSticky note in prepared.stickies) {
+                  _paintPreparedSticky(canvas, note, scale);
+                }
+              });
             },
           ),
         ),
@@ -785,6 +809,12 @@ void _paintPreparedStrokes(
   }
 }
 
+/// The light theme's page rule and margin rule (`AppColors.pageRule`,
+/// `pageMarginRule`), opaque: a PDF stroke colour carries no alpha, so a
+/// translucent tint would print as its full, dark colour.
+const PdfColor _pageRule = PdfColor.fromInt(0xFFE1E1E4);
+const PdfColor _pageMarginRule = PdfColor.fromInt(0xFFE8C8C8);
+
 void _paintRules(
   PdfGraphics canvas,
   PageBackground background,
@@ -795,7 +825,7 @@ void _paintRules(
   final double width = outputSize.x;
   final double height = outputSize.y;
   canvas
-    ..setStrokeColor(const PdfColor.fromInt(0x2E64748B))
+    ..setStrokeColor(_pageRule)
     ..setLineWidth(math.max(0.5, scale));
   void vertical(double x) {
     canvas
@@ -822,7 +852,7 @@ void _paintRules(
       ) {
         horizontal(y);
       }
-      canvas.setStrokeColor(const PdfColor.fromInt(0x4DB85C5C));
+      canvas.setStrokeColor(_pageMarginRule);
       vertical(config.marginRuleInset);
     case PageBackground.grid:
       for (
@@ -840,7 +870,7 @@ void _paintRules(
         vertical(x);
       }
     case PageBackground.dotted:
-      canvas.setFillColor(const PdfColor.fromInt(0x5964748B));
+      canvas.setFillColor(_pageRule);
       for (
         double y = config.dotSpacing;
         y * scale <= height;

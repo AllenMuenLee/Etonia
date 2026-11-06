@@ -3,7 +3,6 @@ import 'dart:async' show unawaited;
 import 'package:flutter/foundation.dart' show ValueListenable;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
-import 'package:gpt_markdown/gpt_markdown.dart';
 import 'package:speech_to_text/speech_recognition_error.dart';
 import 'package:speech_to_text/speech_recognition_result.dart';
 import 'package:speech_to_text/speech_to_text.dart';
@@ -19,7 +18,8 @@ import '../ai/ai_citation.dart';
 import '../ai/ai_client.dart';
 import '../ai/ai_config.dart';
 import '../ai/ai_usage_gate.dart';
-import '../ai/chat_math.dart';
+import 'rich_answer_markdown.dart';
+export 'rich_answer_markdown.dart' show AiAnswerMarkdown;
 import 'ai_citation_highlight.dart';
 
 /// The AI assistant: the selected ink the conversation is about, the
@@ -37,6 +37,7 @@ class AiAssistantPanel extends StatefulWidget {
     required this.onNewChat,
     required this.onAddToContext,
     this.onShowOnNote,
+    this.onImportToStudyDesk,
     this.config = const AiLayoutConfig(),
     this.composerKey,
     this.onOpenPlans,
@@ -77,6 +78,7 @@ class AiAssistantPanel extends StatefulWidget {
   /// Called to bring into view on the note what the focused paragraph is tied
   /// to, as its citation was pressed.
   final VoidCallback? onShowOnNote;
+  final VoidCallback? onImportToStudyDesk;
 
   final AiLayoutConfig config;
 
@@ -469,6 +471,7 @@ class _AiAssistantPanelState extends State<AiAssistantPanel> {
                   controller: controller,
                   onClose: widget.onClose,
                   onOpenPlans: widget.onOpenPlans,
+                  onImportToStudyDesk: widget.onImportToStudyDesk,
                 ),
                 const Divider(),
                 Expanded(
@@ -775,11 +778,13 @@ class _Header extends StatelessWidget {
     required this.controller,
     required this.onClose,
     required this.onOpenPlans,
+    this.onImportToStudyDesk,
   });
 
   final AiAssistantController controller;
   final VoidCallback onClose;
   final VoidCallback? onOpenPlans;
+  final VoidCallback? onImportToStudyDesk;
 
   @override
   Widget build(BuildContext context) {
@@ -825,6 +830,17 @@ class _Header extends StatelessWidget {
               ],
             ),
           ),
+          if (onImportToStudyDesk != null)
+            IconButton(
+              key: const ValueKey('ai-import-to-study-desk'),
+              tooltip: 'Import conversation into Study Desk',
+              onPressed:
+                  controller.messages.isEmpty ||
+                      controller.requestState == AiRequestState.sending
+                  ? null
+                  : onImportToStudyDesk,
+              icon: const Icon(AppIcons.studyDesk),
+            ),
           if (gate != null && openPlans != null)
             _CreditsPill(
               label: gate.creditsLabel,
@@ -1422,35 +1438,6 @@ class _MessageBubble extends StatelessWidget {
           ),
         ],
       ),
-    );
-  }
-}
-
-/// An answer's Markdown, with its formulas, as every chat sets it.
-class AiAnswerMarkdown extends StatelessWidget {
-  const AiAnswerMarkdown(this.source, {super.key});
-
-  final String source;
-
-  /// Stands in for an image the answer links to.
-  static Widget _imagePlaceholder(
-    BuildContext context,
-    String url,
-    double? width,
-    double? height,
-  ) {
-    return Text('[image]', style: Theme.of(context).textTheme.labelMedium);
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return GptMarkdown(
-      delimitBareMath(normalizeInlineMath(source)),
-      style: Theme.of(context).textTheme.bodyMedium,
-      textDirection: Directionality.of(context),
-      useDollarSignsForLatex: true,
-      // An answer never makes the app fetch anything.
-      imageBuilder: _imagePlaceholder,
     );
   }
 }
