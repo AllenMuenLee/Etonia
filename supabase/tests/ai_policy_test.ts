@@ -76,9 +76,11 @@ Deno.test("test grading uses the server notation model in a single metered pass"
   assert.equal(twoStep(config, grading), false);
   const sent = providerRequest(config, grading, 8192, "server-key").body as any;
   assert.equal(sent.stream, false);
-  assert.ok(sent.messages.at(-1).content.some((part: any) =>
-    part.type === "text" && part.text.includes('data-etonia-kind="existing-ink"')
-  ));
+  assert.ok(
+    sent.messages.at(-1).content.some((part: any) =>
+      part.type === "text" && part.text.includes('data-etonia-kind="existing-ink"')
+    ),
+  );
   assert.ok(!sent.messages[0].content.includes("A separate step draws"));
   assert.throws(() => validateInput({ ...input, task: "unknown" }));
   assert.throws(() => requestModel(grading, "client-model"));
@@ -803,6 +805,9 @@ Deno.test("a streamed drawing reads as the whole answer would, on every provider
     output: 4,
     cached: 2,
     cacheWrites: 0,
+    reasoning: 0,
+    imageTokens: null,
+    finishReason: null,
   });
 
   const claude = await readProviderStream(
@@ -829,7 +834,16 @@ Deno.test("a streamed drawing reads as the whole answer would, on every provider
     ),
     () => {},
   );
-  assert.deepEqual(claude, { answer: "<svg/>", input: 10, output: 9, cached: 3, cacheWrites: 2 });
+  assert.deepEqual(claude, {
+    answer: "<svg/>",
+    input: 10,
+    output: 9,
+    cached: 3,
+    cacheWrites: 2,
+    reasoning: null,
+    imageTokens: null,
+    finishReason: null,
+  });
 
   const gemini = await readProviderStream(
     { ...streamModel, provider: "gemini" },
@@ -848,11 +862,27 @@ Deno.test("a streamed drawing reads as the whole answer would, on every provider
     ),
     () => {},
   );
-  assert.deepEqual(gemini, { answer: "<svg/>", cached: 0, cacheWrites: 0, input: 6, output: 5 });
+  assert.deepEqual(gemini, {
+    answer: "<svg/>",
+    cached: 0,
+    cacheWrites: 0,
+    input: 6,
+    output: 5,
+    reasoning: 3,
+    imageTokens: null,
+    finishReason: null,
+  });
 });
 
 Deno.test("liveNotation is a boolean that only goes with a notation request", () => {
-  const notationContext = { width: 800, height: 1100, left: 0.1, top: 0.2, right: 0.4, bottom: 0.5 };
+  const notationContext = {
+    width: 800,
+    height: 1100,
+    left: 0.1,
+    top: 0.2,
+    right: 0.4,
+    bottom: 0.5,
+  };
   const withNote = { ...input, notationInstruction: "Draw", notationContext };
   assert.equal(validateInput({ ...withNote, liveNotation: true }).liveNotation, true);
   assert.throws(() => validateInput({ ...withNote, liveNotation: "yes" }), Failure);
@@ -895,7 +925,7 @@ Deno.test("the service numbers an answer's paragraphs as the app does", () => {
     ["One.\n\n$$\na\n\nb\n$$\n\nThree.", 3],
     ["One.\n\n$$a$$\n\nThree.", 3],
     ['One.\n\n<svg viewBox="0 0 10 10">\n\n<circle r="2"/>\n</svg>\n\nThree.', 3],
-    ['One.\n\n```svg\n<svg>\n\n</svg>\n```\n\nThree.', 3],
+    ["One.\n\n```svg\n<svg>\n\n</svg>\n```\n\nThree.", 3],
     ["One.\n\n[[L5-L9]]\n\nTwo.", 2],
     ["[[L5-L9]]\n\nOne.", 1],
     ["One.\n\n[[C 1 2 3 4]]\n\nTwo.", 2],
@@ -930,7 +960,7 @@ Deno.test("only the drawing is told how to cite, and the words never get the lin
   // An older app still sends them; they go no further.
   assert(!words.includes("SOURCE LINES"));
   assert(!words.includes("L5-L9 note 80 220 240 30"));
-  assert(!words.includes("data-etonia-role=\\\"citation\\\""));
+  assert(!words.includes('data-etonia-role=\\"citation\\"'));
 
   const drawing = JSON.stringify(
     providerRequest(model, cited, 256, "k", {
@@ -942,7 +972,7 @@ Deno.test("only the drawing is told how to cite, and the words never get the lin
   assert(drawing.includes("[P1]"));
   assert(drawing.includes("[P2]"));
   assert(drawing.includes("data-etonia-paragraph"));
-  assert(drawing.includes("data-etonia-role=\\\"citation\\\""));
+  assert(drawing.includes('data-etonia-role=\\"citation\\"'));
   assert(drawing.includes("[[L12-L30]]"));
 
   // A request with Notation off has no drawing, and so cites nothing.
@@ -959,4 +989,59 @@ Deno.test("only the drawing is told how to cite, and the words never get the lin
 Deno.test("lines an older app sends must still be a short string", () => {
   assert.throws(() => validateInput({ ...input, sourceLines: 5 }));
   assert.throws(() => validateInput({ ...input, sourceLines: "x".repeat(16001) }));
+});
+
+Deno.test("a routed request is told how hard to think, and an older one is not", () => {
+  const plain = (provider: "openai" | "claude" | "gemini", effort?: "low" | "high") =>
+    providerRequest({ ...config, provider }, input, 8192, "server-key", undefined, effort)
+      .body as any;
+  assert.equal(plain("openai").reasoning_effort, undefined);
+  assert.equal(plain("openai", "high").reasoning_effort, "high");
+  assert.equal(plain("claude").thinking, undefined);
+  assert.deepEqual(plain("claude", "low").output_config, { effort: "low" });
+  assert.equal(plain("gemini").generationConfig.thinkingConfig, undefined);
+  assert.equal(plain("gemini", "high").generationConfig.thinkingConfig.thinkingLevel, "HIGH");
+  // The drawing pass keeps medium unless it was routed to another level.
+  const drawing = (effort?: "low") =>
+    providerRequest(config, input, 8192, "server-key", {
+      step: "notation",
+      message: "words",
+    }, effort).body as any;
+  assert.equal(drawing().reasoning_effort, "medium");
+  assert.equal(drawing("low").reasoning_effort, "low");
+  // Models are picked by the router when the app says `auto`.
+  assert.equal(
+    validateInput({ ...input, model: "auto", routing: { effort: "low" } }).model,
+    "auto",
+  );
+  assert.throws(() => validateInput({ ...input, model: "gpt-5" }));
+});
+
+Deno.test("a Claude answer never sends an empty system block", () => {
+  const claude = {
+    provider: "claude" as const,
+    model: "claude-test",
+    inputMicroPerKilo: 1,
+    outputMicroPerKilo: 1,
+    maxOutputTokens: 1024,
+  };
+  const input = {
+    requestId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+    model: "auto",
+    prompt: "hi",
+    systemInstruction: "be brief",
+    selectedImage: "iVBORw0KGgo=",
+  } as any;
+  for (
+    const step of [undefined, { step: "text" }, {
+      step: "notation",
+      visual: "static",
+      message: "x",
+    }]
+  ) {
+    const sent = providerRequest(claude, input, 512, "key", step as any, "low");
+    const blocks = (sent.body as any).system as { text: string }[];
+    assert.ok(blocks.length >= 1);
+    for (const block of blocks) assert.ok(block.text.trim().length > 0, JSON.stringify(step));
+  }
 });

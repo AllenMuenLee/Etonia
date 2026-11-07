@@ -60,6 +60,21 @@ the request under its own terms and privacy policy.
 We record how much AI you used (token counts and cost) to keep your credit
 balance, never what you asked.
 
+## Smarter search in the Study Desk
+
+So that the Study Desk can find the right pages by meaning as well as by
+words, Etonia turns the notes you have put on the desk into numbers (called
+embeddings). To do that it sends the text of each part of those notes, and a
+picture of the parts that are drawings, to Google's embedding service through
+our server. This happens once per part, and again only when that part changes.
+It covers only the notes on your desk, not your whole library, and you can turn
+it off, in which case the Study Desk searches by words on your device alone.
+
+Our server does not store or log what is sent or the numbers that come back.
+The numbers are kept only on your device, next to your notes, and are deleted
+with them. Embeddings are billed against your credit like other AI use, and we
+record only their count and cost.
+
 ## Purchases
 
 Subscriptions are sold and billed by Apple (or Google Play on Android). We do

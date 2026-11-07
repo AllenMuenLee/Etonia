@@ -7,6 +7,7 @@ import 'package:flutter/foundation.dart';
 import '../file_note_repository.dart';
 import '../note_repository.dart';
 import 'study_desk_models.dart';
+import 'study_vectors.dart';
 
 /// Where the desk's sources and chats are kept between launches.
 abstract interface class StudyDeskStore {
@@ -304,6 +305,15 @@ StudyChunkDiskCache? studyChunkCacheFor(NoteRepository repository) =>
     switch (repository) {
       final FileNoteRepository files => FileStudyChunkCache(
         Directory('${files.directory.path}/study_index'),
+      ),
+      _ => null,
+    };
+
+/// The vectors cache of [repository], or null for a library with no disk.
+StudyVectorDiskCache? studyVectorCacheFor(NoteRepository repository) =>
+    switch (repository) {
+      final FileNoteRepository files => FileStudyVectorCache(
+        Directory('${files.directory.path}/study_vectors'),
       ),
       _ => null,
     };

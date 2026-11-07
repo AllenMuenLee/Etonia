@@ -2,7 +2,9 @@ import 'package:flutter/material.dart';
 
 import '../../../app/theme/app_icons.dart';
 import '../../../app/theme/app_tokens.dart';
+import '../../../shared/widgets/pressable.dart';
 import 'study_desk_widgets.dart';
+import 'study_motion.dart';
 import 'study_desk_controller.dart';
 import 'study_history_sidebar.dart' show studyCourseColor;
 import 'study_source_picker.dart';
@@ -135,18 +137,23 @@ class StudyDeskOverview extends StatelessWidget {
                         spacing: 8,
                         runSpacing: 4,
                         children: [
-                          OutlinedButton.icon(
-                            key: const ValueKey('study-create-tests'),
-                            onPressed: () => onCreate(StudyMaterialKind.tests),
-                            icon: const Icon(AppIcons.add, size: 18),
-                            label: const Text('New test'),
+                          Pressable(
+                            child: OutlinedButton.icon(
+                              key: const ValueKey('study-create-tests'),
+                              onPressed: () =>
+                                  onCreate(StudyMaterialKind.tests),
+                              icon: const Icon(AppIcons.add, size: 18),
+                              label: const Text('New test'),
+                            ),
                           ),
-                          OutlinedButton.icon(
-                            key: const ValueKey('study-create-flashcards'),
-                            onPressed: () =>
-                                onCreate(StudyMaterialKind.flashcards),
-                            icon: const Icon(AppIcons.add, size: 18),
-                            label: const Text('New flashcards'),
+                          Pressable(
+                            child: OutlinedButton.icon(
+                              key: const ValueKey('study-create-flashcards'),
+                              onPressed: () =>
+                                  onCreate(StudyMaterialKind.flashcards),
+                              icon: const Icon(AppIcons.add, size: 18),
+                              label: const Text('New flashcards'),
+                            ),
                           ),
                         ],
                       ),
@@ -159,20 +166,36 @@ class StudyDeskOverview extends StatelessWidget {
                               style: Theme.of(context).textTheme.titleMedium,
                             ),
                           ),
-                          Text(
-                            '${entries.length} items',
-                            style: TextStyle(color: colors.textSecondary),
+                          // The count changes in place, as a fade.
+                          AnimatedSwitcher(
+                            duration: AppMotion.resolve(
+                              context,
+                              AppMotion.stateFade,
+                            ),
+                            switchInCurve: AppMotion.fadeInCurve,
+                            switchOutCurve: AppMotion.fadeOutCurve,
+                            child: Text(
+                              '${entries.length} items',
+                              key: ValueKey<int>(entries.length),
+                              style: TextStyle(color: colors.textSecondary),
+                            ),
                           ),
                         ],
                       ),
-                      if (entries.isEmpty)
-                        Padding(
-                          padding: const EdgeInsets.symmetric(vertical: 24),
-                          child: Text(
-                            'Your chats, tests, and flashcards will appear here.',
-                            style: TextStyle(color: colors.textSecondary),
-                          ),
-                        ),
+                      StudyDisclose(
+                        child: entries.isEmpty
+                            ? Padding(
+                                key: const ValueKey('study-overview-empty'),
+                                padding: const EdgeInsets.symmetric(
+                                  vertical: 24,
+                                ),
+                                child: Text(
+                                  'Your chats, tests, and flashcards will appear here.',
+                                  style: TextStyle(color: colors.textSecondary),
+                                ),
+                              )
+                            : null,
+                      ),
                     ],
                   ),
                 ),
@@ -183,35 +206,42 @@ class StudyDeskOverview extends StatelessWidget {
                   itemCount: entries.length,
                   itemBuilder: (context, index) {
                     final entry = entries[index];
-                    return Padding(
-                      padding: const EdgeInsets.only(bottom: AppSpacing.xs),
-                      child: StudySurface(
-                        onTap: entry.open,
-                        child: ListTile(
-                          key: ValueKey('study-class-material-${entry.id}'),
-                          leading: Icon(
-                            entry.icon,
-                            size: 20,
-                            color: colors.textSecondary,
-                          ),
-                          title: Text(
-                            entry.title,
-                            maxLines: 2,
-                            overflow: TextOverflow.ellipsis,
-                          ),
-                          contentPadding: const EdgeInsets.symmetric(
-                            horizontal: AppSpacing.md,
-                            vertical: AppSpacing.xs,
-                          ),
-                          subtitle: Text(
-                            entry.label,
-                            style: Theme.of(context).textTheme.bodySmall
-                                ?.copyWith(color: colors.textSecondary),
-                          ),
-                          trailing: Icon(
-                            AppIcons.disclosure,
-                            size: 16,
-                            color: colors.textSecondary,
+                    // One after another the first time they are in view, and
+                    // not again as they are scrolled to or rebuilt.
+                    return StudyAppear(
+                      key: ValueKey('study-class-appear-${entry.id}'),
+                      once: ('study-overview', course.id, entry.id),
+                      delay: AppMotion.staggerStep * (index.clamp(0, 8) + 3),
+                      child: Padding(
+                        padding: const EdgeInsets.only(bottom: AppSpacing.xs),
+                        child: StudySurface(
+                          onTap: entry.open,
+                          child: ListTile(
+                            key: ValueKey('study-class-material-${entry.id}'),
+                            leading: Icon(
+                              entry.icon,
+                              size: 20,
+                              color: colors.textSecondary,
+                            ),
+                            title: Text(
+                              entry.title,
+                              maxLines: 2,
+                              overflow: TextOverflow.ellipsis,
+                            ),
+                            contentPadding: const EdgeInsets.symmetric(
+                              horizontal: AppSpacing.md,
+                              vertical: AppSpacing.xs,
+                            ),
+                            subtitle: Text(
+                              entry.label,
+                              style: Theme.of(context).textTheme.bodySmall
+                                  ?.copyWith(color: colors.textSecondary),
+                            ),
+                            trailing: Icon(
+                              AppIcons.disclosure,
+                              size: 16,
+                              color: colors.textSecondary,
+                            ),
                           ),
                         ),
                       ),

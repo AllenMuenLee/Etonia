@@ -28,6 +28,9 @@ class _RoutedFakeAiClient extends FakeAiClient implements AiModelRouter {
   AiModelId get defaultModel => AiModelId.luna;
 
   @override
+  bool get routes => false;
+
+  @override
   bool isModelConfigured(AiModelId model) => true;
 }
 
@@ -476,10 +479,11 @@ void main() {
       await first;
       await waitForRequest(2);
       client.answer('["Chapter 1", "Chapter 2", "Choose pages"]', index: 1);
-      client.plannerAvailable = false;
+      expect(client.studyPlanningRequests, hasLength(1));
 
       final second = desk.send('Chapter 2');
       await waitForRequest(3);
+      expect(client.studyPlanningRequests, hasLength(2));
       expect(client.requests[2].messages.last.text, contains('ENERGY_BODY'));
       expect(
         client.requests[2].messages.last.text,

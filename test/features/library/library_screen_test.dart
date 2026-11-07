@@ -389,7 +389,7 @@ void main() {
     await _pumpLibrary(tester, repository);
     expect(find.text('Nothing here yet'), findsOneWidget);
 
-    await tester.tap(find.byTooltip('New note'));
+    await tester.tap(find.byKey(const ValueKey<String>('new-note-expand')));
     await tester.pumpAndSettle();
     await tester.tap(find.text('Template…'));
     await tester.pumpAndSettle();
@@ -435,7 +435,7 @@ void main() {
     final InMemoryNoteRepository repository = _repository();
     await _pumpLibrary(tester, repository);
 
-    await tester.tap(find.byTooltip('New note'));
+    await tester.tap(find.byKey(const ValueKey<String>('new-note-expand')));
     await tester.pumpAndSettle();
     await tester.tap(find.text('Template…'));
     await tester.pumpAndSettle();
@@ -459,7 +459,7 @@ void main() {
     // The next note offers the same template first.
     await tester.tap(find.byTooltip('Back to library'));
     await tester.pumpAndSettle();
-    await tester.tap(find.byTooltip('New note'));
+    await tester.tap(find.byKey(const ValueKey<String>('new-note-expand')));
     await tester.pumpAndSettle();
     await tester.tap(find.text('Template…'));
     await tester.pumpAndSettle();
@@ -477,7 +477,7 @@ void main() {
     final InMemoryNoteRepository repository = _repository();
     await _pumpLibrary(tester, repository);
 
-    await tester.tap(find.byTooltip('New note'));
+    await tester.tap(find.byKey(const ValueKey<String>('new-note-expand')));
     await tester.pumpAndSettle();
     await tester.tap(find.text('Template…'));
     await tester.pumpAndSettle();
@@ -657,20 +657,22 @@ void main() {
   });
 
   testWidgets(
-    'New note offers test and PDF imports, a template, and quick start',
+    'New note sub-button offers test, PDF imports, and template',
     (WidgetTester tester) async {
       await _pumpLibrary(tester, _repository());
       expect(find.byTooltip('Import PDF'), findsNothing);
 
-      final Rect button = tester.getRect(find.byTooltip('New note'));
+      final Rect button = tester.getRect(
+        find.byKey(const ValueKey<String>('new-note-expand')),
+      );
 
-      await tester.tap(find.byTooltip('New note'));
+      await tester.tap(find.byKey(const ValueKey<String>('new-note-expand')));
       await tester.pumpAndSettle();
       expect(find.text('Import editable PDF'), findsNothing);
       expect(find.text('Import test'), findsOneWidget);
       // Top to bottom, with the quickest last, nearest the button.
       final List<double> rows =
-          <String>['Import PDF', 'Template…', 'Quick start']
+          <String>['Import test', 'Import PDF', 'Template…']
               .map(
                 (String label) => tester
                     .getCenter(find.widgetWithText(MenuItemButton, label))
@@ -681,7 +683,7 @@ void main() {
       expect(rows[1], lessThan(rows[2]));
       final Finder menu = find
           .ancestor(
-            of: find.widgetWithText(MenuItemButton, 'Quick start'),
+            of: find.widgetWithText(MenuItemButton, 'Template…'),
             matching: find.byType(Material),
           )
           .first;
@@ -694,7 +696,7 @@ void main() {
   ) async {
     addTearDown(tester.view.resetViewInsets);
     await _pumpLibrary(tester, _repository());
-    await tester.tap(find.byTooltip('New note'));
+    await tester.tap(find.byKey(const ValueKey<String>('new-note-expand')));
     await tester.pumpAndSettle();
     await tester.tap(find.text('Template…'));
     await tester.pumpAndSettle();
@@ -719,25 +721,28 @@ void main() {
     WidgetTester tester,
   ) async {
     await _pumpLibrary(tester, _repository());
-    await tester.tap(find.byTooltip('New note'));
+    await tester.tap(find.byKey(const ValueKey<String>('new-note-expand')));
     await tester.pumpAndSettle();
-    await tester.tap(find.text('Quick start'));
+    await tester.tap(find.text('Template…'));
+    await tester.pumpAndSettle();
+    expect(find.text('File name'), findsOneWidget);
+    await tester.tap(find.text('Create'));
     await tester.pumpAndSettle();
     expect(find.byType(EditorScreen), findsOneWidget);
     // The library is offstage now, but its menu floats in the navigator's
     // overlay and would still be painted, so offstage has to count here.
-    expect(find.text('Quick start', skipOffstage: false), findsNothing);
+    expect(find.text('Template…', skipOffstage: false), findsNothing);
 
     // Back in the library, it opens and closes as ever.
     await tester.tap(find.byTooltip('Back to library'));
     await tester.pumpAndSettle();
-    expect(find.text('Quick start'), findsNothing);
-    await tester.tap(find.byTooltip('New note'));
+    expect(find.text('Template…'), findsNothing);
+    await tester.tap(find.byKey(const ValueKey<String>('new-note-expand')));
     await tester.pumpAndSettle();
-    expect(find.text('Quick start'), findsOneWidget);
+    expect(find.text('Template…'), findsOneWidget);
     await tester.tapAt(Offset.zero);
     await tester.pumpAndSettle();
-    expect(find.text('Quick start'), findsNothing);
+    expect(find.text('Template…'), findsNothing);
   });
 
   testWidgets('quick start makes a blank A4 note, then the last template', (
@@ -749,8 +754,6 @@ void main() {
     final Set<String> seen = <String>{};
     Future<PageSetup> quickStart() async {
       await tester.tap(find.byTooltip('New note'));
-      await tester.pumpAndSettle();
-      await tester.tap(find.text('Quick start'));
       await tester.pumpAndSettle();
       // Straight into the editor, with nothing asked.
       expect(find.text('File name'), findsNothing);
@@ -767,7 +770,7 @@ void main() {
 
     expect(await quickStart(), const PageSetup());
 
-    await tester.tap(find.byTooltip('New note'));
+    await tester.tap(find.byKey(const ValueKey<String>('new-note-expand')));
     await tester.pumpAndSettle();
     await tester.tap(find.text('Template…'));
     await tester.pumpAndSettle();

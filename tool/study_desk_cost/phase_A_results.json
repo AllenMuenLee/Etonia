@@ -1,0 +1,56 @@
+{
+  "phase": "A",
+  "gate": "pass",
+  "checks": [
+    {
+      "fixture": "digital-systems-prose",
+      "task": "study.plan",
+      "pass": true
+    },
+    {
+      "fixture": "digital-systems-prose",
+      "task": "study.answer",
+      "pass": true
+    },
+    {
+      "fixture": "digital-systems-prose",
+      "task": "study.suggestions",
+      "pass": true
+    },
+    {
+      "fixture": "math-and-negation",
+      "task": "study.plan",
+      "pass": true
+    },
+    {
+      "fixture": "math-and-negation",
+      "task": "study.answer",
+      "pass": true
+    },
+    {
+      "fixture": "math-and-negation",
+      "task": "study.suggestions",
+      "pass": true
+    },
+    {
+      "fixture": "chinese-technical",
+      "task": "study.plan",
+      "pass": true
+    },
+    {
+      "fixture": "chinese-technical",
+      "task": "study.answer",
+      "pass": true
+    },
+    {
+      "fixture": "chinese-technical",
+      "task": "study.suggestions",
+      "pass": true
+    }
+  ],
+  "baseline_cost_micro": 25525,
+  "actual_A_cost_micro": 15856,
+  "cache_normalized_A_cost_micro": 23880,
+  "A_cached_tokens": 4224,
+  "limits": "Three synthetic tutor turns; actual cache conditions differ. No production savings claim."
+}

@@ -1645,7 +1645,7 @@ class _InkCanvasState extends State<InkCanvas> with WidgetsBindingObserver {
     widget.stylusOnly?.addListener(_onNativeSettingsChanged);
     widget.exclusionsChanged?.addListener(_onNativeSettingsChanged);
     widget.replay?.addListener(_onNativeSettingsChanged);
-    widget.visible?.addListener(_onNativeSettingsChanged);
+    widget.visible?.addListener(_onVisibleChanged);
     widget.ruler?.addListener(_onRulerChanged);
     widget.carry?._attach(this);
     _scheduleNativeSync();
@@ -1696,8 +1696,8 @@ class _InkCanvasState extends State<InkCanvas> with WidgetsBindingObserver {
       widget.replay?.addListener(_onNativeSettingsChanged);
     }
     if (oldWidget.visible != widget.visible) {
-      oldWidget.visible?.removeListener(_onNativeSettingsChanged);
-      widget.visible?.addListener(_onNativeSettingsChanged);
+      oldWidget.visible?.removeListener(_onVisibleChanged);
+      widget.visible?.addListener(_onVisibleChanged);
     }
     if (oldWidget.ruler != widget.ruler) {
       oldWidget.ruler?.removeListener(_onRulerChanged);
@@ -1718,6 +1718,17 @@ class _InkCanvasState extends State<InkCanvas> with WidgetsBindingObserver {
   }
 
   @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    final ValueListenable<bool>? zooming = PageViewport.zoomingOf(context);
+    if (!identical(zooming, _zoomingWatched)) {
+      _zoomingWatched?.removeListener(_onZoomingChanged);
+      _zoomingWatched = zooming;
+      zooming?.addListener(_onZoomingChanged);
+    }
+  }
+
+  @override
   void dispose() {
     _leaveCarry(widget.carry);
     _holdTimer?.cancel();
@@ -1732,7 +1743,8 @@ class _InkCanvasState extends State<InkCanvas> with WidgetsBindingObserver {
     widget.stylusOnly?.removeListener(_onNativeSettingsChanged);
     widget.exclusionsChanged?.removeListener(_onNativeSettingsChanged);
     widget.replay?.removeListener(_onNativeSettingsChanged);
-    widget.visible?.removeListener(_onNativeSettingsChanged);
+    widget.visible?.removeListener(_onVisibleChanged);
+    _zoomingWatched?.removeListener(_onZoomingChanged);
     widget.ruler?.removeListener(_onRulerChanged);
     _releaseClaims();
     _rulerReadout.dispose();
@@ -1930,6 +1942,22 @@ class _InkCanvasState extends State<InkCanvas> with WidgetsBindingObserver {
   }
 
   void _onNativeSettingsChanged() => _scheduleNativeSync();
+
+  /// Whether the page is being zoomed, as its viewport reports.
+  ValueListenable<bool>? _zoomingWatched;
+
+  /// The page moved on screen. Not told to the native side step by step
+  /// while the page is zoomed, which would be a message across the platform
+  /// channel for each page in every frame of a pinch: it is told once, where
+  /// the page ends up.
+  void _onVisibleChanged() {
+    if (_zoomingWatched?.value ?? false) return;
+    _scheduleNativeSync();
+  }
+
+  void _onZoomingChanged() {
+    if (!(_zoomingWatched?.value ?? false)) _scheduleNativeSync();
+  }
 
   /// Whether the native stylus path draws: with the pen, and not beside the
   /// ruler, whose edge the native preview could not follow. The Flutter
@@ -3403,19 +3431,28 @@ class _InkCanvasState extends State<InkCanvas> with WidgetsBindingObserver {
           fit: StackFit.expand,
           children: <Widget>[
             RepaintBoundary(
-              child: CustomPaint(
-                painter: CompletedStrokesPainter(
-                  controller: widget.controller,
-                  brightness: brightness,
-                  visible: paintArea,
-                  viewport: widget.visible,
-                  replay: widget.replay,
-                  replayHighlight: colors.accent,
-                  tiles: _inkTiles,
-                  scale: PageViewport.scaleOf(context),
-                  pixelRatio: MediaQuery.maybeDevicePixelRatioOf(context) ?? 1,
-                  zooming: PageViewport.zoomingOf(context),
-                ),
+              child: ValueListenableBuilder<bool>(
+                valueListenable:
+                    PageViewport.zoomingOf(context) ??
+                    const AlwaysStoppedAnimation<bool>(false),
+                builder: (BuildContext context, bool zooming, Widget? child) =>
+                    CustomPaint(
+                      willChange:
+                          zooming && !InkTileCache.profileEveryZoomFrame,
+                      painter: CompletedStrokesPainter(
+                        controller: widget.controller,
+                        brightness: brightness,
+                        visible: paintArea,
+                        viewport: widget.visible,
+                        replay: widget.replay,
+                        replayHighlight: colors.accent,
+                        tiles: _inkTiles,
+                        scale: PageViewport.scaleOf(context),
+                        pixelRatio:
+                            MediaQuery.maybeDevicePixelRatioOf(context) ?? 1,
+                        zooming: PageViewport.zoomingOf(context),
+                      ),
+                    ),
               ),
             ),
             // Sticky notes lie above images and completed page strokes.

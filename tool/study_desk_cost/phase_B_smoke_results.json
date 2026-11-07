@@ -1,0 +1,18 @@
+{
+  "scope": "Six synthetic turns; real planner and router; same B transport/context; calibration off versus on; includes all helpers and retries.",
+  "summaries": [
+    {
+      "variant": "uncalibrated",
+      "calls": 17,
+      "costMicro": 19889,
+      "valid": true
+    },
+    {
+      "variant": "B",
+      "calls": 17,
+      "costMicro": 17109,
+      "valid": true
+    }
+  ],
+  "spendMicro": 36998
+}

@@ -84,15 +84,27 @@ class _StudyDiagramCardState extends State<StudyDiagramCard> {
             height: 150,
             child: FutureBuilder<Uint8List?>(
               future: _crop,
-              builder: (context, snap) => snap.data == null
-                  ? const Center(child: Icon(Icons.schema_outlined))
-                  : Image.memory(
-                      snap.data!,
-                      fit: BoxFit.contain,
-                      cacheWidth: 640,
-                      errorBuilder: (_, _, _) =>
-                          const Center(child: Icon(Icons.schema_outlined)),
-                    ),
+              builder: (context, snap) => AnimatedSwitcher(
+                duration: AppMotion.resolve(context, AppMotion.fadeIn),
+                switchInCurve: AppMotion.fadeInCurve,
+                switchOutCurve: AppMotion.fadeOutCurve,
+                child: snap.data == null
+                    ? const Center(
+                        key: ValueKey<String>('diagram-placeholder'),
+                        child: Icon(Icons.schema_outlined),
+                      )
+                    : RepaintBoundary(
+                        key: const ValueKey<String>('diagram-crop'),
+                        child: Image.memory(
+                          snap.data!,
+                          fit: BoxFit.contain,
+                          cacheWidth: 640,
+                          gaplessPlayback: true,
+                          errorBuilder: (_, _, _) =>
+                              const Center(child: Icon(Icons.schema_outlined)),
+                        ),
+                      ),
+              ),
             ),
           ),
           Padding(

@@ -16,7 +16,11 @@ preferred model. Existing local credits and debug grants are not imported.
 
 There are no note, PDF, chat, prompt, response, image or embedding tables, and no
 Storage buckets. An AI request forwards the **current prompt, recent conversation
-text, and selected PNG crop** to a provider in memory. Optional drawing coordinates
+text, and selected PNG crop** to a provider in memory. The `embed` function does
+the same for Study Desk search: it forwards the text, or the PNG crop, of the
+chunks of notes on the desk (sixteen at a time) and returns the vectors. The app
+keeps them on the device; the server stores and logs nothing but the cost.
+Optional drawing coordinates
 contain only page dimensions and crop bounds. The full note image is never
 serialized. Responses are returned to the device and never persisted.
 Request bodies, provider responses, purchase tokens and errors are not logged.
@@ -77,6 +81,14 @@ by the provider account's own settings and terms, not by this Supabase code.
    the notation pass always requests high reasoning. The picked answer model
    never sees the grammar; both passes are billed at their own model's rates
    against the same hold.
+   **Routing.** The app sends `model: "auto"` with a `routing` object (`task`,
+   `effort`, `allowedModels`, optional hints) and the server picks the cheapest
+   (model, effort) that is capable enough for the task; see `docs/ai_router.md`.
+   Optional `AI_ROUTER_CONFIG` is a single-line JSON object of per-model
+   overrides of the baseline capability scores, from `supabase/evals/fit.ts`;
+   without it the baseline in `_shared/ai_router.ts` applies. A request that
+   names a model (an older app) is answered by it, as before. The log line
+   `ai_route` records task, model, effort, tokens and cost, never content.
 6. Generate `PURCHASE_TOKEN_ENCRYPTION_KEY` from 32 cryptographically random bytes
    and base64-encode them. Back it up securely. Rotating it requires re-encrypting
    existing locators; changing it alone makes old subscriptions unreadable.
@@ -127,6 +139,7 @@ npx supabase db push
 npx supabase secrets set --env-file supabase/.env.local --project-ref YOUR_PROJECT_REF
 npx supabase functions deploy billing --project-ref YOUR_PROJECT_REF
 npx supabase functions deploy ai --project-ref YOUR_PROJECT_REF
+npx supabase functions deploy embed --project-ref YOUR_PROJECT_REF
 npx supabase functions deploy store-events --project-ref YOUR_PROJECT_REF
 npx supabase functions deploy analytics --project-ref YOUR_PROJECT_REF
 flutter run --dart-define-from-file=dart_defines.json
@@ -173,7 +186,9 @@ select * from analytics_private.customer_health order by last_active_at desc;
 ```
 
 `provider_cost_micro_usd` is the configured model-cost estimate, not an invoice.
-`charged_micro_usd` is the credit deduction and can be zero for unlimited models.
+`charged_micro_usd` is the credit deduction. It is zero for unlimited requests:
+a paid plan, Haiku or Luna, at low or medium effort (`billing_private.requests.unlimited`).
+High effort on them is metered like any other model.
 Store proceeds are deliberately not estimated: taxes, fees, refunds and actual
 yearly prices should come from App Store Connect / Play Console financial reports.
 
@@ -242,3 +257,78 @@ References: [Supabase email OTP](https://supabase.com/docs/guides/auth/auth-emai
 [Google subscription verification](https://developers.google.com/android-publisher/api-ref/rest/v3/purchases.subscriptionsv2/get),
 [authenticated Pub/Sub push](https://cloud.google.com/pubsub/docs/authenticate-push-subscriptions),
 [OpenAI Chat Completions](https://developers.openai.com/api/reference/resources/chat/subresources/completions/methods/create).
+
+## Embeddings (Study Desk search)
+
+`functions/embed` turns the text or a PNG crop of a chunk of notes into a
+768-dimension vector with `gemini-embedding-2` (it uses `GEMINI_API_KEY`, and
+`AI_EMBED_CONFIG` overrides `{"model", "textMicroPerMillion", "imageMicro"}`;
+the defaults are $0.20 per million text tokens and $0.00012 per picture). The
+app asks for sixteen inputs at a time, `kind` is `document` or `query`, and the
+vectors come back as little-endian float32 in base64. Nothing is stored.
+
+- Billing: `embed_admit` refuses an account with no plan or credit, or past 40
+  requests a minute or 5,000 a day; `embed_settle` takes the cost once, keyed by
+  the request id. An embedding is never unlimited, on any plan, and its rows
+  (model `embed`) do not count toward the answer limits.
+- The app stops asking for ten minutes after a refusal and searches by words.
+- Apply `migrations/202611070001_embeddings.sql` and deploy the function
+  (`npx supabase functions deploy embed --project-ref YOUR_PROJECT_REF`) before shipping the app.
+- Test: `supabase/tests/embed_test.ts` and the embeddings case in
+  `billing_test.ts`.
+
+## Study Desk cost accounting and qualified routing
+
+Apply `migrations/202611080001_ai_usage_breakdown.sql` **before** deploying the
+updated `ai` function, then distribute the updated app. This adds the
+service-only `ai_settle_usage` RPC and private `analytics_private.ai_task_costs`
+and `ai_pass_costs` views. Settlement records task, opaque turn UUID, model,
+effort, numeric token counts and priced cost components for every paid attempt.
+Prompt, answer and note text are rejected at this persistence boundary. Old
+`ai_settle` and SVG clients remain supported; historical rows are not backfilled
+with guessed tasks. A turn UUID groups planner, answer and suggestions.
+
+For exact ordinary Standard-rate Sol/Luna model configurations, missing cache
+rates/mode receive the defaults in `model-config.example.json`. Explicit rates
+remain authoritative. Other model IDs/prices require their own configuration.
+Cache-write rates are full input rates, not surcharges. Reasoning tokens are an
+output subtotal, never a second output charge; unavailable subtotals are null.
+Explicit checkpoints end at stable instructions. Actual cache hits must be
+measured; short prefixes and repeat requests are not guaranteed to hit.
+
+New plain Study Desk requests send `responseFormat` and
+`studyPolicyVersion: "study-cost-b1"`. A validation rejection from an old server
+falls back once to the SVG contract before provider work; uncertain provider
+failures do not trigger that fallback. The qualified Luna profile is specific to
+this policy and exact model ID. Custom `AI_ROUTER_CONFIG` capability scores
+disable these qualifications for that model unless `studyCalibration: true` is
+explicitly set. Set `studyCalibration: false` to disable the profile per model.
+History, non-ASCII text, visuals, complex work and unqualified answer categories
+receive no new cheap-answer qualification. Source-based calculations are outside
+the initial calculation profile. Native helper JSON and source-ID checks can
+escalate a failed response while preserving the request's billing constraints.
+
+An administrator can inspect component cost without accessing learner content:
+
+```sql
+select task, sum(input_tokens) as input_tokens,
+  sum(output_tokens) as output_tokens,
+  sum(input_cost_micro_usd) / 1000000 as input_usd,
+  sum(output_cost_micro_usd) / 1000000 as output_usd,
+  sum(provider_cost_micro_usd) / 1000000 as total_usd
+from analytics_private.ai_pass_costs
+where metric_date >= current_date - 7
+group by task order by total_usd desc;
+```
+
+Report and reproducible evaluation instructions:
+[`docs/study_desk_cost_implementation.md`](../docs/study_desk_cost_implementation.md).
+
+The November 7 retrieval gate now asks the model before searching notes or
+loading full mistake records, with independent note/mistake choices. The changed
+planner deliberately omits the old `studyPolicyVersion` qualification tag;
+answer requests retain their existing qualified-policy scope. New semantic work
+is bounded to a candidate shortlist, and exact Claude 5.5 Standard model/rate
+pairs receive missing cache-read/write defaults. See the
+[live credit investigation](../docs/study_desk_credit_drop_investigation.md)
+for measured spend, regression coverage and release requirements.

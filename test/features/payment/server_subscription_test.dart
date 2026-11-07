@@ -41,7 +41,11 @@ void main() {
     await pumpEventQueue();
     expect(controller.remainingCreditsMicroUsd, 123456);
     await controller.saved;
-    expect(store.json, {'version': 1, 'preferredModel': 'sol'});
+    expect(store.json, {
+      'version': 1,
+      'preferredModel': 'sol',
+      'routing': const AiRoutingPreferences().toJson(),
+    });
   });
 
   test('expiry, unavailable backend and sign-out fail closed', () async {

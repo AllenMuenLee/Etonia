@@ -1,5 +1,69 @@
 import { PGlite } from "npm:@electric-sql/pglite@0.3.14";
 import { strict as assert } from "node:assert";
+import { describePass } from "../functions/_shared/ai_usage.ts";
+
+Deno.test("AI per-pass settlement is atomic, private, reconciled, and idempotent", async () => {
+  const db = await migrated();
+  try {
+    await db.exec("set role service_role");
+    await db.query("select public.billing_touch($1,false,$2)", [
+      user,
+      "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+    ]);
+    await db.query("select public.ai_reserve($1,$2,'sol')", [user, req1]);
+    const pass = describePass(
+      "sol",
+      {
+        provider: "openai",
+        model: "gpt-6.1-sol",
+        inputMicroPerKilo: 2000,
+        outputMicroPerKilo: 10000,
+        maxOutputTokens: 4096,
+        cachedInputMicroPerKilo: 100,
+        cacheWriteMicroPerKilo: 2500,
+      },
+      "low",
+      "answer",
+      { input: 2000, output: 100, cached: 1000, cacheWrites: 500, reasoning: 60 },
+    );
+    const settle = (details: unknown, cost = pass.costMicro, actor = user) =>
+      db.query(
+        "select public.ai_settle_usage($1,$2,$3,2000,100,false,'study.answer',$4,'low',$5::jsonb)",
+        [actor, req1, cost, req2, JSON.stringify(details)],
+      );
+    await assert.rejects(() => settle([{ ...pass, prompt: "must never be stored" }]), /rejected/);
+    await assert.rejects(() => settle([pass], pass.costMicro + 1), /rejected/);
+    await assert.rejects(() => settle([pass], pass.costMicro, other));
+    await db.exec("reset role");
+    assert.equal(
+      (await db.query<{ status: string }>(
+        "select status from billing_private.requests where request_id=$1",
+        [req1],
+      )).rows[0].status,
+      "pending",
+    );
+    await db.exec("set role service_role");
+    await settle([pass]);
+    await settle([{ ...pass, prompt: "idempotent retries cannot replace metadata" }]);
+    await db.exec("reset role");
+    const row = (await db.query<Record<string, unknown>>(
+      "select task,turn_id,effort,provider_cost,usage_details from billing_private.requests where request_id=$1",
+      [req1],
+    )).rows[0];
+    assert.equal(row.task, "study.answer");
+    assert.equal(row.turn_id, req2);
+    assert.equal(Number(row.provider_cost), pass.costMicro);
+    assert.deepEqual(row.usage_details, { pricingVersion: "token-v2", passes: [pass] });
+    await db.exec("set role authenticated");
+    await assert.rejects(() => settle([pass]), /permission denied/);
+    await assert.rejects(
+      () => db.query("select * from billing_private.requests"),
+      /permission denied/,
+    );
+  } finally {
+    await db.close();
+  }
+});
 
 const user = "11111111-1111-4111-8111-111111111111";
 const other = "22222222-2222-4222-8222-222222222222";
@@ -94,17 +158,48 @@ Deno.test("final pricing: plans, credits, and old products on their renamed tier
       { plan: "max2499", rank: 3, title: "Max", monthly_price_cents: 2499 },
     ]);
     const product = async (id: string) =>
-      (await db.query("select plan, rank, allowance::int from billing_private.products where product_id = $1", [
-        id,
-      ])).rows[0];
-    assert.deepEqual(await product("etonia_plan_699_monthly"), { plan: "starter699", rank: 1, allowance: 2450000 });
-    assert.deepEqual(await product("com.etonia.app.plan.1499.monthly"), { plan: "pro1499", rank: 2, allowance: 5250000 });
-    assert.deepEqual(await product("etonia_plan_2499_monthly"), { plan: "max2499", rank: 3, allowance: 8750000 });
-    assert.deepEqual(await product("com.etonia.app.plan.699.yearly"), { plan: "starter699", rank: 1, allowance: 29400000 });
-    assert.deepEqual(await product("etonia_plan_1499_yearly"), { plan: "pro1499", rank: 2, allowance: 63000000 });
-    assert.deepEqual(await product("com.etonia.app.plan.2499.yearly"), { plan: "max2499", rank: 3, allowance: 105000000 });
+      (await db.query(
+        "select plan, rank, allowance::int from billing_private.products where product_id = $1",
+        [
+          id,
+        ],
+      )).rows[0];
+    assert.deepEqual(await product("etonia_plan_699_monthly"), {
+      plan: "starter699",
+      rank: 1,
+      allowance: 2450000,
+    });
+    assert.deepEqual(await product("com.etonia.app.plan.1499.monthly"), {
+      plan: "pro1499",
+      rank: 2,
+      allowance: 5250000,
+    });
+    assert.deepEqual(await product("etonia_plan_2499_monthly"), {
+      plan: "max2499",
+      rank: 3,
+      allowance: 8750000,
+    });
+    assert.deepEqual(await product("com.etonia.app.plan.699.yearly"), {
+      plan: "starter699",
+      rank: 1,
+      allowance: 29400000,
+    });
+    assert.deepEqual(await product("etonia_plan_1499_yearly"), {
+      plan: "pro1499",
+      rank: 2,
+      allowance: 63000000,
+    });
+    assert.deepEqual(await product("com.etonia.app.plan.2499.yearly"), {
+      plan: "max2499",
+      rank: 3,
+      allowance: 105000000,
+    });
     // Retired, but still honoured for a subscription already on it.
-    assert.deepEqual(await product("etonia_plan_1299_monthly"), { plan: "pro1499", rank: 2, allowance: 4000000 });
+    assert.deepEqual(await product("etonia_plan_1299_monthly"), {
+      plan: "pro1499",
+      rank: 2,
+      allowance: 4000000,
+    });
     assert.equal(
       (await db.query<{ n: number }>(
         "select count(*)::int n from billing_private.products where plan not in ('starter699','pro1499','max2499')",
@@ -224,9 +319,10 @@ Deno.test("Postgres billing: permissions, ownership, renewals, expiry and atomic
     // The dashboard reads the view as an administrator, not as service_role.
     const plans = async () => {
       await db.exec("reset role");
-      const rows = (await db.query<{ user_id: string; is_anonymous: boolean; plan: string; devices: number }>(
-        "select user_id, is_anonymous, plan, devices::int from billing_private.account_plans order by user_id",
-      )).rows;
+      const rows =
+        (await db.query<{ user_id: string; is_anonymous: boolean; plan: string; devices: number }>(
+          "select user_id, is_anonymous, plan, devices::int from billing_private.account_plans order by user_id",
+        )).rows;
       await db.exec("set role service_role");
       return rows;
     };
@@ -242,7 +338,8 @@ Deno.test("Postgres billing: permissions, ownership, renewals, expiry and atomic
     ]);
     await db.exec("reset role");
     await assert.rejects(
-      () => db.query("insert into billing_private.products values ('app_store', 'x', 'free', 0, 1)"),
+      () =>
+        db.query("insert into billing_private.products values ('app_store', 'x', 'free', 0, 1)"),
       /products_paid_plan/,
     );
     const tables = (await db.query<{ table_name: string }>(
@@ -298,7 +395,10 @@ Deno.test("gift codes: $3 of free credit per account, all free credit lasts a mo
     await db.exec("reset role");
     await db.exec(`update billing_private.gift_codes set max_redemptions = null`);
     await db.exec("set role service_role");
-    assert.equal((await redeem(other, false, "WELCOME3")).rows[0].s.remainingCreditsMicroUsd, 3000000);
+    assert.equal(
+      (await redeem(other, false, "WELCOME3")).rows[0].s.remainingCreditsMicroUsd,
+      3000000,
+    );
 
     // After a month the credit is none and cannot be reserved.
     await db.exec("reset role");
@@ -359,6 +459,164 @@ Deno.test("deleting an account erases its records but not the device's free-cred
     await db.exec(`insert into auth.users values ('${again}'); set role service_role`);
     await touch(again, phone);
     assert.equal((await state(again)).remainingCreditsMicroUsd, 0);
+  } finally {
+    await db.close();
+  }
+});
+
+Deno.test("router billing: unlimited only on a paid plan, Haiku or Luna, up to medium effort", async () => {
+  const db = await migrated();
+  try {
+    const phone = "dddddddd-dddd-4ddd-8ddd-dddddddddddd";
+    await db.exec("set role service_role");
+    const state = async () =>
+      (await db.query<{ s: any }>("select public.billing_state($1) s", [user])).rows[0].s;
+    const reserve = async (model: string, effort: string) => {
+      const id = crypto.randomUUID();
+      const held = (await db.query<{ r: any }>(
+        "select public.ai_reserve($1,$2,$3,null,$4) r",
+        [user, id, model, effort],
+      )).rows[0].r;
+      return { id, unlimited: held.unlimited as boolean };
+    };
+    const settle = (id: string, cost = 100000) =>
+      db.query("select public.ai_settle($1,$2,$3,10,10,false)", [user, id, cost]);
+    const charged = async (id: string) => {
+      await db.exec("reset role");
+      const row = (await db.query<{ charged: string; provider_cost: string; unlimited: boolean }>(
+        `select charged::text, provider_cost::text, unlimited
+           from billing_private.requests where request_id = $1`,
+        [id],
+      )).rows[0];
+      await db.exec("set role service_role");
+      return row;
+    };
+
+    // Free credit pays for everything, so nothing is unlimited on it.
+    await db.query("select public.billing_touch($1, false, $2)", [user, phone]);
+    const free = await reserve("haiku", "low");
+    assert.equal(free.unlimited, false);
+    await settle(free.id, 1000);
+    assert.equal((await state()).remainingCreditsMicroUsd, 499000);
+
+    await db.exec("reset role");
+    await db.exec(
+      `update billing_private.grants set remaining = 0 where transaction_key = 'free:${user}'`,
+    );
+    await db.exec("set role service_role");
+    // A free plan with nothing left is refused, whatever it asks for.
+    for (const effort of ["low", "medium", "high"]) {
+      await assert.rejects(() => reserve("luna", effort), /insufficient_credits/);
+    }
+
+    // A paid plan: Haiku and Luna at low and medium effort cost nothing.
+    await db.query("select public.billing_apply($1, $2::jsonb)", [
+      user,
+      JSON.stringify({
+        platform: "google_play",
+        productId: "etonia_plan_1499_monthly",
+        chainKey: "google:chain",
+        transactionKey: "google:first",
+        locatorCiphertext: "encrypted",
+        active: true,
+        expiresAt: new Date(Date.now() + 86400000).toISOString(),
+        status: "active",
+        autoRenew: true,
+        observedAt: new Date().toISOString(),
+      }),
+    ]);
+    assert.equal((await state()).remainingCreditsMicroUsd, 5250000);
+    for (const [model, effort] of [["haiku", "low"], ["luna", "medium"], ["haiku", "medium"]]) {
+      const request = await reserve(model, effort);
+      assert.equal(request.unlimited, true, `${model} at ${effort}`);
+      await settle(request.id);
+      assert.deepEqual(await charged(request.id), {
+        charged: "0",
+        provider_cost: "100000",
+        unlimited: true,
+      });
+    }
+    assert.equal((await state()).remainingCreditsMicroUsd, 5250000);
+
+    // High effort on them, and every other model, is metered.
+    for (
+      const [model, effort] of [["haiku", "high"], ["luna", "high"], ["sonnet", "low"], [
+        "sol",
+        "medium",
+      ]]
+    ) {
+      const request = await reserve(model, effort);
+      assert.equal(request.unlimited, false, `${model} at ${effort}`);
+      await settle(request.id);
+      assert.equal((await charged(request.id)).charged, "100000");
+    }
+    assert.equal((await state()).remainingCreditsMicroUsd, 5250000 - 4 * 100000);
+
+    // Out of credits, a paid plan still reaches the unlimited pairs and nothing else.
+    await db.exec("reset role");
+    await db.exec(
+      `update billing_private.grants set remaining = 0 where transaction_key = 'google:first'`,
+    );
+    await db.exec("set role service_role");
+    for (const [model, effort] of [["haiku", "high"], ["sol", "low"], ["sonnet", "medium"]]) {
+      await assert.rejects(() => reserve(model, effort), /insufficient_credits/);
+    }
+    const carried = await reserve("luna", "medium");
+    assert.equal(carried.unlimited, true);
+    await settle(carried.id, 250000);
+    assert.equal((await state()).remainingCreditsMicroUsd, 0);
+
+    await assert.rejects(() => reserve("haiku", "extreme"), /rejected/);
+  } finally {
+    await db.close();
+  }
+});
+
+Deno.test("embeddings: charged once from credits, never unlimited, and apart from answer limits", async () => {
+  const db = await migrated();
+  try {
+    const phone = "dddddddd-dddd-4ddd-8ddd-dddddddddddd";
+    await db.exec("set role service_role");
+    const balance = async () =>
+      (await db.query<{ s: any }>("select public.billing_state($1) s", [user])).rows[0].s
+        .remainingCreditsMicroUsd;
+    // No credit was ever granted: refused.
+    await assert.rejects(() => db.query("select public.embed_admit($1)", [user]), /plan_required/);
+    await db.query("select public.billing_touch($1, false, $2)", [user, phone]);
+    await db.query("select public.embed_admit($1)", [user]);
+    const request = crypto.randomUUID();
+    await db.query("select public.embed_settle($1,$2,$3,$4)", [user, request, 1200, 400]);
+    assert.equal(await balance(), 500000 - 1200);
+    // The same request id again costs nothing more.
+    await db.query("select public.embed_settle($1,$2,$3,$4)", [user, request, 1200, 400]);
+    assert.equal(await balance(), 500000 - 1200);
+
+    // Embedding rows do not use up the answer limits (4 pending, 300 a day).
+    await db.exec("reset role");
+    await db.exec(
+      `insert into billing_private.requests(request_id,user_id,transaction_key,model,reserved,charged,provider_cost,status)
+      select gen_random_uuid(), '${user}', 'free:${user}', 'embed', 0, 0, 0, 'settled' from generate_series(1, 320)`,
+    );
+    await db.exec("set role service_role");
+    const answer = await db.query<{ r: any }>(
+      "select public.ai_reserve($1,$2,'haiku',null,'low') r",
+      [user, crypto.randomUUID()],
+    );
+    assert.equal(answer.rows[0].r.unlimited, false);
+    // ...and have their own: forty a minute.
+    await assert.rejects(() => db.query("select public.embed_admit($1)", [user]), /rate_limited/);
+
+    // Nothing left: refused.
+    await db.exec("reset role");
+    await db.exec("delete from billing_private.requests where model = 'embed'");
+    await db.exec(
+      `update billing_private.grants set remaining = 0 where transaction_key = 'free:${user}'`,
+    );
+    await db.exec("set role service_role");
+    await assert.rejects(
+      () => db.query("select public.embed_admit($1)", [user]),
+      /insufficient_credits/,
+    );
   } finally {
     await db.close();
   }

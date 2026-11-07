@@ -5,11 +5,14 @@ import 'package:flutter/material.dart';
 
 import '../../../app/theme/app_icons.dart';
 import '../../../app/theme/app_tokens.dart';
+import '../../../shared/motion/motion_memory.dart';
 import '../../../shared/navigation/app_dialogs.dart';
+import '../../../shared/widgets/pressable.dart';
 import '../../editor/document_io/document_platform.dart';
 import 'study_desk_controller.dart';
 import 'study_desk_models.dart';
 import 'study_desk_widgets.dart';
+import 'study_motion.dart';
 import 'study_desk_overview.dart' show StudyMaterialKind;
 import 'practice/study_practice_models.dart';
 
@@ -313,7 +316,11 @@ class _StudyHistorySidebarState extends State<StudyHistorySidebar> {
             ],
           ),
         );
-        if (confirmed == true) controller.deleteSession(session.id);
+        if (confirmed == true) {
+          controller.deleteSession(session.id);
+          // What it showed is gone with it: a chat made again is a first look.
+          MotionMemory.instance.forget(('study-page', ('chat', session.id)));
+        }
       case 'rename':
         var text = session.title;
         final title = await showAppDialog<String>(
@@ -408,37 +415,56 @@ class _StudyHistorySidebarState extends State<StudyHistorySidebar> {
     bool selected = false,
     Color? iconColor,
     Widget? trailing,
-  }) => Padding(
-    padding: const EdgeInsets.symmetric(vertical: AppSpacing.xxs / 2),
-    child: ListTile(
-      key: key,
-      minTileHeight: AppSizes.minTouchTarget,
-      contentPadding: const EdgeInsetsDirectional.only(
-        start: AppSpacing.md,
-        end: AppSpacing.xxs,
+  }) {
+    final BorderRadius radius = BorderRadius.circular(AppRadii.small);
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: AppSpacing.xxs / 2),
+      // Sinks under the finger; the highlight of the row in view slides over
+      // to the next, as a colour that moves, not one that is swapped.
+      child: Pressable(
+        pressedScale: 0.985,
+        borderRadius: radius,
+        child: AnimatedContainer(
+          duration: AppMotion.resolve(context, AppMotion.fadeIn),
+          curve: AppMotion.fadeInCurve,
+          decoration: BoxDecoration(
+            color: selected
+                ? AppColors.of(context).selected
+                : Colors.transparent,
+            borderRadius: radius,
+          ),
+          child: Material(
+            type: MaterialType.transparency,
+            child: ListTile(
+              key: key,
+              minTileHeight: AppSizes.minTouchTarget,
+              contentPadding: const EdgeInsetsDirectional.only(
+                start: AppSpacing.md,
+                end: AppSpacing.xxs,
+              ),
+              horizontalTitleGap: AppSpacing.sm,
+              shape: RoundedRectangleBorder(borderRadius: radius),
+              selected: selected,
+              selectedColor: AppColors.of(context).textPrimary,
+              leading: Icon(
+                icon,
+                size: 20,
+                color: iconColor ?? AppColors.of(context).textSecondary,
+              ),
+              title: Text(
+                title,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: Theme.of(context).textTheme.bodyMedium,
+              ),
+              trailing: trailing,
+              onTap: () => _select(onTap),
+            ),
+          ),
+        ),
       ),
-      horizontalTitleGap: AppSpacing.sm,
-      shape: RoundedRectangleBorder(
-        borderRadius: BorderRadius.circular(AppRadii.small),
-      ),
-      selected: selected,
-      selectedTileColor: AppColors.of(context).selected,
-      selectedColor: AppColors.of(context).textPrimary,
-      leading: Icon(
-        icon,
-        size: 20,
-        color: iconColor ?? AppColors.of(context).textSecondary,
-      ),
-      title: Text(
-        title,
-        maxLines: 1,
-        overflow: TextOverflow.ellipsis,
-        style: Theme.of(context).textTheme.bodyMedium,
-      ),
-      trailing: trailing,
-      onTap: () => _select(onTap),
-    ),
-  );
+    );
+  }
 
   Widget _sessionRow(StudySession session) => _row(
     session.title,
@@ -456,9 +482,12 @@ class _StudyHistorySidebarState extends State<StudyHistorySidebar> {
   );
 
   @override
-  Widget build(BuildContext context) => ListenableBuilder(
+  Widget build(BuildContext context) => StudyThrottledBuilder(
     listenable: widget.controller,
-    builder: (context, _) {
+    // While an answer streams in, the rows are sorted and drawn a few times a
+    // second, not once for every chunk.
+    coalesce: () => widget.controller.partialAnswer != null,
+    builder: (context) {
       final controller = widget.controller;
       final colors = AppColors.of(context);
       bool matches(String title) =>
@@ -588,26 +617,30 @@ class _StudyHistorySidebarState extends State<StudyHistorySidebar> {
                   ],
                 ),
               ),
-              if (_searchOpen)
-                Padding(
-                  padding: const EdgeInsets.all(12),
-                  child: TextField(
-                    key: const ValueKey('study-sidebar-search'),
-                    autofocus: true,
-                    decoration: const InputDecoration(
-                      hintText: 'Search',
-                      prefixIcon: Icon(AppIcons.search, size: 18),
-                      isDense: true,
-                      border: OutlineInputBorder(
-                        borderRadius: BorderRadius.all(
-                          Radius.circular(AppRadii.medium),
+              StudyDisclose(
+                child: _searchOpen
+                    ? Padding(
+                        key: const ValueKey('study-sidebar-search-field'),
+                        padding: const EdgeInsets.all(12),
+                        child: TextField(
+                          key: const ValueKey('study-sidebar-search'),
+                          autofocus: true,
+                          decoration: const InputDecoration(
+                            hintText: 'Search',
+                            prefixIcon: Icon(AppIcons.search, size: 18),
+                            isDense: true,
+                            border: OutlineInputBorder(
+                              borderRadius: BorderRadius.all(
+                                Radius.circular(AppRadii.medium),
+                              ),
+                              borderSide: BorderSide.none,
+                            ),
+                          ),
+                          onChanged: (value) => setState(() => _query = value),
                         ),
-                        borderSide: BorderSide.none,
-                      ),
-                    ),
-                    onChanged: (value) => setState(() => _query = value),
-                  ),
-                ),
+                      )
+                    : null,
+              ),
               Expanded(
                 child: ListView(
                   padding: const EdgeInsets.symmetric(horizontal: 8),

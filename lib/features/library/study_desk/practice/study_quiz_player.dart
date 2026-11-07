@@ -9,6 +9,7 @@ import '../../../../shared/widgets/app_controls.dart';
 import '../../../../shared/widgets/pressable.dart';
 import '../../../editor/widgets/ai_assistant_panel.dart';
 import '../study_desk_models.dart';
+import '../study_motion.dart';
 import 'study_practice_models.dart';
 
 /// How a quiz tells what was right.
@@ -316,27 +317,39 @@ class _StudyQuizPlayerState extends State<StudyQuizPlayer> {
           padding: const EdgeInsets.symmetric(horizontal: AppSpacing.md),
           child: ClipRRect(
             borderRadius: AppBorderRadius.circular(AppRadii.small),
-            child: LinearProgressIndicator(
-              key: const ValueKey<String>('quiz-progress-bar'),
-              value: answered / _questions.length,
-              minHeight: 6,
-              color: colors.accent,
-              backgroundColor: colors.surfaceMuted,
-              semanticsLabel: 'Questions answered',
+            child: TweenAnimationBuilder<double>(
+              tween: Tween<double>(end: answered / _questions.length),
+              duration: AppMotion.springDuration(context, AppMotion.smooth),
+              curve: AppMotion.zoomInCurve,
+              builder: (BuildContext context, double value, Widget? _) =>
+                  LinearProgressIndicator(
+                    key: const ValueKey<String>('quiz-progress-bar'),
+                    value: value,
+                    minHeight: 6,
+                    color: colors.accent,
+                    backgroundColor: colors.surfaceMuted,
+                    semanticsLabel: 'Questions answered',
+                  ),
             ),
           ),
         ),
         Expanded(
           child: _reviewing
-              ? _Review(
-                  questions: _questions,
-                  flagged: _flagged,
-                  onOpen: (int index) => setState(() {
-                    _index = index;
-                    _reviewing = false;
-                  }),
+              ? StudyAppear(
+                  key: const ValueKey<String>('quiz-review-appear'),
+                  child: _Review(
+                    questions: _questions,
+                    flagged: _flagged,
+                    onOpen: (int index) => setState(() {
+                      _index = index;
+                      _reviewing = false;
+                    }),
+                  ),
                 )
-              : SingleChildScrollView(
+              : StudyAppear(
+                  key: ValueKey<String>('quiz-question-appear-$_index'),
+                  rise: 14,
+                  child: SingleChildScrollView(
                   key: ValueKey<String>('quiz-question-$_index'),
                   padding: const EdgeInsets.all(AppSpacing.md),
                   child: Center(
@@ -383,6 +396,7 @@ class _StudyQuizPlayerState extends State<StudyQuizPlayer> {
                       ),
                     ),
                   ),
+                ),
                 ),
         ),
         Padding(
@@ -560,10 +574,10 @@ class _OptionPill extends StatelessWidget {
                     ),
                     if (state == _OptionState.correct) ...<Widget>[
                       const SizedBox(width: AppSpacing.xs),
-                      Icon(AppIcons.check, size: 18, color: colors.success),
+                      _Mark(icon: AppIcons.check, color: colors.success),
                     ] else if (state == _OptionState.wrong) ...<Widget>[
                       const SizedBox(width: AppSpacing.xs),
-                      Icon(AppIcons.close, size: 18, color: colors.danger),
+                      _Mark(icon: AppIcons.close, color: colors.danger),
                     ],
                   ],
                 ),
@@ -574,6 +588,24 @@ class _OptionPill extends StatelessWidget {
       ),
     );
   }
+}
+
+/// A check or a cross, popping in as the answer is shown.
+class _Mark extends StatelessWidget {
+  const _Mark({required this.icon, required this.color});
+
+  final IconData icon;
+  final Color color;
+
+  @override
+  Widget build(BuildContext context) => TweenAnimationBuilder<double>(
+    tween: Tween<double>(begin: 0, end: 1),
+    duration: AppMotion.resolve(context, AppMotion.checkDraw),
+    curve: AppMotion.popCurve,
+    builder: (BuildContext context, double value, Widget? child) =>
+        Transform.scale(scale: value, child: child),
+    child: Icon(icon, size: 18, color: color),
+  );
 }
 
 /// An option's words: plain where they are plain, so its colour holds on a

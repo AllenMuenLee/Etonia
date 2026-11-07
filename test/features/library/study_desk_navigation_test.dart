@@ -3,7 +3,6 @@ import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:greatnote/app/greatnote_app.dart';
-import 'package:greatnote/features/editor/ai/ai_client.dart';
 import 'package:greatnote/features/editor/ink/ink_sample.dart';
 import 'package:greatnote/features/editor/page/page_setup.dart';
 import 'package:greatnote/features/editor/text/note_text.dart';
@@ -288,7 +287,6 @@ void main() {
         body: StudyGenerateTestSheet(controller: f.desk),
       );
       await waitForRequest(tester, f.client, 1);
-      expect(f.client.requests.first.model, AiModelId.luna);
       expect(
         f.client.requests.first.messages.single.text,
         contains('marker alpha'),

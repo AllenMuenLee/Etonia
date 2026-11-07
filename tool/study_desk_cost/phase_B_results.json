@@ -1,0 +1,659 @@
+{
+  "caseDigest": "280e3b62e4bcb0132e4dd5d1e6a9239a8f4d0efbb1b8b3e8c63d1a71546a9acf",
+  "cases": 150,
+  "generations": 630,
+  "passedGenerations": 571,
+  "actualEvaluationSpendMicro": 1091377,
+  "qualifiedProfiles": 9,
+  "groups": [
+    {
+      "task": "study.answer",
+      "kind": "calculation",
+      "difficulty": 1,
+      "model": "luna",
+      "effort": "low",
+      "qualified": true,
+      "generationCostMicro": 954,
+      "inputCostMicro": 458.7,
+      "outputCostMicro": 485.0,
+      "inputTokens": 23019,
+      "outputTokens": 970,
+      "calibration": {
+        "cases": 10,
+        "failures": 0
+      },
+      "heldout": {
+        "cases": 10,
+        "failures": 0
+      }
+    },
+    {
+      "task": "study.answer",
+      "kind": "calculation",
+      "difficulty": 1,
+      "model": "luna",
+      "effort": "medium",
+      "qualified": true,
+      "generationCostMicro": 1130,
+      "inputCostMicro": 458.7,
+      "outputCostMicro": 660.5,
+      "inputTokens": 23019,
+      "outputTokens": 1321,
+      "calibration": {
+        "cases": 10,
+        "failures": 0
+      },
+      "heldout": {
+        "cases": 10,
+        "failures": 0
+      }
+    },
+    {
+      "task": "study.answer",
+      "kind": "calculation",
+      "difficulty": 1,
+      "model": "sol",
+      "effort": "medium",
+      "qualified": false,
+      "generationCostMicro": 20513,
+      "inputCostMicro": 9071.6,
+      "outputCostMicro": 11430,
+      "inputTokens": 23019,
+      "outputTokens": 1143,
+      "calibration": {
+        "cases": 10,
+        "failures": 0
+      },
+      "heldout": {
+        "cases": 10,
+        "failures": 0
+      }
+    },
+    {
+      "task": "study.answer",
+      "kind": "calculation",
+      "difficulty": 2,
+      "model": "luna",
+      "effort": "low",
+      "qualified": true,
+      "generationCostMicro": 1559,
+      "inputCostMicro": 564.86,
+      "outputCostMicro": 983.0,
+      "inputTokens": 23159,
+      "outputTokens": 1966,
+      "calibration": {
+        "cases": 10,
+        "failures": 0
+      },
+      "heldout": {
+        "cases": 10,
+        "failures": 0
+      }
+    },
+    {
+      "task": "study.answer",
+      "kind": "calculation",
+      "difficulty": 2,
+      "model": "luna",
+      "effort": "medium",
+      "qualified": true,
+      "generationCostMicro": 1888,
+      "inputCostMicro": 657.02,
+      "outputCostMicro": 1220.0,
+      "inputTokens": 23159,
+      "outputTokens": 2440,
+      "calibration": {
+        "cases": 10,
+        "failures": 0
+      },
+      "heldout": {
+        "cases": 10,
+        "failures": 0
+      }
+    },
+    {
+      "task": "study.answer",
+      "kind": "calculation",
+      "difficulty": 2,
+      "model": "sol",
+      "effort": "medium",
+      "qualified": false,
+      "generationCostMicro": 33923,
+      "inputCostMicro": 9351.6,
+      "outputCostMicro": 24560,
+      "inputTokens": 23159,
+      "outputTokens": 2456,
+      "calibration": {
+        "cases": 10,
+        "failures": 0
+      },
+      "heldout": {
+        "cases": 10,
+        "failures": 0
+      }
+    },
+    {
+      "task": "study.answer",
+      "kind": "definition",
+      "difficulty": 1,
+      "model": "luna",
+      "effort": "low",
+      "qualified": false,
+      "generationCostMicro": 1439,
+      "inputCostMicro": 727.58,
+      "outputCostMicro": 701.0,
+      "inputTokens": 22943,
+      "outputTokens": 1402,
+      "calibration": {
+        "cases": 10,
+        "failures": 0
+      },
+      "heldout": {
+        "cases": 10,
+        "failures": 1
+      }
+    },
+    {
+      "task": "study.answer",
+      "kind": "definition",
+      "difficulty": 1,
+      "model": "luna",
+      "effort": "medium",
+      "qualified": false,
+      "generationCostMicro": 1947,
+      "inputCostMicro": 635.42,
+      "outputCostMicro": 1300.5,
+      "inputTokens": 22943,
+      "outputTokens": 2601,
+      "calibration": {
+        "cases": 10,
+        "failures": 0
+      },
+      "heldout": {
+        "cases": 10,
+        "failures": 0
+      }
+    },
+    {
+      "task": "study.answer",
+      "kind": "definition",
+      "difficulty": 1,
+      "model": "sol",
+      "effort": "medium",
+      "qualified": false,
+      "generationCostMicro": 40106,
+      "inputCostMicro": 10865.2,
+      "outputCostMicro": 29230,
+      "inputTokens": 22943,
+      "outputTokens": 2923,
+      "calibration": {
+        "cases": 10,
+        "failures": 0
+      },
+      "heldout": {
+        "cases": 10,
+        "failures": 1
+      }
+    },
+    {
+      "task": "study.answer",
+      "kind": "definition",
+      "difficulty": 2,
+      "model": "luna",
+      "effort": "low",
+      "qualified": false,
+      "generationCostMicro": 2086,
+      "inputCostMicro": 460.7,
+      "outputCostMicro": 1616.5,
+      "inputTokens": 23039,
+      "outputTokens": 3233,
+      "calibration": {
+        "cases": 10,
+        "failures": 1
+      },
+      "heldout": {
+        "cases": 10,
+        "failures": 1
+      }
+    },
+    {
+      "task": "study.answer",
+      "kind": "definition",
+      "difficulty": 2,
+      "model": "luna",
+      "effort": "medium",
+      "qualified": false,
+      "generationCostMicro": 2908,
+      "inputCostMicro": 460.7,
+      "outputCostMicro": 2435.5,
+      "inputTokens": 23039,
+      "outputTokens": 4871,
+      "calibration": {
+        "cases": 10,
+        "failures": 1
+      },
+      "heldout": {
+        "cases": 10,
+        "failures": 1
+      }
+    },
+    {
+      "task": "study.answer",
+      "kind": "definition",
+      "difficulty": 2,
+      "model": "sol",
+      "effort": "medium",
+      "qualified": false,
+      "generationCostMicro": 64768,
+      "inputCostMicro": 7166.0,
+      "outputCostMicro": 57590,
+      "inputTokens": 23039,
+      "outputTokens": 5759,
+      "calibration": {
+        "cases": 10,
+        "failures": 0
+      },
+      "heldout": {
+        "cases": 10,
+        "failures": 0
+      }
+    },
+    {
+      "task": "study.answer",
+      "kind": "sentinel",
+      "difficulty": 3,
+      "model": "luna",
+      "effort": "low",
+      "qualified": false,
+      "generationCostMicro": 3835,
+      "inputCostMicro": 1513.14,
+      "outputCostMicro": 2308.5,
+      "inputTokens": 36213,
+      "outputTokens": 4617,
+      "calibration": {
+        "cases": 10,
+        "failures": 1
+      },
+      "heldout": {
+        "cases": 20,
+        "failures": 0
+      }
+    },
+    {
+      "task": "study.answer",
+      "kind": "sentinel",
+      "difficulty": 3,
+      "model": "luna",
+      "effort": "medium",
+      "qualified": false,
+      "generationCostMicro": 4793,
+      "inputCostMicro": 1513.14,
+      "outputCostMicro": 3263.5,
+      "inputTokens": 36213,
+      "outputTokens": 6527,
+      "calibration": {
+        "cases": 10,
+        "failures": 1
+      },
+      "heldout": {
+        "cases": 20,
+        "failures": 1
+      }
+    },
+    {
+      "task": "study.answer",
+      "kind": "sentinel",
+      "difficulty": 3,
+      "model": "sol",
+      "effort": "medium",
+      "qualified": false,
+      "generationCostMicro": 76730,
+      "inputCostMicro": 18192.4,
+      "outputCostMicro": 58520,
+      "inputTokens": 36213,
+      "outputTokens": 5852,
+      "calibration": {
+        "cases": 10,
+        "failures": 0
+      },
+      "heldout": {
+        "cases": 20,
+        "failures": 1
+      }
+    },
+    {
+      "task": "study.answer",
+      "kind": "sourceLookup",
+      "difficulty": 1,
+      "model": "luna",
+      "effort": "low",
+      "qualified": false,
+      "generationCostMicro": 3150,
+      "inputCostMicro": 2918.3,
+      "outputCostMicro": 224.5,
+      "inputTokens": 29183,
+      "outputTokens": 449,
+      "calibration": {
+        "cases": 10,
+        "failures": 1
+      },
+      "heldout": {
+        "cases": 10,
+        "failures": 1
+      }
+    },
+    {
+      "task": "study.answer",
+      "kind": "sourceLookup",
+      "difficulty": 1,
+      "model": "luna",
+      "effort": "medium",
+      "qualified": false,
+      "generationCostMicro": 3395,
+      "inputCostMicro": 2918.3,
+      "outputCostMicro": 466.0,
+      "inputTokens": 29183,
+      "outputTokens": 932,
+      "calibration": {
+        "cases": 10,
+        "failures": 0
+      },
+      "heldout": {
+        "cases": 10,
+        "failures": 0
+      }
+    },
+    {
+      "task": "study.answer",
+      "kind": "sourceLookup",
+      "difficulty": 1,
+      "model": "sol",
+      "effort": "medium",
+      "qualified": false,
+      "generationCostMicro": 62766,
+      "inputCostMicro": 58366,
+      "outputCostMicro": 4400,
+      "inputTokens": 29183,
+      "outputTokens": 440,
+      "calibration": {
+        "cases": 10,
+        "failures": 0
+      },
+      "heldout": {
+        "cases": 10,
+        "failures": 0
+      }
+    },
+    {
+      "task": "study.answer",
+      "kind": "sourceLookup",
+      "difficulty": 2,
+      "model": "luna",
+      "effort": "low",
+      "qualified": false,
+      "generationCostMicro": 3324,
+      "inputCostMicro": 2791.3,
+      "outputCostMicro": 523.5,
+      "inputTokens": 27913,
+      "outputTokens": 1047,
+      "calibration": {
+        "cases": 10,
+        "failures": 3
+      },
+      "heldout": {
+        "cases": 10,
+        "failures": 3
+      }
+    },
+    {
+      "task": "study.answer",
+      "kind": "sourceLookup",
+      "difficulty": 2,
+      "model": "luna",
+      "effort": "medium",
+      "qualified": false,
+      "generationCostMicro": 3619,
+      "inputCostMicro": 2791.3,
+      "outputCostMicro": 820.0,
+      "inputTokens": 27913,
+      "outputTokens": 1640,
+      "calibration": {
+        "cases": 10,
+        "failures": 2
+      },
+      "heldout": {
+        "cases": 10,
+        "failures": 4
+      }
+    },
+    {
+      "task": "study.answer",
+      "kind": "sourceLookup",
+      "difficulty": 2,
+      "model": "sol",
+      "effort": "medium",
+      "qualified": false,
+      "generationCostMicro": 64076,
+      "inputCostMicro": 55826,
+      "outputCostMicro": 8250,
+      "inputTokens": 27913,
+      "outputTokens": 825,
+      "calibration": {
+        "cases": 10,
+        "failures": 1
+      },
+      "heldout": {
+        "cases": 10,
+        "failures": 4
+      }
+    },
+    {
+      "task": "study.plan",
+      "kind": "calculation",
+      "difficulty": 2,
+      "model": "haiku",
+      "effort": "high",
+      "qualified": false,
+      "generationCostMicro": 5821,
+      "inputCostMicro": 2232.2,
+      "outputCostMicro": 3580.0,
+      "inputTokens": 22322,
+      "outputTokens": 7160,
+      "calibration": {
+        "cases": 10,
+        "failures": 2
+      },
+      "heldout": {
+        "cases": 10,
+        "failures": 0
+      }
+    },
+    {
+      "task": "study.plan",
+      "kind": "calculation",
+      "difficulty": 2,
+      "model": "luna",
+      "effort": "low",
+      "qualified": true,
+      "generationCostMicro": 1924,
+      "inputCostMicro": 1379.9,
+      "outputCostMicro": 537.0,
+      "inputTokens": 13799,
+      "outputTokens": 1074,
+      "calibration": {
+        "cases": 10,
+        "failures": 0
+      },
+      "heldout": {
+        "cases": 10,
+        "failures": 0
+      }
+    },
+    {
+      "task": "study.plan",
+      "kind": "calculation",
+      "difficulty": 2,
+      "model": "luna",
+      "effort": "medium",
+      "qualified": true,
+      "generationCostMicro": 2050,
+      "inputCostMicro": 1379.9,
+      "outputCostMicro": 663.5,
+      "inputTokens": 13799,
+      "outputTokens": 1327,
+      "calibration": {
+        "cases": 10,
+        "failures": 0
+      },
+      "heldout": {
+        "cases": 10,
+        "failures": 0
+      }
+    },
+    {
+      "task": "study.plan",
+      "kind": "definition",
+      "difficulty": 2,
+      "model": "haiku",
+      "effort": "high",
+      "qualified": false,
+      "generationCostMicro": 7259,
+      "inputCostMicro": 2243.675,
+      "outputCostMicro": 5003.5,
+      "inputTokens": 22167,
+      "outputTokens": 10007,
+      "calibration": {
+        "cases": 10,
+        "failures": 3
+      },
+      "heldout": {
+        "cases": 10,
+        "failures": 5
+      }
+    },
+    {
+      "task": "study.plan",
+      "kind": "definition",
+      "difficulty": 2,
+      "model": "luna",
+      "effort": "low",
+      "qualified": false,
+      "generationCostMicro": 2271,
+      "inputCostMicro": 1367.9,
+      "outputCostMicro": 892.5,
+      "inputTokens": 13679,
+      "outputTokens": 1785,
+      "calibration": {
+        "cases": 10,
+        "failures": 1
+      },
+      "heldout": {
+        "cases": 10,
+        "failures": 0
+      }
+    },
+    {
+      "task": "study.plan",
+      "kind": "definition",
+      "difficulty": 2,
+      "model": "luna",
+      "effort": "medium",
+      "qualified": true,
+      "generationCostMicro": 2096,
+      "inputCostMicro": 1367.9,
+      "outputCostMicro": 717.5,
+      "inputTokens": 13679,
+      "outputTokens": 1435,
+      "calibration": {
+        "cases": 10,
+        "failures": 0
+      },
+      "heldout": {
+        "cases": 10,
+        "failures": 0
+      }
+    },
+    {
+      "task": "study.plan",
+      "kind": "sourceLookup",
+      "difficulty": 2,
+      "model": "haiku",
+      "effort": "high",
+      "qualified": false,
+      "generationCostMicro": 5174,
+      "inputCostMicro": 3122.0,
+      "outputCostMicro": 2042.5,
+      "inputTokens": 31220,
+      "outputTokens": 4085,
+      "calibration": {
+        "cases": 10,
+        "failures": 10
+      },
+      "heldout": {
+        "cases": 10,
+        "failures": 9
+      }
+    },
+    {
+      "task": "study.plan",
+      "kind": "sourceLookup",
+      "difficulty": 2,
+      "model": "luna",
+      "effort": "low",
+      "qualified": true,
+      "generationCostMicro": 2443,
+      "inputCostMicro": 1885.3,
+      "outputCostMicro": 550.0,
+      "inputTokens": 18853,
+      "outputTokens": 1100,
+      "calibration": {
+        "cases": 10,
+        "failures": 0
+      },
+      "heldout": {
+        "cases": 10,
+        "failures": 0
+      }
+    },
+    {
+      "task": "study.plan",
+      "kind": "sourceLookup",
+      "difficulty": 2,
+      "model": "luna",
+      "effort": "medium",
+      "qualified": true,
+      "generationCostMicro": 2650,
+      "inputCostMicro": 1885.3,
+      "outputCostMicro": 756.0,
+      "inputTokens": 18853,
+      "outputTokens": 1512,
+      "calibration": {
+        "cases": 10,
+        "failures": 0
+      },
+      "heldout": {
+        "cases": 10,
+        "failures": 0
+      }
+    }
+  ],
+  "calculationAnswerCostMicro": {
+    "sol": 54436,
+    "luna": 2513
+  },
+  "calculationAnswerSavings": 0.9538356969652436,
+  "sourceSelection": {
+    "cases": 40,
+    "casesPruned": 19,
+    "originalSourceCharacters": 71791,
+    "retainedSourceCharacters": 59997,
+    "relevantOriginalParagraphsPreserved": true
+  },
+  "limitations": [
+    "Synthetic cases; automated blind grading with conservative zero-failure gate.",
+    "Same B input compared across models, not a production A/B experiment.",
+    "Cache states and sampled output lengths differ.",
+    "Answer profiles require both difficulty bands; no definition/source answer downgrade.",
+    "Protected proof, lesson, visual and non-ASCII requests retain existing routes."
+  ]
+}

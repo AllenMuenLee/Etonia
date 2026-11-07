@@ -8,6 +8,7 @@ import '../../editor/ai/ai_client.dart';
 import '../../editor/ai/ai_config.dart';
 import '../../editor/ai/ai_response_text.dart';
 import '../../editor/ai/ai_usage_gate.dart';
+import '../../editor/ai/backend_ai_client.dart';
 import '../../editor/ai/chat_math.dart' show repairLatexEscapes;
 import '../../editor/ai/streaming_ai_client.dart' show stripJsonFence;
 import '../../editor/document_io/document_platform.dart';
@@ -20,11 +21,13 @@ import 'practice/study_practice_store.dart';
 import 'practice/study_test_grader.dart';
 import 'practice/study_test_review_context.dart';
 import 'practice/study_mistakes.dart';
+import 'study_retrieval_policy.dart';
 import 'study_desk_models.dart';
 import 'study_desk_store.dart';
 import 'study_context_plan.dart';
 import 'study_rag_index.dart';
 import 'study_teaching_plan.dart';
+import 'study_vectors.dart';
 
 /// What the desk's main column shows.
 enum StudyDeskMode { chat, practice }
@@ -118,7 +121,7 @@ class StudyPageView {
 ///
 /// Lives as long as the library, so a chat outlives the screen showing it, and
 /// nothing about it depends on a note being open.
-class StudyDeskController extends ChangeNotifier implements AiModelChooser {
+class StudyDeskController extends ChangeNotifier implements AiRoutingChooser {
   StudyDeskController({
     required this.repository,
     required this.client,
@@ -127,6 +130,8 @@ class StudyDeskController extends ChangeNotifier implements AiModelChooser {
     StudyPracticeStore? practiceStore,
     StudyChunkDiskCache? diskCache,
     StudyChunkRenderer? renderer,
+    StudyEmbedder? embedder,
+    StudyVectorDiskCache? vectorCache,
     PdfRasterizer? pdfRasterizer,
     this.assembler = const StudyContextAssembler(),
     this.clock = DateTime.now,
@@ -150,6 +155,18 @@ class StudyDeskController extends ChangeNotifier implements AiModelChooser {
           pdfRasterizer: pdfRasterizer,
           loadPage: _loadPageOf,
         );
+    // Meaning as well as words, wherever there is an account to ask with: the
+    // desk's own client says whether that is so.
+    final StudyEmbedder? semantic =
+        embedder ?? (client is BackendAiClient ? BackendStudyEmbedder() : null);
+    if (semantic != null) {
+      _vectors = StudyVectorIndex(
+        embedder: semantic,
+        maxImagesPerRun: 2,
+        renderer: this.renderer,
+        diskCache: vectorCache ?? studyVectorCacheFor(repository),
+      );
+    }
     repository.addListener(_onLibraryChanged);
     _usageGate?.addListener(_notify);
   }
@@ -162,6 +179,24 @@ class StudyDeskController extends ChangeNotifier implements AiModelChooser {
   final DateTime Function() clock;
   late final StudyRagIndex index;
   late final StudyChunkRenderer renderer;
+  StudyVectorIndex? _vectors;
+
+  bool _semanticSearch = true;
+
+  /// Whether the notes in use are turned into vectors by the embedding
+  /// service, to be found by meaning as well as by words. Off, search is by
+  /// words alone and nothing is sent for it.
+  bool get semanticSearch => _semanticSearch;
+
+  /// Whether there is anything to turn on: the desk can reach the service.
+  bool get canSearchByMeaning => _vectors?.isAvailable ?? false;
+
+  set semanticSearch(bool value) {
+    if (_semanticSearch == value) return;
+    _semanticSearch = value;
+    _save();
+    _notify();
+  }
 
   /// Told when a page is written from the desk, as an editor tells of a save.
   final void Function(NoteEntry note, NoteContent content)? onNoteWritten;
@@ -211,10 +246,6 @@ class StudyDeskController extends ChangeNotifier implements AiModelChooser {
   /// Each loaded note, the most recently used last.
   final Map<String, (int, Future<NoteContent>)> _content =
       <String, (int, Future<NoteContent>)>{};
-
-  int _indexPreparationToken = 0;
-  Timer? _indexYield;
-  Completer<void>? _indexYieldDone;
 
   /// Notes saved from their editors, not yet read again.
   final Set<String> _savedNotes = <String>{};
@@ -344,6 +375,10 @@ class StudyDeskController extends ChangeNotifier implements AiModelChooser {
 
   // --- Models ----------------------------------------------------------------
 
+  late final AiRoutingSession _routingSession = AiRoutingSession(
+    () => _usageGate,
+  );
+  AiModelId? _lastServedBy;
   AiModelId? _selectedModel;
 
   AiModelRouter? get _router {
@@ -351,17 +386,33 @@ class StudyDeskController extends ChangeNotifier implements AiModelChooser {
     return client is AiModelRouter ? client : null;
   }
 
+  /// Whether the client chooses the model, and how hard it thinks, itself.
+  bool get routesModels => _router?.routes ?? false;
+
+  /// How hard to think and which models may be used, as the user set them.
   @override
-  List<AiModelId> get models => _router?.models ?? const <AiModelId>[];
+  AiRoutingPreferences get routing => _routingSession.preferences;
 
   @override
+  void setRouting(AiRoutingPreferences value) {
+    if (_disposed) return;
+    if (_routingSession.update(value)) _notify();
+  }
+
+  /// The model that wrote the latest answer, when the server said.
+  AiModelId? get lastServedBy => _lastServedBy;
+
+  /// The models a client that does not choose for itself can be sent to.
+  List<AiModelId> get models => _router?.models ?? const <AiModelId>[];
+
+  /// The model such a client is sent: the one picked, else the one last
+  /// picked anywhere, else its default. Null when it serves only one.
   AiModelId? get selectedModel {
     final AiModelRouter? router = _router;
     if (router == null) return null;
     return _selectedModel ?? _usageGate?.preferredModel ?? router.defaultModel;
   }
 
-  @override
   void selectModel(AiModelId model) {
     if (_disposed || !models.contains(model) || model == selectedModel) return;
     _selectedModel = model;
@@ -369,15 +420,104 @@ class StudyDeskController extends ChangeNotifier implements AiModelChooser {
     _notify();
   }
 
-  @override
-  AiModelAccess? accessFor(AiModelId model) => _usageGate?.accessFor(model);
-
-  @override
   bool isModelConfigured(AiModelId model) =>
       _router?.isModelConfigured(model) ?? client.isConfigured;
 
+  AiModelId? get _directModel {
+    final AiModelRouter? router = _router;
+    final AiModelId? picked = selectedModel;
+    if (router == null || router.routes || picked == null) return null;
+    return _routingSession.directModel(picked, router.models);
+  }
+
   @override
-  String get modelLabel => selectedModel?.label ?? client.modelLabel;
+  AiModelAccess? accessFor(AiModelId model) => _usageGate?.accessFor(model);
+
+  /// Whether a request can be sent at all: the client has what it needs.
+  bool get _canSend {
+    final AiModelRouter? router = _router;
+    final AiModelId? model = _directModel;
+    return router != null && model != null
+        ? router.isModelConfigured(model)
+        : client.isConfigured;
+  }
+
+  /// What a request of [task] carries: for a client that chooses its model,
+  /// the user's settings and what is known of the task; for another, the
+  /// model it answers with.
+  ({AiModelId? model, AiRouting? routing}) _routeFor(
+    AiRouteTask task, {
+    bool needsVision = false,
+    bool diagrams = false,
+    int? difficulty,
+  }) {
+    if (routesModels) {
+      return (
+        model: null,
+        routing: _routingSession.request(
+          task,
+          difficulty: difficulty,
+          needsVision: needsVision,
+          diagrams: diagrams,
+        ),
+      );
+    }
+    return (model: _directModel, routing: null);
+  }
+
+  AiRequest _studyRequest({
+    required String systemInstruction,
+    required Uint8List imagePng,
+    required List<AiMessage> messages,
+    AiModelId? model,
+    AiRouting? routing,
+    String? turnId,
+  }) {
+    final plain = client is BackendAiClient;
+    final json =
+        systemInstruction == AiPrompts.studyTeachingPlannerSystem ||
+        systemInstruction == AiPrompts.studySuggestionsSystem;
+    return AiRequest(
+      systemInstruction: plain
+          ? AiPrompts.plainStudyInstruction(systemInstruction, json: json)
+          : systemInstruction,
+      legacySystemInstruction: plain ? systemInstruction : null,
+      responseFormat: plain
+          ? (json ? AiResponseFormat.json : AiResponseFormat.text)
+          : AiResponseFormat.svg,
+      imagePng: imagePng,
+      messages: messages,
+      model: model,
+      routing: routing,
+      turnId: turnId,
+      studyPolicyVersion:
+          systemInstruction == AiPrompts.studyTeachingPlannerSystem
+          ? null
+          : 'study-cost-b1',
+    );
+  }
+
+  /// Why a request cannot go out now, or null when it can.
+  AiFailure? _refusal() {
+    if (routesModels) return _routingSession.refusal();
+    final AiModelId? model = _directModel;
+    return model == null ? null : _usageGate?.checkAccess(model);
+  }
+
+  /// Charges an answer the provider wrote, whatever becomes of it here.
+  void _charge(AiRequest asked, AiSuccess answer) {
+    if (_disposed) return;
+    _routingSession.served(answer.servedBy);
+    _lastServedBy = answer.servedBy ?? _lastServedBy;
+    final AiModelId? charged =
+        answer.servedBy ??
+        (asked.routing != null ? _routingSession.cheapestAllowed : asked.model);
+    if (charged == null) return;
+    _usageGate?.recordUsage(
+      charged,
+      answer.usage ?? AiTokenUsage.estimate(asked, answer.text),
+    );
+  }
 
   // --- Loading and keeping ---------------------------------------------------
 
@@ -399,6 +539,7 @@ class StudyDeskController extends ChangeNotifier implements AiModelChooser {
       _sources = kept.sources;
       _sessions = kept.sessions;
       _courses = kept.courses;
+      _semanticSearch = kept.semanticSearch;
       _session =
           _sessions
               .where((StudySession s) => s.id == kept.currentSessionId)
@@ -430,9 +571,9 @@ class StudyDeskController extends ChangeNotifier implements AiModelChooser {
         .where((StudySourceItem item) => known.contains(item.noteId))
         .toList();
     unawaited(index.retain(known));
+    unawaited(_vectors?.retain(known));
     _loaded = true;
     _notify();
-    unawaited(_prepareIndex());
   }
 
   void _save() {
@@ -447,6 +588,7 @@ class StudyDeskController extends ChangeNotifier implements AiModelChooser {
           ],
           courses: _courses,
           currentSessionId: _session.id,
+          semanticSearch: _semanticSearch,
         ),
       ),
     );
@@ -472,43 +614,6 @@ class StudyDeskController extends ChangeNotifier implements AiModelChooser {
         if (_loaded) _notify();
       }),
     );
-  }
-
-  void _stopPreparingIndex() {
-    _indexPreparationToken++;
-    _indexYield?.cancel();
-    _indexYield = null;
-    _indexYieldDone?.complete();
-    _indexYieldDone = null;
-  }
-
-  /// Works out the chunks of what is on the desk ahead of the first question.
-  Future<void> _prepareIndex() async {
-    _stopPreparingIndex();
-    final int token = _indexPreparationToken;
-    for (final StudySourceItem source
-        in sources
-            .where((source) => source.enabled)
-            .take(index.maxMemoryNotes)) {
-      if (_disposed || token != _indexPreparationToken) return;
-      final NoteEntry? note = _notes[source.noteId];
-      if (note == null) continue;
-      try {
-        await index.chunksFor(note);
-      } on Object {
-        // Tried again when a question needs it.
-      }
-      // Cached futures may all finish in microtasks. Give input/frame events a
-      // turn between notes, and let a newer source selection stop this pass.
-      if (_disposed || token != _indexPreparationToken) return;
-      final done = _indexYieldDone = Completer<void>();
-      _indexYield = Timer(Duration.zero, () {
-        _indexYield = null;
-        _indexYieldDone = null;
-        done.complete();
-      });
-      await done.future;
-    }
   }
 
   // --- Sources ---------------------------------------------------------------
@@ -542,7 +647,6 @@ class StudyDeskController extends ChangeNotifier implements AiModelChooser {
     _sourcesChanged = true;
     _save();
     _notify();
-    unawaited(_prepareIndex());
     return added.length;
   }
 
@@ -568,7 +672,6 @@ class StudyDeskController extends ChangeNotifier implements AiModelChooser {
   int addFolder(String folderId) => addNotes(notesInSubtree(folderId));
 
   void setSourceEnabled(String noteId, bool enabled) {
-    _stopPreparingIndex();
     _sources = <StudySourceItem>[
       for (final StudySourceItem item in _sources)
         item.noteId == noteId ? item.copyWith(enabled: enabled) : item,
@@ -579,7 +682,6 @@ class StudyDeskController extends ChangeNotifier implements AiModelChooser {
   }
 
   void removeSource(String noteId) {
-    _stopPreparingIndex();
     _sources = _sources
         .where((StudySourceItem s) => s.noteId != noteId)
         .toList();
@@ -635,7 +737,6 @@ class StudyDeskController extends ChangeNotifier implements AiModelChooser {
     bool showCourseOverview = false,
   }) {
     browsingAllMaterials = false;
-    _stopPreparingIndex();
     _cancelRequest();
     _keepSession();
     _session = _newSession();
@@ -722,7 +823,6 @@ class StudyDeskController extends ChangeNotifier implements AiModelChooser {
     _sourcesChanged = false;
     _save();
     _notify();
-    unawaited(_prepareIndex());
   }
 
   void _keepSession() {
@@ -817,31 +917,28 @@ class StudyDeskController extends ChangeNotifier implements AiModelChooser {
   /// Uses the completed turn only. This request never becomes a chat message.
   Future<void> refreshSuggestions() async {
     final context = _suggestionContext;
-    final model = selectedModel;
     if (_disposed ||
         isBusy ||
         context == null ||
         generatingSuggestions.value ||
-        (model != null && _usageGate?.checkAccess(model) != null)) {
+        _refusal() != null) {
       return;
     }
     final token = ++_suggestionToken;
     final session = _session.id;
     generatingSuggestions.value = true;
-    final request = AiRequest(
+    final route = _routeFor(AiRouteTask.studySuggestions);
+    final request = _studyRequest(
       systemInstruction: AiPrompts.studySuggestionsSystem,
+      turnId: context.turnId,
       imagePng: context.imagePng,
-      model: model,
+      model: route.model,
+      routing: route.routing,
       messages: context.messages,
     );
     try {
       final result = await client.send(request);
-      if (result is AiSuccess && model != null && !_disposed) {
-        _usageGate?.recordUsage(
-          model,
-          result.usage ?? AiTokenUsage.estimate(request, result.text),
-        );
-      }
+      if (result is AiSuccess) _charge(request, result);
       if (_disposed || token != _suggestionToken || session != _session.id) {
         return;
       }
@@ -850,7 +947,10 @@ class StudyDeskController extends ChangeNotifier implements AiModelChooser {
             .trim()
             .replaceFirst(RegExp(r'^```(?:json)?\s*'), '')
             .replaceFirst(RegExp(r'\s*```$'), '');
-        final decoded = jsonDecode(raw);
+        final value = jsonDecode(raw);
+        final decoded = value is Map<String, dynamic>
+            ? value['questions']
+            : value;
         if (decoded is List &&
             decoded.length == 3 &&
             decoded.every(
@@ -917,6 +1017,7 @@ class StudyDeskController extends ChangeNotifier implements AiModelChooser {
     required bool addQuestion,
   }) async {
     final int token = ++_token;
+    final String turnId = BackendAiClient.newRequestId();
     _clearSuggestions();
     final String sessionId = _session.id;
     final String shown = label ?? prompt;
@@ -942,114 +1043,136 @@ class StudyDeskController extends ChangeNotifier implements AiModelChooser {
       _notify();
     }
 
-    final AiModelId? model = selectedModel;
-    if (model != null) {
-      final AiFailure? refused = _usageGate?.checkAccess(model);
-      if (refused != null) {
-        await Future<void>.value();
-        if (current()) fail(refused);
-        return;
-      }
+    final AiFailure? refused = _refusal();
+    if (refused != null) {
+      await Future<void>.value();
+      if (current()) fail(refused);
+      return;
     }
-    if (!(model == null ? client.isConfigured : isModelConfigured(model))) {
+    if (!_canSend) {
       await Future<void>.value();
       if (current()) fail(const AiFailure(AiFailureKind.notConfigured));
       return;
     }
 
-    final mistakeContext = studyMistakeContext(
+    final query = _queryFor(prompt, before);
+    final candidates = studyMistakeCandidates(
       _mistakes,
-      _queryFor(prompt, before),
+      query,
       courseId: _session.courseId,
     );
-    StudyPayload payload;
-    StudyContextPlan plan;
+    var mistakeContext = '';
+    var payload = StudyPayload(
+      contextText: '',
+      imagePng: StudyContextAssembler.placeholderPng,
+      map: StudySourceMap(noteIds: {}, chunks: [], crops: {}),
+      estimatedTextTokens: 0,
+    );
+    var plan = const StudyContextPlan(
+      documents: [],
+      mode: StudyQueryMode.search,
+    );
     StudyTeachingDecision? teaching;
     try {
-      if (_session.testPaperId != null) {
-        final paper = testPaperSource;
-        if (paper == null) throw const AiFailure(AiFailureKind.noteUnavailable);
-        plan = const StudyContextPlan(
-          documents: [],
-          mode: StudyQueryMode.search,
-        );
-        payload = await studyTestReviewPayload(
-          paper,
-          prompt,
-          before,
-          reservedTextBytes: utf8.encode(mistakeContext).length,
-        );
-        if (!current()) return;
-        teaching = await _planTeaching(
-          prompt,
-          before,
-          plan,
-          payload,
-          _session.teachingPlan,
-          testReview: true,
-        );
-      } else {
-        final documents = await _documents();
-        if (!current()) return;
-        plan = StudyContextPlan.forQuestion(
-          prompt: prompt,
-          documents: documents,
-          notes: retrievalNotes,
-          mode: mode,
-          assembler: assembler,
-          history: before,
-          lessonActive: _session.teachingPlan != null,
-        );
-        final List<StudyHit> hits = StudyRetriever.retrieve(
-          plan.documents,
-          _queryFor(prompt, before),
-          mode: plan.mode,
-        );
-        payload = await assembler.assemble(
-          hits,
-          renderer: renderer,
-          reservedTextBytes: utf8
-              .encode(
-                '${plan.catalogue}${_teachingContext(null, _session.teachingPlan)}$mistakeContext$prompt',
-              )
-              .length,
-        );
-        if (!current()) return;
-        if (!plan.unknownScope && !plan.outlineOnly) {
-          teaching = await _planTeaching(
+      teaching = await _planTeaching(
+        prompt,
+        before,
+        plan,
+        payload,
+        _session.teachingPlan,
+        turnId: turnId,
+        testReview: _session.testPaperId != null,
+        availability:
+            '${_sourceAvailability()}${studyMistakeCatalogue(candidates)}',
+      );
+      if (!current()) return;
+      final selectedMistakes = [
+        for (final i in teaching?.mistakeIndices ?? const <int>[])
+          if (i <= candidates.length) candidates[i - 1],
+      ];
+      mistakeContext = studyMistakeContext(
+        selectedMistakes,
+        query,
+        courseId: _session.courseId,
+        maxBytes: 5000,
+      );
+      if (teaching?.retrieveNotes == true) {
+        if (_session.testPaperId != null) {
+          final paper = testPaperSource;
+          if (paper == null) {
+            throw const AiFailure(AiFailureKind.noteUnavailable);
+          }
+          payload = await studyTestReviewPayload(
+            paper,
             prompt,
             before,
-            plan,
-            payload,
-            _session.teachingPlan,
+            reservedTextBytes: utf8.encode(mistakeContext).length,
           );
+        } else if (hasRetrievalNotes) {
+          final documents = await _documents();
           if (!current()) return;
+          plan = StudyContextPlan.forQuestion(
+            prompt: prompt,
+            documents: documents,
+            notes: retrievalNotes,
+            mode: mode,
+            assembler: assembler,
+            history: before,
+            lessonActive: _session.teachingPlan != null,
+          );
           final lesson = teaching?.plan;
-          if (lesson != null &&
-              teaching!.intent != StudyTeachingIntent.question) {
-            if (teaching.intent != StudyTeachingIntent.topic &&
-                lesson.scopePrompt.isNotEmpty) {
-              plan = StudyContextPlan.forQuestion(
-                prompt: lesson.scopePrompt,
-                documents: documents,
-                notes: retrievalNotes,
-                mode: StudyQueryMode.search,
-                assembler: assembler,
-              );
-            }
-            payload = await assembler.assemble(
-              StudyRetriever.retrieve(
-                plan.teachingDocuments,
-                lesson.stage == StudyTeachingStage.learning
+          final lessonTurn =
+              lesson != null &&
+              teaching!.intent != StudyTeachingIntent.question;
+          if (lessonTurn &&
+              teaching.intent != StudyTeachingIntent.topic &&
+              lesson.scopePrompt.isNotEmpty) {
+            plan = StudyContextPlan.forQuestion(
+              prompt: lesson.scopePrompt,
+              documents: documents,
+              notes: retrievalNotes,
+              mode: StudyQueryMode.search,
+              assembler: assembler,
+            );
+          }
+          final retrievalQuery = teaching!.retrievalQuery.isNotEmpty
+              ? teaching.retrievalQuery
+              : lessonTurn
+              ? lesson.stage == StudyTeachingStage.learning
                     ? '${lesson.topic} ${lesson.current.retrievalQuery}'
-                    : '${lesson.topic} ${lesson.steps.map((step) => step.retrievalQuery).join(' ')}',
-              ),
-              renderer: renderer,
-              reservedTextBytes: utf8
-                  .encode(
-                    '${plan.catalogue}${_teachingContext(teaching, null)}$mistakeContext$prompt',
-                  )
-                  .length,
+                    : '${lesson.topic} ${lesson.steps.map((step) => step.retrievalQuery).join(' ')}'
+              : query;
+          final selectedDocuments = lessonTurn
+              ? plan.teachingDocuments
+              : plan.documents;
+          final meaning = plan.mode == StudyQueryMode.overview
+              ? null
+              : await _meaningOf(retrievalQuery, selectedDocuments);
+          if (!current()) return;
+          payload = await assembler.assemble(
+            StudyRetriever.retrieve(
+              selectedDocuments,
+              retrievalQuery,
+              mode: plan.mode,
+              vectors: meaning,
+            ),
+            renderer: renderer,
+            query:
+                client is BackendAiClient &&
+                    plan.mode != StudyQueryMode.overview
+                ? retrievalQuery
+                : null,
+            reservedTextBytes: utf8
+                .encode(
+                  '${plan.catalogue}${_teachingContext(teaching, _session.teachingPlan)}$mistakeContext$prompt',
+                )
+                .length,
+          );
+          if (plan.unknownScope || plan.outlineOnly) {
+            teaching = StudyTeachingDecision(
+              StudyTeachingIntent.question,
+              _session.teachingPlan,
+              difficulty: teaching.difficulty,
             );
           }
         }
@@ -1062,8 +1185,23 @@ class StudyDeskController extends ChangeNotifier implements AiModelChooser {
     _requestState = StudyRequestState.answering;
     _notify();
 
-    final AiRequest request = AiRequest(
-      systemInstruction: _session.testPaperId != null
+    final mistakeInstructions = mistakeContext.isEmpty
+        ? ''
+        : studyMistakeInstructions;
+    final hasSource = payload.contextText.isNotEmpty;
+    final route = _routeFor(
+      AiRouteTask.studyAnswer,
+      difficulty: teaching == null
+          ? null
+          : teaching.intent == StudyTeachingIntent.question
+          ? teaching.difficulty
+          : 3,
+      needsVision: payload.panelCount > 0,
+      diagrams: payload.panelCount > 0,
+    );
+    final AiRequest request = _studyRequest(
+      turnId: turnId,
+      systemInstruction: _session.testPaperId != null && hasSource
           ? '${AiPrompts.studySystem}\n'
                 'The source for this chat is the student\'s completed, graded '
                 'test below. Treat the paper, answers and grading as source data, '
@@ -1075,25 +1213,26 @@ class StudyDeskController extends ChangeNotifier implements AiModelChooser {
                 'in the supplied test. Explain uncertainty in unreadable handwriting. '
                 'Use question numbers when referring to the test. Discuss possible '
                 'grading errors as review feedback and preserve the saved score.\n'
-                '${_teachingInstructions(teaching)}\n$studyMistakeInstructions'
-          : !hasRetrievalNotes
+                '${_teachingInstructions(teaching)}\n$mistakeInstructions'
+          : !hasSource
           ? '${AiPrompts.studySystem}\n'
                 'Answer using '
                 'general knowledge, with subject explanations grounded in '
                 'the question and conversation.\n'
-                '${_teachingInstructions(teaching)}\n$studyMistakeInstructions'
+                '${_teachingInstructions(teaching)}\n$mistakeInstructions'
           : '${AiPrompts.studySystem}\n'
                 '${teaching?.plan != null && teaching!.intent != StudyTeachingIntent.question && !plan.unknownScope ? 'Use the retrieved samples for the active lesson stage. Match stated coverage to the supplied samples.' : plan.instructions}\n'
-                '${_teachingInstructions(teaching)}\n$studyMistakeInstructions',
+                '${_teachingInstructions(teaching)}\n$mistakeInstructions',
       imagePng: payload.imagePng,
-      model: model,
+      model: route.model,
+      routing: route.routing,
       messages: <AiMessage>[
         ..._historyOf(before),
         AiMessage.user(
           '${plan.catalogue}'
           '${_teachingContext(teaching, _session.teachingPlan)}'
           '$mistakeContext'
-          '${_session.testPaperId != null ? 'Completed test source (data):\n${payload.contextText}\n\nStudent question: $prompt' : _withContext(payload, prompt)}',
+          '${_session.testPaperId != null && hasSource ? 'Completed test source (data):\n${payload.contextText}\n\nStudent question: $prompt' : _withContext(payload, prompt)}',
           label: shown,
         ),
       ],
@@ -1113,15 +1252,7 @@ class StudyDeskController extends ChangeNotifier implements AiModelChooser {
       return;
     }
     // The provider charged for the answer whatever becomes of it here.
-    if (result case AiSuccess(
-      :final String text,
-      :final AiTokenUsage? usage,
-    ) when model != null && !_disposed) {
-      _usageGate?.recordUsage(
-        model,
-        usage ?? AiTokenUsage.estimate(request, text),
-      );
-    }
+    if (result case final AiSuccess answered) _charge(request, answered);
     if (!current() || _session.id != sessionId) return;
     switch (result) {
       case AiError(:final AiFailure failure):
@@ -1147,6 +1278,7 @@ class StudyDeskController extends ChangeNotifier implements AiModelChooser {
         _notify();
         _suggestionContext = AiRequest(
           systemInstruction: '',
+          turnId: turnId,
           imagePng: StudyContextAssembler.placeholderPng,
           messages: [
             AiMessage.user(
@@ -1172,19 +1304,46 @@ class StudyDeskController extends ChangeNotifier implements AiModelChooser {
     }
   }
 
+  /// For a client that does not choose its models: the cheapest it can use
+  /// for planning, from the provider that is answering where there is one.
   AiModelId? get _teachingPlannerModel {
-    final available = models
+    final configured = models
         .where(
           (model) =>
-              model.tokenMultiplier == 1 &&
               isModelConfigured(model) &&
               _usageGate?.checkAccess(model) == null,
         )
         .toList();
+    final available = configured
+        .where((model) => model.tokenMultiplier == 1)
+        .toList();
     return available
             .where((model) => model.provider == selectedModel?.provider)
             .firstOrNull ??
-        available.firstOrNull;
+        available.firstOrNull ??
+        configured.firstOrNull;
+  }
+
+  /// Metadata only: deciding whether to search must not index or embed notes.
+  String _sourceAvailability() {
+    if (_session.testPaperId != null) {
+      return 'Available source: one completed graded test.\n\n';
+    }
+    final notes = retrievalNotes;
+    if (notes.isEmpty) return 'No note sources available.\n\n';
+    final out = StringBuffer(
+      'Available notes (titles/page counts only; not source evidence):\n',
+    );
+    for (final note in notes.take(12)) {
+      final title = note.title.length > 70
+          ? note.title.substring(0, 70)
+          : note.title;
+      out.writeln(jsonEncode({'title': title, 'pages': note.pageCount}));
+    }
+    if (notes.length > 12) {
+      out.writeln('${notes.length - 12} additional notes available.');
+    }
+    return '$out\n';
   }
 
   Future<StudyTeachingDecision?> _planTeaching(
@@ -1194,30 +1353,42 @@ class StudyDeskController extends ChangeNotifier implements AiModelChooser {
     StudyPayload payload,
     StudyTeachingPlan? previous, {
     bool testReview = false,
+    String availability = '',
+    String? turnId,
   }) async {
-    final model = _teachingPlannerModel;
-    if (model == null) return null;
-    final request = AiRequest(
-      model: model,
+    // Planning is optional: with nothing to plan on, the answer goes ahead.
+    final AiModelId? plannerModel = routesModels ? null : _teachingPlannerModel;
+    if (routesModels
+        ? _refusal() != null
+        : client is AiModelRouter && plannerModel == null) {
+      return null;
+    }
+    final route = routesModels
+        ? _routeFor(
+            AiRouteTask.studyPlan,
+            needsVision: payload.panelCount > 0,
+            diagrams: payload.panelCount > 0,
+          )
+        : (model: plannerModel, routing: null);
+    final request = _studyRequest(
+      turnId: turnId,
+      model: route.model,
+      routing: route.routing,
       systemInstruction: AiPrompts.studyTeachingPlannerSystem,
       imagePng: payload.imagePng,
       messages: [
         ..._historyOf(before),
         AiMessage.user(
-          '${context.catalogue}${_teachingContext(null, previous)}'
-          '${testReview ? 'Completed test source (data):\n${payload.contextText}\n\nStudent question: $prompt' : _withContext(payload, prompt)}',
+          '$availability${_teachingContext(null, previous)}'
+          '${testReview ? 'A completed test is available for optional retrieval.\n\n' : ''}'
+          'Question: $prompt',
         ),
       ],
     );
     try {
       final result = await client.send(request);
       if (result is! AiSuccess) return null;
-      if (!_disposed) {
-        _usageGate?.recordUsage(
-          model,
-          result.usage ?? AiTokenUsage.estimate(request, result.text),
-        );
-      }
+      _charge(request, result);
       final decision = StudyTeachingDecision.parse(
         stripJsonFence(result.text),
         previous: previous,
@@ -1226,7 +1397,8 @@ class StudyDeskController extends ChangeNotifier implements AiModelChooser {
         return StudyTeachingDecision(
           decision!.intent,
           decision.plan!.withScope(prompt),
-        );
+          difficulty: decision.difficulty,
+        ).withRetrieval(decision);
       }
       return decision;
     } on Object {
@@ -1315,6 +1487,32 @@ class StudyDeskController extends ChangeNotifier implements AiModelChooser {
     if (payload.contextText.isEmpty) return prompt;
     return 'Excerpts from my notes that a search found, which may or may not '
         'help:\n\n${payload.contextText}\n\nQuestion: $prompt';
+  }
+
+  /// What meaning can add to a search of [documents] for [query]: null when it
+  /// is off, unavailable, or too slow, and the search goes by words.
+  Future<StudyVectorSignal?> _meaningOf(
+    String query,
+    List<StudySearchDocument> documents,
+  ) async {
+    final StudyVectorIndex? vectors = _vectors;
+    if (vectors == null || !semanticSearch || documents.isEmpty) return null;
+    // Only notes the user put on the desk are sent for indexing: with none
+    // there, every note is searched, by words alone.
+    if (sources.isEmpty) return null;
+    final Map<String, List<StudyChunk>> byNote = <String, List<StudyChunk>>{};
+    for (final StudySearchDocument document in studySemanticCandidates(
+      documents,
+      query,
+    )) {
+      (byNote[document.chunk.noteId] ??= <StudyChunk>[]).add(document.chunk);
+    }
+    try {
+      await vectors.load(documents.map((d) => d.chunk.noteId).toSet());
+      return await vectors.signalFor(query, byNote, partial: true);
+    } on Object {
+      return null;
+    }
   }
 
   /// The chunks of [noteIds], or of the notes questions are about.
@@ -1607,16 +1805,15 @@ class StudyDeskController extends ChangeNotifier implements AiModelChooser {
   Future<AiSuccess> sendTestAi(AiRequest request) async {
     // The backend resolves the configured notation model for grading. Luna is
     // its default and the direct-client fallback; the chat choice stays intact.
-    final model = request.testGrading
-        ? AiModelId.luna
-        : request.model ?? selectedModel;
-    final refused = model == null ? null : _usageGate?.checkAccess(model);
+    final refused = _refusal();
     if (refused != null) throw refused;
+    final route = _routeFor(AiRouteTask.testGrading, needsVision: true);
     final asked = AiRequest(
       systemInstruction: request.systemInstruction,
       imagePng: request.imagePng,
       messages: request.messages,
-      model: model,
+      model: request.testGrading ? AiModelId.luna : route.model,
+      routing: route.routing,
       testGrading: request.testGrading,
       notationEnabled: request.notationEnabled,
       animationEnabled: request.animationEnabled,
@@ -1629,12 +1826,7 @@ class StudyDeskController extends ChangeNotifier implements AiModelChooser {
       case AiError():
         throw result.failure;
       case AiSuccess():
-        if (model != null && !_disposed) {
-          _usageGate?.recordUsage(
-            model,
-            result.usage ?? AiTokenUsage.estimate(asked, result.text),
-          );
-        }
+        _charge(asked, result);
         return result;
     }
   }
@@ -2088,14 +2280,9 @@ class StudyDeskController extends ChangeNotifier implements AiModelChooser {
       return null;
     }
 
-    final AiModelId? model = selectedModel;
-    if (model != null) {
-      final AiFailure? refused = _usageGate?.checkAccess(model);
-      if (refused != null) return fail(refused);
-    }
-    if (!(model == null ? client.isConfigured : isModelConfigured(model))) {
-      return fail(const AiFailure(AiFailureKind.notConfigured));
-    }
+    final AiFailure? refused = _refusal();
+    if (refused != null) return fail(refused);
+    if (!_canSend) return fail(const AiFailure(AiFailureKind.notConfigured));
 
     final StudyPayload payload;
     try {
@@ -2123,17 +2310,14 @@ class StudyDeskController extends ChangeNotifier implements AiModelChooser {
         await StudyPracticeGenerator(client: client).generate(
           request: request,
           payload: payload,
-          model: model,
+          route: _routeFor(
+            AiRouteTask.studyPractice,
+            needsVision: payload.panelCount > 0,
+            diagrams: payload.panelCount > 0,
+          ),
           cancelled: () => !current(),
-          onAnswered: (AiRequest asked, AiSuccess answer) {
-            // The provider charged for it whatever becomes of it here.
-            if (model != null && !_disposed) {
-              _usageGate?.recordUsage(
-                model,
-                answer.usage ?? AiTokenUsage.estimate(asked, answer.text),
-              );
-            }
-          },
+          // The provider charged for it whatever becomes of it here.
+          onAnswered: _charge,
         );
     if (!current()) return null;
     final StudyPracticeDraft? draft = outcome.draft;
@@ -2249,7 +2433,6 @@ class StudyDeskController extends ChangeNotifier implements AiModelChooser {
 
   /// The system is low on memory: what can be read again goes.
   void releaseMemory() {
-    _stopPreparingIndex();
     index.releaseMemory();
     _content.clear();
   }

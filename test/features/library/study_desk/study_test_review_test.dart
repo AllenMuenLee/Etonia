@@ -117,7 +117,8 @@ void main() {
         invoke: (_, body) async {
           calls++;
           expect(body['task'], 'testGrading');
-          expect(body['model'], 'luna');
+          expect(body['model'], 'auto');
+          expect((body['routing'] as Map)['task'], 'test.grading');
           expect(
             body['selectedSvg'],
             contains('data-etonia-selection-bounds="0 0 760.0 360.0"'),

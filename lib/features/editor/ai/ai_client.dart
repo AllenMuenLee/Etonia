@@ -3,9 +3,11 @@ import 'dart:typed_data';
 import 'ai_citation.dart';
 import 'ai_models.dart';
 import 'ai_notation.dart';
+import 'ai_routing.dart';
 import 'note_image_renderer.dart';
 
 export 'ai_models.dart';
+export 'ai_routing.dart';
 
 /// Receives the assistant's message as far as it has been written, and
 /// whether all of it has: then only the notation, if any, is still coming.
@@ -94,6 +96,8 @@ class AiMessage {
 }
 
 /// Everything one stateless `generateContent` call needs. Immutable.
+enum AiResponseFormat { svg, text, json }
+
 class AiRequest {
   AiRequest({
     required this.systemInstruction,
@@ -106,11 +110,33 @@ class AiRequest {
     this.notationInstruction,
     this.testGrading = false,
     this.model,
+    this.routing,
+    this.responseFormat = AiResponseFormat.svg,
+    this.legacySystemInstruction,
+    this.turnId,
+    this.studyPolicyVersion = 'study-cost-b1',
   }) : messages = List<AiMessage>.unmodifiable(messages);
 
   /// Which model answers, for a client that serves several
-  /// ([AiModelRouter]). A client with one model ignores it.
+  /// ([AiModelRouter]) but does not choose for itself. A client with one
+  /// model ignores it.
   final AiModelId? model;
+
+  /// What a client that chooses the model itself ([AiModelRouter.routes]) is
+  /// told: the task, how hard to think, and the models the user left on.
+  /// Such a client ignores [model].
+  final AiRouting? routing;
+
+  final AiResponseFormat responseFormat;
+
+  /// A changed planner policy must not reuse an older quality calibration.
+  final String? studyPolicyVersion;
+
+  /// Used only when an older backend rejects the new transport before billing.
+  final String? legacySystemInstruction;
+
+  /// A random identifier, never a question or a source identifier.
+  final String? turnId;
 
   /// Grades and marks a test in one pass using the server's notation model.
   final bool testGrading;
@@ -202,6 +228,9 @@ enum AiFailureKind {
   /// No active plan includes the chosen model.
   planRequired,
 
+  /// Every model is turned off in the Advanced settings.
+  noModelEnabled,
+
   /// The plan's AI credits for metered models are spent.
   insufficientCredits,
 }
@@ -239,11 +268,12 @@ class AiFailure {
       AiFailureKind.interrupted =>
         'The note was closed before the answer arrived. Try again.',
       AiFailureKind.planRequired =>
-        'Your plan does not include this model. Upgrade in Plans & '
-            'Credits, or pick a model your plan includes.',
+        'AI needs a plan. Sign in and choose one in Plans & Credits.',
+      AiFailureKind.noModelEnabled =>
+        'Every model is turned off. Turn one on in Thinking > Advanced.',
       AiFailureKind.insufficientCredits =>
-        'Your AI credits are used up. Upgrade in Plans & Credits; Haiku '
-            'and Luna are unlimited on every paid plan.',
+        'Your AI credit is used up. Upgrade in Plans & Credits to keep '
+            'going.',
     };
   }
 
@@ -324,6 +354,7 @@ class AiSuccess extends AiResult {
     this.notationRejected = false,
     this.citations = const <int, String>{},
     this.usage,
+    this.servedBy,
   });
 
   factory AiSuccess.response(
@@ -341,6 +372,9 @@ class AiSuccess extends AiResult {
 
   /// The tokens the answer took, when the provider said.
   final AiTokenUsage? usage;
+
+  /// The model that wrote the answer, when the server chose it and said so.
+  final AiModelId? servedBy;
 
   final String text;
   final AiNotation? notation;
@@ -394,6 +428,10 @@ abstract class AiModelRouter implements AiClient {
 
   /// The model a request that names none is answered by.
   AiModelId get defaultModel;
+
+  /// Whether this client chooses the model itself from [AiRequest.routing],
+  /// rather than answering with the one [AiRequest.model] names.
+  bool get routes => false;
 
   /// Whether a request naming [model] can be sent: its provider has a key.
   bool isModelConfigured(AiModelId model);

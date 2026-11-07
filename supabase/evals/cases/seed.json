@@ -1,0 +1,110 @@
+[
+  {
+    "id": "study.answer.boolean-simplify-1",
+    "task": "study.answer",
+    "difficulty": 1,
+    "capabilities": ["reasoning"],
+    "prompt": "Simplify the Boolean expression A·B + A·B' and say which law you used.",
+    "check": { "type": "contains_all", "values": ["A"] }
+  },
+  {
+    "id": "study.answer.demorgan-2",
+    "task": "study.answer",
+    "difficulty": 2,
+    "capabilities": ["reasoning"],
+    "prompt": "Use De Morgan's theorem to write (A + B)' · C as a sum-of-products using only AND, OR and NOT of single variables.",
+    "check": { "type": "regex", "pattern": "A'\\s*[·*]?\\s*B'\\s*[·*]?\\s*C" }
+  },
+  {
+    "id": "study.answer.karnaugh-3",
+    "task": "study.answer",
+    "difficulty": 3,
+    "capabilities": ["reasoning"],
+    "prompt": "A 4-variable function F(A,B,C,D) is 1 for minterms 0, 2, 5, 7, 8, 10, 13, 15 and 0 otherwise. Give the minimal sum-of-products.",
+    "check": { "type": "regex", "pattern": "B'\\s*[·*]?\\s*D'.*B\\s*[·*]?\\s*D|B\\s*[·*]?\\s*D.*B'\\s*[·*]?\\s*D'" }
+  },
+  {
+    "id": "study.answer.flipflop-2",
+    "task": "study.answer",
+    "difficulty": 2,
+    "capabilities": ["reasoning"],
+    "prompt": "A positive-edge D flip-flop has D=1 and Q=0. The clock rises, then D changes to 0 before the clock falls. What is Q after the clock falls? Answer in one sentence.",
+    "check": { "type": "regex", "pattern": "\\bQ\\b.{0,30}\\b(1|high)\\b|\\b(1|high)\\b.{0,30}\\bQ\\b" }
+  },
+  {
+    "id": "study.plan.json-1",
+    "task": "study.plan",
+    "difficulty": 1,
+    "capabilities": ["structured", "reasoning"],
+    "system": "Return only a JSON object with the keys intent, topic and steps. intent is one of question, topic, continue. steps is a list of short strings.",
+    "prompt": "Teach me sequential logic from scratch.",
+    "check": { "type": "json", "requiredKeys": ["intent", "topic", "steps"] }
+  },
+  {
+    "id": "study.plan.json-2",
+    "task": "study.plan",
+    "difficulty": 2,
+    "capabilities": ["structured", "reasoning"],
+    "system": "Return only a JSON object with the keys intent, topic and steps. intent is one of question, topic, continue. steps is a list of short strings.",
+    "prompt": "What is a multiplexer?",
+    "check": { "type": "json", "requiredKeys": ["intent", "topic", "steps"] }
+  },
+  {
+    "id": "study.suggestions.json-1",
+    "task": "study.suggestions",
+    "difficulty": 1,
+    "capabilities": ["structured"],
+    "system": "Return only a JSON array of exactly three short follow-up questions a student might ask next.",
+    "prompt": "Question: What is a half adder?\nAnswer: A half adder adds two bits, giving a sum (A XOR B) and a carry (A AND B).",
+    "check": { "type": "regex", "pattern": "^\\s*(```(json)?\\s*)?\\[\\s*\"[^\"]+\"\\s*,\\s*\"[^\"]+\"\\s*,\\s*\"[^\"]+\"\\s*\\]" }
+  },
+  {
+    "id": "study.practice.json-2",
+    "task": "study.practice",
+    "difficulty": 2,
+    "capabilities": ["structured", "reasoning"],
+    "system": "Return only a JSON object with the key questions: a list of 3 multiple choice questions, each with prompt, choices (4 strings) and answerIndex.",
+    "prompt": "Make a short quiz on Karnaugh maps.",
+    "check": { "type": "json", "requiredKeys": ["questions"] }
+  },
+  {
+    "id": "editor.answer.ohm-1",
+    "task": "editor.answer",
+    "difficulty": 1,
+    "capabilities": ["reasoning", "vision"],
+    "prompt": "A 12 V source drives a 4 kilo-ohm resistor. What is the current? Give the number and the unit.",
+    "check": { "type": "regex", "pattern": "\\b3\\s*mA\\b|0\\.003\\s*A" }
+  },
+  {
+    "id": "editor.answer.explain-2",
+    "task": "editor.answer",
+    "difficulty": 2,
+    "capabilities": ["reasoning", "vision"],
+    "prompt": "In one paragraph, explain why a transistor used as a switch is driven into saturation and cut-off rather than the linear region.",
+    "check": {
+      "type": "judge",
+      "rubric": "Correct if it says the transistor then dissipates little power and gives a clean on or off output. Incorrect if it claims the linear region is better for switching."
+    }
+  },
+  {
+    "id": "test.grading.partial-credit-2",
+    "task": "test.grading",
+    "difficulty": 2,
+    "capabilities": ["reasoning", "vision"],
+    "system": "You grade a student's answer. Return only a JSON object with the keys score (0 to 5) and feedback.",
+    "prompt": "Question (5 marks): Simplify A·B + A·B'. Student answer: A·B + A·B' = A·(B + B') = A·1 = B.",
+    "check": { "type": "json", "requiredKeys": ["score", "feedback"] }
+  },
+  {
+    "id": "test.grading.catches-error-3",
+    "task": "test.grading",
+    "difficulty": 3,
+    "capabilities": ["reasoning", "vision"],
+    "system": "You grade a student's answer. Return only a JSON object with the keys score (0 to 5) and feedback.",
+    "prompt": "Question (5 marks): Simplify A·B + A·B'. Student answer: A·B + A·B' = A·(B + B') = A·1 = B.",
+    "check": {
+      "type": "judge",
+      "rubric": "The student's last step is wrong: A·1 is A, not B. Correct if the feedback names that error and the score is 3 or less."
+    }
+  }
+]

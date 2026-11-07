@@ -65,6 +65,74 @@ void main() {
     await second.up();
   });
 
+  testWidgets('a pinch tells the native side where the page ends up, not '
+      'each step of the way', (WidgetTester tester) async {
+    debugDefaultTargetPlatformOverride = TargetPlatform.android;
+    final TestDefaultBinaryMessenger messenger =
+        TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
+    const MethodChannel channel = MethodChannel('com.etonia.app/native_ink');
+    final List<String> calls = <String>[];
+    messenger.setMockMethodCallHandler(channel, (MethodCall call) async {
+      calls.add(call.method);
+      return call.method == 'registerSurface' ? true : null;
+    });
+    addTearDown(() async {
+      await tester.pumpWidget(const SizedBox.shrink());
+      messenger.setMockMethodCallHandler(channel, null);
+      debugDefaultTargetPlatformOverride = null;
+    });
+
+    const PageSetup shortPage = PageSetup(
+      size: PageSize.custom,
+      customSize: Size(1000, 500),
+    );
+    final NoteDocument document = NoteDocument(
+      pages: <NotePage>[
+        for (int i = 0; i < 3; i++)
+          NotePage(ink: InkController(), setup: shortPage),
+      ],
+    );
+    addTearDown(document.dispose);
+    await pumpApp(
+      tester,
+      viewport: TestViewport.tabletLandscape,
+      home: EditorScreen(document: document),
+    );
+    await tester.pumpAndSettle();
+    calls.clear();
+
+    final Offset center = tester.getCenter(find.byType(EditorScreen));
+    final TestGesture first = await tester.startGesture(
+      center - const Offset(40, 0),
+      kind: PointerDeviceKind.touch,
+    );
+    final TestGesture second = await tester.startGesture(
+      center + const Offset(40, 0),
+      kind: PointerDeviceKind.touch,
+    );
+    await tester.pump();
+    for (int i = 0; i < 8; i++) {
+      await first.moveBy(const Offset(-6, 0));
+      await second.moveBy(const Offset(6, 0));
+      await tester.pump(const Duration(milliseconds: 16));
+    }
+    expect(
+      calls.where((String call) => call == 'updateSurface'),
+      isEmpty,
+      reason: 'no message across the platform channel for each step',
+    );
+
+    await first.up();
+    await second.up();
+    await tester.pump(const Duration(milliseconds: 300));
+    await tester.pump(const Duration(milliseconds: 300));
+    expect(
+      calls.where((String call) => call == 'updateSurface'),
+      isNotEmpty,
+      reason: 'told where the page ended up',
+    );
+  });
+
   testWidgets('closing the page mid-handoff still removes the wet ink', (
     WidgetTester tester,
   ) async {

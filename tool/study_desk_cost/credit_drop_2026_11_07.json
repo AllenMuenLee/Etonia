@@ -1,0 +1,51 @@
+{
+  "snapshotLatestUtc": "2026-11-07 16:15:47.13966+00",
+  "windowStartUtc": "2026-11-07 16:09:22.739755+00",
+  "allowanceMicro": 500000,
+  "remainingMicro": 13129,
+  "reconstructedBeforeMicro": 98114,
+  "chargedMicro": 84985,
+  "reconstructedBeforePercent": 19.6228,
+  "afterPercent": 2.6258,
+  "calls": 74,
+  "byModel": {
+    "embed": {
+      "calls": 59,
+      "costMicro": 16139,
+      "inputTokens": 81762,
+      "outputTokens": 0,
+      "share": 0.189904
+    },
+    "haiku": {
+      "calls": 12,
+      "costMicro": 17038,
+      "inputTokens": 49227,
+      "outputTokens": 23925,
+      "share": 0.200482
+    },
+    "sol": {
+      "calls": 3,
+      "costMicro": 51808,
+      "inputTokens": 17154,
+      "outputTokens": 1750,
+      "share": 0.609613
+    }
+  },
+  "knownHaikuCacheOverpricingMicro": 194.22,
+  "lastTwoTutorTurns": [
+    {
+      "costMicro": 3395,
+      "calls": 3
+    },
+    {
+      "costMicro": 6361,
+      "calls": 3
+    }
+  ],
+  "limitations": [
+    "Requests with null task cannot be attributed to Study Desk with certainty.",
+    "Embedding requests have no shared turn ID; exact per-conversation embedding attribution is unavailable.",
+    "Credit reconstruction adds observed settled charges to remaining balance; historical UI display times were not recorded.",
+    "No prompts, answers, notes, emails, raw user IDs, or keys were read from production."
+  ]
+}

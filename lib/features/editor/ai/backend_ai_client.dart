@@ -31,10 +31,14 @@ class BackendAiClient implements AiModelRouter {
       invoke != null || invokeStream != null || _backend.isConfigured;
   @override
   bool isModelConfigured(AiModelId model) => isConfigured;
+
+  /// The server picks the model, and how hard it thinks, from the task.
+  @override
+  bool get routes => true;
   @override
   String get modelLabel => defaultModel.label;
 
-  static String _requestId() {
+  static String newRequestId() {
     final random = Random.secure();
     final bytes = List<int>.generate(16, (_) => random.nextInt(256));
     bytes[6] = (bytes[6] & 15) | 64;
@@ -126,8 +130,20 @@ class BackendAiClient implements AiModelRouter {
           request.notationEnabled && note != null && validFocus;
       final history = _history(request.messages, latestIndex);
       final Map<String, Object?> body = <String, Object?>{
-        'requestId': _requestId(),
-        'model': (request.model ?? defaultModel).name,
+        'requestId': newRequestId(),
+        if (request.turnId != null) 'turnId': request.turnId,
+        if (request.responseFormat != AiResponseFormat.svg)
+          'responseFormat': request.responseFormat.name,
+        if (request.responseFormat != AiResponseFormat.svg)
+          if (request.studyPolicyVersion != null)
+            'studyPolicyVersion': request.studyPolicyVersion,
+        // A routed request names no model: the server picks the cheapest one
+        // that is capable enough. A request that names one (an older caller)
+        // is answered by it.
+        'model': request.routing != null
+            ? 'auto'
+            : (request.model ?? defaultModel).name,
+        if (request.routing != null) 'routing': request.routing!.toJson(),
         if (request.testGrading) 'task': 'testGrading',
         'prompt': latest.text,
         if (history.isNotEmpty) 'history': history,
@@ -161,13 +177,63 @@ class BackendAiClient implements AiModelRouter {
             'bottom': clampedBottom,
           },
       };
-      final Map<String, dynamic> response = await _invoke(
-        body,
-        notation: notation,
-        onPartial: onPartial,
-        onNotation: onNotation,
-      );
+      Map<String, dynamic> response;
+      try {
+        response = await _invoke(
+          body,
+          notation: notation,
+          onPartial: onPartial,
+          onNotation: onNotation,
+        );
+      } on BackendFailure catch (error) {
+        // Old servers reject unknown fields before reserving or sending work.
+        // Never retry a timeout/provider failure: it may already be charged.
+        if (error.code != 'rejected' ||
+            request.responseFormat == AiResponseFormat.svg ||
+            request.legacySystemInstruction == null) {
+          rethrow;
+        }
+        final legacy = Map<String, Object?>.of(body)
+          ..remove('responseFormat')
+          ..remove('turnId')
+          ..remove('studyPolicyVersion')
+          ..['systemInstruction'] = request.legacySystemInstruction;
+        response = await _invoke(
+          legacy,
+          notation: notation,
+          onPartial: onPartial,
+          onNotation: onNotation,
+        );
+      }
       if (_closed) return const AiError(AiFailure(AiFailureKind.interrupted));
+      if (request.responseFormat != AiResponseFormat.svg &&
+          response['responseFormat'] == request.responseFormat.name) {
+        final rawAnswer = response['answer'] as String;
+        final words = request.responseFormat == AiResponseFormat.json
+            ? stripJsonFence(rawAnswer)
+            : rawAnswer.trim();
+        if (words.isEmpty) return const AiError(AiFailure(AiFailureKind.empty));
+        if (request.responseFormat == AiResponseFormat.json) {
+          try {
+            final decoded = jsonDecode(words);
+            if (decoded is! Map && decoded is! List) {
+              return const AiError(AiFailure(AiFailureKind.malformed));
+            }
+          } on FormatException {
+            return const AiError(AiFailure(AiFailureKind.malformed));
+          }
+        }
+        onPartial?.call(words, true);
+        final usage = response['usage'] as Map<String, dynamic>;
+        return AiSuccess(
+          words,
+          usage: AiTokenUsage(
+            inputTokens: usage['inputTokens'] as int,
+            outputTokens: usage['outputTokens'] as int,
+          ),
+          servedBy: _servedBy(response['servedBy']),
+        );
+      }
       final String raw = stripJsonFence(response['answer'] as String);
       final AiAssistantResponse answer;
       try {
@@ -195,6 +261,7 @@ class BackendAiClient implements AiModelRouter {
           inputTokens: usage['inputTokens'] as int,
           outputTokens: usage['outputTokens'] as int,
         ),
+        servedBy: _servedBy(response['servedBy']),
       );
     } on BackendFailure catch (error) {
       return AiError(
@@ -215,6 +282,15 @@ class BackendAiClient implements AiModelRouter {
     } finally {
       if (invoke == null && invokeStream == null) _backend.billingChanged();
     }
+  }
+
+  /// The model the server says answered, or null for an older server.
+  static AiModelId? _servedBy(Object? served) {
+    if (served is! Map<String, dynamic>) return null;
+    for (final AiModelId model in AiModelId.values) {
+      if (model.name == served['model']) return model;
+    }
+    return null;
   }
 
   Future<Map<String, dynamic>> _invoke(

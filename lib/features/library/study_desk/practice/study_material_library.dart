@@ -3,8 +3,8 @@ import 'package:flutter/material.dart';
 import '../../../../app/theme/app_icons.dart';
 import '../../../../app/theme/app_tokens.dart';
 import '../../../../shared/widgets/dog_ear.dart';
-import '../../../../shared/widgets/pressable.dart';
 import '../study_desk_widgets.dart';
+import '../study_motion.dart';
 import 'study_practice_models.dart';
 
 enum _Sort { recent, title }
@@ -79,7 +79,19 @@ class _StudyMaterialLibraryState extends State<StudyMaterialLibrary> {
     super.dispose();
   }
 
-  Widget _entry(_MaterialEntry entry) => _MaterialCard(
+  Widget _entry(_MaterialEntry entry, int index) => StudyAppear(
+    key: ValueKey(
+      entry.deck != null
+          ? 'practice-deck-appear-${entry.deck!.id}'
+          : 'study-paper-appear-${entry.paper!.id}',
+    ),
+    // Changing the view plays them in again, in the new shape.
+    once: ('study-material', entry.deck?.id ?? entry.paper!.id, _grid),
+    delay: AppMotion.staggerStep * (index.clamp(0, AppMotion.staggerCount) + 2),
+    child: _card(entry),
+  );
+
+  Widget _card(_MaterialEntry entry) => _MaterialCard(
     key: ValueKey(
       entry.deck != null
           ? 'practice-deck-${entry.deck!.id}'
@@ -265,10 +277,17 @@ class _StudyMaterialLibraryState extends State<StudyMaterialLibrary> {
                             ),
                           ],
                         ),
-                        if (widget.status != null) ...[
-                          const SizedBox(height: AppSpacing.md),
-                          widget.status!,
-                        ],
+                        StudyDisclose(
+                          child: widget.status == null
+                              ? null
+                              : Padding(
+                                  key: const ValueKey('study-material-status'),
+                                  padding: const EdgeInsets.only(
+                                    top: AppSpacing.md,
+                                  ),
+                                  child: widget.status,
+                                ),
+                        ),
                       ],
                     ),
                   ),
@@ -276,26 +295,29 @@ class _StudyMaterialLibraryState extends State<StudyMaterialLibrary> {
                 if (entries.isEmpty)
                   SliverFillRemaining(
                     hasScrollBody: false,
-                    child: StudyEmptyState(
-                      symbol: Icon(
-                        tests ? AppIcons.note : AppIcons.template,
-                        size: 32,
-                        color: colors.textSecondary,
+                    child: StudyAppear(
+                      key: ValueKey('study-material-empty-$tests-$query'),
+                      child: StudyEmptyState(
+                        symbol: Icon(
+                          tests ? AppIcons.note : AppIcons.template,
+                          size: 32,
+                          color: colors.textSecondary,
+                        ),
+                        title: query.isNotEmpty
+                            ? 'No matching material'
+                            : tests
+                            ? 'Your tests belong here'
+                            : 'Your flashcards belong here',
+                        message: query.isNotEmpty
+                            ? 'Try another title or source note.'
+                            : 'Choose material from your library to get started.',
+                        action: query.isNotEmpty
+                            ? TextButton(
+                                onPressed: () => setState(_search.clear),
+                                child: const Text('Clear search'),
+                              )
+                            : null,
                       ),
-                      title: query.isNotEmpty
-                          ? 'No matching material'
-                          : tests
-                          ? 'Your tests belong here'
-                          : 'Your flashcards belong here',
-                      message: query.isNotEmpty
-                          ? 'Try another title or source note.'
-                          : 'Choose material from your library to get started.',
-                      action: query.isNotEmpty
-                          ? TextButton(
-                              onPressed: () => setState(_search.clear),
-                              child: const Text('Clear search'),
-                            )
-                          : null,
                     ),
                   ),
                 for (final groupId in orderedGroups) ...[
@@ -337,14 +359,14 @@ class _StudyMaterialLibraryState extends State<StudyMaterialLibrary> {
                                 ),
                             itemCount: groups[groupId]!.length,
                             itemBuilder: (context, index) =>
-                                _entry(groups[groupId]![index]),
+                                _entry(groups[groupId]![index], index),
                           )
                         : SliverList.separated(
                             itemCount: groups[groupId]!.length,
                             separatorBuilder: (_, _) =>
                                 const SizedBox(height: AppSpacing.xs),
                             itemBuilder: (context, index) =>
-                                _entry(groups[groupId]![index]),
+                                _entry(groups[groupId]![index], index),
                           ),
                   ),
                 ],
@@ -480,167 +502,159 @@ class _MaterialCard extends StatelessWidget {
         ),
       );
     }
-    return Pressable(
-      child: StudySurface(
-        onTap: onOpen,
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            Expanded(
-              child: Container(
-                color: colors.surfaceMuted.withValues(alpha: .45),
-                padding: const EdgeInsets.fromLTRB(
-                  AppSpacing.lg,
-                  AppSpacing.md,
-                  AppSpacing.lg,
-                  0,
-                ),
-                child: _MaterialPreview(entry: entry),
-              ),
-            ),
-            Padding(
+    return StudySurface(
+      onTap: onOpen,
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Expanded(
+            child: Container(
+              color: colors.surfaceMuted.withValues(alpha: .45),
               padding: const EdgeInsets.fromLTRB(
+                AppSpacing.lg,
                 AppSpacing.md,
-                AppSpacing.xs,
-                AppSpacing.xxs,
-                AppSpacing.md,
+                AppSpacing.lg,
+                0,
               ),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.stretch,
-                children: [
-                  Row(
-                    children: [
-                      Expanded(
-                        child: Text(
-                          '${entry.kind} · ${entry.detail}',
-                          style: text.labelMedium,
-                        ),
+              child: _MaterialPreview(entry: entry),
+            ),
+          ),
+          Padding(
+            padding: const EdgeInsets.fromLTRB(
+              AppSpacing.md,
+              AppSpacing.xs,
+              AppSpacing.xxs,
+              AppSpacing.md,
+            ),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                Row(
+                  children: [
+                    Expanded(
+                      child: Text(
+                        '${entry.kind} · ${entry.detail}',
+                        style: text.labelMedium,
                       ),
-                      PopupMenuButton<String>(
-                        key: ValueKey(
-                          deck != null
-                              ? 'practice-deck-menu-${deck.id}'
-                              : 'study-paper-menu-${paper!.id}',
+                    ),
+                    PopupMenuButton<String>(
+                      key: ValueKey(
+                        deck != null
+                            ? 'practice-deck-menu-${deck.id}'
+                            : 'study-paper-menu-${paper!.id}',
+                      ),
+                      tooltip: deck != null ? 'Deck actions' : 'Test actions',
+                      icon: Icon(
+                        AppIcons.more,
+                        color: colors.textSecondary,
+                        size: 20,
+                      ),
+                      onSelected: (action) {
+                        switch (action) {
+                          case 'open':
+                            onOpen();
+                          case 'export':
+                            onExport?.call();
+                          case 'manage':
+                            onManage?.call();
+                          case 'save':
+                            onSave?.call();
+                          case 'sources':
+                            onSources?.call();
+                        }
+                      },
+                      itemBuilder: (_) => [
+                        if (onSources != null)
+                          const PopupMenuItem(
+                            value: 'sources',
+                            child: Text('Browse sources'),
+                          ),
+                        PopupMenuItem(
+                          value: 'open',
+                          child: Text(
+                            deck != null
+                                ? 'Practice Flashcards'
+                                : paper!.isSubmitted
+                                ? 'Review Graded Paper'
+                                : 'Take Test',
+                          ),
                         ),
-                        tooltip: deck != null ? 'Deck actions' : 'Test actions',
-                        icon: Icon(
-                          AppIcons.more,
-                          color: colors.textSecondary,
-                          size: 20,
-                        ),
-                        onSelected: (action) {
-                          switch (action) {
-                            case 'open':
-                              onOpen();
-                            case 'export':
-                              onExport?.call();
-                            case 'manage':
-                              onManage?.call();
-                            case 'save':
-                              onSave?.call();
-                            case 'sources':
-                              onSources?.call();
-                          }
-                        },
-                        itemBuilder: (_) => [
-                          if (onSources != null)
-                            const PopupMenuItem(
-                              value: 'sources',
-                              child: Text('Browse sources'),
-                            ),
+                        if (deck != null) ...[
+                          const PopupMenuItem(
+                            value: 'export',
+                            child: Text('Export Test PDF'),
+                          ),
+                          const PopupMenuItem(
+                            value: 'manage',
+                            child: Text('Edit / Manage'),
+                          ),
+                        ],
+                        if (paper != null && onSave != null)
                           PopupMenuItem(
-                            value: 'open',
+                            key: ValueKey('study-save-paper-${paper.id}'),
+                            value: 'save',
+                            enabled: !saving,
                             child: Text(
-                              deck != null
-                                  ? 'Practice Flashcards'
-                                  : paper!.isSubmitted
-                                  ? 'Review Graded Paper'
-                                  : 'Take Test',
+                              saving
+                                  ? 'Preparing PDF…'
+                                  : 'Add to library or folder',
                             ),
                           ),
-                          if (deck != null) ...[
-                            const PopupMenuItem(
-                              value: 'export',
-                              child: Text('Export Test PDF'),
-                            ),
-                            const PopupMenuItem(
-                              value: 'manage',
-                              child: Text('Edit / Manage'),
-                            ),
-                          ],
-                          if (paper != null && onSave != null)
-                            PopupMenuItem(
-                              key: ValueKey('study-save-paper-${paper.id}'),
-                              value: 'save',
-                              enabled: !saving,
-                              child: Text(
-                                saving
-                                    ? 'Preparing PDF…'
-                                    : 'Add to library or folder',
-                              ),
-                            ),
-                        ],
-                      ),
-                    ],
-                  ),
-                  Padding(
-                    padding: const EdgeInsetsDirectional.only(
-                      end: AppSpacing.sm,
+                      ],
                     ),
+                  ],
+                ),
+                Padding(
+                  padding: const EdgeInsetsDirectional.only(end: AppSpacing.sm),
+                  child: Text(
+                    entry.title,
+                    maxLines: 2,
+                    overflow: TextOverflow.ellipsis,
+                    style: text.titleMedium,
+                  ),
+                ),
+                const SizedBox(height: AppSpacing.xxs),
+                InkWell(
+                  onTap: onSources,
+                  child: Padding(
+                    padding: const EdgeInsets.symmetric(vertical: 4),
                     child: Text(
-                      entry.title,
-                      maxLines: 2,
+                      source,
+                      maxLines: 1,
                       overflow: TextOverflow.ellipsis,
-                      style: text.titleMedium,
+                      style: text.bodySmall,
                     ),
                   ),
-                  const SizedBox(height: AppSpacing.xxs),
-                  InkWell(
-                    onTap: onSources,
-                    child: Padding(
-                      padding: const EdgeInsets.symmetric(vertical: 4),
+                ),
+                const SizedBox(height: AppSpacing.sm),
+                Row(
+                  children: [
+                    Expanded(
                       child: Text(
-                        source,
+                        entry.status,
                         maxLines: 1,
                         overflow: TextOverflow.ellipsis,
-                        style: text.bodySmall,
+                        style: text.labelMedium,
                       ),
                     ),
-                  ),
-                  const SizedBox(height: AppSpacing.sm),
-                  Row(
-                    children: [
-                      Expanded(
-                        child: Text(
-                          entry.status,
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                          style: text.labelMedium,
-                        ),
-                      ),
-                      const SizedBox(width: AppSpacing.xs),
-                      Text(
-                        paper?.isSubmitted == true
-                            ? 'Review'
-                            : deck != null
-                            ? 'Study'
-                            : 'Start',
-                        style: text.labelLarge,
-                      ),
-                      const SizedBox(width: AppSpacing.xs),
-                      Icon(
-                        AppIcons.forward,
-                        color: colors.textPrimary,
-                        size: 16,
-                      ),
-                      const SizedBox(width: AppSpacing.sm),
-                    ],
-                  ),
-                ],
-              ),
+                    const SizedBox(width: AppSpacing.xs),
+                    Text(
+                      paper?.isSubmitted == true
+                          ? 'Review'
+                          : deck != null
+                          ? 'Study'
+                          : 'Start',
+                      style: text.labelLarge,
+                    ),
+                    const SizedBox(width: AppSpacing.xs),
+                    Icon(AppIcons.forward, color: colors.textPrimary, size: 16),
+                    const SizedBox(width: AppSpacing.sm),
+                  ],
+                ),
+              ],
             ),
-          ],
-        ),
+          ),
+        ],
       ),
     );
   }

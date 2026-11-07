@@ -97,6 +97,7 @@ class SubscriptionController extends ChangeNotifier with AiUsageGate {
   final TargetPlatform platform;
 
   SubscriptionState _state = const SubscriptionState();
+  AiRoutingPreferences _routing = const AiRoutingPreferences();
   bool _loaded = false;
   bool _disposed = false;
   StreamSubscription<List<StorePurchaseUpdate>>? _updates;
@@ -215,6 +216,7 @@ class SubscriptionController extends ChangeNotifier with AiUsageGate {
     if (_disposed) {
       return;
     }
+    _routing = AiRoutingPreferences.fromJson(json?['routing']);
     if (backend != null) {
       // Only a UI preference is trusted from disk. Never migrate local credits.
       _state = SubscriptionState(
@@ -613,6 +615,19 @@ class SubscriptionController extends ChangeNotifier with AiUsageGate {
   }
 
   @override
+  AiRoutingPreferences get routing => _routing;
+
+  @override
+  void setRouting(AiRoutingPreferences value) {
+    if (value == _routing) {
+      return;
+    }
+    _routing = value;
+    _save();
+    _notify();
+  }
+
+  @override
   AiModelId? get preferredModel => _state.preferredModel;
 
   @override
@@ -629,9 +644,12 @@ class SubscriptionController extends ChangeNotifier with AiUsageGate {
   Future<void> get saved => _saving;
 
   void _save() {
-    final Map<String, Object?> json = backend == null
-        ? _state.toJson()
-        : {'version': 1, 'preferredModel': _state.preferredModel?.name};
+    final Map<String, Object?> json = <String, Object?>{
+      ...backend == null
+          ? _state.toJson()
+          : {'version': 1, 'preferredModel': _state.preferredModel?.name},
+      'routing': _routing.toJson(),
+    };
     _saving = _saving.then((void _) async {
       try {
         await store.write(json);

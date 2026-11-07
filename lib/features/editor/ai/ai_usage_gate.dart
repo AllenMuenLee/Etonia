@@ -1,6 +1,7 @@
 import 'package:flutter/foundation.dart';
 
 import 'ai_client.dart';
+import 'ai_routing.dart';
 
 /// What the user's plan allows with one model.
 enum AiModelAccess {
@@ -22,16 +23,6 @@ enum AiModelAccess {
   bool get canSend => this == unlimited || this == metered;
 }
 
-/// What a model picker needs of whatever chat it sits in.
-abstract interface class AiModelChooser {
-  List<AiModelId> get models;
-  AiModelId? get selectedModel;
-  String get modelLabel;
-  AiModelAccess? accessFor(AiModelId model);
-  bool isModelConfigured(AiModelId model);
-  void selectModel(AiModelId model);
-}
-
 /// Decides which models the assistant may use, and is told what each
 /// answer cost. The editor depends on this alone, so tests, and builds that
 /// meter on a server, can supply their own.
@@ -50,6 +41,22 @@ abstract mixin class AiUsageGate implements Listenable {
     };
   }
 
+  /// Why nothing can be sent now with any of the [allowed] models, or null
+  /// when one can. A paid plan out of credits can still use its unlimited
+  /// models, so it is never refused here; a free plan with nothing left is.
+  AiFailure? checkRouting(Set<AiModelId> allowed) {
+    AiFailure? first;
+    AiFailure? credits;
+    for (final AiModelId model in allowed) {
+      final AiFailure? refused = checkAccess(model);
+      if (refused == null) return null;
+      first ??= refused;
+      if (refused.kind == AiFailureKind.insufficientCredits)
+        credits ??= refused;
+    }
+    return credits ?? first;
+  }
+
   /// Charges an answer from [model] that took [usage].
   void recordUsage(AiModelId model, AiTokenUsage usage);
 
@@ -62,7 +69,14 @@ abstract mixin class AiUsageGate implements Listenable {
   /// Whether the metered token allowance has reached zero.
   bool get isOutOfTokens => tokenFraction <= 0;
 
-  /// The model last picked, remembered across launches.
+  /// How hard to think and which models may be used, remembered across
+  /// launches.
+  AiRoutingPreferences get routing => const AiRoutingPreferences();
+
+  void setRouting(AiRoutingPreferences value) {}
+
+  /// The model last picked, remembered across launches. Only a client that
+  /// does not choose models for itself uses it.
   AiModelId? get preferredModel;
 
   void setPreferredModel(AiModelId model);

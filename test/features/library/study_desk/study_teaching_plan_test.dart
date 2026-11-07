@@ -46,6 +46,7 @@ class _Router extends AiModelRouter {
   final decisions = <AiResult>[];
   final configured = {AiModelId.luna, AiModelId.haiku, AiModelId.sol};
   Completer<AiResult>? plannerGate;
+  Completer<AiResult>? suggestionGate;
   bool failAnswer = false;
 
   @override
@@ -69,13 +70,28 @@ class _Router extends AiModelRouter {
   }) async {
     requests.add(request);
     if (request.systemInstruction == AiPrompts.studyTeachingPlannerSystem) {
-      return plannerGate?.future ??
-          (decisions.isEmpty
-              ? const AiSuccess('{"intent":"question"}')
-              : decisions.removeAt(0));
+      if (plannerGate != null) return plannerGate!.future;
+      final result = decisions.isEmpty
+          ? const AiSuccess('{"intent":"question"}')
+          : decisions.removeAt(0);
+      // These source/lesson fixtures explicitly ask the fake model to retrieve.
+      if (result is AiSuccess) {
+        try {
+          final value = jsonDecode(result.text) as Map<String, dynamic>;
+          value.putIfAbsent(
+            'retrieval',
+            () => {'notes': true, 'mistakeIndices': [], 'query': ''},
+          );
+          return AiSuccess(jsonEncode(value));
+        } on Object {
+          return result;
+        }
+      }
+      return result;
     }
     if (request.systemInstruction == AiPrompts.studySuggestionsSystem) {
-      return const AiSuccess('["An example?","Why?","What next?"]');
+      return suggestionGate?.future ??
+          const AiSuccess('["An example?","Why?","What next?"]');
     }
     if (failAnswer) return const AiError(AiFailure(AiFailureKind.network));
     onPartial?.call('A variable is a placeholder for a number.', true);
@@ -137,6 +153,78 @@ Future<StudyDeskController> fixture(
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
 
+  test('rapid suggestion refreshes share the in-progress generation', () async {
+    final router = _Router()..suggestionGate = Completer<AiResult>();
+    final desk = await fixture(router);
+    await desk.send('What is a variable?');
+    final before = router.requests.length;
+    await Future.wait([desk.refreshSuggestions(), desk.refreshSuggestions()]);
+    expect(router.requests.length, before);
+    router.suggestionGate!.complete(
+      const AiSuccess('["Why?","An example?","What next?"]'),
+    );
+    while (desk.generatingSuggestions.value) {
+      await Future<void>.delayed(Duration.zero);
+    }
+    expect(desk.dynamicSuggestions.value, hasLength(3));
+  });
+
+  test(
+    'backend navigation gets a fresh retrieval decision and commits only after a successful answer',
+    () async {
+      var planCalls = 0;
+      var failAnswer = false;
+      final seen = <Map<String, Object?>>[];
+      final client = BackendAiClient(
+        invoke: (_, body) async {
+          seen.add(body);
+          final task = (body['routing'] as Map<String, Object?>)['task'];
+          if (task == 'study.plan') planCalls++;
+          if (task == 'study.answer' && failAnswer) {
+            return {
+              'answer': '',
+              'responseFormat': 'text',
+              'usage': {'inputTokens': 1, 'outputTokens': 0},
+            };
+          }
+          return {
+            'answer': task == 'study.plan'
+                ? jsonEncode({
+                    'intent': planCalls == 1 ? 'topic' : 'continue',
+                    'difficulty': 3,
+                    if (planCalls == 1) 'plan': lesson() else 'activeStep': 1,
+                    'retrieval': {
+                      'notes': false,
+                      'mistakeIndices': [],
+                      'query': '',
+                    },
+                  })
+                : task == 'study.suggestions'
+                ? '{"questions":["Why?","An example?","What next?"]}'
+                : 'A complete lesson step and understanding check.',
+            'responseFormat': body['responseFormat'],
+            'usage': {'inputTokens': 10, 'outputTokens': 10},
+          };
+        },
+      );
+      final desk = await fixture(client);
+      await desk.send('Teach algebra');
+      expect(desk.currentSession.teachingPlan!.activeStep, 0);
+      failAnswer = true;
+      await desk.send('next');
+      expect(desk.currentSession.teachingPlan!.activeStep, 0);
+      expect(planCalls, 2);
+      failAnswer = false;
+      await desk.send('next');
+      expect(desk.currentSession.teachingPlan!.activeStep, 1);
+      expect(planCalls, 3);
+      final answer = seen.lastWhere(
+        (body) => (body['routing'] as Map)['task'] == 'study.answer',
+      );
+      expect((answer['routing'] as Map)['difficulty'], 3);
+    },
+  );
+
   test('topic plan persists and step retrieval changes across turns', () async {
     final router = _Router();
     router.decisions.add(
@@ -146,7 +234,14 @@ void main() {
     final desk = await fixture(router, store: store);
     await desk.send('Teach me algebra from the basics');
     expect(router.requests.first.model, AiModelId.luna);
-    expect(router.requests.first.messages.last.text, contains('placeholder'));
+    expect(
+      router.requests.first.messages.last.text,
+      contains('Available notes'),
+    );
+    expect(
+      router.requests.first.messages.last.text,
+      isNot(contains('placeholder')),
+    );
     expect(router.answers.single.model, AiModelId.sol);
     expect(
       router.answers.single.messages.last.text,
@@ -272,11 +367,11 @@ void main() {
     expect(router.requests.first.model, AiModelId.luna);
     expect(
       router.requests.first.messages.last.text,
-      contains('Completed test source'),
+      contains('completed test is available'),
     );
     expect(
       router.requests.first.messages.last.text,
-      contains('Solve x + 1 = 3'),
+      isNot(contains('Solve x + 1 = 3')),
     );
     expect(router.answers.last.model, AiModelId.sol);
     expect(
@@ -600,46 +695,48 @@ void main() {
     await desk.send('Teach me the whole book');
     expect(
       router.requests.first.messages.last.text,
-      contains('Source catalogue'),
+      contains('Available notes'),
     );
     expect(
       router.answers.single.systemInstruction,
       contains('Only the source catalogue is supplied'),
     );
     expect(desk.currentSession.teachingPlan, isNull);
-    expect(router.requests.first.model, AiModelId.sol);
+    expect(router.requests.first.model, AiModelId.luna);
   });
 
   test(
-    'unavailable low-cost models fall back without a premium planner',
+    'the retrieval decision still runs when only a premium model is configured',
     () async {
       final router = _Router()
         ..configured.removeAll([AiModelId.luna, AiModelId.haiku]);
       final desk = await fixture(router);
       await desk.send('What is a variable?');
       expect(router.requests.first.model, AiModelId.sol);
+      expect(
+        router.requests.first.systemInstruction,
+        AiPrompts.studyTeachingPlannerSystem,
+      );
       expect(router.answers, hasLength(1));
     },
   );
 
   test(
-    'planner JSON travels through the production SVG response envelope',
+    'planner JSON and tutor Markdown travel through the plain backend transport',
     () async {
       final seen = <Map<String, Object?>>[];
       final client = BackendAiClient(
         invoke: (_, body) async {
           seen.add(body);
-          final instruction = body['systemInstruction'];
-          final answer = instruction == AiPrompts.studyTeachingPlannerSystem
+          final task = (body['routing'] as Map<String, Object?>)['task'];
+          final answer = task == 'study.plan'
               ? jsonEncode({'intent': 'topic', 'plan': lesson()})
-              : instruction == AiPrompts.studySuggestionsSystem
+              : task == 'study.suggestions'
               ? '["Why?","An example?","What next?"]'
               : 'A variable holds a number.';
           return <String, dynamic>{
-            'answer':
-                '<svg xmlns="http://www.w3.org/2000/svg" data-etonia-version="1">'
-                '<title>Study</title><desc data-etonia-role="message">'
-                '${htmlEscape.convert(answer)}</desc></svg>',
+            'answer': answer,
+            'responseFormat': body['responseFormat'],
             'usage': {'inputTokens': 80, 'outputTokens': 30},
           };
         },
@@ -647,8 +744,14 @@ void main() {
       final desk = await fixture(client);
       await desk.send('Teach algebra');
       expect(desk.currentSession.teachingPlan!.topic, 'Algebra');
-      expect(seen.first['model'], 'luna');
-      expect(seen[1]['model'], 'sol');
+      // The app names no model: the server routes each task.
+      expect(seen.first['model'], 'auto');
+      expect(seen.first['responseFormat'], 'json');
+      expect((seen.first['routing'] as Map)['task'], 'study.plan');
+      expect(seen[1]['model'], 'auto');
+      expect(seen[1]['responseFormat'], 'text');
+      expect(seen[1]['turnId'], seen.first['turnId']);
+      expect((seen[1]['routing'] as Map)['task'], 'study.answer');
       expect(seen[1]['prompt'], contains('foundationExercise'));
     },
   );

@@ -9,12 +9,25 @@ export interface ModelConfig {
   /** What a cached input token costs, from the provider's price list. Without
    * it, cached input is billed as any other input. */
   cachedInputMicroPerKilo?: number;
+  /** Full cache-write rate, not an additive surcharge. */
+  cacheWriteMicroPerKilo?: number;
+  /** Explicit prefix caching is opt-in and only used on supported OpenAI models. */
+  cacheMode?: "implicit" | "explicit";
 }
 export const aliases = ["haiku", "luna", "sonnet", "sol", "opus", "argon", "astra"];
 export interface AiInput {
   task?: "testGrading";
   requestId: string;
+  /** Opaque correlation ID shared by a tutor turn's helper and answer requests. */
+  turnId?: string;
+  /** Omitted by older clients, which keep the SVG transport. */
+  responseFormat?: "text" | "json";
+  studyPolicyVersion?: "study-cost-b1";
+  /** An alias, or `auto` to let the router choose (see `routing`). */
   model: string;
+  /** What the router needs when `model` is `auto`; validated by
+   * `parseRoutingRequest`. */
+  routing?: unknown;
   prompt: string;
   history?: AiHistoryMessage[];
   systemInstruction: string;
@@ -115,8 +128,12 @@ export function validateInput(body: Record<string, unknown>) {
     Object.keys(body).some((k) =>
       ![
         "requestId",
+        "turnId",
+        "responseFormat",
+        "studyPolicyVersion",
         "task",
         "model",
+        "routing",
         "prompt",
         "history",
         "systemInstruction",
@@ -136,7 +153,14 @@ export function validateInput(body: Record<string, unknown>) {
     !/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
       body.requestId,
     ) ||
-    typeof body.model !== "string" || !aliases.includes(body.model) ||
+    typeof body.model !== "string" || (body.model !== "auto" && !aliases.includes(body.model)) ||
+    (body.turnId !== undefined && (typeof body.turnId !== "string" ||
+      !/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
+        body.turnId,
+      ))) ||
+    (body.studyPolicyVersion !== undefined && body.studyPolicyVersion !== "study-cost-b1") ||
+    (body.responseFormat !== undefined && body.responseFormat !== "text" &&
+      body.responseFormat !== "json") ||
     (body.task !== undefined && body.task !== "testGrading") ||
     typeof body.prompt !== "string" || !body.prompt.trim() ||
     new TextEncoder().encode(body.prompt).length > 24000 ||
@@ -156,6 +180,10 @@ export function validateInput(body: Record<string, unknown>) {
       (typeof body.sourceLines !== "string" ||
         new TextEncoder().encode(body.sourceLines).length > maxSourceLinesBytes))
   ) throw new Failure("rejected");
+  if (
+    body.responseFormat !== undefined &&
+    (body.notationContext !== undefined || body.task === "testGrading")
+  ) throw new Failure("rejected");
   validatePng(body.selectedImage);
   if (body.selectedSvg !== undefined) validateSelectionSvg(body.selectedSvg);
   if (body.notationImage !== undefined) validatePng(body.notationImage);
@@ -172,7 +200,8 @@ export function validateInput(body: Record<string, unknown>) {
     ) throw new Failure("rejected");
   } else if (
     body.notationInstruction !== undefined || body.animationAllowed !== undefined ||
-    body.liveNotation !== undefined || body.notationImage !== undefined || body.selectedSvg !== undefined
+    body.liveNotation !== undefined || body.notationImage !== undefined ||
+    body.selectedSvg !== undefined
   ) {
     throw new Failure("rejected");
   }
@@ -215,9 +244,66 @@ export function modelConfig(catalog: Record<string, ModelConfig>, alias: string)
     (model.cachedInputMicroPerKilo !== undefined &&
       (!Number.isSafeInteger(model.cachedInputMicroPerKilo) ||
         model.cachedInputMicroPerKilo < 0 ||
-        model.cachedInputMicroPerKilo > model.inputMicroPerKilo))
+        model.cachedInputMicroPerKilo > model.inputMicroPerKilo)) ||
+    (model.cacheWriteMicroPerKilo !== undefined &&
+      (!Number.isSafeInteger(model.cacheWriteMicroPerKilo) || model.cacheWriteMicroPerKilo < 0 ||
+        model.cacheWriteMicroPerKilo > 1e9)) ||
+    (model.cacheMode !== undefined && model.cacheMode !== "implicit" &&
+      model.cacheMode !== "explicit")
   ) throw new Failure("not_configured", 503);
-  return model;
+  // Defaults only for exact, published Standard model/rate pairs. Overrides
+  // remain explicit for other models, tiers, or negotiated pricing.
+  const standard = model.provider === "openai" && (
+    model.model === "gpt-6.1-sol" && model.inputMicroPerKilo === 2000 &&
+      model.outputMicroPerKilo === 10000
+      ? {
+        cachedInputMicroPerKilo: 100,
+        cacheWriteMicroPerKilo: 2500,
+        cacheMode: "explicit" as const,
+      }
+      : model.model === "gpt-6-luna" && model.inputMicroPerKilo === 100 &&
+          model.outputMicroPerKilo === 500
+      ? { cachedInputMicroPerKilo: 10, cacheWriteMicroPerKilo: 125, cacheMode: "explicit" as const }
+      : undefined
+  );
+  const claudeStandard = model.provider === "claude" && (
+    model.model === "claude-haiku-5-5" && model.inputMicroPerKilo === 100 &&
+      model.outputMicroPerKilo === 500
+      ? { cachedInputMicroPerKilo: 10, cacheWriteMicroPerKilo: 125 }
+      : model.model === "claude-sonnet-5-5" && model.inputMicroPerKilo === 2000 &&
+          model.outputMicroPerKilo === 10000
+      ? { cachedInputMicroPerKilo: 100, cacheWriteMicroPerKilo: 2500 }
+      : model.model === "claude-opus-5-5" && model.inputMicroPerKilo === 4000 &&
+          model.outputMicroPerKilo === 20000
+      ? { cachedInputMicroPerKilo: 200, cacheWriteMicroPerKilo: 5000 }
+      : undefined
+  );
+  const defaults = standard || claudeStandard;
+  return defaults ? { ...defaults, ...model } : model;
+}
+
+export type ProviderEffort = "low" | "medium" | "high";
+
+/** What to add to a provider request for [effort]: fields for the body, and for
+ * Gemini's `generationConfig`. Matches how the drawing pass already asks. */
+export function providerEffort(
+  provider: ModelConfig["provider"],
+  effort: ProviderEffort,
+): { body: Record<string, unknown>; generationConfig: Record<string, unknown> } {
+  switch (provider) {
+    case "openai":
+      return { body: { reasoning_effort: effort }, generationConfig: {} };
+    case "claude":
+      return {
+        body: { thinking: { type: "adaptive" }, output_config: { effort } },
+        generationConfig: {},
+      };
+    case "gemini":
+      return {
+        body: {},
+        generationConfig: { thinkingConfig: { thinkingLevel: effort.toUpperCase() } },
+      };
+  }
 }
 
 /** The stricter of the answer and notation model for plan authorization.
@@ -259,7 +345,12 @@ function inputCostBound(model: ModelConfig, input: AiInput, part: Part = "all"):
   // UTF-8 bytes conservatively bound text tokens; leave room for the fixed
   // system instruction and framing. Every pass is sent the selection crop.
   const inputBound = new TextEncoder().encode(sent).length + imageTokenBound;
-  return Math.ceil(inputBound * model.inputMicroPerKilo / 1000);
+  const maximumRate = Math.max(
+    model.inputMicroPerKilo,
+    model.cacheWriteMicroPerKilo ??
+      (model.provider === "claude" ? model.inputMicroPerKilo * 1.25 : model.inputMicroPerKilo),
+  );
+  return Math.ceil(inputBound * maximumRate / 1000);
 }
 
 /** The most the drawing step can cost: [drawer] reads the note and the
@@ -321,10 +412,9 @@ export function costOf(
     throw new Failure("server", 503);
   }
   const cachedRate = model.cachedInputMicroPerKilo ?? model.inputMicroPerKilo;
-  // Claude charges a quarter more to write the cache, once per five minutes.
-  const writeRate = model.provider === "claude"
-    ? model.inputMicroPerKilo * 1.25
-    : model.inputMicroPerKilo;
+  // A configured full write rate also covers OpenAI's newer cache-write pricing.
+  const writeRate = model.cacheWriteMicroPerKilo ??
+    (model.provider === "claude" ? model.inputMicroPerKilo * 1.25 : model.inputMicroPerKilo);
   return Math.ceil(
     ((input - cached - cacheWrites) * model.inputMicroPerKilo + cached * cachedRate +
       cacheWrites * writeRate + output * model.outputMicroPerKilo) / 1000,
@@ -571,6 +661,9 @@ export function providerRequest(
   maxOutput: number,
   key: string,
   aiStep?: AiStep,
+  /** How hard a routed request thinks. Without it the drawing pass thinks at
+   * medium and an answer uses the provider's default. */
+  effort?: ProviderEffort,
 ): {
   url: string;
   headers: Record<string, string>;
@@ -580,6 +673,7 @@ export function providerRequest(
   // provider's medium setting, and streams so that it can be shown as it is
   // written.
   const drawing = aiStep?.step === "notation";
+  const thinking = effort ? providerEffort(model.provider, effort) : undefined;
   const system = instruction(input, aiStep?.step === "notation") +
     (aiStep?.step === "text" ? textStep : aiStep?.step === "notation"
       ? notationStep +
@@ -592,7 +686,8 @@ export function providerRequest(
   // positions, and the question and answer in the same turn. Only an older
   // client, which sends no SVG, has its gridded crop drawn from.
   const selectedSvg = aiStep?.step === "notation" || input.task === "testGrading"
-    ? input.selectedSvg : undefined;
+    ? input.selectedSvg
+    : undefined;
   const selectedImage = aiStep?.step === "notation" && !selectedSvg
     ? input.notationImage ?? input.selectedImage
     : input.selectedImage;
@@ -601,6 +696,8 @@ export function providerRequest(
     ? drawingRequest(input, aiStep.visual, aiStep.message)
     : input.prompt;
   if (model.provider === "openai") {
+    const explicitCache = model.cacheMode === "explicit" &&
+      /^gpt-(?:6(?:\.|-)|5\.(?:[6-9]|[1-9]\d))/.test(model.model);
     return {
       url: "https://api.openai.com/v1/chat/completions",
       headers: { Authorization: `Bearer ${key}` },
@@ -609,11 +706,22 @@ export function providerRequest(
         store: false,
         stream: drawing,
         max_completion_tokens: maxOutput,
+        ...(input.responseFormat === "json" ? { response_format: { type: "json_object" } } : {}),
+        ...(explicitCache ? { prompt_cache_options: { mode: "explicit" } } : {}),
         ...(drawing
-          ? { reasoning_effort: "medium", stream_options: { include_usage: true } }
-          : {}),
+          ? { reasoning_effort: effort ?? "medium", stream_options: { include_usage: true } }
+          : thinking?.body),
         messages: [
-          { role: "system", content: system },
+          explicitCache
+            ? {
+              role: "developer",
+              content: [{
+                type: "text",
+                text: system,
+                prompt_cache_breakpoint: { mode: "explicit" },
+              }],
+            }
+            : { role: "system", content: system },
           ...requestHistory,
           {
             role: "user",
@@ -636,6 +744,11 @@ export function providerRequest(
     };
   }
   if (model.provider === "claude") {
+    const variableInstruction = (aiStep?.step === "notation" ? requestInstruction(input) : "") +
+      (aiStep?.step === "text" ? textStep : aiStep?.step === "notation"
+        ? notationStep +
+          (aiStep.visual === "static" ? " Use static SVG geometry and text for every element." : "")
+        : "");
     return {
       url: "https://api.anthropic.com/v1/messages",
       headers: { "x-api-key": key, "anthropic-version": "2023-06-01" },
@@ -643,7 +756,9 @@ export function providerRequest(
         model: model.model,
         max_tokens: maxOutput,
         stream: drawing,
-        ...(drawing ? { thinking: { type: "adaptive" }, output_config: { effort: "medium" } } : {}),
+        ...(drawing
+          ? { thinking: { type: "adaptive" }, output_config: { effort: effort ?? "medium" } }
+          : thinking?.body),
         // The fixed instructions are cached: later requests within five
         // minutes read them at a tenth of the price.
         system: [
@@ -652,16 +767,9 @@ export function providerRequest(
             text: fixedInstruction(input, aiStep?.step === "notation"),
             cache_control: { type: "ephemeral" },
           },
-          {
-            type: "text",
-            text: (aiStep?.step === "notation" ? requestInstruction(input) : "") +
-              (aiStep?.step === "text" ? textStep : aiStep?.step === "notation"
-                ? notationStep +
-                  (aiStep.visual === "static"
-                    ? " Use static SVG geometry and text for every element."
-                    : "")
-                : ""),
-          },
+          // Anthropic refuses an empty text block, which is what an ordinary
+          // answer (no drawing or text step) would send here.
+          ...(variableInstruction ? [{ type: "text", text: variableInstruction }] : []),
         ],
         // The explanation/decision is held to its small shape. The notation's
         // shape cannot be: Claude refuses its schema as too large a grammar
@@ -707,8 +815,10 @@ export function providerRequest(
       ],
       generationConfig: {
         maxOutputTokens: maxOutput,
-        ...(drawing ? { thinkingConfig: { thinkingLevel: "MEDIUM" } } : {}),
-        responseMimeType: "text/plain",
+        ...(drawing
+          ? { thinkingConfig: { thinkingLevel: (effort ?? "medium").toUpperCase() } }
+          : thinking?.generationConfig),
+        responseMimeType: input.responseFormat === "json" ? "application/json" : "text/plain",
       },
     },
   };
@@ -720,7 +830,10 @@ export function providerAnswer(model: ModelConfig, body: any) {
       input: body.usage?.prompt_tokens,
       output: body.usage?.completion_tokens,
       cached: body.usage?.prompt_tokens_details?.cached_tokens ?? 0,
-      cacheWrites: 0,
+      cacheWrites: body.usage?.prompt_tokens_details?.cache_write_tokens ?? 0,
+      reasoning: body.usage?.completion_tokens_details?.reasoning_tokens ?? 0,
+      imageTokens: body.usage?.prompt_tokens_details?.image_tokens ?? null,
+      finishReason: body.choices?.[0]?.finish_reason ?? null,
     };
   }
   if (model.provider === "claude") {
@@ -734,6 +847,10 @@ export function providerAnswer(model: ModelConfig, body: any) {
       output: body.usage?.output_tokens,
       cached: read,
       cacheWrites: written,
+      // Claude does not report a distinct thinking-token subtotal here.
+      reasoning: null,
+      imageTokens: null,
+      finishReason: body.stop_reason ?? null,
     };
   }
   return {
@@ -742,6 +859,10 @@ export function providerAnswer(model: ModelConfig, body: any) {
     ).join(""),
     cached: body.usageMetadata?.cachedContentTokenCount ?? 0,
     cacheWrites: 0,
+    reasoning: body.usageMetadata?.thoughtsTokenCount ?? 0,
+    imageTokens: body.usageMetadata?.promptTokensDetails?.find((p: any) => p.modality === "IMAGE")
+      ?.tokenCount ?? null,
+    finishReason: body.candidates?.[0]?.finishReason ?? null,
     input: body.usageMetadata?.promptTokenCount,
     output: typeof body.usageMetadata?.candidatesTokenCount === "number"
       ? body.usageMetadata.candidatesTokenCount + (body.usageMetadata.thoughtsTokenCount ?? 0)

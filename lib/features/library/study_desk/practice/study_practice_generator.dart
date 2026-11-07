@@ -169,7 +169,10 @@ class StudyPracticeGenerator {
   Future<StudyPracticeOutcome> generate({
     required StudyPracticeRequest request,
     required StudyPayload payload,
-    AiModelId? model,
+    ({AiModelId? model, AiRouting? routing}) route = (
+      model: null,
+      routing: null,
+    ),
     void Function(AiRequest request, AiSuccess answer)? onAnswered,
     bool Function()? cancelled,
   }) async {
@@ -178,7 +181,8 @@ class StudyPracticeGenerator {
       final AiRequest asked = AiRequest(
         systemInstruction: AiPrompts.studyPracticeSystem,
         imagePng: payload.imagePng,
-        model: model,
+        model: route.model,
+        routing: route.routing,
         messages: <AiMessage>[
           AiMessage.user(
             promptFor(request, payload, correction: attempt > 0),

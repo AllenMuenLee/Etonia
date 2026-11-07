@@ -23,6 +23,7 @@ import '../note_content.dart';
 import '../note_repository.dart';
 import 'study_desk_models.dart';
 import 'study_desk_store.dart';
+import 'study_vectors.dart';
 
 // ---------------------------------------------------------------------------
 // Stage 1: what a page is made of, and how it falls into chunks.
@@ -1015,7 +1016,10 @@ class StudyRagIndex {
 
 /// How a question's chunks are chosen.
 enum StudyQueryMode {
-  /// By what its words match, or a fair spread when they match nothing.
+  /// By what its words and their meaning match. A question with nothing in it
+  /// to look for gets a fair spread. One that matches nothing gets only pages
+  /// with no words to be ruled out by (scans, slides, drawings): pages with
+  /// words that have nothing to do with it only lead an answer astray.
   search,
 
   /// A fair spread of every note, whatever the words.
@@ -1194,6 +1198,23 @@ abstract final class StudyRetriever {
   /// Far enough below the best, a chunk is noise, however little else matched.
   static const double _relativeCutoff = 0.25;
 
+  /// Reciprocal rank fusion's usual constant.
+  static const double _fusionK = 60;
+
+  /// How near a chunk's meaning must be to the question's to be found by
+  /// meaning alone (cosine), for its words and for its picture. A question
+  /// against a picture is always less alike than against words.
+  @visibleForTesting
+  static const double textFloor = 0.55;
+  @visibleForTesting
+  static const double imageFloor = 0.30;
+
+  /// Below these a chunk whose words match is still left out.
+  @visibleForTesting
+  static const double textLowFloor = 0.35;
+  @visibleForTesting
+  static const double imageLowFloor = 0.15;
+
   /// The chunks for [query], best first, at most [limit]. The text budget is
   /// the assembler's to apply.
   static List<StudyHit> retrieve(
@@ -1201,6 +1222,7 @@ abstract final class StudyRetriever {
     String query, {
     StudyQueryMode mode = StudyQueryMode.search,
     int limit = maxChunks,
+    StudyVectorSignal? vectors,
   }) {
     if (documents.isEmpty || limit <= 0) return const <StudyHit>[];
     if (mode == StudyQueryMode.overview) {
@@ -1258,20 +1280,116 @@ abstract final class StudyRetriever {
       }
       if (score > 0) hits.add(StudyHit(documents[i], score));
     }
-    if (hits.isEmpty) return _spread(documents, limit);
-    hits.sort((StudyHit a, StudyHit b) {
-      final int byScore = b.score.compareTo(a.score);
-      if (byScore != 0) return byScore;
-      final int page = a.chunk.pageIndex.compareTo(b.chunk.pageIndex);
-      return page != 0
-          ? page
-          : a.chunk.chunkIndex.compareTo(b.chunk.chunkIndex);
-    });
-    final double floor = hits.first.score * _relativeCutoff;
-    return hits
-        .where((StudyHit hit) => hit.score >= floor)
-        .take(limit)
-        .toList(growable: false);
+    // Nothing to look for in the question: it names no subject, so any fair
+    // sample serves as well as another.
+    if (terms.isEmpty && vectors == null) return _spread(documents, limit);
+    hits.sort(_byScore);
+    final double floor = hits.isEmpty ? 0 : hits.first.score * _relativeCutoff;
+    final List<StudyHit> byWords = <StudyHit>[
+      for (final StudyHit hit in hits)
+        if (hit.score >= floor) hit,
+    ];
+    final List<StudyHit> found = vectors == null
+        ? byWords.take(limit).toList(growable: false)
+        : _fuse(documents, byWords, vectors, limit);
+    if (found.isNotEmpty) return found;
+    // Nothing matched. Pages with words have been ruled out by them, but a
+    // scanned page, a slide, or a drawing has none to rule it out, and the
+    // model can read those as pictures: a few of them go along, to be used
+    // only if they help.
+    return _spread(
+      documents.where((StudySearchDocument d) => !_hasWords(d.chunk)).toList(),
+      limit,
+    );
+  }
+
+  /// Whether anything a search can match is written on [chunk].
+  static bool _hasWords(StudyChunk chunk) =>
+      chunk.handwriting.trim().isNotEmpty ||
+      chunk.typed.trim().isNotEmpty ||
+      chunk.svgText.trim().isNotEmpty ||
+      chunk.anchors.any((String a) => a.trim().isNotEmpty) ||
+      chunk.lines.any((StudyChunkLine l) => l.text.trim().isNotEmpty);
+
+  static int _byScore(StudyHit a, StudyHit b) {
+    final int byScore = b.score.compareTo(a.score);
+    if (byScore != 0) return byScore;
+    final int page = a.chunk.pageIndex.compareTo(b.chunk.pageIndex);
+    return page != 0 ? page : a.chunk.chunkIndex.compareTo(b.chunk.chunkIndex);
+  }
+
+  /// Words and meaning together. Each is a ranked list (words, the question's
+  /// meaning against each chunk's words, against each chunk's picture), and a
+  /// chunk's place is the sum of how high it comes in each, since the lists'
+  /// scores are not on one scale.
+  ///
+  /// A chunk is a candidate if its meaning is near the question's, or if its
+  /// words match and its meaning is not far from it. A chunk whose words match
+  /// but whose meaning is far (a Laplace page for "digital systems", matched
+  /// on "systems") is not one.
+  static List<StudyHit> _fuse(
+    List<StudySearchDocument> documents,
+    List<StudyHit> byWords,
+    StudyVectorSignal vectors,
+    int limit,
+  ) {
+    final List<(StudySearchDocument, double)> byText =
+        <(StudySearchDocument, double)>[];
+    final List<(StudySearchDocument, double)> byImage =
+        <(StudySearchDocument, double)>[];
+    final Map<StudySearchDocument, (double, double)> nearness =
+        <StudySearchDocument, (double, double)>{};
+    for (final StudySearchDocument document in documents) {
+      final StudyChunkVectors? known = vectors.lookup(document.chunk);
+      final Float32List? text = known?.text;
+      final Float32List? image = known?.image;
+      final double textCos = text == null
+          ? -1
+          : studyCosine(vectors.query, text);
+      final double imageCos = image == null
+          ? -1
+          : studyCosine(vectors.query, image);
+      nearness[document] = (textCos, imageCos);
+      if (textCos >= textFloor) byText.add((document, textCos));
+      if (imageCos >= imageFloor) byImage.add((document, imageCos));
+    }
+    int byCosine(
+      (StudySearchDocument, double) a,
+      (StudySearchDocument, double) b,
+    ) => b.$2.compareTo(a.$2);
+    byText.sort(byCosine);
+    byImage.sort(byCosine);
+
+    final Map<StudySearchDocument, double> fused =
+        <StudySearchDocument, double>{};
+    void rank(Iterable<StudySearchDocument> list) {
+      int place = 0;
+      for (final StudySearchDocument document in list) {
+        fused[document] = (fused[document] ?? 0) + 1 / (_fusionK + ++place);
+      }
+    }
+
+    // Words come first only in that they are given first; each list counts the same.
+    rank(
+      byWords
+          .where((StudyHit hit) => _keptByMeaning(nearness[hit.document]!))
+          .map((StudyHit hit) => hit.document),
+    );
+    rank(byText.map(((StudySearchDocument, double) e) => e.$1));
+    rank(byImage.map(((StudySearchDocument, double) e) => e.$1));
+    final List<StudyHit> hits = <StudyHit>[
+      for (final MapEntry<StudySearchDocument, double> e in fused.entries)
+        StudyHit(e.key, e.value),
+    ]..sort(_byScore);
+    return hits.take(limit).toList(growable: false);
+  }
+
+  /// Whether a chunk that matches by words may stay: it has no meaning known
+  /// yet (a note not indexed), or its meaning is not far from the question's.
+  static bool _keptByMeaning((double, double) near) {
+    final (double text, double image) = near;
+    if (text < 0 && image < 0) return true;
+    return text >= textLowFloor || image >= imageLowFloor;
   }
 
   /// Samples across each note's pages, taking notes in turn.
@@ -1502,6 +1620,71 @@ class StudyPayload {
   final int panelCount;
 }
 
+/// Selects intact typed paragraphs. Mathematical and uncertain visual evidence
+/// stays whole; original line identities and source mappings never change.
+abstract final class StudyEvidenceSelector {
+  static final _math = RegExp(
+    r'[=<>≤≥±×÷^$]|\\(?:frac|sqrt|log|int|sum|begin)|\b(?:domain|unless|boundary conditions)\b',
+    caseSensitive: false,
+  );
+
+  static bool hasMathematics(String text) => _math.hasMatch(text);
+
+  static List<StudyChunkLine> select(StudyChunk chunk, String query) {
+    final lines = chunk.lines;
+    if (chunk.kind != StudyChunkKind.text ||
+        chunk.lowConfidence ||
+        lines.length < 6 ||
+        lines.any((line) => line.hasStrokes) ||
+        lines.fold<int>(0, (n, line) => n + line.text.length) < 1800 ||
+        lines.any((line) => hasMathematics(line.text))) {
+      return lines;
+    }
+    final terms = studyTokens(query)
+        .where(
+          (word) =>
+              word.length >= 2 &&
+              !_stopWords.contains(word) &&
+              !const {
+                'explain',
+                'please',
+                'including',
+                'notes',
+                'question',
+                'tell',
+                'about',
+              }.contains(word),
+        )
+        .toSet();
+    if (terms.length < 2) return lines;
+    final keep = <int>{0};
+    var matched = false;
+    for (var i = 1; i < lines.length; i++) {
+      final words = studyTokens(lines[i].text).toSet();
+      final relevant = terms.any(
+        (term) =>
+            words.contains(term) ||
+            (term.length >= 4 && words.any((word) => word.startsWith(term))),
+      );
+      if (!relevant) continue;
+      matched = true;
+      // Adjacent paragraphs retain definitions, antecedents and qualifications.
+      for (
+        var j = math.max(0, i - 1);
+        j <= math.min(lines.length - 1, i + 1);
+        j++
+      ) {
+        keep.add(j);
+      }
+    }
+    if (!matched || keep.length >= lines.length * .9) return lines;
+    return [
+      for (var i = 0; i < lines.length; i++)
+        if (keep.contains(i)) lines[i],
+    ];
+  }
+}
+
 /// Packs retrieved chunks. Words go as words: a chunk costs image and SVG tokens
 /// only if it cannot be read without them, and only the best two of those do.
 class StudyContextAssembler {
@@ -1547,6 +1730,7 @@ class StudyContextAssembler {
     List<StudyHit> hits, {
     StudyChunkRenderer? renderer,
     int reservedTextBytes = 0,
+    String? query,
   }) async {
     final Map<String, int> noteNumbers = <String, int>{};
     for (final StudyHit hit in hits) {
@@ -1576,15 +1760,25 @@ class StudyContextAssembler {
         hit,
         noteNumbers[hit.chunk.noteId]!,
         panels[hit.chunk],
+        query: query,
       );
-      final String fitted = _fit(
-        _fit(block, maxTextTokens - tokens),
-        maxTotalBytes -
-            reservedTextBytes -
-            utf8.encode(text.toString()).length -
-            2,
-        bytes: true,
-      );
+      final String fitted = query != null
+          ? _fitEvidenceBlock(
+              block,
+              maxTextTokens - tokens,
+              maxTotalBytes -
+                  reservedTextBytes -
+                  utf8.encode(text.toString()).length -
+                  2,
+            )
+          : _fit(
+              _fit(block, maxTextTokens - tokens),
+              maxTotalBytes -
+                  reservedTextBytes -
+                  utf8.encode(text.toString()).length -
+                  2,
+              bytes: true,
+            );
       if (fitted.isEmpty) continue;
       text
         ..write(fitted)
@@ -1634,7 +1828,7 @@ class StudyContextAssembler {
   static String _panelName(int panel) => String.fromCharCode(65 + panel);
 
   /// One excerpt, with the header citations are written from.
-  static String _block(StudyHit hit, int note, int? panel) {
+  static String _block(StudyHit hit, int note, int? panel, {String? query}) {
     final StudyChunk chunk = hit.chunk;
     final String title = hit.document.noteTitle.replaceAll('"', "'");
     final int page = chunk.pageIndex + 1;
@@ -1661,7 +1855,13 @@ class StudyContextAssembler {
       }
       if (chunk.svgText.isNotEmpty) out.write('\nIt says: ${chunk.svgText}');
     }
-    for (final StudyChunkLine line in chunk.lines) {
+    final lines = query == null
+        ? chunk.lines
+        : StudyEvidenceSelector.select(chunk, query);
+    if (lines.length < chunk.lines.length) {
+      out.write('\nUnrelated paragraphs omitted; remaining text is verbatim.');
+    }
+    for (final StudyChunkLine line in lines) {
       out.write('\n');
       if (line.hasStrokes) {
         out.write(
@@ -1673,6 +1873,25 @@ class StudyContextAssembler {
       out.write(line.text);
     }
     return out.toString();
+  }
+
+  static String _fitEvidenceBlock(
+    String block,
+    int tokenBudget,
+    int byteBudget,
+  ) {
+    bool fits(String text) =>
+        estimateTokens(text) <= tokenBudget &&
+        utf8.encode(text).length <= byteBudget;
+    if (fits(block)) return block;
+    // Never present a prefix of an equation or a proof as complete evidence.
+    if (StudyEvidenceSelector.hasMathematics(block)) return '';
+    final kept = <String>[];
+    for (final line in block.split('\n')) {
+      if (!fits([...kept, line].join('\n'))) break;
+      kept.add(line);
+    }
+    return kept.length >= 2 ? kept.join('\n') : '';
   }
 
   /// [block] cut to [budget] tokens or UTF-8 bytes, or nothing when too little

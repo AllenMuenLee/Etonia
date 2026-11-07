@@ -143,20 +143,29 @@ class PageBackgroundPainter extends CustomPainter {
         }
       case PageBackground.dotted:
         final double spacing = thinned(config.dotSpacing);
-        final List<Offset> dots = <Offset>[
-          for (
-            double y = start(area.top, spacing, spacing);
-            y <= area.bottom;
-            y += spacing
-          )
-            for (
-              double x = start(area.left, spacing, spacing);
-              x <= area.right;
-              x += spacing
-            )
-              Offset(x, y),
-        ];
-        canvas.drawPoints(
+        // One flat list of coordinates, not an object for every dot: a page
+        // of dots has thousands, and this runs for each new scale.
+        final double firstX = start(area.left, spacing, spacing);
+        final double firstY = start(area.top, spacing, spacing);
+        int columns = 0;
+        for (double x = firstX; x <= area.right; x += spacing) {
+          columns++;
+        }
+        int rows = 0;
+        for (double y = firstY; y <= area.bottom; y += spacing) {
+          rows++;
+        }
+        final Float32List dots = Float32List(columns * rows * 2);
+        int at = 0;
+        double y = firstY;
+        for (int row = 0; row < rows; row++, y += spacing) {
+          double x = firstX;
+          for (int column = 0; column < columns; column++, x += spacing) {
+            dots[at++] = x;
+            dots[at++] = y;
+          }
+        }
+        canvas.drawRawPoints(
           PointMode.points,
           dots,
           Paint()

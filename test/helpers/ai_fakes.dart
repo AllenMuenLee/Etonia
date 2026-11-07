@@ -5,6 +5,7 @@ import 'dart:ui';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:greatnote/features/editor/ai/ai_canvas_input.dart';
 import 'package:greatnote/features/editor/ai/ai_client.dart';
+import 'package:greatnote/features/editor/ai/ai_config.dart';
 import 'package:greatnote/features/editor/ai/canvas_text_recognizer.dart';
 import 'package:greatnote/features/editor/ai/ai_notation.dart';
 import 'package:greatnote/features/editor/ai/note_image_renderer.dart';
@@ -23,6 +24,13 @@ class FakeAiClient implements AiClient {
 
   /// Every request, in the order it was sent.
   final List<AiRequest> requests = <AiRequest>[];
+
+  /// Retrieval planning is independent of the manually completed answer queue.
+  /// Tests of the gate itself supply explicit decisions through BackendAiClient.
+  final List<AiRequest> studyPlanningRequests = <AiRequest>[];
+  AiResult studyPlanningResult = const AiSuccess(
+    '{"intent":"question","retrieval":{"notes":true,"mistakeIndices":[1,2,3],"query":""}}',
+  );
   final List<Completer<AiResult>> _pending = <Completer<AiResult>>[];
   final List<AiPartialCallback?> _partials = <AiPartialCallback?>[];
   final List<AiNotationPartialCallback?> _notations =
@@ -38,6 +46,10 @@ class FakeAiClient implements AiClient {
     AiPartialCallback? onPartial,
     AiNotationPartialCallback? onNotation,
   }) {
+    if (request.systemInstruction == AiPrompts.studyTeachingPlannerSystem) {
+      studyPlanningRequests.add(request);
+      return Future.value(studyPlanningResult);
+    }
     requests.add(request);
     final Completer<AiResult> completer = Completer<AiResult>();
     _pending.add(completer);
@@ -216,6 +228,9 @@ class FakeAiModelRouter extends FakeAiClient implements AiModelRouter {
 
   @override
   List<AiModelId> get models => AiModelId.values;
+
+  /// Whether the fake chooses the model itself, as the backend does.
+  bool routes = false;
 
   @override
   bool isModelConfigured(AiModelId model) => !unconfigured.contains(model);

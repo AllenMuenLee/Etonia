@@ -6,6 +6,9 @@ verify_jwt = false
 [functions.ai]
 verify_jwt = false
 
+[functions.embed]
+verify_jwt = false
+
 [functions.store-events]
 verify_jwt = false
 

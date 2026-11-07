@@ -404,11 +404,14 @@ void main() {
   });
 
   group('What the tutor is told about the notes', () {
-    test('it is told to answer, and never to comment on the notes', () {
+    test('it answers directly and discusses source coverage when asked', () {
       const String system = AiPrompts.studySystem;
-      expect(system, contains('Always answer the question asked'));
-      expect(system, contains('silently ignore any excerpt'));
-      expect(system, contains('Never remark on how the question relates'));
+      expect(
+        system,
+        contains('Answer the question asked directly and completely'),
+      );
+      expect(system, contains('Use relevant excerpt details'));
+      expect(system, contains('Discuss source coverage when the student asks'));
       // What used to invite it.
       expect(system, isNot(contains('say so in one short line')));
       expect(system, isNot(contains('Base your answer on the excerpts')));
@@ -2637,9 +2640,8 @@ void main() {
         await tester.tap(key('study-paper-${paper.id}'));
         await tester.pumpAndSettle();
         expect(find.text('Test Paper'), findsOneWidget);
-        await tester.drag(find.byType(ListView).last, const Offset(0, -650));
-        await tester.pumpAndSettle();
-        expect(find.text('Grade now'), findsOneWidget);
+        // The canvas player keeps grading in a fixed footer, outside its paper.
+        expect(find.text('Grade now').hitTestable(), findsOneWidget);
         await tester.tap(key('study-toggle-history'));
         await tester.pumpAndSettle();
         if (key('study-sidebar-back').evaluate().isEmpty) {

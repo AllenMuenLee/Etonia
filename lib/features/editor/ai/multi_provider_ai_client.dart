@@ -51,6 +51,9 @@ class MultiProviderAiClient implements AiModelRouter {
   bool get isConfigured => models.any(isModelConfigured);
 
   @override
+  bool get routes => false;
+
+  @override
   String get modelLabel => defaultModel.label;
 
   /// The client [model] is sent to, made on first use.

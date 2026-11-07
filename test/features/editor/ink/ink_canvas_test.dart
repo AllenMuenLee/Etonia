@@ -42,7 +42,7 @@ void _expectFinite(Stroke stroke) {
 
 void main() {
   testWidgets(
-    'pinching keeps caching enabled without changing the stored stroke',
+    'pinching avoids a second raster cache without changing the stored stroke',
     (WidgetTester tester) async {
       final Stroke stroke = Stroke.fromPoints(
         style: const StrokeStyle(ink: InkPalette.ink, width: 2),
@@ -72,7 +72,7 @@ void main() {
       await right.moveBy(const Offset(20, 0));
       await tester.pump();
       expect(canvasScale(tester), greaterThan(initialScale));
-      expect(tester.widget<CustomPaint>(completed.first).willChange, isFalse);
+      expect(tester.widget<CustomPaint>(completed.first).willChange, isTrue);
       expect(controller.strokes.single, same(stroke));
       await left.up();
       await right.up();

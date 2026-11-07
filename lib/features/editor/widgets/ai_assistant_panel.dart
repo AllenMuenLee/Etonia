@@ -10,7 +10,6 @@ import 'package:speech_to_text/speech_to_text.dart';
 import '../../../shared/widgets/processing.dart';
 import '../../../shared/widgets/etonia_mark.dart';
 import '../../../app/theme/app_tokens.dart';
-import '../../../shared/motion/motion_memory.dart';
 import '../../../app/theme/app_icons.dart';
 import '../../../shared/widgets/app_controls.dart';
 import '../ai/ai_assistant_controller.dart';
@@ -18,6 +17,7 @@ import '../ai/ai_citation.dart';
 import '../ai/ai_client.dart';
 import '../ai/ai_config.dart';
 import '../ai/ai_usage_gate.dart';
+import 'ai_routing_controls.dart';
 import 'rich_answer_markdown.dart';
 export 'rich_answer_markdown.dart' show AiAnswerMarkdown;
 import 'ai_citation_highlight.dart';
@@ -576,26 +576,8 @@ class _AiAssistantPanelState extends State<AiAssistantPanel> {
       return const <(String, VoidCallback)>[];
     }
     final VoidCallback? openPlans = widget.onOpenPlans;
-    final bool tokenCountAtZero =
-        failure.kind == AiFailureKind.insufficientCredits ||
-        controller.isOutOfTokens;
     return <(String, VoidCallback)>[
       if (openPlans != null) ('See plans', openPlans),
-      if (tokenCountAtZero)
-        for (final AiModelId model in const <AiModelId>[
-          AiModelId.haiku,
-          AiModelId.luna,
-        ])
-          if (model != controller.selectedModel &&
-              controller.models.contains(model) &&
-              (controller.accessFor(model)?.canSend ?? true))
-            (
-              'Use ${model.label}',
-              () {
-                controller.selectModel(model);
-                controller.retry();
-              },
-            ),
     ];
   }
 
@@ -815,7 +797,7 @@ class _Header extends StatelessWidget {
                   ),
                 ),
                 const SizedBox(height: 2),
-                if (controller.models.isEmpty)
+                if (!controller.routesModels)
                   Text(
                     controller.modelLabel,
                     style: text.labelMedium,
@@ -823,9 +805,9 @@ class _Header extends StatelessWidget {
                     overflow: TextOverflow.ellipsis,
                   )
                 else
-                  AiModelSelector(
+                  AiThinkingSelector(
                     controller: controller,
-                    onOpenPlans: openPlans,
+                    lastServedBy: controller.lastServedBy,
                   ),
               ],
             ),
@@ -981,209 +963,6 @@ class _CreditsPill extends StatelessWidget {
           ),
         ),
       ),
-    );
-  }
-}
-
-/// The model the next message goes to, as a button that lists every model
-/// to switch to: what each is for, and what the plan gives of it.
-class AiModelSelector extends StatelessWidget {
-  const AiModelSelector({
-    super.key,
-    required this.controller,
-    this.onOpenPlans,
-  });
-
-  final AiModelChooser controller;
-  final VoidCallback? onOpenPlans;
-
-  static bool _alwaysUnlimited(AiModelId model) =>
-      model == AiModelId.haiku || model == AiModelId.luna;
-
-  /// Relative token-credit consumption shown beside [model].
-  static String badgeFor(AiModelId model) => 'x${model.tokenMultiplier}';
-
-  /// Whether [model] shows a lock: the plan does not include it.
-  static bool isLocked(AiModelId model, AiModelAccess? access) {
-    return !_alwaysUnlimited(model) &&
-        (access == AiModelAccess.locked || access == AiModelAccess.noPlan);
-  }
-
-  void _choose(AiModelId model) {
-    final VoidCallback? openPlans = onOpenPlans;
-    // A model the plan lacks leads to the plans that have it.
-    if (openPlans != null && isLocked(model, controller.accessFor(model))) {
-      openPlans();
-      return;
-    }
-    controller.selectModel(model);
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final AppColors colors = AppColors.of(context);
-    final TextTheme text = Theme.of(context).textTheme;
-    final AiModelId? selected = controller.selectedModel;
-    final String label = selected?.label ?? controller.modelLabel;
-    return PopupMenuButton<AiModelId>(
-      popUpAnimationStyle: AppMotion.pacedPopupStyle(
-        MotionMemory.instance.peek(('popup', 'ai-model')),
-      ),
-      onOpened: () => MotionMemory.instance.remember(('popup', 'ai-model')),
-      key: const ValueKey<String>('ai-model-selector'),
-      tooltip: 'Choose model',
-      initialValue: selected,
-      onSelected: _choose,
-      position: PopupMenuPosition.under,
-      constraints: const BoxConstraints(minWidth: 280, maxWidth: 320),
-      itemBuilder: (BuildContext context) {
-        return <PopupMenuEntry<AiModelId>>[
-          for (final AiModelId model in controller.models)
-            PopupMenuItem<AiModelId>(
-              key: ValueKey<String>('ai-model-${model.name}'),
-              value: model,
-              enabled: controller.isModelConfigured(model),
-              child: _ModelOption(
-                model: model,
-                selected: model == selected,
-                configured: controller.isModelConfigured(model),
-                access: controller.accessFor(model),
-              ),
-            ),
-        ];
-      },
-      child: Semantics(
-        button: true,
-        label: 'Model: $label. Choose model',
-        excludeSemantics: true,
-        child: ConstrainedBox(
-          constraints: const BoxConstraints(minHeight: AppSizes.minTouchTarget),
-          child: Align(
-            alignment: AlignmentDirectional.centerStart,
-            widthFactor: 1,
-            child: DecoratedBox(
-              decoration: ShapeDecoration(
-                shape: const StadiumBorder(),
-                color: AppGlass.muted(colors),
-              ),
-              child: Padding(
-                padding: const EdgeInsetsDirectional.only(
-                  start: AppSpacing.sm,
-                  end: AppSpacing.xs,
-                  top: AppSpacing.xxs + 2,
-                  bottom: AppSpacing.xxs + 2,
-                ),
-                child: Row(
-                  mainAxisSize: MainAxisSize.min,
-                  children: <Widget>[
-                    Icon(AppIcons.plans, size: 14, color: colors.textPrimary),
-                    const SizedBox(width: AppSpacing.xxs),
-                    Flexible(
-                      child: Text(
-                        label,
-                        key: const ValueKey<String>('ai-model-label'),
-                        style: text.labelLarge?.copyWith(
-                          color: colors.textPrimary,
-                        ),
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                      ),
-                    ),
-                    const SizedBox(width: 2),
-                    Icon(AppIcons.model, size: 14, color: colors.textPrimary),
-                  ],
-                ),
-              ),
-            ),
-          ),
-        ),
-      ),
-    );
-  }
-}
-
-/// One model in the picker: a check by the chosen one, its name, its
-/// provider and what it is for, and what the plan gives of it.
-class _ModelOption extends StatelessWidget {
-  const _ModelOption({
-    required this.model,
-    required this.selected,
-    required this.configured,
-    required this.access,
-  });
-
-  final AiModelId model;
-  final bool selected;
-  final bool configured;
-  final AiModelAccess? access;
-
-  @override
-  Widget build(BuildContext context) {
-    final AppColors colors = AppColors.of(context);
-    final TextTheme text = Theme.of(context).textTheme;
-    final String badge = AiModelSelector.badgeFor(model);
-    final bool locked = AiModelSelector.isLocked(model, access);
-    return Row(
-      children: <Widget>[
-        SizedBox(
-          width: 24,
-          child: selected
-              ? Icon(AppIcons.check, size: 16, color: colors.accent)
-              : null,
-        ),
-        Expanded(
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            mainAxisSize: MainAxisSize.min,
-            children: <Widget>[
-              Text(
-                model.label,
-                style: text.bodyLarge?.copyWith(
-                  color: colors.textPrimary,
-                  fontWeight: selected ? FontWeight.w600 : null,
-                ),
-              ),
-              Text(
-                configured
-                    ? '${model.provider.label} · ${model.summary}'
-                    : '${model.provider.label} · No API key',
-                style: text.bodySmall?.copyWith(color: colors.textSecondary),
-              ),
-            ],
-          ),
-        ),
-        DecoratedBox(
-          decoration: ShapeDecoration(
-            shape: const StadiumBorder(),
-            color: colors.selected,
-          ),
-          child: Padding(
-            padding: const EdgeInsets.symmetric(
-              horizontal: AppSpacing.xs,
-              vertical: 2,
-            ),
-            child: Row(
-              mainAxisSize: MainAxisSize.min,
-              children: <Widget>[
-                if (locked) ...<Widget>[
-                  Icon(
-                    AppIcons.lock,
-                    key: ValueKey<String>('ai-model-lock-${model.name}'),
-                    size: 12,
-                    color: colors.textPrimary,
-                    semanticLabel: 'Locked',
-                  ),
-                  const SizedBox(width: 2),
-                ],
-                Text(
-                  badge,
-                  style: text.labelSmall?.copyWith(color: colors.textPrimary),
-                ),
-              ],
-            ),
-          ),
-        ),
-      ],
     );
   }
 }

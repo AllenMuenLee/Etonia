@@ -22,7 +22,7 @@ class InkTileCache extends ChangeNotifier {
   static const double tileUnits = 256;
   static const int minPoints = int.fromEnvironment(
     'INK_TILE_MIN_POINTS',
-    defaultValue: 12000,
+    defaultValue: 6000,
   );
   static const int maxTiles = 96;
   static const int maxBytes = maxTiles * tilePixels * tilePixels * 4;
@@ -107,8 +107,20 @@ class InkTileCache extends ChangeNotifier {
     return false;
   }
 
+  static const int _maxLevel = 3;
+
+  /// The finest level made ahead of a zoom: past it, a tile is too big to be
+  /// worth having in case.
+  static const int _maxWarmLevel = 2;
+
+  /// The bytes of a tile's image at [level].
+  static int _imageBytes(int level) {
+    final int side = (tileUnits * _resolution(level)).round() + _gutter * 2;
+    return side * side * 4;
+  }
+
   static int _level(double scale) =>
-      (math.log(scale) / math.ln2).ceil().clamp(-3, 3);
+      (math.log(scale) / math.ln2).ceil().clamp(-3, _maxLevel);
   static double _resolution(int level) => math.pow(2, level).toDouble();
 
   void paint(
@@ -196,6 +208,7 @@ class InkTileCache extends ChangeNotifier {
         (b.rect.center - focus.center).distanceSquared,
       );
     });
+    int? warmBytes;
     for (final _Tile tile in requested) {
       if (tile.strokes.isEmpty) continue;
       final bool shown = tile.rect.overlaps(area);
@@ -222,7 +235,10 @@ class InkTileCache extends ChangeNotifier {
       }
       // Cold tiles get a small first image; detail follows without blocking
       // the gesture. Quantized levels survive fractional scale changes.
-      final int target = fallback == null ? math.min(level, 0) : level;
+      final bool needsDetail = tile.rect.overlaps(focus);
+      final int target = !needsDetail || fallback == null
+          ? math.min(level, 0)
+          : level;
       if (!tile.images.containsKey(target) && !tile.failed.contains(target)) {
         _scheduler._request(
           this,
@@ -232,8 +248,42 @@ class InkTileCache extends ChangeNotifier {
           paintStroke: paintStroke,
         );
       }
+      // Once what is shown is sharp, and nothing is being zoomed, the next
+      // finer level is made behind it, last of all: a pinch in then finds
+      // sharper tiles ready, rather than stretching these until it stops.
+      // A finer level costs four times the pixels, so it is only made while
+      // it is small and the cache has room to spare, and never for tiles
+      // already queued beyond that room.
+      final int finer = target + 1;
+      bool warming =
+          shown &&
+          !holdScale &&
+          finer <= _maxWarmLevel &&
+          tile.images.containsKey(target) &&
+          !tile.images.containsKey(finer) &&
+          !tile.failed.contains(finer);
+      if (warming) {
+        final int bytes = _imageBytes(finer);
+        warmBytes ??= InkTileCache.totalBytes;
+        if (warmBytes + bytes <= maxBytes ~/ 2) {
+          warmBytes += bytes;
+        } else {
+          warming = false;
+        }
+      }
+      if (warming) {
+        _scheduler._request(
+          this,
+          tile,
+          finer,
+          priority: 4,
+          paintStroke: paintStroke,
+        );
+      }
       for (final _RasterJob job in tile.jobs.values.toList()) {
-        if (job.level != target) _scheduler._cancelJob(job);
+        if (job.level != target && !(warming && job.level == finer)) {
+          _scheduler._cancelJob(job);
+        }
       }
     }
     for (final MapEntry<(int, int), _Tile> entry in _tiles.entries.toList()) {
@@ -302,10 +352,14 @@ class InkTileCache extends ChangeNotifier {
       _Tile? oldestTile;
       int? oldestLevel;
       int oldestUse = 0x7fffffffffffffff;
+      bool foundDetail = false;
       for (final InkTileCache cache in _all) {
         for (final _Tile tile in cache._tiles.values) {
           for (final MapEntry<int, _TileImage> entry in tile.images.entries) {
-            if (entry.value.used < oldestUse) {
+            final bool detail = entry.key > 0;
+            if ((detail && !foundDetail) ||
+                (detail == foundDetail && entry.value.used < oldestUse)) {
+              foundDetail = detail;
               oldestUse = entry.value.used;
               oldestTile = tile;
               oldestLevel = entry.key;

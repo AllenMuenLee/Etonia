@@ -3242,9 +3242,10 @@ class _Breadcrumbs extends StatelessWidget {
 }
 
 /// The primary action, floating at the bottom: the accent color and the
-/// floating shadow, like the editor's palette. Its menu imports a PDF as a
-/// note, asks for a template, or starts a note straight away on the last
-/// one; the quickest choice sits nearest the button.
+/// floating shadow, like the editor's palette.
+/// Tapping the main button creates a note straight away with quick start;
+/// the sub-button at its trailing edge expands a menu to choose a template,
+/// import a PDF, or import a test.
 class _NewNoteButton extends StatelessWidget {
   const _NewNoteButton({
     required this.onQuickNote,
@@ -3306,45 +3307,87 @@ class _NewNoteButton extends StatelessWidget {
               child: const Text('Template…'),
             ),
           ),
-          reads(
-            MenuItemButton(
-              leadingIcon: const Icon(AppIcons.newNote),
-              onPressed: onQuickNote,
-              child: const Text('Quick start'),
-            ),
-          ),
         ],
         builder: (BuildContext context, MenuController menu, Widget? child) {
+          final TextStyle textStyle =
+              (Theme.of(context).textTheme.labelLarge ?? const TextStyle())
+                  .copyWith(
+                    color: colors.onAccent,
+                    fontWeight: FontWeight.w600,
+                  );
           return reads(
-            Tooltip(
-              message: 'New note',
-              excludeFromSemantics: true,
-              child: Pressable(
-                pressedScale: 0.94,
-                child: DecoratedBox(
-                  decoration: BoxDecoration(
-                    borderRadius: radius,
-                    boxShadow: AppShadows.floating(colors),
-                  ),
-                  child: FilledButton.icon(
-                    onPressed: () => menu.isOpen ? menu.close() : menu.open(),
-                    style: FilledButton.styleFrom(
-                      backgroundColor: colors.accent,
-                      foregroundColor: colors.onAccent,
-                      minimumSize: const Size(
-                        0,
-                        AppSpacing.xxl + AppSpacing.xxs,
-                      ),
-                      padding: const EdgeInsetsDirectional.fromSTEB(
-                        AppSpacing.md + 2,
-                        0,
-                        AppSpacing.lg - 2,
-                        0,
-                      ),
-                      shape: const RoundedRectangleBorder(borderRadius: radius),
+            Pressable(
+              pressedScale: 0.94,
+              child: DecoratedBox(
+                decoration: BoxDecoration(
+                  borderRadius: radius,
+                  boxShadow: AppShadows.floating(colors),
+                ),
+                child: Material(
+                  color: colors.accent,
+                  shape: const RoundedRectangleBorder(borderRadius: radius),
+                  clipBehavior: Clip.antiAlias,
+                  child: SizedBox(
+                    height: AppSpacing.xxl + AppSpacing.xxs,
+                    child: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      crossAxisAlignment: CrossAxisAlignment.stretch,
+                      children: <Widget>[
+                        Tooltip(
+                          message: 'New note',
+                          excludeFromSemantics: true,
+                          child: InkWell(
+                            onTap: onQuickNote,
+                            child: Padding(
+                              padding: const EdgeInsetsDirectional.fromSTEB(
+                                AppSpacing.md + 2,
+                                0,
+                                AppSpacing.md,
+                                0,
+                              ),
+                              child: Row(
+                                mainAxisSize: MainAxisSize.min,
+                                children: <Widget>[
+                                  Icon(
+                                    AppIcons.add,
+                                    size: 22,
+                                    color: colors.onAccent,
+                                  ),
+                                  const SizedBox(width: AppSpacing.xs),
+                                  Text('New note', style: textStyle),
+                                ],
+                              ),
+                            ),
+                          ),
+                        ),
+                        Container(
+                          width: 1,
+                          margin: const EdgeInsets.symmetric(
+                            vertical: AppSpacing.sm,
+                          ),
+                          color: colors.onAccent.withValues(alpha: 0.2),
+                        ),
+                        Tooltip(
+                          message: 'New note options',
+                          excludeFromSemantics: true,
+                          child: InkWell(
+                            key: const ValueKey<String>('new-note-expand'),
+                            onTap: () =>
+                                menu.isOpen ? menu.close() : menu.open(),
+                            child: SizedBox(
+                              width: AppSizes.minTouchTarget,
+                              child: Center(
+                                child: Icon(
+                                  AppIcons.expand,
+                                  size: 16,
+                                  color: colors.onAccent,
+                                ),
+                              ),
+                            ),
+                          ),
+                        ),
+                      ],
                     ),
-                    icon: const Icon(AppIcons.add, size: 22),
-                    label: const Text('New note'),
                   ),
                 ),
               ),
@@ -3939,6 +3982,8 @@ class _FolderArt extends StatelessWidget {
   Widget build(BuildContext context) {
     final Color tint = resolveFolderColor(context, color);
     final AppColors colors = AppColors.of(context);
+    final bool isNeutral =
+        color == FolderColor.accent || color == FolderColor.gray;
     return _Contained(
       aspect: aspect,
       alignment: alignment,
@@ -3947,6 +3992,8 @@ class _FolderArt extends StatelessWidget {
           tint: tint,
           surface: colors.surface,
           dark: Theme.of(context).brightness == Brightness.dark,
+          isNeutral: isNeutral,
+          dividerColor: colors.divider,
         ),
       ),
     );
@@ -3958,11 +4005,15 @@ class _FolderPainter extends CustomPainter {
     required this.tint,
     required this.surface,
     required this.dark,
+    this.isNeutral = false,
+    this.dividerColor,
   });
 
   final Color tint;
   final Color surface;
   final bool dark;
+  final bool isNeutral;
+  final Color? dividerColor;
 
   @override
   void paint(Canvas canvas, Size size) {
@@ -3996,34 +4047,58 @@ class _FolderPainter extends CustomPainter {
         ..color = Colors.black.withValues(alpha: dark ? 0.4 : 0.14)
         ..maskFilter = const MaskFilter.blur(BlurStyle.normal, 7),
     );
+    final Color backColor = isNeutral
+        ? surface
+        : Color.alphaBlend(
+            tint.withValues(alpha: dark ? 0.62 : 0.55),
+            surface,
+          );
     canvas.drawPath(
       back,
-      Paint()
-        ..color = Color.alphaBlend(
-          tint.withValues(alpha: dark ? 0.62 : 0.55),
-          surface,
-        ),
+      Paint()..color = backColor,
     );
+    if (isNeutral && dividerColor != null) {
+      canvas.drawPath(
+        back,
+        Paint()
+          ..color = dividerColor!
+          ..style = PaintingStyle.stroke
+          ..strokeWidth = 1.0,
+      );
+    }
     // The front, a little lower, lighter, catching the light.
     final RRect front = RRect.fromRectAndRadius(
       Rect.fromLTRB(0, tabHeight + h * 0.08, w, h),
       Radius.circular(r),
     );
+    final Color frontColor = isNeutral
+        ? surface
+        : Color.alphaBlend(
+            tint.withValues(alpha: dark ? 0.86 : 0.78),
+            surface,
+          );
     canvas.drawRRect(
       front,
-      Paint()
-        ..color = Color.alphaBlend(
-          tint.withValues(alpha: dark ? 0.86 : 0.78),
-          surface,
-        ),
+      Paint()..color = frontColor,
     );
+    if (isNeutral && dividerColor != null) {
+      canvas.drawRRect(
+        front,
+        Paint()
+          ..color = dividerColor!
+          ..style = PaintingStyle.stroke
+          ..strokeWidth = 1.0,
+      );
+    }
   }
 
   @override
   bool shouldRepaint(_FolderPainter oldDelegate) {
     return oldDelegate.tint != tint ||
         oldDelegate.surface != surface ||
-        oldDelegate.dark != dark;
+        oldDelegate.dark != dark ||
+        oldDelegate.isNeutral != isNeutral ||
+        oldDelegate.dividerColor != dividerColor;
   }
 }
 
@@ -4232,7 +4307,9 @@ class _FolderSidebar extends StatelessWidget {
           }
 
           return Material(
-            color: colors.background,
+            // Only a pinned header needs a fill, so rows scrolling under it
+            // don't show through; otherwise the sidebar's surface shows.
+            color: pinned ? colors.background : Colors.transparent,
             child: _target(
               folder.id,
               _SidebarRow(

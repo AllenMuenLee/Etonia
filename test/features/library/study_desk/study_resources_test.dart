@@ -4,6 +4,7 @@ import 'dart:ui';
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:greatnote/features/editor/ai/ai_client.dart';
+import 'package:greatnote/features/editor/ai/ai_config.dart';
 import 'package:greatnote/features/editor/ink/ink_sample.dart';
 import 'package:greatnote/features/editor/page/page_setup.dart';
 import 'package:greatnote/features/editor/text/note_text.dart';
@@ -65,9 +66,13 @@ class _AnswerClient extends AiClient {
     AiRequest request, {
     AiPartialCallback? onPartial,
     AiNotationPartialCallback? onNotation,
-  }) async => const AiSuccess(
-    'All four notes [[N1:P1:C1]] [[N2:P1:C1]] [[N3:P1:C1]] [[N4:P1:C1]]',
-  );
+  }) async => request.systemInstruction == AiPrompts.studyTeachingPlannerSystem
+      ? const AiSuccess(
+          '{"intent":"question","retrieval":{"notes":true,"mistakeIndices":[],"query":"mechanics"}}',
+        )
+      : const AiSuccess(
+          'All four notes [[N1:P1:C1]] [[N2:P1:C1]] [[N3:P1:C1]] [[N4:P1:C1]]',
+        );
   @override
   void close() {}
 }

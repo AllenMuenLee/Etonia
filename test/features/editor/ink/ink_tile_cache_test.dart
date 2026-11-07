@@ -274,6 +274,7 @@ void main() {
             child: SizedBox.fromSize(
               size: _page,
               child: CustomPaint(
+                willChange: true,
                 painter: _CountingInkPainter(
                   () => paints++,
                   controller: controller,
@@ -424,6 +425,27 @@ void main() {
   );
 
   test(
+    'the next finer level is made behind the sharp one, never in a zoom',
+    () async {
+      layer.zooming.value = true;
+      await layer.pixels(tiled: true);
+      final int inZoom = layer.tiles.imageCount;
+      expect(inZoom, greaterThan(0));
+
+      layer.zooming.value = false;
+      await layer.pixels(tiled: true);
+      // The sharp level of each tile on show, and the one finer than it, so a
+      // pinch in finds sharper tiles ready.
+      expect(layer.tiles.imageCount, inZoom * 2);
+
+      // And no further: the finer level's own finer level waits for a zoom
+      // that reaches it.
+      await layer.pixels(tiled: true);
+      expect(layer.tiles.imageCount, inZoom * 2);
+    },
+  );
+
+  test(
     'cold zoom shows vectors while images are queued asynchronously',
     () async {
       layer.zooming.value = true;
@@ -518,6 +540,11 @@ void main() {
       expect(inUse, greaterThan(0));
       expect(InkTileCache.totalBytes, lessThanOrEqualTo(InkTileCache.maxBytes));
     }
+    expect(
+      pages.first.tiles.imageCount,
+      greaterThan(0),
+      reason: 'coarse previews survive detail-cache pressure',
+    );
   });
 
   test(
@@ -617,6 +644,42 @@ void main() {
       );
       expect(draws, warmed, reason: 'newly visible ink is already cached');
       await tiles.whenIdle;
+    },
+  );
+
+  test(
+    'offscreen tiles stay at preview resolution until they become visible',
+    () async {
+      final Stroke nearby = Stroke.fromPoints(
+        style: const StrokeStyle(ink: InkPalette.ink, width: 3),
+        points: const <InkVector>[InkVector(300, 50), InkVector(420, 50)],
+      );
+      final InkController ink = InkController(strokes: <Stroke>[nearby]);
+      final InkTileCache tiles = InkTileCache(
+        scheduler: InkTileScheduler(scheduleWork: scheduleMicrotask),
+      );
+      addTearDown(ink.dispose);
+      addTearDown(tiles.dispose);
+      for (int pass = 0; pass < 2; pass++) {
+        _requestTiles(
+          tiles,
+          ink,
+          scale: 4,
+          area: const Rect.fromLTWH(0, 0, 200, 200),
+        );
+        await tiles.whenIdle;
+      }
+      expect(tiles.imageCount, 1);
+      expect(tiles.memoryBytes, lessThan(300000));
+      _requestTiles(
+        tiles,
+        ink,
+        scale: 4,
+        area: const Rect.fromLTWH(260, 0, 200, 200),
+      );
+      await tiles.whenIdle;
+      expect(tiles.imageCount, 2);
+      expect(tiles.memoryBytes, greaterThan(4000000));
     },
   );
 

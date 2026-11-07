@@ -1,0 +1,2 @@
+llmlingua==0.2.2
+tiktoken==0.12.0

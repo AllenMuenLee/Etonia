@@ -121,52 +121,49 @@ void main() {
     await tester.pumpAndSettle();
   });
 
-  test('suggestions work through the production response envelope', () async {
-    final repository = InMemoryNoteRepository();
-    final note = await repository.createNote(title: 'Physics');
-    var requests = 0;
-    final client = BackendAiClient(
-      invoke: (_, body) async {
-        requests++;
-        final suggestions = (body['systemInstruction']! as String).contains(
-          'JSON array of exactly three',
-        );
-        final planning = (body['systemInstruction']! as String).contains(
-          'You plan tutoring lessons',
-        );
-        return <String, dynamic>{
-          'answer':
-              '<svg xmlns="http://www.w3.org/2000/svg" data-etonia-version="1">'
-              '<title>Study</title><desc data-etonia-role="message">'
-              '${planning
-                  ? '{"intent":"question"}'
-                  : suggestions
-                  ? '["Explain torque", "Show an example", "What is inertia?"]'
-                  : 'Momentum is conserved.'}'
-              '</desc></svg>',
-          'usage': {'inputTokens': 100, 'outputTokens': 40},
-        };
-      },
-    );
-    final desk = StudyDeskController(repository: repository, client: client);
-    addTearDown(() {
-      desk.dispose();
-      repository.dispose();
-      client.close();
-    });
-    await desk.load();
-    desk.addNotes([note.id]);
-    await desk.send('Explain momentum');
-    for (var i = 0; i < 10 && desk.generatingSuggestions.value; i++) {
-      await Future<void>.delayed(Duration.zero);
-    }
-    expect(requests, 3);
-    expect(desk.dynamicSuggestions.value, [
-      'Explain torque',
-      'Show an example',
-      'What is inertia?',
-    ]);
-  });
+  test(
+    'suggestions work through the plain production response transport',
+    () async {
+      final repository = InMemoryNoteRepository();
+      final note = await repository.createNote(title: 'Physics');
+      var requests = 0;
+      final client = BackendAiClient(
+        invoke: (_, body) async {
+          requests++;
+          final task = (body['routing'] as Map<String, Object?>)['task'];
+          final suggestions = task == 'study.suggestions';
+          final planning = task == 'study.plan';
+          return <String, dynamic>{
+            'responseFormat': body['responseFormat'],
+            'answer': planning
+                ? '{"intent":"question","difficulty":1}'
+                : suggestions
+                ? '{"questions":["Explain torque","Show an example","What is inertia?"]}'
+                : 'Momentum is conserved.',
+            'usage': {'inputTokens': 100, 'outputTokens': 40},
+          };
+        },
+      );
+      final desk = StudyDeskController(repository: repository, client: client);
+      addTearDown(() {
+        desk.dispose();
+        repository.dispose();
+        client.close();
+      });
+      await desk.load();
+      desk.addNotes([note.id]);
+      await desk.send('Explain momentum');
+      for (var i = 0; i < 10 && desk.generatingSuggestions.value; i++) {
+        await Future<void>.delayed(Duration.zero);
+      }
+      expect(requests, 3);
+      expect(desk.dynamicSuggestions.value, [
+        'Explain torque',
+        'Show an example',
+        'What is inertia?',
+      ]);
+    },
+  );
 
   test('merged page citations keep each diagram crop separate from prose', () {
     const prose = StudyCitation(

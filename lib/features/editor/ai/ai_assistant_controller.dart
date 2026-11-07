@@ -278,7 +278,7 @@ class _AiConversation {
 /// It never touches the ink. It is handed a selection when AI is pressed,
 /// copies what it needs, and from then on works from that copy. Nothing is
 /// sent until [send], [sendQuickAction], or [retry] is called.
-class AiAssistantController extends ChangeNotifier implements AiModelChooser {
+class AiAssistantController extends ChangeNotifier implements AiRoutingChooser {
   AiAssistantController({
     required this._client,
     this.renderer = const SelectionImageRenderer(),
@@ -299,6 +299,10 @@ class AiAssistantController extends ChangeNotifier implements AiModelChooser {
   }
 
   AiUsageGate? _usageGate;
+  late final AiRoutingSession _routingSession = AiRoutingSession(
+    () => _usageGate,
+  );
+  AiModelId? _lastServedBy;
   AiModelId? _selectedModel;
 
   /// Decides which models may be used and is charged for each answer.
@@ -324,18 +328,39 @@ class AiAssistantController extends ChangeNotifier implements AiModelChooser {
   /// Whether the active usage gate has no remaining metered tokens.
   bool get isOutOfTokens => _usageGate?.isOutOfTokens ?? true;
 
-  /// The models the user can pick between; empty when the client serves
-  /// only one.
+  /// Whether the client chooses the model, and how hard it thinks, itself.
+  bool get routesModels {
+    final AiClient client = _client;
+    return client is AiModelRouter && client.routes;
+  }
+
+  /// How hard to think and which models may be used, as the user set them.
   @override
+  AiRoutingPreferences get routing => _routingSession.preferences;
+
+  @override
+  void setRouting(AiRoutingPreferences value) {
+    if (_disposed) {
+      return;
+    }
+    if (_routingSession.update(value)) {
+      notifyListeners();
+    }
+  }
+
+  /// The model that wrote the latest answer, when the server said.
+  AiModelId? get lastServedBy => _lastServedBy;
+
+  /// The models a client that does not choose for itself can be sent to;
+  /// empty when it serves only one.
   List<AiModelId> get models {
     final AiClient client = _client;
     return client is AiModelRouter ? client.models : const <AiModelId>[];
   }
 
-  /// The model the next message goes to: the one picked in this editor,
-  /// else the one last picked anywhere, else the client's default. Null
-  /// when the client serves only one.
-  @override
+  /// The model a client that does not choose for itself is sent: the one
+  /// picked, else the one last picked anywhere, else its default. Null when
+  /// it serves only one. A client that routes ignores it.
   AiModelId? get selectedModel {
     final AiClient client = _client;
     if (client is! AiModelRouter) {
@@ -344,8 +369,8 @@ class AiAssistantController extends ChangeNotifier implements AiModelChooser {
     return _selectedModel ?? _usageGate?.preferredModel ?? client.defaultModel;
   }
 
-  /// Sends the next messages to [model], and remembers the choice.
-  @override
+  /// Sends the next messages to [model], and remembers the choice. For a
+  /// client that does not choose for itself.
   void selectModel(AiModelId model) {
     if (_disposed || !models.contains(model) || model == selectedModel) {
       return;
@@ -355,18 +380,26 @@ class AiAssistantController extends ChangeNotifier implements AiModelChooser {
     notifyListeners();
   }
 
-  /// What the plan allows with [model]; null when nothing is metered.
-  @override
-  AiModelAccess? accessFor(AiModelId model) => _usageGate?.accessFor(model);
-
   /// Whether [model] has a key to send with.
-  @override
   bool isModelConfigured(AiModelId model) {
     final AiClient client = _client;
     return client is AiModelRouter
         ? client.isModelConfigured(model)
         : client.isConfigured;
   }
+
+  AiModelId? get _directModel {
+    final AiClient client = _client;
+    final AiModelId? picked = selectedModel;
+    if (client is! AiModelRouter || client.routes || picked == null) {
+      return null;
+    }
+    return _routingSession.directModel(picked, client.models);
+  }
+
+  /// What the plan allows with [model]; null when nothing is metered.
+  @override
+  AiModelAccess? accessFor(AiModelId model) => _usageGate?.accessFor(model);
 
   final AiClient _client;
   final SelectionImageRenderer renderer;
@@ -590,12 +623,15 @@ class AiAssistantController extends ChangeNotifier implements AiModelChooser {
 
   /// False when there is no API key to send with.
   bool get isConfigured {
-    final AiModelId? model = selectedModel;
-    return model == null ? _client.isConfigured : isModelConfigured(model);
+    final AiClient client = _client;
+    final AiModelId? model = _directModel;
+    return client is AiModelRouter && model != null
+        ? client.isModelConfigured(model)
+        : client.isConfigured;
   }
 
-  @override
-  String get modelLabel => selectedModel?.label ?? _client.modelLabel;
+  /// Shown in the panel header when the client serves one model.
+  String get modelLabel => _directModel?.label ?? _client.modelLabel;
 
   bool get notationEnabled => _notationEnabled;
 
@@ -1099,7 +1135,7 @@ class AiAssistantController extends ChangeNotifier implements AiModelChooser {
     final bool animationAuthorized = notationAuthorized && _animationEnabled;
     final int revocations = _notationRevocations;
     final int animationRevocations = _animationRevocations;
-    final AiModelId? model = selectedModel;
+    final AiModelId? model = _directModel;
     conversation.requestState = AiRequestState.sending;
     conversation.failure = null;
     conversation.partialAnswer = null;
@@ -1144,15 +1180,21 @@ class AiAssistantController extends ChangeNotifier implements AiModelChooser {
     }
 
     final AiUsageGate? gate = _usageGate;
-    if (gate != null && model != null) {
-      final AiFailure? refused = gate.checkAccess(model);
-      if (refused != null) {
-        // Answered at once, so the panel's message and its choices show.
-        await Future<void>.value();
-        finish(AiError(refused));
-        return;
-      }
+    final bool routed = routesModels;
+    final AiFailure? refused = routed
+        ? _routingSession.refusal()
+        : gate != null && model != null
+        ? gate.checkAccess(model)
+        : null;
+    if (refused != null) {
+      // Answered at once, so the panel's message and its choices show.
+      await Future<void>.value();
+      finish(AiError(refused));
+      return;
     }
+    final AiRouting? routing = routed
+        ? _routingSession.request(AiRouteTask.editorAnswer)
+        : null;
     // The model sees the ink as it is now: its own earlier notes, and what
     // the user has written since, where the conversation's ink lies.
     if (inkInArea != null) {
@@ -1258,7 +1300,8 @@ class AiAssistantController extends ChangeNotifier implements AiModelChooser {
           noteImage: noteImage,
           notationEnabled: notationAuthorized,
           animationEnabled: animationAuthorized,
-          model: model,
+          model: routed ? null : model,
+          routing: routing,
         ),
         onPartial: (String message, bool isComplete) {
           if (_disposed ||
@@ -1298,8 +1341,18 @@ class AiAssistantController extends ChangeNotifier implements AiModelChooser {
     if (result case AiSuccess(
       :final String text,
       :final AiTokenUsage? usage,
-    ) when gate != null && model != null && !_disposed) {
-      gate.recordUsage(model, usage ?? AiTokenUsage.estimate(request, text));
+      :final AiModelId? servedBy,
+    ) when !_disposed) {
+      _routingSession.served(servedBy);
+      _lastServedBy = servedBy ?? _lastServedBy;
+      final AiModelId? charged =
+          servedBy ?? (routed ? _routingSession.cheapestAllowed : model);
+      if (gate != null && charged != null) {
+        gate.recordUsage(
+          charged,
+          usage ?? AiTokenUsage.estimate(request, text),
+        );
+      }
     }
     finish(result, noteImage: noteImage);
     endPreview();

@@ -12,6 +12,7 @@ import {
   billingModel,
   combineSteps,
   configuredDrawingModel,
+  type MeteredUsage,
   meterPass,
   modelConfig,
   outputBudget,
@@ -23,7 +24,33 @@ import {
   twoStep,
   validateInput,
 } from "../_shared/ai_policy.ts";
+import {
+  buildCatalog,
+  type Decision,
+  type DenyReason,
+  type Effort,
+  efforts,
+  escalate,
+  estimateInputTokens,
+  failureCode,
+  pairKey,
+  parseRoutingRequest,
+  planFromState,
+  route,
+  type RouteContext,
+  type RouterModel,
+  type RouterOverride,
+  type Task,
+} from "../_shared/ai_router.ts";
 import { reconcile } from "../_shared/stores.ts";
+import { describePass, type PassUsage } from "../_shared/ai_usage.ts";
+import {
+  isPlaceholderPng,
+  studyDifficulty,
+  studyOutputCeiling,
+  studyQuestionKind,
+  usableStudyResponse,
+} from "../_shared/study_policy.ts";
 
 const providerKeys = {
   openai: "OPENAI_API_KEY",
@@ -79,39 +106,213 @@ function eventStream(
   );
 }
 
+/** Providers that just refused a request, and until when. Per instance and
+ * short: it only steers the next requests away from an outage. */
+const outages = new Map<string, number>();
+const outageMs = 60_000;
+const providersDown = () => {
+  const now = Date.now();
+  return [...outages].filter(([, until]) => until > now).map(([provider]) => provider);
+};
+
+/** A router refusal as the error the app already understands. */
+function denial(reason: DenyReason): Failure {
+  const code = failureCode(reason);
+  return new Failure(code, code === "rejected" ? 400 : code === "server" ? 503 : 409);
+}
+
+/** Measured per-model strengths, from the evals, over the baseline. */
+function routerOverrides(): Record<string, RouterOverride> {
+  const raw = Deno.env.get("AI_ROUTER_CONFIG");
+  if (!raw) return {};
+  try {
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error();
+    return parsed;
+  } catch {
+    throw new Failure("not_configured", 503);
+  }
+}
+
+const effortRank = (effort: Effort) => efforts.indexOf(effort);
+
 Deno.serve(endpoint(async (req) => {
   const db = admin();
   const user = await userFor(req, db);
   await rpc(db, "billing_rate_limit", { p_user: user });
   const input = validateInput(await readBody(req, null));
   const catalog = JSON.parse(secret("AI_MODEL_CONFIG"));
-  const modelAlias = requestModel(input, Deno.env.get("AI_NOTATION_MODEL"));
-  const model = modelConfig(catalog, modelAlias);
-  const key = secret(providerKeys[model.provider]);
-  // The answer model is user-selected. Notation/animation is controlled only
-  // by the server environment, with Luna as the default.
-  const two = twoStep(model, input);
-  const drawerAlias = two ? configuredDrawingModel(Deno.env.get("AI_NOTATION_MODEL")) : undefined;
-  const drawer = drawerAlias ? modelConfig(catalog, drawerAlias) : undefined;
-  const drawerKey = drawer ? secret(providerKeys[drawer.provider]) : "";
+  const routed = input.model === "auto";
+  if (!routed && input.routing !== undefined) throw new Failure("rejected");
   // Live store verification fails closed, including renewals, refunds and expiry.
   await reconcile(db, user);
-  // Stop using reserve token thing: if remaining token balance > 0 (or model unlimited),
-  // always accept the request without holding/deducting balance upfront.
+
+  // A routed request names no model: the router picks the cheapest capable
+  // (model, effort). The task, effort setting and the models the user left on
+  // come from the app. Everything it needs is read before anything is reserved.
+  const routing = routed ? parseRoutingRequest(input.routing) : undefined;
+  let routerCatalog: RouterModel[] = [];
+  let context: RouteContext | undefined;
+  let decision: Decision | undefined;
+  if (routing) {
+    const state = await rpc(db, "billing_state", { p_user: user });
+    if (state.activePlan == null && state.grantedPurchaseId == null) {
+      throw new Failure("plan_required", 409);
+    }
+    routerCatalog = buildCatalog(catalog, routerOverrides());
+    const task: Task = input.task === "testGrading"
+      ? "test.grading"
+      : routing.task ?? "editor.answer";
+    const withPicture = task.startsWith("editor.") || task === "test.grading";
+    const placeholder = isPlaceholderPng(input.selectedImage);
+    const needsVision = !placeholder || (routing.needsVision ?? withPicture);
+    context = {
+      task,
+      setting: routing.setting,
+      plan: planFromState(state),
+      creditsMicro: Number(state.remainingCreditsMicroUsd ?? 0),
+      allowed: routing.allowed,
+      unhealthyProviders: providersDown(),
+      previous: routing.previous,
+      hints: {
+        difficulty: studyDifficulty(
+          task,
+          input,
+          routing.difficulty ?? 2,
+          needsVision,
+          routing.diagrams,
+        ),
+        needsVision,
+        studyPolicyVersion: input.responseFormat ? input.studyPolicyVersion : undefined,
+        studyQuestionKind: task.startsWith("study.")
+          ? studyQuestionKind(input.prompt, input.history)
+          : undefined,
+        diagrams: routing.diagrams,
+        inputTokens: estimateInputTokens([
+          input.prompt,
+          input.systemInstruction,
+          input.notationInstruction,
+          input.noteMetadata,
+          input.selectedSvg,
+          JSON.stringify(input.history ?? []),
+        ], input.notationImage ? 2 : placeholder ? 0 : 1) + (placeholder ? 64 : 0),
+        cacheablePrefixTokens: estimateInputTokens([
+          input.systemInstruction,
+          JSON.stringify(input.history ?? []),
+        ], 0),
+      },
+    };
+    const chosen = route(routerCatalog, context);
+    if (!chosen.ok) throw denial(chosen.reason);
+    decision = chosen;
+  }
+  const tried: string[] = decision ? [pairKey(decision.alias, decision.effort)] : [];
+  let escalations = 0;
+
+  // The answer model is the router's pick, or the user's for an older app.
+  // Notation/animation is controlled by the server environment, with Luna as
+  // the default.
+  let modelAlias = decision?.alias ?? requestModel(input, Deno.env.get("AI_NOTATION_MODEL"));
+  let effort: Effort | undefined = decision?.effort;
+  let model = modelConfig(catalog, modelAlias);
+  let key = secret(providerKeys[model.provider]);
+  const two = twoStep(model, input);
+  let drawerAlias = two ? configuredDrawingModel(Deno.env.get("AI_NOTATION_MODEL")) : undefined;
+  let drawerEffort: Effort | undefined;
+  if (two && context) {
+    // The configured drawing model, unless the user turned it off or it cannot
+    // be paid for (a paid plan out of credits keeps drawing on an unlimited one).
+    const base: RouteContext = { ...context, task: "editor.notation", setting: "medium" };
+    const configured = context.allowed && !context.allowed.includes(drawerAlias!)
+      ? undefined
+      : route(routerCatalog, { ...base, allowed: [drawerAlias!] });
+    const chosen = configured?.ok ? configured : route(routerCatalog, base);
+    if (!chosen.ok) throw denial(chosen.reason);
+    drawerAlias = chosen.alias;
+    drawerEffort = chosen.effort;
+  }
+  const drawer = drawerAlias ? modelConfig(catalog, drawerAlias) : undefined;
+  const drawerKey = drawer ? secret(providerKeys[drawer.provider]) : "";
+  // The database decides what is unlimited from the model and effort it is
+  // given. Older apps name a model and no effort: medium, as before.
+  const billedEffort: Effort = !effort
+    ? "medium"
+    : drawerEffort && effortRank(drawerEffort) > effortRank(effort)
+    ? drawerEffort
+    : effort;
+  // If remaining token balance > 0 (or the request is unlimited), always accept
+  // the request without holding/deducting balance upfront.
   await rpc(db, "ai_reserve", {
     p_user: user,
     p_request: input.requestId,
     p_model: billingModel(modelAlias, drawerAlias),
+    p_effort: billedEffort,
   });
-  const settle = (cost: number, tokensIn = 0, tokensOut = 0, release = false) =>
-    rpc(db, "ai_settle", {
+  const passes: PassUsage[] = [];
+  const settle = async (cost: number, tokensIn = 0, tokensOut = 0, release = false) => {
+    await rpc(db, "ai_settle_usage", {
       p_user: user,
       p_request: input.requestId,
       p_cost: cost,
       p_input: tokensIn,
       p_output: tokensOut,
       p_release: release,
+      p_task: context?.task ?? (input.task === "testGrading" ? "test.grading" : "editor.answer"),
+      p_turn: input.turnId ?? input.requestId,
+      p_effort: effort ?? "medium",
+      p_passes: passes,
     });
+    // Only what the router decided and what it cost, never what was asked.
+    if (!release && decision && context) {
+      console.log(JSON.stringify({
+        event: "ai_route",
+        task: context.task,
+        setting: context.setting,
+        plan: context.plan,
+        model: modelAlias,
+        effort,
+        drawer: drawerAlias,
+        drawerEffort,
+        billing: decision.billing,
+        capable: decision.capable,
+        escalations,
+        inputTokens: tokensIn,
+        outputTokens: tokensOut,
+        cost,
+      }));
+    }
+  };
+  /** What the app is told about who answered, for "show the model used". */
+  const servedBy = () => routed ? { model: modelAlias, effort } : undefined;
+  /** Moves a routed request to the next pair after [cause], if that pair is
+   * billed the way the reservation was: otherwise the user would be charged
+   * for a pair the reservation called free, or the reverse. */
+  const retry = (failed: Decision, cause: "refused" | "unusable"): boolean => {
+    if (!context || !decision || escalations >= 2) return false;
+    const next = cause === "refused"
+      ? route(routerCatalog, {
+        ...context,
+        unhealthyProviders: providersDown(),
+        exclude: tried,
+      })
+      : escalate(routerCatalog, { ...context, exclude: tried }, failed);
+    if (!next.ok || next.billing !== decision.billing) return false;
+    const nextModel = modelConfig(catalog, next.alias);
+    let nextKey: string;
+    try {
+      nextKey = secret(providerKeys[nextModel.provider]);
+    } catch {
+      return false;
+    }
+    tried.push(pairKey(next.alias, next.effort));
+    decision = next;
+    modelAlias = next.alias;
+    effort = next.effort;
+    model = nextModel;
+    key = nextKey;
+    escalations++;
+    return true;
+  };
   let sent = false;
   let settled = false;
   /** Sends one provider request: its answer and usage, or null when the
@@ -152,21 +353,60 @@ Deno.serve(endpoint(async (req) => {
     };
   };
   try {
-    // If the user's remaining token balance is above 0, always accept the request
-    // and provide the full model output budget without artificial hold throttling.
-    const maxOutput = outputBudget(model, two);
     const started = Date.now();
-    const first = await ask(
-      providerRequest(model, input, maxOutput, key, two ? { step: "text" } : undefined),
-      model,
-    );
+    let spent: MeteredUsage | undefined;
+    let first: Awaited<ReturnType<typeof ask>>;
+    for (;;) {
+      // If the user's remaining balance is above 0 (or the request is
+      // unlimited), the request is accepted with the model's full output budget.
+      const maxOutput = studyOutputCeiling(context?.task, outputBudget(model, two), effort);
+      first = await ask(
+        providerRequest(model, input, maxOutput, key, two ? { step: "text" } : undefined, effort),
+        model,
+      );
+      if (!first.result) {
+        // A provider that is down is skipped by the next requests, and this one
+        // moves to the next pair if it can.
+        if (first.refused === 429 || (first.refused ?? 0) >= 500) {
+          outages.set(model.provider, Date.now() + outageMs);
+          if (decision && retry(decision, "refused")) continue;
+        }
+        break;
+      }
+      spent = meterPass(spent, model, first.result);
+      passes.push(describePass(modelAlias, model, effort ?? "medium", "answer", first.result));
+      // A failure the server can see itself: an empty answer, or words that
+      // cannot be read from the first step of a notation request.
+      const text = first.result.answer;
+      let usable = typeof text === "string" && text.trim() !== "";
+      if (usable && two) {
+        try {
+          stepMessage(text);
+        } catch {
+          usable = false;
+        }
+      }
+      if (usable) usable = usableStudyResponse(input, context?.task, text);
+      if (first.result.finishReason === "length" || first.result.finishReason === "MAX_TOKENS") {
+        usable = false;
+      }
+      if (!usable && decision && retry(decision, "unusable")) continue;
+      if (!usable) {
+        await settle(spent.cost, spent.inputTokens, spent.outputTokens);
+        settled = true;
+        throw new Failure("server", 503);
+      }
+      break;
+    }
     if (!first.result) {
-      // A definitive rejection has no answer to bill.
-      await settle(0, 0, 0, true);
+      // A definitive rejection has no answer to bill, unless an earlier attempt
+      // of this request was already paid for.
+      if (spent) await settle(spent.cost, spent.inputTokens, spent.outputTokens);
+      else await settle(0, 0, 0, true);
       settled = true;
       throw new Failure(first.refused === 429 ? "rate_limited" : "server", 503);
     }
-    let usage = meterPass(undefined, model, first.result);
+    let usage: MeteredUsage = spent!;
     let answer = first.result.answer;
     if (drawer && typeof answer === "string" && answer) {
       // The user's model has written the words from the clean crop; the
@@ -194,6 +434,7 @@ Deno.serve(endpoint(async (req) => {
                 message,
                 visual: input.animationAllowed === true ? undefined : "static",
               },
+              drawerEffort,
             ),
             drawer,
             Math.max(5000, 105000 - (Date.now() - started)),
@@ -201,6 +442,15 @@ Deno.serve(endpoint(async (req) => {
           );
           if (second.result) {
             usage = meterPass(usage, drawer, second.result);
+            passes.push(
+              describePass(
+                drawerAlias!,
+                drawer,
+                drawerEffort ?? "medium",
+                "notation",
+                second.result,
+              ),
+            );
             notationAnswer = second.result.answer;
           }
         } catch {
@@ -213,6 +463,7 @@ Deno.serve(endpoint(async (req) => {
         return {
           answer,
           usage: { inputTokens: usage.inputTokens, outputTokens: usage.outputTokens },
+          servedBy: servedBy(),
         };
       };
       if (req.headers.get("accept")?.includes("text/event-stream")) {
@@ -240,6 +491,8 @@ Deno.serve(endpoint(async (req) => {
     return json({
       answer,
       usage: { inputTokens: usage.inputTokens, outputTokens: usage.outputTokens },
+      servedBy: servedBy(),
+      responseFormat: input.responseFormat,
     });
   } catch (error) {
     if (!sent && !settled) await settle(0, 0, 0, true);

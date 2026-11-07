@@ -481,7 +481,7 @@ void main() {
           clock: () => _now,
         ),
       );
-      await tester.tap(find.byTooltip('New note'));
+      await tester.tap(find.byKey(const ValueKey<String>('new-note-expand')));
       await tester.pumpAndSettle();
       await tester.tap(find.text('Import test'));
       await tester.pumpAndSettle();

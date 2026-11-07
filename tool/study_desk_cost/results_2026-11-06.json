@@ -1,0 +1,422 @@
+{
+  "date": "2026-11-06",
+  "currency": "USD estimates at local app-configured rates, not verified provider invoices",
+  "backend_scope": "All features; Study Desk cannot be isolated from billing_private.requests",
+  "backend_utc_day": [
+    {
+      "day": "2026-11-06",
+      "model": "embed",
+      "status": "settled",
+      "requests": 69,
+      "input_tokens": 86749,
+      "output_tokens": 0,
+      "provider_cost_micro_usd": "17775"
+    },
+    {
+      "day": "2026-11-06",
+      "model": "haiku",
+      "status": "settled",
+      "requests": 2,
+      "input_tokens": 5618,
+      "output_tokens": 7752,
+      "provider_cost_micro_usd": "4467"
+    },
+    {
+      "day": "2026-11-06",
+      "model": "luna",
+      "status": "settled",
+      "requests": 11,
+      "input_tokens": 30535,
+      "output_tokens": 3161,
+      "provider_cost_micro_usd": "4641"
+    },
+    {
+      "day": "2026-11-06",
+      "model": "sol",
+      "status": "settled",
+      "requests": 13,
+      "input_tokens": 38459,
+      "output_tokens": 7720,
+      "provider_cost_micro_usd": "154118"
+    }
+  ],
+  "local_rates_micro_usd_per_1000_tokens": {
+    "haiku": {
+      "provider": "claude",
+      "model": "claude-haiku-5-5",
+      "inputMicroPerKilo": 100,
+      "outputMicroPerKilo": 500,
+      "maxOutputTokens": 16384
+    },
+    "luna": {
+      "provider": "openai",
+      "model": "gpt-6-luna",
+      "inputMicroPerKilo": 100,
+      "outputMicroPerKilo": 500,
+      "maxOutputTokens": 16384
+    },
+    "sonnet": {
+      "provider": "claude",
+      "model": "claude-sonnet-5-5",
+      "inputMicroPerKilo": 2000,
+      "outputMicroPerKilo": 10000,
+      "maxOutputTokens": 16384
+    },
+    "sol": {
+      "provider": "openai",
+      "model": "gpt-6.1-sol",
+      "inputMicroPerKilo": 2000,
+      "outputMicroPerKilo": 10000,
+      "maxOutputTokens": 16384
+    },
+    "opus": {
+      "provider": "claude",
+      "model": "claude-opus-5-5",
+      "inputMicroPerKilo": 4000,
+      "outputMicroPerKilo": 20000,
+      "maxOutputTokens": 16384
+    },
+    "argon": {
+      "provider": "gemini",
+      "model": "gemini-4-argon",
+      "inputMicroPerKilo": 4000,
+      "outputMicroPerKilo": 20000,
+      "maxOutputTokens": 16384
+    },
+    "astra": {
+      "provider": "openai",
+      "model": "gpt-6-astra",
+      "inputMicroPerKilo": 10000,
+      "outputMicroPerKilo": 50000,
+      "maxOutputTokens": 16384
+    }
+  },
+  "compression": {
+    "model": "microsoft/llmlingua-2-bert-base-multilingual-cased-meetingbank",
+    "device": "cuda",
+    "load_seconds": 4.903529000002891,
+    "tokenizer_proxy": "o200k_base; excludes image/chat framing tokens",
+    "scope": "Synthetic fixtures, fresh conversations, source text only; no downstream quality certification"
+  },
+  "compression_measurements": [
+    {
+      "fixture": "digital-systems-prose",
+      "task": "study.plan",
+      "retention_target": 0.5,
+      "source_tokens_before": 704,
+      "source_tokens_after": 346,
+      "text_input_tokens_before": 1449,
+      "text_input_tokens_after": 1091,
+      "source_reduction": 0.5085227272727273,
+      "whole_text_input_reduction": 0.24706694271911667,
+      "compression_seconds": 1.3270470999996178
+    },
+    {
+      "fixture": "digital-systems-prose",
+      "task": "study.plan",
+      "retention_target": 0.25,
+      "source_tokens_before": 704,
+      "source_tokens_after": 174,
+      "text_input_tokens_before": 1449,
+      "text_input_tokens_after": 919,
+      "source_reduction": 0.7528409090909091,
+      "whole_text_input_reduction": 0.3657694962042788,
+      "compression_seconds": 0.10558190000301693
+    },
+    {
+      "fixture": "digital-systems-prose",
+      "task": "study.answer",
+      "retention_target": 0.5,
+      "source_tokens_before": 704,
+      "source_tokens_after": 346,
+      "text_input_tokens_before": 1870,
+      "text_input_tokens_after": 1512,
+      "source_reduction": 0.5085227272727273,
+      "whole_text_input_reduction": 0.19144385026737964,
+      "compression_seconds": 1.3270470999996178
+    },
+    {
+      "fixture": "digital-systems-prose",
+      "task": "study.answer",
+      "retention_target": 0.25,
+      "source_tokens_before": 704,
+      "source_tokens_after": 174,
+      "text_input_tokens_before": 1870,
+      "text_input_tokens_after": 1340,
+      "source_reduction": 0.7528409090909091,
+      "whole_text_input_reduction": 0.28342245989304815,
+      "compression_seconds": 0.10558190000301693
+    },
+    {
+      "fixture": "math-and-negation",
+      "task": "study.plan",
+      "retention_target": 0.5,
+      "source_tokens_before": 413,
+      "source_tokens_after": 247,
+      "text_input_tokens_before": 1160,
+      "text_input_tokens_after": 994,
+      "source_reduction": 0.4019370460048426,
+      "whole_text_input_reduction": 0.14310344827586208,
+      "compression_seconds": 0.0415245999902254
+    },
+    {
+      "fixture": "math-and-negation",
+      "task": "study.plan",
+      "retention_target": 0.25,
+      "source_tokens_before": 413,
+      "source_tokens_after": 183,
+      "text_input_tokens_before": 1160,
+      "text_input_tokens_after": 929,
+      "source_reduction": 0.5569007263922519,
+      "whole_text_input_reduction": 0.19913793103448274,
+      "compression_seconds": 0.05065429999376647
+    },
+    {
+      "fixture": "math-and-negation",
+      "task": "study.answer",
+      "retention_target": 0.5,
+      "source_tokens_before": 413,
+      "source_tokens_after": 247,
+      "text_input_tokens_before": 1581,
+      "text_input_tokens_after": 1415,
+      "source_reduction": 0.4019370460048426,
+      "whole_text_input_reduction": 0.10499683744465527,
+      "compression_seconds": 0.0415245999902254
+    },
+    {
+      "fixture": "math-and-negation",
+      "task": "study.answer",
+      "retention_target": 0.25,
+      "source_tokens_before": 413,
+      "source_tokens_after": 183,
+      "text_input_tokens_before": 1581,
+      "text_input_tokens_after": 1350,
+      "source_reduction": 0.5569007263922519,
+      "whole_text_input_reduction": 0.1461100569259962,
+      "compression_seconds": 0.05065429999376647
+    },
+    {
+      "fixture": "chinese-technical",
+      "task": "study.plan",
+      "retention_target": 0.5,
+      "source_tokens_before": 243,
+      "source_tokens_after": 239,
+      "text_input_tokens_before": 990,
+      "text_input_tokens_after": 987,
+      "source_reduction": 0.016460905349794275,
+      "whole_text_input_reduction": 0.00303030303030305,
+      "compression_seconds": 0.049250099997152574
+    },
+    {
+      "fixture": "chinese-technical",
+      "task": "study.plan",
+      "retention_target": 0.25,
+      "source_tokens_before": 243,
+      "source_tokens_after": 120,
+      "text_input_tokens_before": 990,
+      "text_input_tokens_after": 868,
+      "source_reduction": 0.5061728395061729,
+      "whole_text_input_reduction": 0.12323232323232325,
+      "compression_seconds": 0.0531252999935532
+    },
+    {
+      "fixture": "chinese-technical",
+      "task": "study.answer",
+      "retention_target": 0.5,
+      "source_tokens_before": 243,
+      "source_tokens_after": 239,
+      "text_input_tokens_before": 1411,
+      "text_input_tokens_after": 1408,
+      "source_reduction": 0.016460905349794275,
+      "whole_text_input_reduction": 0.002126151665485465,
+      "compression_seconds": 0.049250099997152574
+    },
+    {
+      "fixture": "chinese-technical",
+      "task": "study.answer",
+      "retention_target": 0.25,
+      "source_tokens_before": 243,
+      "source_tokens_after": 120,
+      "text_input_tokens_before": 1411,
+      "text_input_tokens_after": 1289,
+      "source_reduction": 0.5061728395061729,
+      "whole_text_input_reduction": 0.08646350106307588,
+      "compression_seconds": 0.0531252999935532
+    }
+  ],
+  "live_replay_scope": "Synthetic study.answer only; fixed gpt-6.1-sol low effort; 4096 output cap; no router, planning, suggestions, search or compressor hosting costs",
+  "live_replays": [
+    {
+      "fixture": "digital-systems-prose",
+      "variant": "baseline",
+      "model": "gpt-6.1-sol",
+      "effort": "low",
+      "usage": {
+        "prompt_tokens": 1881,
+        "completion_tokens": 516,
+        "total_tokens": 2397,
+        "prompt_tokens_details": {
+          "cached_tokens": 0,
+          "audio_tokens": 0
+        },
+        "completion_tokens_details": {
+          "reasoning_tokens": 0,
+          "audio_tokens": 0,
+          "accepted_prediction_tokens": 0,
+          "rejected_prediction_tokens": 0
+        }
+      },
+      "input_cost_usd": 0.003762,
+      "output_cost_usd": 0.00516,
+      "total_cost_usd": 0.008922,
+      "latency_seconds": 9.328396899989457,
+      "finish_reason": "stop"
+    },
+    {
+      "fixture": "digital-systems-prose",
+      "variant": "compressed",
+      "model": "gpt-6.1-sol",
+      "effort": "low",
+      "usage": {
+        "prompt_tokens": 1523,
+        "completion_tokens": 482,
+        "total_tokens": 2005,
+        "prompt_tokens_details": {
+          "cached_tokens": 0,
+          "audio_tokens": 0
+        },
+        "completion_tokens_details": {
+          "reasoning_tokens": 0,
+          "audio_tokens": 0,
+          "accepted_prediction_tokens": 0,
+          "rejected_prediction_tokens": 0
+        }
+      },
+      "input_cost_usd": 0.003046,
+      "output_cost_usd": 0.00482,
+      "total_cost_usd": 0.007866,
+      "latency_seconds": 8.351946700000553,
+      "finish_reason": "stop"
+    },
+    {
+      "fixture": "math-and-negation",
+      "variant": "baseline",
+      "model": "gpt-6.1-sol",
+      "effort": "low",
+      "usage": {
+        "prompt_tokens": 1592,
+        "completion_tokens": 398,
+        "total_tokens": 1990,
+        "prompt_tokens_details": {
+          "cached_tokens": 0,
+          "audio_tokens": 0
+        },
+        "completion_tokens_details": {
+          "reasoning_tokens": 0,
+          "audio_tokens": 0,
+          "accepted_prediction_tokens": 0,
+          "rejected_prediction_tokens": 0
+        }
+      },
+      "input_cost_usd": 0.003184,
+      "output_cost_usd": 0.00398,
+      "total_cost_usd": 0.007164,
+      "latency_seconds": 5.383655199999339,
+      "finish_reason": "stop"
+    },
+    {
+      "fixture": "math-and-negation",
+      "variant": "compressed",
+      "model": "gpt-6.1-sol",
+      "effort": "low",
+      "usage": {
+        "prompt_tokens": 1426,
+        "completion_tokens": 452,
+        "total_tokens": 1878,
+        "prompt_tokens_details": {
+          "cached_tokens": 0,
+          "audio_tokens": 0
+        },
+        "completion_tokens_details": {
+          "reasoning_tokens": 0,
+          "audio_tokens": 0,
+          "accepted_prediction_tokens": 0,
+          "rejected_prediction_tokens": 0
+        }
+      },
+      "input_cost_usd": 0.002852,
+      "output_cost_usd": 0.00452,
+      "total_cost_usd": 0.007372,
+      "latency_seconds": 5.555672599992249,
+      "finish_reason": "stop"
+    },
+    {
+      "fixture": "chinese-technical",
+      "variant": "baseline",
+      "model": "gpt-6.1-sol",
+      "effort": "low",
+      "usage": {
+        "prompt_tokens": 1422,
+        "completion_tokens": 599,
+        "total_tokens": 2021,
+        "prompt_tokens_details": {
+          "cached_tokens": 0,
+          "audio_tokens": 0
+        },
+        "completion_tokens_details": {
+          "reasoning_tokens": 0,
+          "audio_tokens": 0,
+          "accepted_prediction_tokens": 0,
+          "rejected_prediction_tokens": 0
+        }
+      },
+      "input_cost_usd": 0.002844,
+      "output_cost_usd": 0.00599,
+      "total_cost_usd": 0.008834,
+      "latency_seconds": 9.606614300006186,
+      "finish_reason": "stop"
+    },
+    {
+      "fixture": "chinese-technical",
+      "variant": "compressed",
+      "model": "gpt-6.1-sol",
+      "effort": "low",
+      "usage": {
+        "prompt_tokens": 1419,
+        "completion_tokens": 753,
+        "total_tokens": 2172,
+        "prompt_tokens_details": {
+          "cached_tokens": 0,
+          "audio_tokens": 0
+        },
+        "completion_tokens_details": {
+          "reasoning_tokens": 0,
+          "audio_tokens": 0,
+          "accepted_prediction_tokens": 0,
+          "rejected_prediction_tokens": 0
+        }
+      },
+      "input_cost_usd": 0.002838,
+      "output_cost_usd": 0.00753,
+      "total_cost_usd": 0.010368,
+      "latency_seconds": 12.828913899997133,
+      "finish_reason": "stop"
+    }
+  ],
+  "totals": {
+    "baseline": {
+      "input_tokens": 4895,
+      "output_tokens": 1513,
+      "input_cost_usd": 0.00979,
+      "output_cost_usd": 0.01513,
+      "total_cost_usd": 0.02492
+    },
+    "compressed": {
+      "input_tokens": 4368,
+      "output_tokens": 1687,
+      "input_cost_usd": 0.008736,
+      "output_cost_usd": 0.01687,
+      "total_cost_usd": 0.025606
+    }
+  }
+}

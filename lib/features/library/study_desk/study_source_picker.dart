@@ -350,6 +350,42 @@ class _StudySourcePickerState extends State<StudySourcePicker> {
                     )
                   : ListView(children: rows),
             ),
+            if (widget.controller.canSearchByMeaning)
+              MergeSemantics(
+                child: Row(
+                  children: <Widget>[
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: <Widget>[
+                          Text(
+                            'Search by meaning',
+                            style: text.bodyMedium?.copyWith(
+                              color: colors.textPrimary,
+                            ),
+                          ),
+                          Text(
+                            'Finds pages by what they mean, not only the words. '
+                            'Sends the notes you use to Google to index them. '
+                            'Nothing is kept there.',
+                            maxLines: 3,
+                            overflow: TextOverflow.ellipsis,
+                            style: text.labelSmall?.copyWith(
+                              color: colors.textSecondary,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                    Switch(
+                      key: const ValueKey<String>('study-semantic-search'),
+                      value: widget.controller.semanticSearch,
+                      onChanged: (bool on) =>
+                          setState(() => widget.controller.semanticSearch = on),
+                    ),
+                  ],
+                ),
+              ),
             const SizedBox(height: AppSpacing.sm),
             Wrap(
               alignment: WrapAlignment.end,

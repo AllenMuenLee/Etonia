@@ -15,6 +15,7 @@ import '../../../editor/document_io/document_platform.dart';
 import '../../../editor/widgets/document_io_progress_dialog.dart';
 import '../study_desk_controller.dart';
 import '../study_desk_models.dart';
+import '../study_motion.dart';
 import '../study_source_tree.dart';
 import '../study_material_sources.dart';
 import 'study_material_library.dart';
@@ -252,14 +253,17 @@ class _StudyPracticeStudioViewState extends State<StudyPracticeStudioView> {
             .where((p) => p.id == _controller.activeTestPaperId)
             .firstOrNull;
         if (paper != null) {
-          return StudyTestPaperPlayer(
-            key: ValueKey(paper.id),
-            paper: paper,
-            controller: _controller,
-            onClose: _controller.closeTestPaper,
-            showCloseButton: widget.showPlayerBackButton,
-            onViewCitation: widget.onViewCitation,
-            onSaveToLibrary: widget.onSaveTestToLibrary,
+          return _arrive(
+            ('paper', paper.id),
+            StudyTestPaperPlayer(
+              key: ValueKey(paper.id),
+              paper: paper,
+              controller: _controller,
+              onClose: _controller.closeTestPaper,
+              showCloseButton: widget.showPlayerBackButton,
+              onViewCitation: widget.onViewCitation,
+              onSaveToLibrary: widget.onSaveTestToLibrary,
+            ),
           );
         }
         _controller.onPracticeBack = _onBack;
@@ -268,103 +272,124 @@ class _StudyPracticeStudioViewState extends State<StudyPracticeStudioView> {
             ? null
             : _controller.practiceSet(id);
         if (set != null) {
-          return StudyFlashcardPlayer(
-            key: ValueKey<String>('flashcards-$id'),
-            set: set,
-            labelOf: _controller.labelOf,
-            onChanged: _onChanged,
-            onViewCitation: widget.onViewCitation,
-            onClose: _stopPlaying,
-            showCloseButton: widget.showPlayerBackButton,
-            clock: _controller.clock,
-            onBrowseSources: () =>
-                unawaited(_showSources(set.sourceNoteIds, set.sourceSessionId)),
+          return _arrive(
+            ('deck', set.id),
+            StudyFlashcardPlayer(
+              key: ValueKey<String>('flashcards-$id'),
+              set: set,
+              labelOf: _controller.labelOf,
+              onChanged: _onChanged,
+              onViewCitation: widget.onViewCitation,
+              onClose: _stopPlaying,
+              showCloseButton: widget.showPlayerBackButton,
+              clock: _controller.clock,
+              onBrowseSources: () => unawaited(
+                _showSources(set.sourceNoteIds, set.sourceSessionId),
+              ),
+            ),
           );
         }
         final failure = _controller.practiceFailure;
-        return StudyMaterialLibrary(
-          decks:
-              (_controller.browsingAllMaterials
-                      ? _controller.practiceSets
-                      : _controller.visiblePracticeSets)
-                  .where((set) => set.flashcards.isNotEmpty)
-                  .toList(),
-          papers: _controller.browsingAllMaterials
-              ? _controller.testPapers
-              : _controller.visibleTestPapers,
-          courseNames: {
-            for (final course in _controller.courses) course.id: course.name,
-          },
-          groupByCourse: _controller.browsingAllMaterials,
-          courseId: _controller.selectedCourseId,
-          courseName: _controller.selectedCourse?.name,
-          section: _controller.practiceSection,
-          onSection: _controller.setPracticeSection,
-          onGenerateFlashcards:
-              _controller.isGeneratingPractice || _controller.allNotes.isEmpty
-              ? null
-              : () => unawaited(_generate()),
-          onGenerateTest:
-              _controller.isGeneratingTest || _controller.allNotes.isEmpty
-              ? null
-              : () => unawaited(_generateTest()),
-          onImport: () => unawaited(_importPaper()),
-          onOpenDeck: _play,
-          onOpenPaper: (paper) => paper.isSubmitted
-              ? _controller.openTestReview(paper)
-              : _controller.openTestPaper(paper),
-          onExportDeck: (set) => unawaited(_export(set)),
-          onManageDeck: (set) => unawaited(_manage(set)),
-          onSavePaper: widget.onSaveTestToLibrary == null
-              ? null
-              : (paper) => unawaited(_savePaperToLibrary(paper)),
-          savingPaperId: _savingPaperId,
-          sourceLabel: (ids) {
-            final names = ids
-                .map((id) => _controller.noteOf(id)?.title)
-                .whereType<String>();
-            return names.isEmpty
-                ? (_controller.browsingAllMaterials
-                      ? 'Your library'
-                      : _controller.selectedCourse?.name ?? 'Your library')
-                : names.join(', ');
-          },
-          onBrowseSources: (ids, sessionId) =>
-              unawaited(_showSources(ids, sessionId)),
-          status:
-              failure == null &&
-                  !_controller.isGeneratingPractice &&
-                  !_controller.isGeneratingTest
-              ? null
-              : Column(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    if (_controller.isGeneratingPractice ||
-                        _controller.isGeneratingTest)
-                      const _Generating(),
-                    if (failure != null)
-                      _GenerationFailure(
-                        failure: failure,
-                        onRetry: () => unawaited(
-                          _controller.practiceSection ==
-                                  PracticeStudioSection.tests
-                              ? _generateTest()
-                              : _controller.retryPracticeGeneration(),
+        return _arrive(
+          (
+            'library',
+            _controller.practiceSection,
+            _controller.selectedCourseId,
+          ),
+          StudyMaterialLibrary(
+            decks:
+                (_controller.browsingAllMaterials
+                        ? _controller.practiceSets
+                        : _controller.visiblePracticeSets)
+                    .where((set) => set.flashcards.isNotEmpty)
+                    .toList(),
+            papers: _controller.browsingAllMaterials
+                ? _controller.testPapers
+                : _controller.visibleTestPapers,
+            courseNames: {
+              for (final course in _controller.courses) course.id: course.name,
+            },
+            groupByCourse: _controller.browsingAllMaterials,
+            courseId: _controller.selectedCourseId,
+            courseName: _controller.selectedCourse?.name,
+            section: _controller.practiceSection,
+            onSection: _controller.setPracticeSection,
+            onGenerateFlashcards:
+                _controller.isGeneratingPractice || _controller.allNotes.isEmpty
+                ? null
+                : () => unawaited(_generate()),
+            onGenerateTest:
+                _controller.isGeneratingTest || _controller.allNotes.isEmpty
+                ? null
+                : () => unawaited(_generateTest()),
+            onImport: () => unawaited(_importPaper()),
+            onOpenDeck: _play,
+            onOpenPaper: (paper) => paper.isSubmitted
+                ? _controller.openTestReview(paper)
+                : _controller.openTestPaper(paper),
+            onExportDeck: (set) => unawaited(_export(set)),
+            onManageDeck: (set) => unawaited(_manage(set)),
+            onSavePaper: widget.onSaveTestToLibrary == null
+                ? null
+                : (paper) => unawaited(_savePaperToLibrary(paper)),
+            savingPaperId: _savingPaperId,
+            sourceLabel: (ids) {
+              final names = ids
+                  .map((id) => _controller.noteOf(id)?.title)
+                  .whereType<String>();
+              return names.isEmpty
+                  ? (_controller.browsingAllMaterials
+                        ? 'Your library'
+                        : _controller.selectedCourse?.name ?? 'Your library')
+                  : names.join(', ');
+            },
+            onBrowseSources: (ids, sessionId) =>
+                unawaited(_showSources(ids, sessionId)),
+            status:
+                failure == null &&
+                    !_controller.isGeneratingPractice &&
+                    !_controller.isGeneratingTest
+                ? null
+                : Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      if (_controller.isGeneratingPractice ||
+                          _controller.isGeneratingTest)
+                        const _Generating(),
+                      if (failure != null)
+                        _GenerationFailure(
+                          failure: failure,
+                          onRetry: () => unawaited(
+                            _controller.practiceSection ==
+                                    PracticeStudioSection.tests
+                                ? _generateTest()
+                                : _controller.retryPracticeGeneration(),
+                          ),
+                          onDismiss: _controller.dismissPracticeFailure,
+                          onOpenPlans:
+                              failure.kind == AiFailureKind.planRequired ||
+                                  failure.kind ==
+                                      AiFailureKind.insufficientCredits
+                              ? widget.onOpenPlans
+                              : null,
                         ),
-                        onDismiss: _controller.dismissPracticeFailure,
-                        onOpenPlans:
-                            failure.kind == AiFailureKind.planRequired ||
-                                failure.kind ==
-                                    AiFailureKind.insufficientCredits
-                            ? widget.onOpenPlans
-                            : null,
-                      ),
-                  ],
-                ),
+                    ],
+                  ),
+          ),
         );
       },
     );
   }
+
+  /// What is opened plays in where it is, as the library does when it comes
+  /// back: slowly the first time, as a glance after. Opening it is the only
+  /// time anything is built for it, and closing it lets all of it go.
+  Widget _arrive(Object scope, Widget child) => StudyAppear(
+    playOnMount: false,
+    replayKey: scope,
+    memoryKey: ('study-practice', scope),
+    child: child,
+  );
 
   Future<void> _generateTest() => showAppSheet<void>(
     context: context,

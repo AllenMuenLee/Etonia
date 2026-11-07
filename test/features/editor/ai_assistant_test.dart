@@ -1324,14 +1324,8 @@ void main() {
       expect(AiAssistantPanel.notConfigured, contains('GEMINI_API_KEY'));
       expect(AiAssistantPanel.notConfigured, contains('Claude_API_KEY'));
       expect(AiAssistantPanel.notConfigured, contains('Openai_API_KEY'));
-      // The editor's own client serves every model, starting on Sol.
-      expect(
-        find.descendant(
-          of: find.byKey(const ValueKey<String>('ai-model-selector')),
-          matching: find.text('Sol'),
-        ),
-        findsOneWidget,
-      );
+      // The editor's own client chooses the model itself.
+      expect(find.text('Thinking: Auto'), findsOneWidget);
       for (final String label in <String>['Explain this', 'Grade this']) {
         expect(
           tester.widget<OutlinedButton>(_quickAction(label)).onPressed,

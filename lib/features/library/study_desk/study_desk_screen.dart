@@ -10,6 +10,7 @@ import 'package:speech_to_text/speech_to_text.dart';
 import '../../../app/theme/app_icons.dart';
 import '../../../app/theme/app_tokens.dart';
 import '../../../shared/layout/breakpoints.dart';
+import '../../../shared/memory/memory_pressure.dart';
 import '../../../shared/navigation/app_sheets.dart';
 import '../../../shared/widgets/app_controls.dart';
 import '../../../shared/widgets/etonia_mark.dart';
@@ -18,6 +19,7 @@ import '../../editor/ai/ai_citation.dart';
 import '../../editor/ai/ai_client.dart';
 import '../../editor/document_io/document_platform.dart';
 import '../../editor/widgets/ai_assistant_panel.dart';
+import '../../editor/widgets/ai_routing_controls.dart';
 import '../../editor/ink/pen_settings.dart';
 import '../../editor/widgets/ai_citation_highlight.dart';
 import 'practice/study_practice_studio_view.dart';
@@ -29,6 +31,7 @@ import 'study_citation_preview.dart';
 import 'study_desk_controller.dart';
 import 'study_desk_models.dart';
 import 'study_desk_overview.dart';
+import 'study_motion.dart';
 import 'study_desk_widgets.dart';
 import 'study_source_picker.dart';
 import 'study_history_sidebar.dart';
@@ -100,6 +103,11 @@ class _StudyDeskScreenState extends State<StudyDeskScreen> {
   /// and it moves from beside the chat to over it.
   final GlobalKey _paneKey = GlobalKey();
 
+  /// So that the chat and the practice studio keep their state, and their
+  /// place, as the pane opens and closes and moves them from one parent to
+  /// another.
+  final GlobalKey _mainKey = GlobalKey();
+
   /// Built the first time it is shown, and kept, as the chat is, after that.
   bool _practiceBuilt = false;
 
@@ -117,6 +125,18 @@ class _StudyDeskScreenState extends State<StudyDeskScreen> {
 
   int _shownMessages = 0;
   String? _shownSession;
+
+  /// Messages before this one were there when the chat was opened or an answer
+  /// had been streamed into view: they are simply there, and do not arrive.
+  int _settledMessages = 0;
+  bool _streamed = false;
+
+  /// A streamed answer changes the controller for every chunk; the desk
+  /// follows at a pace the screen can draw.
+  late final StudyThrottle _streaming = StudyThrottle(
+    const Duration(milliseconds: 80),
+    _refreshStreaming,
+  );
 
   /// Set when the pane is shut by hand: reading on no longer opens it, though a
   /// chip does. Only where the pane sits beside the chat.
@@ -136,10 +156,25 @@ class _StudyDeskScreenState extends State<StudyDeskScreen> {
     _controller.addListener(_onControllerChanged);
     _scroll.addListener(_scheduleFocusUpdate);
     _shownMessages = _controller.messages.length;
+    _settledMessages = _shownMessages;
     _shownSession = _controller.sessionId;
     _shownReviewRevision = _controller.testReviewOpenRevision;
     _scrollToEnd();
+    MemoryPressure.instance.addListener(_releaseMemory);
     unawaited(_controller.load());
+  }
+
+  /// The system is low on memory: the studio, when nothing in it is open, is
+  /// let go and built again the next time it is wanted, and what is on screen
+  /// stays as it is, not arriving a second time.
+  void _releaseMemory() {
+    if (!mounted) return;
+    _settledMessages = _controller.messages.length;
+    final bool idle =
+        _controller.mode != StudyDeskMode.practice &&
+        _controller.activeFlashcardSetId == null &&
+        _controller.activeTestPaperId == null;
+    if (idle && _practiceBuilt) setState(() => _practiceBuilt = false);
   }
 
   @override
@@ -153,19 +188,23 @@ class _StudyDeskScreenState extends State<StudyDeskScreen> {
 
   @override
   void dispose() {
+    MemoryPressure.instance.removeListener(_releaseMemory);
     _text.removeListener(_onTextChanged);
     _controller.removeListener(_onControllerChanged);
     _text.dispose();
     _composerFocus.dispose();
     _scroll.dispose();
     _focusDebounce?.cancel();
+    _streaming.dispose();
+    _paragraphs.clear();
     unawaited(_speech.cancel());
     super.dispose();
   }
 
+  /// Only the composer listens to the text for Send, so a keystroke does not
+  /// rebuild the transcript, the sidebar, and the pane with it.
   void _onTextChanged() {
     _controller.draft = _text.text;
-    setState(() {});
   }
 
   void _onControllerChanged() {
@@ -183,8 +222,22 @@ class _StudyDeskScreenState extends State<StudyDeskScreen> {
     final int count = _controller.messages.length;
     final bool newSession = _shownSession != _controller.sessionId;
     final bool grew = count > _shownMessages;
+    final bool streaming = _controller.partialAnswer?.isNotEmpty ?? false;
+    if (streaming) _streamed = true;
     _shownMessages = count;
     _shownSession = _controller.sessionId;
+    if (newSession) {
+      _settledMessages = count;
+      _streamed = false;
+    } else if (grew && _streamed && !streaming) {
+      // The answer that has just landed was read as it came in.
+      _settledMessages = count;
+      _streamed = false;
+    }
+    if (streaming && !grew && !newSession && !reviewOpened) {
+      _streaming();
+      return;
+    }
     setState(() {});
     if (newSession) {
       _text.value = TextEditingValue(text: _controller.draft);
@@ -197,6 +250,12 @@ class _StudyDeskScreenState extends State<StudyDeskScreen> {
       if (grew) _smoothNextScroll = false;
     }
     if (grew) _scheduleFocusUpdate();
+  }
+
+  void _refreshStreaming() {
+    if (!mounted) return;
+    setState(() {});
+    _scrollToEnd();
   }
 
   void _scrollToEnd({bool animate = false}) {
@@ -386,8 +445,17 @@ class _StudyDeskScreenState extends State<StudyDeskScreen> {
   @override
   Widget build(BuildContext context) {
     final AppColors colors = AppColors.of(context);
+    final bool onCourse =
+        _controller.page == StudyDeskPage.course &&
+        _controller.selectedCourse != null;
     // With the whole window to itself, the chat keeps to a width lines can be
-    // read at, in the middle of whatever room it has.
+    // read at, in the middle of whatever room it has. Moving between a class,
+    // a chat, and another chat plays the page in again, in place, without
+    // building anything twice: slowly the first time it is shown, and as a
+    // glance after.
+    final Object pageScope = onCourse
+        ? ('class', _controller.selectedCourseId)
+        : ('chat', _controller.sessionId);
     final Widget chat = Align(
       alignment: Alignment.topCenter,
       child: ConstrainedBox(
@@ -395,18 +463,21 @@ class _StudyDeskScreenState extends State<StudyDeskScreen> {
         constraints: const BoxConstraints(
           maxWidth: StudyDeskScreen.readingWidth,
         ),
-        child:
-            _controller.page == StudyDeskPage.course &&
-                _controller.selectedCourse != null
-            ? StudyDeskOverview(
-                key: ValueKey(_controller.selectedCourseId),
-                controller: _controller,
-                onOpenSource: _openSource,
-                onAddSources: widget.onAddSources,
-                composer: _composer(),
-                onCreate: (kind) => unawaited(_createMaterial(kind)),
-              )
-            : _buildChat(context),
+        child: StudyAppear(
+          playOnMount: false,
+          replayKey: pageScope,
+          memoryKey: ('study-page', pageScope),
+          child: onCourse
+              ? StudyDeskOverview(
+                  key: ValueKey(_controller.selectedCourseId),
+                  controller: _controller,
+                  onOpenSource: _openSource,
+                  onAddSources: widget.onAddSources,
+                  composer: _composer(),
+                  onCreate: (kind) => unawaited(_createMaterial(kind)),
+                )
+              : _buildChat(context),
+        ),
       ),
     );
     final bool practising = _controller.mode == StudyDeskMode.practice;
@@ -417,10 +488,10 @@ class _StudyDeskScreenState extends State<StudyDeskScreen> {
         _workspaceToolbar(),
         Expanded(
           // Both stay built: the chat comes back scrolled as it was left, and a
-          // quiz as far as it had got.
-          child: IndexedStack(
+          // quiz as far as it had got. Only the one in view is painted,
+          // ticking, or read out.
+          child: StudyScenes(
             index: practising ? 1 : 0,
-            sizing: StackFit.expand,
             children: <Widget>[
               chat,
               if (_practiceBuilt)
@@ -446,7 +517,7 @@ class _StudyDeskScreenState extends State<StudyDeskScreen> {
         _controller.citationFocusNotifier,
         _controller.citationPaneOpen,
       ]),
-      child: main,
+      child: KeyedSubtree(key: _mainKey, child: main),
       builder: (context, stableMain) {
         return LayoutBuilder(
           builder: (context, constraints) {
@@ -476,6 +547,7 @@ class _StudyDeskScreenState extends State<StudyDeskScreen> {
                   )
                 : null;
             final wide = constraints.maxWidth >= 900;
+            final split = constraints.maxWidth >= Breakpoints.expanded;
             final showHistory = _historyOpen ?? (wide && testSource == null);
             final sidebar = StudyHistorySidebar(
               controller: _controller,
@@ -491,23 +563,15 @@ class _StudyDeskScreenState extends State<StudyDeskScreen> {
             final content = Row(
               crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
-                if (wide && showHistory)
-                  Container(
+                if (wide)
+                  StudySidebarSlot(
+                    open: showHistory,
                     width: 272,
-                    foregroundDecoration: BoxDecoration(
-                      border: BorderDirectional(
-                        end: BorderSide(
-                          color: colors.divider,
-                          width: AppSizes.hairline,
-                        ),
-                      ),
-                    ),
+                    dividerColor: colors.divider,
                     child: sidebar,
                   ),
                 Expanded(
-                  child:
-                      pane != null &&
-                          constraints.maxWidth >= Breakpoints.expanded
+                  child: split
                       ? StudyResizableSplit(
                           leading: stableMain!,
                           trailing: pane,
@@ -524,23 +588,41 @@ class _StudyDeskScreenState extends State<StudyDeskScreen> {
                   fit: StackFit.expand,
                   children: [
                     content,
-                    if (!wide && showHistory) ...[
-                      ModalBarrier(
-                        dismissible: true,
-                        color: colors.shadow.withValues(alpha: .35),
-                        onDismiss: () => setState(() => _historyOpen = false),
+                    if (!wide) ...[
+                      Positioned.fill(
+                        child: StudyPresence(
+                          child: showHistory
+                              ? ModalBarrier(
+                                  dismissible: true,
+                                  color: colors.shadow.withValues(alpha: .35),
+                                  onDismiss: () =>
+                                      setState(() => _historyOpen = false),
+                                )
+                              : null,
+                        ),
                       ),
-                      Align(
-                        alignment: AlignmentDirectional.centerStart,
-                        child: SizedBox(
-                          width: constraints.maxWidth.clamp(0, 320),
-                          child: sidebar,
+                      Positioned.fill(
+                        child: StudyPresence(
+                          offset: const Offset(-0.1, 0),
+                          child: showHistory
+                              ? Align(
+                                  alignment: AlignmentDirectional.centerStart,
+                                  child: SizedBox(
+                                    width: constraints.maxWidth.clamp(0, 320),
+                                    child: sidebar,
+                                  ),
+                                )
+                              : null,
                         ),
                       ),
                     ],
-                    if (pane != null &&
-                        constraints.maxWidth < Breakpoints.expanded)
-                      pane,
+                    if (!split)
+                      Positioned.fill(
+                        child: StudyPresence(
+                          offset: const Offset(0.06, 0),
+                          child: pane,
+                        ),
+                      ),
                   ],
                 ),
               ),
@@ -555,6 +637,13 @@ class _StudyDeskScreenState extends State<StudyDeskScreen> {
   Widget _workspaceToolbar() => LayoutBuilder(
     builder: (context, constraints) {
       final historyVisible = _historyOpen ?? _layoutWidth >= 900;
+      final String title =
+          _controller.browsingAllMaterials &&
+              _controller.mode == StudyDeskMode.practice
+          ? _controller.practiceSection == PracticeStudioSection.tests
+                ? 'Tests'
+                : 'Flashcards'
+          : _controller.selectedCourse?.name ?? 'Study Desk';
       return Padding(
         padding: const EdgeInsets.symmetric(
           horizontal: AppSpacing.sm,
@@ -562,24 +651,53 @@ class _StudyDeskScreenState extends State<StudyDeskScreen> {
         ),
         child: Row(
           children: [
-            if (!historyVisible)
-              IconButton(
-                key: const ValueKey('study-toggle-history'),
-                tooltip: 'Open history',
-                icon: const Icon(AppIcons.sidebar),
-                onPressed: () => setState(() => _historyOpen = true),
+            // The button makes room for itself as it comes, and gives it back
+            // as it goes, so the title slides rather than jumps.
+            AnimatedSize(
+              duration: AppMotion.springDuration(context, AppMotion.snappy),
+              curve: AppMotion.zoomInCurve,
+              alignment: AlignmentDirectional.centerStart,
+              child: AnimatedSwitcher(
+                duration: AppMotion.resolve(context, AppMotion.fadeIn),
+                reverseDuration: AppMotion.resolve(context, AppMotion.fadeOut),
+                switchInCurve: AppMotion.fadeInCurve,
+                switchOutCurve: AppMotion.fadeOutCurve,
+                transitionBuilder: (child, animation) => FadeTransition(
+                  opacity: animation,
+                  child: ScaleTransition(
+                    scale: Tween<double>(
+                      begin: 0.85,
+                      end: 1,
+                    ).animate(animation),
+                    child: child,
+                  ),
+                ),
+                child: historyVisible
+                    ? const SizedBox(key: ValueKey('study-history-hidden'))
+                    : IconButton(
+                        key: const ValueKey('study-toggle-history'),
+                        tooltip: 'Open history',
+                        icon: const Icon(AppIcons.sidebar),
+                        onPressed: () => setState(() => _historyOpen = true),
+                      ),
               ),
+            ),
             Expanded(
-              child: Text(
-                _controller.browsingAllMaterials &&
-                        _controller.mode == StudyDeskMode.practice
-                    ? _controller.practiceSection == PracticeStudioSection.tests
-                          ? 'Tests'
-                          : 'Flashcards'
-                    : _controller.selectedCourse?.name ?? 'Study Desk',
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-                style: Theme.of(context).textTheme.titleMedium,
+              child: AnimatedSwitcher(
+                duration: AppMotion.resolve(context, AppMotion.stateFade),
+                switchInCurve: AppMotion.fadeInCurve,
+                switchOutCurve: AppMotion.fadeOutCurve,
+                layoutBuilder: (current, previous) => Stack(
+                  alignment: AlignmentDirectional.centerStart,
+                  children: <Widget>[...previous, ?current],
+                ),
+                child: Text(
+                  title,
+                  key: ValueKey<String>(title),
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: Theme.of(context).textTheme.titleMedium,
+                ),
               ),
             ),
           ],
@@ -705,83 +823,115 @@ class _StudyDeskScreenState extends State<StudyDeskScreen> {
                   );
                 }
                 if (i < messages.length) {
-                  return Padding(
-                    padding: const EdgeInsets.only(bottom: AppSpacing.md),
-                    child: messages[i].fromUser
-                        ? _Question(text: messages[i].text)
-                        : _Answer(
-                            key: ValueKey<String>(
-                              'study-answer-${controller.sessionId}-$i',
+                  return StudyAppear(
+                    key: ValueKey<String>(
+                      'study-message-${controller.sessionId}-$i',
+                    ),
+                    once: ('study-message', controller.sessionId, i),
+                    enabled: i >= _settledMessages,
+                    rise: 14,
+                    child: Padding(
+                      padding: const EdgeInsets.only(bottom: AppSpacing.md),
+                      child: messages[i].fromUser
+                          ? _Question(text: messages[i].text)
+                          : _Answer(
+                              key: ValueKey<String>(
+                                'study-answer-${controller.sessionId}-$i',
+                              ),
+                              message: messages[i],
+                              index: i,
+                              controller: controller,
+                              register:
+                                  ((int, int) ref, BuildContext context) =>
+                                      _paragraphs[ref] = context,
+                              unregister:
+                                  ((int, int) ref, BuildContext context) {
+                                    if (identical(_paragraphs[ref], context)) {
+                                      _paragraphs.remove(ref);
+                                    }
+                                  },
+                              onCitation: _openCitation,
                             ),
-                            message: messages[i],
-                            index: i,
-                            controller: controller,
-                            register: ((int, int) ref, BuildContext context) =>
-                                _paragraphs[ref] = context,
-                            unregister: ((int, int) ref, BuildContext context) {
-                              if (identical(_paragraphs[ref], context)) {
-                                _paragraphs.remove(ref);
-                              }
-                            },
-                            onCitation: _openCitation,
-                          ),
+                    ),
                   );
                 }
                 return Column(
                   crossAxisAlignment: CrossAxisAlignment.stretch,
                   children: [
-                    if (controller.showTestRecommendation)
-                      Card(
-                        child: Padding(
-                          padding: const EdgeInsets.all(16),
-                          child: Column(
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            children: [
-                              const Icon(AppIcons.studyDesk),
-                              Text(
-                                'Ready for a quick test on ${controller.activeTestTopic}?',
+                    StudyDisclose(
+                      child: controller.showTestRecommendation
+                          ? Card(
+                              key: const ValueKey<String>(
+                                'study-test-recommendation',
                               ),
-                              const Text(
-                                'Generated from your notes: 4 MCQs and 1 FRQ with a handwriting canvas.',
-                              ),
-                              FilledButton(
-                                onPressed: controller.isGeneratingTest
-                                    ? null
-                                    : () => unawaited(
-                                        _createMaterial(
-                                          StudyMaterialKind.tests,
-                                        ),
+                              child: Padding(
+                                padding: const EdgeInsets.all(16),
+                                child: Column(
+                                  crossAxisAlignment: CrossAxisAlignment.start,
+                                  children: [
+                                    const Icon(AppIcons.studyDesk),
+                                    Text(
+                                      'Ready for a quick test on ${controller.activeTestTopic}?',
+                                    ),
+                                    const Text(
+                                      'Generated from your notes: 4 MCQs and 1 FRQ with a handwriting canvas.',
+                                    ),
+                                    FilledButton(
+                                      onPressed: controller.isGeneratingTest
+                                          ? null
+                                          : () => unawaited(
+                                              _createMaterial(
+                                                StudyMaterialKind.tests,
+                                              ),
+                                            ),
+                                      child: Text(
+                                        controller.isGeneratingTest
+                                            ? 'Generating test…'
+                                            : 'Generate Test & Start Now',
                                       ),
-                                child: Text(
-                                  controller.isGeneratingTest
-                                      ? 'Generating test…'
-                                      : 'Generate Test & Start Now',
+                                    ),
+                                    if (controller.practiceFailure != null)
+                                      Text(controller.practiceFailure!.message),
+                                  ],
                                 ),
                               ),
-                              if (controller.practiceFailure != null)
-                                Text(controller.practiceFailure!.message),
-                            ],
-                          ),
+                            )
+                          : null,
+                    ),
+                    // Repainted alone: each chunk of a streamed answer changes
+                    // only this, not the transcript above it.
+                    if (partial != null && partial.isNotEmpty)
+                      RepaintBoundary(
+                        child: Padding(
+                          padding: const EdgeInsets.only(bottom: AppSpacing.md),
+                          child: AiAnswerMarkdown(partial),
                         ),
                       ),
-                    if (partial != null && partial.isNotEmpty)
-                      Padding(
-                        padding: const EdgeInsets.only(bottom: AppSpacing.md),
-                        child: AiAnswerMarkdown(partial),
-                      ),
-                    if (controller.isBusy && (partial?.isEmpty ?? true))
-                      _Working(state: controller.requestState),
-                    if (failure != null)
-                      _Failure(
-                        failure: failure,
-                        onRetry: () => unawaited(controller.retry()),
-                        onOpenPlans:
-                            failure.kind == AiFailureKind.planRequired ||
-                                failure.kind ==
-                                    AiFailureKind.insufficientCredits
-                            ? widget.onOpenPlans
-                            : null,
-                      ),
+                    StudyDisclose(
+                      child: controller.isBusy && (partial?.isEmpty ?? true)
+                          ? _Working(
+                              key: const ValueKey<String>('study-working'),
+                              state: controller.requestState,
+                            )
+                          : null,
+                    ),
+                    StudyDisclose(
+                      child: failure == null
+                          ? null
+                          : _Failure(
+                              key: ValueKey<String>(
+                                'study-failure-${failure.kind.name}',
+                              ),
+                              failure: failure,
+                              onRetry: () => unawaited(controller.retry()),
+                              onOpenPlans:
+                                  failure.kind == AiFailureKind.planRequired ||
+                                      failure.kind ==
+                                          AiFailureKind.insufficientCredits
+                                  ? widget.onOpenPlans
+                                  : null,
+                            ),
+                    ),
                     if (controller.showStarters)
                       _Starters(
                         onChosen: (starter) => unawaited(
@@ -825,14 +975,19 @@ class _StudyDeskScreenState extends State<StudyDeskScreen> {
     );
   }
 
-  Widget _composer() => _Composer(
-    text: _text,
-    focusNode: _composerFocus,
-    controller: _controller,
-    listening: _listening,
-    onOpenPlans: widget.onOpenPlans,
-    onVoiceInput: () => unawaited(_toggleVoiceInput()),
-    onSend: _text.text.trim().isNotEmpty && _controller.canSend ? _send : null,
+  Widget _composer() => ListenableBuilder(
+    listenable: _text,
+    builder: (context, _) => _Composer(
+      text: _text,
+      focusNode: _composerFocus,
+      controller: _controller,
+      listening: _listening,
+      onOpenPlans: widget.onOpenPlans,
+      onVoiceInput: () => unawaited(_toggleVoiceInput()),
+      onSend: _text.text.trim().isNotEmpty && _controller.canSend
+          ? _send
+          : null,
+    ),
   );
 
   Widget _markedPaper(StudyTestPaper paper, VoidCallback onClose) =>
@@ -1165,9 +1320,13 @@ class _Suggestions extends StatelessWidget {
                   runSpacing: AppSpacing.xs,
                   children: [
                     for (final question in suggestions)
-                      ActionChip(
-                        label: Text(question, softWrap: true),
-                        onPressed: () => onChosen(question),
+                      Pressable(
+                        type: PressableType.chip,
+                        borderRadius: BorderRadius.circular(AppRadii.small),
+                        child: ActionChip(
+                          label: Text(question, softWrap: true),
+                          onPressed: () => onChosen(question),
+                        ),
                       ),
                   ],
                 ),
@@ -1250,7 +1409,7 @@ class _CitationChip extends StatelessWidget {
 }
 
 class _Working extends StatelessWidget {
-  const _Working({required this.state});
+  const _Working({super.key, required this.state});
 
   final StudyRequestState state;
 
@@ -1279,6 +1438,7 @@ class _Working extends StatelessWidget {
 
 class _Failure extends StatelessWidget {
   const _Failure({
+    super.key,
     required this.failure,
     required this.onRetry,
     this.onOpenPlans,
@@ -1351,18 +1511,27 @@ class _Starters extends StatelessWidget {
         runSpacing: AppSpacing.xs,
         alignment: WrapAlignment.start,
         children: <Widget>[
-          for (final StudyStarter starter in StudyStarter.all)
-            OutlinedButton(
-              style: OutlinedButton.styleFrom(
-                backgroundColor: colors.surfaceMuted,
-                shape: RoundedRectangleBorder(
-                  borderRadius: BorderRadius.circular(AppRadii.small),
+          for (final (int index, StudyStarter starter)
+              in StudyStarter.all.indexed)
+            StudyAppear(
+              once: ('study-starter', starter.label),
+              delay: AppMotion.staggerStep * (index * 2 + 2),
+              child: Pressable(
+                type: PressableType.chip,
+                borderRadius: BorderRadius.circular(AppRadii.small),
+                child: OutlinedButton(
+                  style: OutlinedButton.styleFrom(
+                    backgroundColor: colors.surfaceMuted,
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(AppRadii.small),
+                    ),
+                  ),
+                  onPressed: () => onChosen(starter),
+                  child: Text(
+                    starter.label,
+                    style: TextStyle(color: colors.textPrimary),
+                  ),
                 ),
-              ),
-              onPressed: () => onChosen(starter),
-              child: Text(
-                starter.label,
-                style: TextStyle(color: colors.textPrimary),
               ),
             ),
         ],
@@ -1396,7 +1565,7 @@ class _Composer extends StatelessWidget {
   Widget build(BuildContext context) {
     final AppColors colors = AppColors.of(context);
     final TextTheme theme = Theme.of(context).textTheme;
-    final bool hasModels = controller.models.isNotEmpty;
+    final bool hasModels = controller.routesModels;
     return Padding(
       key: const ValueKey('study-composer-bar'),
       padding: const EdgeInsetsDirectional.fromSTEB(
@@ -1405,11 +1574,32 @@ class _Composer extends StatelessWidget {
         AppSpacing.md,
         AppSpacing.sm,
       ),
-      child: DecoratedBox(
-        decoration: BoxDecoration(
-          color: colors.surface,
-          borderRadius: BorderRadius.circular(AppRadii.medium),
-          border: Border.all(color: colors.divider),
+      // The bar warms as it is written in, and the field eases open and shut
+      // with its lines.
+      child: ListenableBuilder(
+        listenable: focusNode,
+        builder: (context, child) => AnimatedContainer(
+          duration: AppMotion.resolve(context, AppMotion.fadeIn),
+          curve: AppMotion.fadeInCurve,
+          decoration: BoxDecoration(
+            color: colors.surface,
+            borderRadius: BorderRadius.circular(AppRadii.medium),
+            border: Border.all(
+              color: focusNode.hasFocus
+                  ? colors.focus.withValues(alpha: .55)
+                  : colors.divider,
+            ),
+            boxShadow: <BoxShadow>[
+              BoxShadow(
+                color: colors.shadow.withValues(
+                  alpha: focusNode.hasFocus ? .10 : 0,
+                ),
+                blurRadius: focusNode.hasFocus ? 14 : 0,
+                offset: const Offset(0, 3),
+              ),
+            ],
+          ),
+          child: child,
         ),
         child: Padding(
           padding: const EdgeInsets.all(AppSpacing.xs),
@@ -1417,37 +1607,42 @@ class _Composer extends StatelessWidget {
             mainAxisSize: MainAxisSize.min,
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
-              TextField(
-                key: const ValueKey<String>('study-composer'),
-                controller: text,
-                focusNode: focusNode,
-                minLines: 1,
-                maxLines: 5,
-                keyboardType: TextInputType.multiline,
-                textInputAction: TextInputAction.newline,
-                textCapitalization: TextCapitalization.sentences,
-                style: theme.bodyMedium?.copyWith(color: colors.textPrimary),
-                cursorColor: colors.accent,
-                decoration: InputDecoration(
-                  filled: false,
-                  hintText: controller.currentSession.testPaperId != null
-                      ? 'Ask about your test'
-                      : StudyDeskScreen.composerHint,
-                  hintMaxLines: 2,
-                  hintStyle: theme.bodyMedium?.copyWith(
-                    color: colors.textSecondary,
-                  ),
-                  contentPadding: const EdgeInsets.symmetric(
-                    horizontal: AppSpacing.xs,
-                    vertical: AppSpacing.sm,
-                  ),
-                  border: InputBorder.none,
-                  enabledBorder: InputBorder.none,
-                  focusedBorder: OutlineInputBorder(
-                    borderRadius: AppBorderRadius.medium,
-                    borderSide: BorderSide(
-                      color: colors.focus,
-                      width: AppSizes.focusRingWidth,
+              AnimatedSize(
+                duration: AppMotion.springDuration(context, AppMotion.snappy),
+                curve: AppMotion.zoomInCurve,
+                alignment: Alignment.topCenter,
+                child: TextField(
+                  key: const ValueKey<String>('study-composer'),
+                  controller: text,
+                  focusNode: focusNode,
+                  minLines: 1,
+                  maxLines: 5,
+                  keyboardType: TextInputType.multiline,
+                  textInputAction: TextInputAction.newline,
+                  textCapitalization: TextCapitalization.sentences,
+                  style: theme.bodyMedium?.copyWith(color: colors.textPrimary),
+                  cursorColor: colors.accent,
+                  decoration: InputDecoration(
+                    filled: false,
+                    hintText: controller.currentSession.testPaperId != null
+                        ? 'Ask about your test'
+                        : StudyDeskScreen.composerHint,
+                    hintMaxLines: 2,
+                    hintStyle: theme.bodyMedium?.copyWith(
+                      color: colors.textSecondary,
+                    ),
+                    contentPadding: const EdgeInsets.symmetric(
+                      horizontal: AppSpacing.xs,
+                      vertical: AppSpacing.sm,
+                    ),
+                    border: InputBorder.none,
+                    enabledBorder: InputBorder.none,
+                    focusedBorder: OutlineInputBorder(
+                      borderRadius: AppBorderRadius.medium,
+                      borderSide: BorderSide(
+                        color: colors.focus,
+                        width: AppSizes.focusRingWidth,
+                      ),
                     ),
                   ),
                 ),
@@ -1459,9 +1654,9 @@ class _Composer extends StatelessWidget {
                     child: Align(
                       alignment: AlignmentDirectional.centerStart,
                       child: hasModels
-                          ? AiModelSelector(
+                          ? AiThinkingSelector(
                               controller: controller,
-                              onOpenPlans: onOpenPlans,
+                              lastServedBy: controller.lastServedBy,
                             )
                           : const SizedBox.shrink(),
                     ),

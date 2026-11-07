@@ -659,6 +659,7 @@ class StudyDeskState {
     this.sessions = const <StudySession>[],
     this.currentSessionId,
     this.courses = const <StudyCourse>[],
+    this.semanticSearch = true,
   });
 
   factory StudyDeskState.fromJson(Map<String, Object?> json) => StudyDeskState(
@@ -677,6 +678,7 @@ class StudyDeskState {
         StudySession.fromJson(session! as Map<String, Object?>),
     ],
     currentSessionId: json['current'] as String?,
+    semanticSearch: json['semantic'] != false,
   );
 
   final List<StudySourceItem> sources;
@@ -684,8 +686,13 @@ class StudyDeskState {
   final String? currentSessionId;
   final List<StudyCourse> courses;
 
+  /// Whether notes on the desk are found by meaning too, which sends them to
+  /// the embedding service. On unless the user turned it off.
+  final bool semanticSearch;
+
   Map<String, Object?> toJson() => <String, Object?>{
     'schema': 2,
+    if (!semanticSearch) 'semantic': false,
     'courses': [for (final course in courses) course.toJson()],
     'sources': <Object?>[
       for (final StudySourceItem source in sources) source.toJson(),

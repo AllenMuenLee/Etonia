@@ -1,0 +1,116 @@
+{
+  "scope": "Twelve synthetic current-policy gate behaviors, actual auto route; no production learner data or app credit charges; not a model qualification.",
+  "cases": 12,
+  "passed": 12,
+  "costMicro": 5050,
+  "results": [
+    {
+      "id": "greeting",
+      "passed": true,
+      "model": "haiku",
+      "effort": "high",
+      "inputTokens": 1702,
+      "outputTokens": 300,
+      "costMicro": 357
+    },
+    {
+      "id": "arithmetic",
+      "passed": true,
+      "model": "haiku",
+      "effort": "high",
+      "inputTokens": 1709,
+      "outputTokens": 287,
+      "costMicro": 184
+    },
+    {
+      "id": "general-definition",
+      "passed": true,
+      "model": "haiku",
+      "effort": "high",
+      "inputTokens": 1721,
+      "outputTokens": 457,
+      "costMicro": 270
+    },
+    {
+      "id": "formatting",
+      "passed": true,
+      "model": "haiku",
+      "effort": "high",
+      "inputTokens": 1759,
+      "outputTokens": 351,
+      "costMicro": 221
+    },
+    {
+      "id": "conversation-followup",
+      "passed": true,
+      "model": "haiku",
+      "effort": "high",
+      "inputTokens": 1765,
+      "outputTokens": 369,
+      "costMicro": 230
+    },
+    {
+      "id": "explicit-note-connection",
+      "passed": true,
+      "model": "haiku",
+      "effort": "high",
+      "inputTokens": 1724,
+      "outputTokens": 2161,
+      "costMicro": 1122
+    },
+    {
+      "id": "specific-note-review",
+      "passed": true,
+      "model": "haiku",
+      "effort": "high",
+      "inputTokens": 1719,
+      "outputTokens": 342,
+      "costMicro": 212
+    },
+    {
+      "id": "exact-past-error",
+      "passed": true,
+      "model": "haiku",
+      "effort": "high",
+      "inputTokens": 1708,
+      "outputTokens": 605,
+      "costMicro": 342
+    },
+    {
+      "id": "shared-error-mechanism",
+      "passed": true,
+      "model": "haiku",
+      "effort": "high",
+      "inputTokens": 1722,
+      "outputTokens": 817,
+      "costMicro": 450
+    },
+    {
+      "id": "broad-topic-not-a-match",
+      "passed": true,
+      "model": "haiku",
+      "effort": "high",
+      "inputTokens": 1710,
+      "outputTokens": 250,
+      "costMicro": 165
+    },
+    {
+      "id": "independent-topic",
+      "passed": true,
+      "model": "haiku",
+      "effort": "high",
+      "inputTokens": 1720,
+      "outputTokens": 2335,
+      "costMicro": 1209
+    },
+    {
+      "id": "completed-test-review",
+      "passed": true,
+      "model": "haiku",
+      "effort": "high",
+      "inputTokens": 1508,
+      "outputTokens": 536,
+      "costMicro": 288
+    }
+  ]
+}

@@ -155,10 +155,60 @@ enum StudyTeachingIntent {
 }
 
 class StudyTeachingDecision {
-  const StudyTeachingDecision(this.intent, this.plan);
+  const StudyTeachingDecision(
+    this.intent,
+    this.plan, {
+    this.difficulty = 2,
+    this.retrieveNotes = false,
+    this.mistakeIndices = const [],
+    this.retrievalQuery = '',
+  });
 
   final StudyTeachingIntent intent;
   final StudyTeachingPlan? plan;
+  final int difficulty;
+  final bool retrieveNotes;
+  final List<int> mistakeIndices;
+  final String retrievalQuery;
+
+  StudyTeachingDecision withRetrieval(StudyTeachingDecision decision) =>
+      StudyTeachingDecision(
+        intent,
+        plan,
+        difficulty: difficulty,
+        retrieveNotes: decision.retrieveNotes,
+        mistakeIndices: decision.mistakeIndices,
+        retrievalQuery: decision.retrievalQuery,
+      );
+
+  /// Explicit navigation needs no new plan or correctness judgment.
+  static StudyTeachingDecision? explicitNavigation(
+    String prompt,
+    StudyTeachingPlan? previous,
+  ) {
+    if (previous == null ||
+        previous.stage != StudyTeachingStage.learning ||
+        !const {
+          'next',
+          'next step',
+          'move on',
+          '下一步',
+        }.contains(prompt.trim().toLowerCase())) {
+      return null;
+    }
+    if (previous.activeStep == previous.steps.length - 1) {
+      return StudyTeachingDecision(
+        StudyTeachingIntent.assessment,
+        previous.atStage(StudyTeachingStage.assessment),
+        difficulty: 3,
+      );
+    }
+    return StudyTeachingDecision(
+      StudyTeachingIntent.continuation,
+      previous.atStep(previous.activeStep + 1),
+      difficulty: 3,
+    );
+  }
 
   static StudyTeachingDecision? parse(
     String text, {
@@ -172,9 +222,44 @@ class StudyTeachingDecision {
       return null;
     }
     if (raw is! Map) return null;
+    final Object? difficultyValue = raw['difficulty'] ?? 2;
+    if (difficultyValue is! int || difficultyValue < 1 || difficultyValue > 3) {
+      return null;
+    }
+    final retrieval = raw['retrieval'];
+    if (retrieval != null) {
+      if (retrieval is! Map ||
+          retrieval['notes'] is! bool ||
+          retrieval['mistakeIndices'] is! List ||
+          (retrieval['mistakeIndices'] as List).length > 3 ||
+          !(retrieval['mistakeIndices'] as List).every(
+            (i) => i is int && i >= 1 && i <= 8,
+          ) ||
+          retrieval['query'] is! String ||
+          (retrieval['query'] as String).length > 300) {
+        return null;
+      }
+      final copy = Map<String, Object?>.from(raw)..remove('retrieval');
+      final decision = parse(jsonEncode(copy), previous: previous);
+      if (decision == null) return null;
+      return StudyTeachingDecision(
+        decision.intent,
+        decision.plan,
+        difficulty: decision.difficulty,
+        retrieveNotes: retrieval['notes'] as bool,
+        mistakeIndices: List<int>.unmodifiable(
+          (retrieval['mistakeIndices'] as List).cast<int>().toSet(),
+        ),
+        retrievalQuery: (retrieval['query'] as String).trim(),
+      );
+    }
     switch (raw['intent']) {
       case 'question':
-        return StudyTeachingDecision(StudyTeachingIntent.question, previous);
+        return StudyTeachingDecision(
+          StudyTeachingIntent.question,
+          previous,
+          difficulty: difficultyValue,
+        );
       case 'topic':
         final plan = StudyTeachingPlan.tryRead(raw['plan']);
         if (plan == null ||
@@ -182,7 +267,11 @@ class StudyTeachingDecision {
             plan.stage != StudyTeachingStage.learning) {
           return null;
         }
-        return StudyTeachingDecision(StudyTeachingIntent.topic, plan);
+        return StudyTeachingDecision(
+          StudyTeachingIntent.topic,
+          plan,
+          difficulty: difficultyValue,
+        );
       case 'continue':
         final index = raw['activeStep'];
         if (previous == null ||
@@ -196,6 +285,7 @@ class StudyTeachingDecision {
         return StudyTeachingDecision(
           StudyTeachingIntent.continuation,
           previous.atStep(index),
+          difficulty: difficultyValue,
         );
       case 'assessment':
         if (previous == null ||
@@ -206,6 +296,7 @@ class StudyTeachingDecision {
         return StudyTeachingDecision(
           StudyTeachingIntent.assessment,
           previous.atStage(StudyTeachingStage.assessment),
+          difficulty: difficultyValue,
         );
       case 'complete':
       case 'review':
@@ -220,6 +311,7 @@ class StudyTeachingDecision {
           raw['intent'] == 'review'
               ? previous
               : previous.atStage(StudyTeachingStage.completed),
+          difficulty: difficultyValue,
         );
       default:
         return null;

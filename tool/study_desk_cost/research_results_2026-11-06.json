@@ -1,0 +1,50 @@
+{
+  "date": "2026-11-06",
+  "kind": "Local tokenizer measurements and illustrative arithmetic; no new paid generations",
+  "wrapper_measurements": [
+    {
+      "fixture": "digital-systems-prose",
+      "whole_svg_proxy_tokens": 513,
+      "message_proxy_tokens": 467,
+      "mechanically_removed_tokens": 46
+    },
+    {
+      "fixture": "math-and-negation",
+      "whole_svg_proxy_tokens": 395,
+      "message_proxy_tokens": 341,
+      "mechanically_removed_tokens": 54
+    },
+    {
+      "fixture": "chinese-technical",
+      "whole_svg_proxy_tokens": 596,
+      "message_proxy_tokens": 541,
+      "mechanically_removed_tokens": 55
+    }
+  ],
+  "wrapper_output_saving_usd_at_sol_rate": 0.00155,
+  "wrapper_saving_fraction_of_previous_baseline": 0.06219903691813804,
+  "answer_system_tokens_with_current_contract": 1106,
+  "answer_system_tokens_after_removing_contract_only": 1009,
+  "baseline_input_cost_fraction": 0.39285714285714285,
+  "baseline_output_cost_fraction": 0.6071428571428571,
+  "scenario": {
+    "assumed_input_reduction": 0.2,
+    "assumed_output_reduction": 0.25,
+    "assumed_post_optimization_spend_routed_to_luna": 0.4,
+    "assumed_luna_to_sol_price_ratio": 0.05,
+    "baseline_usd_per_1000_answers": 8.306666666666667,
+    "token_efficiency_only_usd_per_1000_answers": 6.3931666666666676,
+    "balanced_usd_per_1000_answers": 3.9637633333333335,
+    "balanced_saving_fraction": 0.5228214285714285,
+    "minimum_remaining_spend_fraction_routed_to_luna_to_reach_half": 0.3687873977286604
+  },
+  "cache_example": {
+    "requests": 10,
+    "prefix_write_multiplier": 1.25,
+    "prefix_read_multiplier": 0.05,
+    "average_prefix_cost_multiplier": 0.16999999999999998,
+    "stable_prefix_tokens": 1106,
+    "net_prefix_savings_vs_ten_uncached_copies_usd": 0.0183596,
+    "saving_per_answer_usd": 0.00183596
+  }
+}
