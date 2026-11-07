@@ -1,6 +1,9 @@
+import 'dart:typed_data';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:greatnote/features/library/study_desk/study_motion.dart';
+import 'package:greatnote/features/library/study_desk/study_view_cache.dart';
 
 Widget _host(Widget child) => MaterialApp(home: Scaffold(body: child));
 
@@ -180,5 +183,124 @@ void main() {
     await tester.pump(const Duration(milliseconds: 400));
     expect(find.text('v11'), findsOneWidget);
     expect(builds, 3, reason: 'the last change is never lost');
+  });
+
+  group('the byte cache', () {
+    Uint8List bytes(int n) => Uint8List(n);
+
+    test(
+      'shares one run between everyone asking, and keeps the result',
+      () async {
+        final StudyByteCache cache = StudyByteCache(maxBytes: 1000);
+        int made = 0;
+        Future<Uint8List?> make() async {
+          made++;
+          await Future<void>.delayed(const Duration(milliseconds: 5));
+          return bytes(10);
+        }
+
+        final results = await Future.wait(<Future<Uint8List?>>[
+          cache.load('a', make),
+          cache.load('a', make),
+        ]);
+        expect(made, 1);
+        expect(identical(results[0], results[1]), isTrue);
+        // Kept: the next ask is answered at once, with the same bytes.
+        final Uint8List? again = cache.peek('a');
+        expect(identical(again, results[0]), isTrue);
+        await cache.load('a', make);
+        expect(made, 1);
+      },
+    );
+
+    test('a failure is not remembered', () async {
+      final StudyByteCache cache = StudyByteCache(maxBytes: 1000);
+      expect(await cache.load('a', () async => throw StateError('x')), isNull);
+      expect(cache.peek('a'), isNull);
+      expect(await cache.load('a', () async => bytes(5)), isNotNull);
+    });
+
+    test('over its budget the longest unused goes, and nothing huge stays', () {
+      final StudyByteCache cache = StudyByteCache(maxBytes: 300);
+      cache.put('a', bytes(100));
+      cache.put('b', bytes(100));
+      cache.put('c', bytes(100));
+      cache.peek('a');
+      cache.put('d', bytes(100));
+      expect(cache.peek('b'), isNull, reason: 'b was used longest ago');
+      expect(cache.peek('a'), isNotNull);
+      expect(cache.usedBytes, lessThanOrEqualTo(300));
+      cache.put('huge', bytes(200));
+      expect(cache.peek('huge'), isNull, reason: 'more than a third');
+    });
+  });
+
+  testWidgets('a memo hands back the same widget until its inputs change', (
+    tester,
+  ) async {
+    int builds = 0;
+    Widget build(int dep, int other) => _host(
+      Column(
+        children: <Widget>[
+          Text('outer $other'),
+          StudyMemo(
+            deps: <Object?>[dep],
+            builder: (BuildContext context) {
+              builds++;
+              return Text('inner $dep');
+            },
+          ),
+        ],
+      ),
+    );
+    await tester.pumpWidget(build(1, 1));
+    await tester.pumpWidget(build(1, 2));
+    await tester.pumpWidget(build(1, 3));
+    expect(builds, 1, reason: 'what is above changed, what it holds did not');
+    await tester.pumpWidget(build(2, 3));
+    expect(builds, 2);
+    expect(find.text('inner 2'), findsOneWidget);
+  });
+
+  testWidgets('a scene out of view does not rebuild for what changes', (
+    tester,
+  ) async {
+    final ValueNotifier<int> value = ValueNotifier<int>(0);
+    int builds = 0;
+    Widget build(int index) => _host(
+      StudyScenes(
+        index: index,
+        children: <Widget>[
+          const Text('chat'),
+          StudyScenedBuilder(
+            listenable: value,
+            builder: (BuildContext context) {
+              builds++;
+              return Text('studio ${value.value}');
+            },
+          ),
+        ],
+      ),
+    );
+    await tester.pumpWidget(build(1));
+    await tester.pumpAndSettle();
+    expect(builds, 1);
+    value.value = 1;
+    await tester.pump();
+    expect(find.text('studio 1'), findsOneWidget);
+
+    await tester.pumpWidget(build(0));
+    await tester.pumpAndSettle();
+    final int before = builds;
+    for (int i = 2; i < 12; i++) {
+      value.value = i;
+      await tester.pump();
+    }
+    expect(builds, before, reason: 'out of view, it ignores every change');
+
+    await tester.pumpWidget(build(1));
+    await tester.pumpAndSettle();
+    expect(find.text('studio 11'), findsOneWidget);
+    expect(builds, before + 1, reason: 'once, from the state as it is');
   });
 }

@@ -24,6 +24,7 @@ import 'study_desk_controller.dart';
 import 'study_desk_models.dart';
 import 'study_in_situ_editor.dart';
 import 'study_in_situ_toolbar.dart';
+import 'study_view_cache.dart';
 
 /// Whether the inspection pane is showing a page or being written on.
 enum _InspectionMode { preview, editing }
@@ -484,7 +485,6 @@ class _CitedPageState extends State<_CitedPage>
   List<Rect> _rings = const <Rect>[];
 
   Uint8List? _pdf;
-  final Map<String, Uint8List> _assets = <String, Uint8List>{};
 
   // --- Writing on the page ---------------------------------------------------
 
@@ -557,7 +557,6 @@ class _CitedPageState extends State<_CitedPage>
       _readView();
       if (!samePage) {
         _pdf = null;
-        _assets.clear();
         _framed = null;
         unawaited(_readPdf());
       }
@@ -729,16 +728,33 @@ class _CitedPageState extends State<_CitedPage>
     ];
   }
 
+  /// What this note's page is made from is kept (see [StudyViewCache]), so
+  /// coming back to a page, or to a note's picture, shows it at once; only the
+  /// first time is read and drawn, and the page is on screen without its paper
+  /// until then (the paper fades in over it).
+  Object _cacheKey(Object part) => (
+    identityHashCode(widget.controller.repository),
+    widget.view.note.id,
+    part,
+  );
+
   Future<void> _readPdf() async {
     final PdfPageSource? source = _page.pdfSource;
     final PdfRasterizer? rasterizer = widget.pdfRasterizer;
     if (source == null || rasterizer == null) return;
-    try {
+    const int width = 1400;
+    final Object key = _cacheKey(('pdf', source.assetId, source.pageIndex));
+    final Uint8List? kept = StudyViewCache.pdfPages.peek(key);
+    if (kept != null) {
+      _pdf = kept;
+      return;
+    }
+    final String noteId = widget.view.note.id;
+    final Uint8List? png = await StudyViewCache.pdfPages.load(key, () async {
       final NoteAssetData asset = await widget.controller.repository.readAsset(
-        widget.view.note.id,
+        noteId,
         source.assetId,
       );
-      const int width = 1400;
       final RasterizedPdfPage page = await rasterizer.render(
         asset.bytes,
         source.pageIndex,
@@ -748,24 +764,22 @@ class _CitedPageState extends State<_CitedPage>
           (width * source.pageSize.height / source.pageSize.width).round(),
         ),
       );
-      if (mounted) setState(() => _pdf = page.png);
-    } on Object {
-      // The ink stays readable without its paper.
+      return page.png;
+    });
+    if (png != null && mounted && _page.pdfSource?.assetId == source.assetId) {
+      setState(() => _pdf = png);
     }
   }
 
-  Future<Uint8List?> _readAsset(String assetId) async {
-    final Uint8List? kept = _assets[assetId];
-    if (kept != null) return kept;
-    try {
+  Future<Uint8List?> _readAsset(String assetId) {
+    final String noteId = widget.view.note.id;
+    return StudyViewCache.assets.load(_cacheKey(('asset', assetId)), () async {
       final NoteAssetData asset = await widget.controller.repository.readAsset(
-        widget.view.note.id,
+        noteId,
         assetId,
       );
-      return _assets[assetId] = asset.bytes;
-    } on Object {
-      return null;
-    }
+      return asset.bytes;
+    });
   }
 
   /// The union of what is marked.
@@ -855,7 +869,24 @@ class _CitedPageState extends State<_CitedPage>
                   child: ColoredBox(color: colors.writingSurface),
                 ),
                 if (_pdf case final Uint8List pdf)
-                  Image.memory(pdf, fit: BoxFit.fill),
+                  Image.memory(
+                    pdf,
+                    fit: BoxFit.fill,
+                    gaplessPlayback: true,
+                    // Not there, then there: the paper fades in once it has
+                    // been decoded, instead of the page jumping.
+                    frameBuilder: (context, child, frame, sync) => sync
+                        ? child
+                        : AnimatedOpacity(
+                            opacity: frame == null ? 0 : 1,
+                            duration: AppMotion.resolve(
+                              context,
+                              AppMotion.fadeIn,
+                            ),
+                            curve: AppMotion.fadeInCurve,
+                            child: child,
+                          ),
+                  ),
                 if (_page.images.isNotEmpty)
                   PageImageLayer(controller: ink, readAsset: _readAsset),
                 AiCitationMarks(strokes: _strokes, circles: _rings),

@@ -466,19 +466,133 @@ class _StudyScenesState extends State<StudyScenes>
           ignoring: !active,
           child: ExcludeSemantics(
             excluding: !active,
-            child: FadeTransition(
-              opacity: _opacities[i],
-              child: SlideTransition(
-                position: _offsets[i],
-                // Always in its own layer: it is the same widget, in the
-                // same place, whether it moves or not, so it keeps its state.
-                child: RepaintBoundary(child: child),
+            child: StudyActive(
+              active: active,
+              child: FadeTransition(
+                opacity: _opacities[i],
+                child: SlideTransition(
+                  position: _offsets[i],
+                  // Always in its own layer: it is the same widget, in the
+                  // same place, whether it moves or not, so it keeps its state.
+                  child: RepaintBoundary(child: child),
+                ),
               ),
             ),
           ),
         ),
       ),
     );
+  }
+}
+
+/// Whether the scene a widget is in is the one in view. A scene out of view
+/// is kept built, for its state, but has no reason to follow what changes.
+class StudyActive extends InheritedWidget {
+  const StudyActive({super.key, required this.active, required super.child});
+
+  final bool active;
+
+  /// True outside any scene.
+  static bool of(BuildContext context) =>
+      context.dependOnInheritedWidgetOfExactType<StudyActive>()?.active ?? true;
+
+  @override
+  bool updateShouldNotify(StudyActive oldWidget) => oldWidget.active != active;
+}
+
+/// Rebuilds [builder] when [listenable] changes, but only while its scene is in
+/// view ([StudyActive]); out of view it keeps what it last drew and ignores
+/// every change, and when the scene comes back it builds once, from the
+/// state as it is then. The practice studio, kept built behind the chat,
+/// would otherwise sort and lay out its library for every chunk of an answer.
+class StudyScenedBuilder extends StatefulWidget {
+  const StudyScenedBuilder({
+    super.key,
+    required this.listenable,
+    required this.builder,
+  });
+
+  final Listenable listenable;
+  final WidgetBuilder builder;
+
+  @override
+  State<StudyScenedBuilder> createState() => _StudyScenedBuilderState();
+}
+
+class _StudyScenedBuilderState extends State<StudyScenedBuilder> {
+  Widget? _last;
+  bool _active = true;
+
+  @override
+  void initState() {
+    super.initState();
+    widget.listenable.addListener(_changed);
+  }
+
+  @override
+  void didUpdateWidget(StudyScenedBuilder oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (!identical(oldWidget.listenable, widget.listenable)) {
+      oldWidget.listenable.removeListener(_changed);
+      widget.listenable.addListener(_changed);
+    }
+  }
+
+  @override
+  void dispose() {
+    widget.listenable.removeListener(_changed);
+    super.dispose();
+  }
+
+  void _changed() {
+    if (_active && mounted) setState(() => _last = null);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    _active = StudyActive.of(context);
+    final Widget? last = _last;
+    if (!_active && last != null) return last;
+    return _last = widget.builder(context);
+  }
+}
+
+/// Builds [builder] again only when [deps] differ from the last time, and
+/// otherwise hands back the very same widget, so the framework skips the
+/// whole subtree under it, however often what is above rebuilds. For rows
+/// that cost something to build (an answer's Markdown, its citations) and
+/// are made of what does not change.
+class StudyMemo extends StatefulWidget {
+  const StudyMemo({super.key, required this.deps, required this.builder});
+
+  final List<Object?> deps;
+  final WidgetBuilder builder;
+
+  @override
+  State<StudyMemo> createState() => _StudyMemoState();
+}
+
+class _StudyMemoState extends State<StudyMemo> {
+  Widget? _built;
+  List<Object?>? _builtFor;
+
+  static bool _same(List<Object?> a, List<Object?> b) {
+    if (a.length != b.length) return false;
+    for (int i = 0; i < a.length; i++) {
+      if (!identical(a[i], b[i]) && a[i] != b[i]) return false;
+    }
+    return true;
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final Widget? built = _built;
+    final List<Object?>? builtFor = _builtFor;
+    if (built != null && builtFor != null && _same(builtFor, widget.deps)) {
+      return built;
+    }
+    _builtFor = List<Object?>.of(widget.deps);
+    return _built = widget.builder(context);
   }
 }
 
@@ -588,15 +702,17 @@ class _StudyThrottledBuilderState extends State<StudyThrottledBuilder> {
 
 /// Runs [run] at most once in [gap], the last call always: a trailing edge.
 class StudyThrottle {
-  StudyThrottle(this.gap, this.run);
+  StudyThrottle(Duration gap, this.run, {Duration Function()? gapOf})
+    : _gap = gapOf ?? (() => gap);
 
-  final Duration gap;
+  final Duration Function() _gap;
   final VoidCallback run;
   final Stopwatch _since = Stopwatch();
   Timer? _trailing;
 
   void call() {
     if (_trailing != null) return;
+    final Duration gap = _gap();
     final Duration elapsed = _since.elapsed;
     if (!_since.isRunning || elapsed >= gap) {
       _fire();

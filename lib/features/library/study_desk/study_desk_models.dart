@@ -660,9 +660,16 @@ class StudyDeskState {
     this.currentSessionId,
     this.courses = const <StudyCourse>[],
     this.semanticSearch = true,
+    this.deletedSessions = const <String, int>{},
   });
 
   factory StudyDeskState.fromJson(Map<String, Object?> json) => StudyDeskState(
+    deletedSessions: <String, int>{
+      if (json['deletedSessions'] case final Map<Object?, Object?> deleted)
+        for (final MapEntry<Object?, Object?> entry in deleted.entries)
+          if (entry.key case final String id)
+            if (entry.value case final int at) id: at,
+    },
     courses: <StudyCourse>[
       for (final course in json['courses'] as List? ?? const [])
         StudyCourse.fromJson(Map<String, Object?>.from(course as Map)),
@@ -686,6 +693,11 @@ class StudyDeskState {
   final String? currentSessionId;
   final List<StudyCourse> courses;
 
+  /// The chats deleted, by id, and when (milliseconds since the epoch). A
+  /// device that still has one is told, when the chats of two devices are
+  /// brought together, that it was deleted rather than that it is new.
+  final Map<String, int> deletedSessions;
+
   /// Whether notes on the desk are found by meaning too, which sends them to
   /// the embedding service. On unless the user turned it off.
   final bool semanticSearch;
@@ -701,5 +713,6 @@ class StudyDeskState {
       for (final StudySession session in sessions) session.toJson(),
     ],
     if (currentSessionId != null) 'current': currentSessionId,
+    if (deletedSessions.isNotEmpty) 'deletedSessions': deletedSessions,
   };
 }

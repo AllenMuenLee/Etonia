@@ -149,13 +149,55 @@ String? safeChatSvg(String source) {
   }
 }
 
+/// An answer's blocks, as `richAnswerBlocks` and the Markdown reader's own
+/// preparation make them, kept for the last [_parseLimit] answers: an answer
+/// scrolled back into view, or opened again, is not parsed again.
+class _ParsedAnswers {
+  static const int _parseLimit = 64;
+  static final Map<String, List<({String kind, String source, String text})>>
+  _kept = <String, List<({String kind, String source, String text})>>{};
+
+  static List<({String kind, String source, String text})> of(String source) {
+    final kept = _kept.remove(source);
+    if (kept != null) return _kept[source] = kept;
+    final parsed = [
+      for (final block in richAnswerBlocks(source))
+        (
+          kind: block.kind,
+          source: block.source,
+          // The words the Markdown reader is given.
+          text: delimitBareMath(normalizeInlineMath(block.source)),
+        ),
+    ];
+    _kept[source] = parsed;
+    if (_kept.length > _parseLimit) _kept.remove(_kept.keys.first);
+    return parsed;
+  }
+}
+
 /// Shared renderer for the editor assistant, study chats and practice answers.
-class AiAnswerMarkdown extends StatelessWidget {
+///
+/// Parsing Markdown and typesetting its maths is the dearest thing a chat
+/// does, so it is done once for a given answer and look: when the screen
+/// around it rebuilds for something else (a streamed chunk elsewhere, the
+/// sidebar, a keystroke), the very same widgets are handed back and the
+/// framework skips all of it.
+class AiAnswerMarkdown extends StatefulWidget {
   const AiAnswerMarkdown(this.source, {super.key});
   final String source;
 
+  @override
+  State<AiAnswerMarkdown> createState() => _AiAnswerMarkdownState();
+}
+
+class _AiAnswerMarkdownState extends State<AiAnswerMarkdown> {
+  Widget? _built;
+  String? _builtFrom;
+  ThemeData? _theme;
+  TextDirection? _direction;
+
   Widget _markdown(BuildContext context, String text) => GptMarkdown(
-    delimitBareMath(normalizeInlineMath(text)),
+    text,
     style: Theme.of(
       context,
     ).textTheme.bodyMedium?.copyWith(color: AppColors.of(context).textPrimary),
@@ -175,18 +217,29 @@ class AiAnswerMarkdown extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final blocks = richAnswerBlocks(source);
-    return Column(
+    final ThemeData theme = Theme.of(context);
+    final TextDirection direction = Directionality.of(context);
+    final Widget? built = _built;
+    if (built != null &&
+        _builtFrom == widget.source &&
+        _direction == direction &&
+        (identical(_theme, theme) || _theme == theme)) {
+      return built;
+    }
+    _builtFrom = widget.source;
+    _theme = theme;
+    _direction = direction;
+    return _built = Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       mainAxisSize: MainAxisSize.min,
       children: [
-        for (final block in blocks)
+        for (final block in _ParsedAnswers.of(widget.source))
           if (block.kind == 'markdown')
-            _markdown(context, block.source)
+            _markdown(context, block.text)
           else if (block.kind == 'svg')
             _SvgCard(source: block.source)
           else
-            _Callout(kind: block.kind, child: _markdown(context, block.source)),
+            _Callout(kind: block.kind, child: _markdown(context, block.text)),
       ],
     );
   }

@@ -10,8 +10,12 @@ import {
 import { buildCatalog, estimateInputTokens, route } from "../functions/_shared/ai_router.ts";
 import { describePass } from "../functions/_shared/ai_usage.ts";
 const folder = "build/study_desk_cost_audit";
+const notesFirst = Deno.args.includes("--notes-first");
+const stem = notesFirst ? "notes_first" : "retrieval_gate";
 const capture = JSON.parse(
-  await Deno.readTextFile(`${folder}/captured_requests_gate.json`),
+  await Deno.readTextFile(
+    `${folder}/${notesFirst ? "captured_requests_notes_first" : "captured_requests_gate"}.json`,
+  ),
 )
   .find((r: any) => r.task === "study.plan");
 const configuration = JSON.parse(Deno.env.get("AI_MODEL_CONFIG") ?? "{}");
@@ -40,7 +44,18 @@ const availability =
       unanswered: false,
     },
   ]) + "\n\n";
-const fixtures = [
+interface GateFixture {
+  id: string;
+  question: string;
+  notes: boolean;
+  mistakes: number[];
+  history?: boolean;
+  test?: boolean;
+  depth?: "brief" | "full";
+  availability?: string;
+  intent?: "question" | "topic";
+}
+const fixtures: GateFixture[] = [
   { id: "greeting", question: "Hello!", notes: false, mistakes: [] },
   {
     id: "arithmetic",
@@ -112,13 +127,66 @@ const fixtures = [
     test: true,
   },
 ];
+if (notesFirst) {
+  fixtures.find((f) => f.id === "broad-topic-not-a-match")!.question =
+    "What is an equation? Just define it independently of my notes.";
+  fixtures.push(
+    {
+      id: "introduce-with-relevant-notes",
+      intent: "question",
+      question: "Introduce force.",
+      notes: true,
+      mistakes: [],
+      depth: "brief",
+    },
+    {
+      id: "generic-filename-introduction",
+      intent: "question",
+      question: "Introduce flip-flops.",
+      notes: true,
+      mistakes: [],
+      depth: "brief",
+      availability:
+        'Available notes (titles/page counts only; not source evidence):\n{"title":"Lecture 1.pdf","pages":300}\n\n',
+    },
+    {
+      id: "explain-without-explicit-note-request",
+      question: "Explain acceleration.",
+      notes: true,
+      mistakes: [],
+      depth: "brief",
+    },
+    {
+      id: "clearly-unrelated-introduction",
+      question: "Introduce Baroque music.",
+      notes: false,
+      mistakes: [],
+    },
+    {
+      id: "detailed-source-derivation",
+      question:
+        "Using my Physics notes, derive the complete work-energy theorem, preserving every assumption and mathematical step.",
+      notes: true,
+      mistakes: [],
+      depth: "full",
+    },
+    {
+      id: "explicit-independent-introduction",
+      intent: "question",
+      question: "Introduce force without using my notes.",
+      notes: false,
+      mistakes: [],
+    },
+  );
+}
 const results: any[] = [];
 let spent = 0;
 const parseGate = (answer: string) =>
   JSON.parse(answer.trim().replace(/^```(?:json)?\s*|\s*```$/g, ""));
 for (const fixture of Deno.args.includes("--rescore") ? [] : fixtures) {
-  const prompt =
-    (fixture.test ? "Available source: one completed graded test.\n\n" : availability) +
+  const prompt = (fixture.test
+    ? "Available source: one completed graded test.\n\n"
+    : fixture.availability ?? availability) +
     `Question: ${fixture.question}`;
   const input: AiInput = {
     requestId: crypto.randomUUID(),
@@ -204,7 +272,9 @@ for (const fixture of Deno.args.includes("--rescore") ? [] : fixtures) {
   const actualMistakes = Array.isArray(retrieval?.mistakeIndices)
     ? [...retrieval.mistakeIndices].sort()
     : null;
-  const success = retrieval?.notes === fixture.notes &&
+  const success = (!fixture.intent || value?.intent === fixture.intent) &&
+    (!notesFirst || ["brief", "full"].includes(retrieval?.depth)) &&
+    (!fixture.depth || retrieval?.depth === fixture.depth) && retrieval?.notes === fixture.notes &&
     JSON.stringify(actualMistakes) === JSON.stringify(fixture.mistakes) &&
     typeof retrieval?.query === "string" && retrieval.query.length <= 300 &&
     (fixture.notes || retrieval.query === "") &&
@@ -216,9 +286,10 @@ for (const fixture of Deno.args.includes("--rescore") ? [] : fixtures) {
     passed: success,
     retrieval,
     answer: usage.answer,
+    intent: value?.intent,
   });
   await Deno.writeTextFile(
-    `${folder}/retrieval_gate_live.json`,
+    `${folder}/${stem}_live.json`,
     JSON.stringify(results, null, 2),
   );
   console.log(
@@ -235,7 +306,7 @@ for (const fixture of Deno.args.includes("--rescore") ? [] : fixtures) {
 // spending again when only the smoke's parser (not the policy) was corrected.
 if (Deno.args.includes("--rescore")) {
   const saved = JSON.parse(
-    await Deno.readTextFile(`${folder}/retrieval_gate_live.json`),
+    await Deno.readTextFile(`${folder}/${stem}_live.json`),
   );
   for (const fixture of fixtures) {
     const row = saved.find((r: any) => r.id === fixture.id);
@@ -249,7 +320,10 @@ if (Deno.args.includes("--rescore")) {
     const actual = Array.isArray(retrieval?.mistakeIndices)
       ? [...retrieval.mistakeIndices].sort()
       : null;
-    const passed = retrieval?.notes === fixture.notes &&
+    const passed = (!fixture.intent || parseGate(row.answer)?.intent === fixture.intent) &&
+      (!notesFirst || ["brief", "full"].includes(retrieval?.depth)) &&
+      (!fixture.depth || retrieval?.depth === fixture.depth) &&
+      retrieval?.notes === fixture.notes &&
       JSON.stringify(actual) === JSON.stringify(fixture.mistakes) &&
       typeof retrieval?.query === "string" && retrieval.query.length <= 300 &&
       (fixture.notes || retrieval.query === "");
@@ -258,11 +332,11 @@ if (Deno.args.includes("--rescore")) {
   }
 }
 await Deno.writeTextFile(
-  "tool/study_desk_cost/retrieval_gate_results.json",
+  `tool/study_desk_cost/${stem}_results.json`,
   JSON.stringify(
     {
       scope:
-        "Twelve synthetic current-policy gate behaviors, actual auto route; no production learner data or app credit charges; not a model qualification.",
+        "Synthetic retrieval gate behaviors, actual auto route; no production learner data or app credit charges; not a model qualification.",
       cases: results.length,
       passed: results.filter((r) => r.passed).length,
       costMicro: spent,

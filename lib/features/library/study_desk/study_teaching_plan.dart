@@ -154,6 +154,8 @@ enum StudyTeachingIntent {
   complete,
 }
 
+enum StudyRetrievalDepth { brief, full }
+
 class StudyTeachingDecision {
   const StudyTeachingDecision(
     this.intent,
@@ -162,6 +164,7 @@ class StudyTeachingDecision {
     this.retrieveNotes = false,
     this.mistakeIndices = const [],
     this.retrievalQuery = '',
+    this.retrievalDepth = StudyRetrievalDepth.full,
   });
 
   final StudyTeachingIntent intent;
@@ -170,6 +173,7 @@ class StudyTeachingDecision {
   final bool retrieveNotes;
   final List<int> mistakeIndices;
   final String retrievalQuery;
+  final StudyRetrievalDepth retrievalDepth;
 
   StudyTeachingDecision withRetrieval(StudyTeachingDecision decision) =>
       StudyTeachingDecision(
@@ -179,6 +183,7 @@ class StudyTeachingDecision {
         retrieveNotes: decision.retrieveNotes,
         mistakeIndices: decision.mistakeIndices,
         retrievalQuery: decision.retrievalQuery,
+        retrievalDepth: decision.retrievalDepth,
       );
 
   /// Explicit navigation needs no new plan or correctness judgment.
@@ -236,7 +241,9 @@ class StudyTeachingDecision {
             (i) => i is int && i >= 1 && i <= 8,
           ) ||
           retrieval['query'] is! String ||
-          (retrieval['query'] as String).length > 300) {
+          (retrieval['query'] as String).length > 300 ||
+          (retrieval['depth'] != null &&
+              !const ['brief', 'full'].contains(retrieval['depth']))) {
         return null;
       }
       final copy = Map<String, Object?>.from(raw)..remove('retrieval');
@@ -251,6 +258,9 @@ class StudyTeachingDecision {
           (retrieval['mistakeIndices'] as List).cast<int>().toSet(),
         ),
         retrievalQuery: (retrieval['query'] as String).trim(),
+        retrievalDepth: retrieval['depth'] == 'brief'
+            ? StudyRetrievalDepth.brief
+            : StudyRetrievalDepth.full,
       );
     }
     switch (raw['intent']) {

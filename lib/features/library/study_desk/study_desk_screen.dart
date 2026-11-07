@@ -14,6 +14,7 @@ import '../../../shared/memory/memory_pressure.dart';
 import '../../../shared/navigation/app_sheets.dart';
 import '../../../shared/widgets/app_controls.dart';
 import '../../../shared/widgets/etonia_mark.dart';
+import '../../../shared/widgets/hold_menu.dart';
 import '../../../shared/widgets/pressable.dart';
 import '../../editor/ai/ai_citation.dart';
 import '../../editor/ai/ai_client.dart';
@@ -133,9 +134,17 @@ class _StudyDeskScreenState extends State<StudyDeskScreen> {
 
   /// A streamed answer changes the controller for every chunk; the desk
   /// follows at a pace the screen can draw.
+  /// The longer the answer, the dearer it is to read again, so the further
+  /// apart: about twelve a second at first, and not under four as it grows.
   late final StudyThrottle _streaming = StudyThrottle(
     const Duration(milliseconds: 80),
     _refreshStreaming,
+    gapOf: () => Duration(
+      milliseconds: (80 + (_controller.partialAnswer?.length ?? 0) ~/ 12).clamp(
+        80,
+        250,
+      ),
+    ),
   );
 
   /// Set when the pane is shut by hand: reading on no longer opens it, though a
@@ -235,7 +244,9 @@ class _StudyDeskScreenState extends State<StudyDeskScreen> {
       _streamed = false;
     }
     if (streaming && !grew && !newSession && !reviewOpened) {
-      _streaming();
+      // Out of sight in the studio, there is no chat to redraw: it is drawn
+      // once, as it then is, when it comes back.
+      if (_controller.mode != StudyDeskMode.practice) _streaming();
       return;
     }
     setState(() {});
@@ -251,6 +262,15 @@ class _StudyDeskScreenState extends State<StudyDeskScreen> {
     }
     if (grew) _scheduleFocusUpdate();
   }
+
+  /// What the chips of [message] say now, so a renamed note changes them.
+  String _labelsOf(StudyMessage message) => message.links.isEmpty
+      ? ''
+      : <String>[
+          for (final StudyParagraphLinks link in message.links)
+            for (final StudyCitation citation in link.citations)
+              _controller.labelOf(citation),
+        ].join('|');
 
   void _refreshStreaming() {
     if (!mounted) return;
@@ -560,26 +580,18 @@ class _StudyDeskScreenState extends State<StudyDeskScreen> {
               closeOnSelection: !wide,
               exportSink: widget.exportSink,
             );
-            final content = Row(
-              crossAxisAlignment: CrossAxisAlignment.stretch,
-              children: [
-                if (wide)
-                  StudySidebarSlot(
+            final Widget desk = split
+                ? StudyResizableSplit(leading: stableMain!, trailing: pane)
+                : stableMain!;
+            final Widget content = wide
+                ? StudySidebarLayout(
                     open: showHistory,
                     width: 272,
                     dividerColor: colors.divider,
-                    child: sidebar,
-                  ),
-                Expanded(
-                  child: split
-                      ? StudyResizableSplit(
-                          leading: stableMain!,
-                          trailing: pane,
-                        )
-                      : stableMain!,
-                ),
-              ],
-            );
+                    sidebar: sidebar,
+                    main: desk,
+                  )
+                : desk;
             return KeyedSubtree(
               key: const ValueKey<String>('study-desk-screen'),
               child: Material(
@@ -830,28 +842,49 @@ class _StudyDeskScreenState extends State<StudyDeskScreen> {
                     once: ('study-message', controller.sessionId, i),
                     enabled: i >= _settledMessages,
                     rise: 14,
-                    child: Padding(
-                      padding: const EdgeInsets.only(bottom: AppSpacing.md),
-                      child: messages[i].fromUser
-                          ? _Question(text: messages[i].text)
-                          : _Answer(
-                              key: ValueKey<String>(
-                                'study-answer-${controller.sessionId}-$i',
-                              ),
-                              message: messages[i],
-                              index: i,
-                              controller: controller,
-                              register:
-                                  ((int, int) ref, BuildContext context) =>
-                                      _paragraphs[ref] = context,
-                              unregister:
-                                  ((int, int) ref, BuildContext context) {
-                                    if (identical(_paragraphs[ref], context)) {
-                                      _paragraphs.remove(ref);
-                                    }
-                                  },
-                              onCitation: _openCitation,
-                            ),
+                    // A message is made of what does not change, and costs
+                    // Markdown and citations to build: it is built again only
+                    // when it, or what its chips say, does.
+                    child: StudyMemo(
+                      deps: <Object?>[
+                        messages[i],
+                        i,
+                        controller.sessionId,
+                        controller.pagesEpoch,
+                        _labelsOf(messages[i]),
+                      ],
+                      builder: (context) => Padding(
+                        padding: const EdgeInsets.only(bottom: AppSpacing.md),
+                        // Held, a message offers to be changed: a question to
+                        // be edited, an answer to be written again. What it
+                        // offers is read when it is held, not when built.
+                        child: HoldMenu(
+                          actions: () => _messageActions(i),
+                          child: messages[i].fromUser
+                              ? _Question(text: messages[i].text)
+                              : _Answer(
+                                  key: ValueKey<String>(
+                                    'study-answer-${controller.sessionId}-$i',
+                                  ),
+                                  message: messages[i],
+                                  index: i,
+                                  controller: controller,
+                                  register:
+                                      ((int, int) ref, BuildContext context) =>
+                                          _paragraphs[ref] = context,
+                                  unregister:
+                                      ((int, int) ref, BuildContext context) {
+                                        if (identical(
+                                          _paragraphs[ref],
+                                          context,
+                                        )) {
+                                          _paragraphs.remove(ref);
+                                        }
+                                      },
+                                  onCitation: _openCitation,
+                                ),
+                        ),
+                      ),
                     ),
                   );
                 }
@@ -1002,6 +1035,84 @@ class _StudyDeskScreenState extends State<StudyDeskScreen> {
         onSaveToLibrary: widget.onSaveTestToLibrary,
       );
 
+  /// What holding the message at [index] offers.
+  List<HoldMenuAction> _messageActions(int index) {
+    final List<StudyMessage> messages = _controller.messages;
+    if (index >= messages.length) return const <HoldMenuAction>[];
+    final StudyMessage message = messages[index];
+    return <HoldMenuAction>[
+      if (message.fromUser && _controller.canReviseMessage(index))
+        HoldMenuAction(
+          label: 'Edit',
+          icon: AppIcons.rename,
+          onSelected: () => unawaited(_editQuestion(index)),
+        ),
+      if (!message.fromUser &&
+          index > 0 &&
+          messages[index - 1].fromUser &&
+          _controller.canReviseMessage(index))
+        HoldMenuAction(
+          label: 'Run again',
+          icon: AppIcons.restore,
+          onSelected: () => unawaited(_rerunAnswer(index)),
+        ),
+      HoldMenuAction(
+        label: 'Copy',
+        icon: AppIcons.copy,
+        onSelected: () =>
+            unawaited(Clipboard.setData(ClipboardData(text: message.text))),
+      ),
+    ];
+  }
+
+  /// Asks to be told whether to go on, when changing a message takes later
+  /// ones with it.
+  Future<bool> _confirmDropping(int index, String action) async {
+    final int after = _controller.messagesAfter(index);
+    if (after == 0) return true;
+    final bool? confirmed = await showDialog<bool>(
+      context: context,
+      builder: (BuildContext context) => AlertDialog(
+        title: Text(action),
+        content: Text(
+          after == 1
+              ? 'The message after it will be removed from this chat.'
+              : 'The $after messages after it will be removed from this chat.',
+        ),
+        actions: <Widget>[
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(false),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.of(context).pop(true),
+            child: Text(action),
+          ),
+        ],
+      ),
+    );
+    return confirmed == true && mounted;
+  }
+
+  Future<void> _rerunAnswer(int index) async {
+    if (!await _confirmDropping(index, 'Run again')) return;
+    await _controller.rerunAnswer(index);
+  }
+
+  Future<void> _editQuestion(int index) async {
+    final List<StudyMessage> messages = _controller.messages;
+    if (index >= messages.length) return;
+    final String? edited = await showDialog<String>(
+      context: context,
+      builder: (BuildContext context) =>
+          _EditQuestionDialog(initial: messages[index].text),
+    );
+    if (edited == null || edited.trim().isEmpty || !mounted) return;
+    if (edited.trim() == messages[index].text.trim()) return;
+    if (!await _confirmDropping(index, 'Send edit')) return;
+    await _controller.editQuestion(index, edited);
+  }
+
   void _openMarkedPaper() {
     final paper = _controller.testPaperSource;
     if (paper == null) return;
@@ -1020,6 +1131,61 @@ class _StudyDeskScreenState extends State<StudyDeskScreen> {
         ),
       );
     }
+  }
+}
+
+/// Where a question is changed before it is asked again.
+class _EditQuestionDialog extends StatefulWidget {
+  const _EditQuestionDialog({required this.initial});
+
+  final String initial;
+
+  @override
+  State<_EditQuestionDialog> createState() => _EditQuestionDialogState();
+}
+
+class _EditQuestionDialogState extends State<_EditQuestionDialog> {
+  late final TextEditingController _text = TextEditingController(
+    text: widget.initial,
+  );
+
+  @override
+  void dispose() {
+    _text.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AlertDialog(
+      title: const Text('Edit your question'),
+      content: SizedBox(
+        width: 480,
+        child: TextField(
+          key: const ValueKey<String>('study-edit-question'),
+          controller: _text,
+          autofocus: true,
+          minLines: 2,
+          maxLines: 8,
+          textInputAction: TextInputAction.newline,
+        ),
+      ),
+      actions: <Widget>[
+        TextButton(
+          onPressed: () => Navigator.of(context).pop(),
+          child: const Text('Cancel'),
+        ),
+        ListenableBuilder(
+          listenable: _text,
+          builder: (BuildContext context, Widget? _) => FilledButton(
+            onPressed: _text.text.trim().isEmpty
+                ? null
+                : () => Navigator.of(context).pop(_text.text),
+            child: const Text('Send'),
+          ),
+        ),
+      ],
+    );
   }
 }
 

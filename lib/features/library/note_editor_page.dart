@@ -403,6 +403,38 @@ class _NoteEditorPageState extends State<NoteEditorPage> {
     _chargeDocument();
   }
 
+  /// The save made as this page closes, which a late answer is added after.
+  Future<void>? _closingSave;
+
+  /// Where an answer is written when it arrives after the note was closed: it
+  /// goes in the note as it was saved, beside the question it answers.
+  late final Future<void> Function(Map<String, Object?> session)
+  _retiredAiSaver = _makeRetiredAiSaver();
+
+  Future<void> Function(Map<String, Object?> session) _makeRetiredAiSaver() {
+    // Taken now: this page is gone by the time the answer comes.
+    final NoteRepository repository = widget.repository;
+    final String noteId = widget.note.id;
+    final void Function(NoteEntry note, NoteContent content)? onSaved =
+        widget.onSaved;
+    return (Map<String, Object?> session) async {
+      try {
+        await _closingSave;
+      } on Object {
+        // The note's own save failing leaves what is read below as it was.
+      }
+      final NoteContent stored = await repository.loadNote(noteId);
+      final NoteContent updated = NoteContent(
+        stored.pages,
+        aiSession: session,
+        isImportedPdf: stored.isImportedPdf,
+        recordings: stored.recordings,
+      );
+      final NoteEntry saved = await repository.saveNote(noteId, updated);
+      onSaved?.call(saved, updated);
+    };
+  }
+
   /// Materialize the shared clipboard after the first frame. Do not clean
   /// assets against the loaded snapshot: imports/edits may already have
   /// started by the time this asynchronous work finishes.
@@ -487,7 +519,7 @@ class _NoteEditorPageState extends State<NoteEditorPage> {
     _uncoverLimit?.cancel();
     _preview?.dispose();
     // Read the pages before they go; the save finishes on its own.
-    _autosaver?.flush();
+    _closingSave = _autosaver?.flush();
     _autosaver?.dispose();
     final NoteDocument? document = _document;
     if (document != null) {
@@ -556,6 +588,7 @@ class _NoteEditorPageState extends State<NoteEditorPage> {
         toolbarShown: widget.toolbarShown,
         toolbarLayout: widget.toolbarLayout,
         stylusActions: widget.stylusActions,
+        onAiSessionRetired: _retiredAiSaver,
         initialNotationEnabled: widget.initialNotationEnabled,
         assetReader: _readAsset,
         onPageShown: _uncover,

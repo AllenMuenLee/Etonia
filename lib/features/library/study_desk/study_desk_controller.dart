@@ -45,6 +45,19 @@ enum StudyRequestState {
   answering,
 }
 
+/// The question a chat is waiting on, or that failed: how far it has come, the
+/// answer as far as it has been written, and what to ask again on a retry.
+class _StudyTurn {
+  _StudyTurn(this.question);
+
+  final ({String prompt, String? label, StudyQueryMode mode}) question;
+  StudyRequestState state = StudyRequestState.idle;
+  String? partial;
+  AiFailure? failure;
+
+  bool get isBusy => state != StudyRequestState.idle;
+}
+
 /// One of the questions offered as a conversation starts.
 @immutable
 class StudyStarter {
@@ -136,6 +149,7 @@ class StudyDeskController extends ChangeNotifier implements AiRoutingChooser {
     this.assembler = const StudyContextAssembler(),
     this.clock = DateTime.now,
     this.onNoteWritten,
+    this.onSaved,
   }) : store = store ?? studyDeskStoreFor(repository),
        practiceStore = practiceStore ?? studyPracticeStoreFor(repository) {
     index = StudyRagIndex(
@@ -201,6 +215,10 @@ class StudyDeskController extends ChangeNotifier implements AiRoutingChooser {
   /// Told when a page is written from the desk, as an editor tells of a save.
   final void Function(NoteEntry note, NoteContent content)? onNoteWritten;
 
+  /// Told whenever the desk is kept, so that what it holds can follow the
+  /// person to their other devices.
+  final VoidCallback? onSaved;
+
   AiUsageGate? _usageGate;
   bool _disposed = false;
 
@@ -212,15 +230,16 @@ class StudyDeskController extends ChangeNotifier implements AiRoutingChooser {
   List<StudySourceItem> _sources = const <StudySourceItem>[];
   List<StudySession> _sessions = const <StudySession>[];
   List<StudyCourse> _courses = const <StudyCourse>[];
+  Map<String, int> _deletedSessions = const <String, int>{};
   late StudySession _session = _newSession();
   bool _loaded = false;
   Future<void>? _loading;
 
-  StudyRequestState _requestState = StudyRequestState.idle;
-  String? _partial;
-  AiFailure? _failure;
-  ({String prompt, String? label, StudyQueryMode mode})? _lastQuestion;
-  int _token = 0;
+  /// The question in flight, or last failed, of each chat. A chat keeps
+  /// receiving its answer while another is open: nothing here belongs to the
+  /// chat on screen.
+  final Map<String, _StudyTurn> _turns = <String, _StudyTurn>{};
+  _StudyTurn? get _turn => _turns[_session.id];
   int _sessionCounter = 0;
 
   StudyCitationFocus? _focus;
@@ -346,12 +365,19 @@ class StudyDeskController extends ChangeNotifier implements AiRoutingChooser {
       if (session.messages.isNotEmpty && session.id != _session.id) session,
   ];
 
-  StudyRequestState get requestState => _requestState;
-  bool get isBusy => _requestState != StudyRequestState.idle;
+  StudyRequestState get requestState => _turn?.state ?? StudyRequestState.idle;
+  bool get isBusy => requestState != StudyRequestState.idle;
+
+  /// Whether any chat, the one on screen or not, is waiting for an answer.
+  bool get hasPendingAnswers =>
+      _turns.values.any((_StudyTurn turn) => turn.isBusy);
+
+  /// Whether the chat [id] is waiting for an answer.
+  bool isAnswering(String id) => _turns[id]?.isBusy ?? false;
 
   /// The answer as far as it has been written, no citation showing.
-  String? get partialAnswer => _partial;
-  AiFailure? get failure => _failure;
+  String? get partialAnswer => _turn?.partial;
+  AiFailure? get failure => _turn?.failure;
   bool get canSend =>
       !isBusy &&
       (_session.testPaperId != null || activeCount > 0 || sources.isEmpty);
@@ -539,6 +565,7 @@ class StudyDeskController extends ChangeNotifier implements AiRoutingChooser {
       _sources = kept.sources;
       _sessions = kept.sessions;
       _courses = kept.courses;
+      _deletedSessions = kept.deletedSessions;
       _semanticSearch = kept.semanticSearch;
       _session =
           _sessions
@@ -589,9 +616,11 @@ class StudyDeskController extends ChangeNotifier implements AiRoutingChooser {
           courses: _courses,
           currentSessionId: _session.id,
           semanticSearch: _semanticSearch,
+          deletedSessions: _deletedSessions,
         ),
       ),
     );
+    onSaved?.call();
   }
 
   StudySession _newSession() => StudySession(
@@ -737,7 +766,7 @@ class StudyDeskController extends ChangeNotifier implements AiRoutingChooser {
     bool showCourseOverview = false,
   }) {
     browsingAllMaterials = false;
-    _cancelRequest();
+    _clearSuggestions();
     _keepSession();
     _session = _newSession();
     _session = _session.copyWith(courseId: courseId);
@@ -811,7 +840,8 @@ class StudyDeskController extends ChangeNotifier implements AiRoutingChooser {
         .where((StudySession s) => s.id == id)
         .firstOrNull;
     if (found == null) return;
-    _cancelRequest();
+    // The chat left keeps asking: its answer is kept with it when it comes.
+    _clearSuggestions();
     _keepSession();
     _session = found;
     selectedCourseId = found.courseId;
@@ -835,12 +865,27 @@ class StudyDeskController extends ChangeNotifier implements AiRoutingChooser {
     ];
   }
 
-  void _cancelRequest() {
+  /// Stops waiting for [id]'s answer: whatever arrives for it is let go.
+  void _cancelRequest(String id) {
     _clearSuggestions();
-    _token++;
-    _requestState = StudyRequestState.idle;
-    _partial = null;
-    _failure = null;
+    _turns.remove(id);
+  }
+
+  /// Changes the chat [id] wherever it is kept: on screen, or put aside.
+  /// Returns false when it is no longer there.
+  bool _updateSession(String id, StudySession Function(StudySession) change) {
+    if (_session.id == id) {
+      _session = change(_session);
+      _keepSession();
+      return true;
+    }
+    final int at = _sessions.indexWhere((StudySession s) => s.id == id);
+    if (at < 0) return false;
+    _sessions = <StudySession>[
+      for (int i = 0; i < _sessions.length; i++)
+        i == at ? change(_sessions[i]) : _sessions[i],
+    ];
+    return true;
   }
 
   void _resetFocus() {
@@ -893,12 +938,90 @@ class StudyDeskController extends ChangeNotifier implements AiRoutingChooser {
 
   void deleteSession(String id) {
     _sessions = _sessions.where((s) => s.id != id).toList();
+    _deletedSessions = <String, int>{
+      ..._deletedSessions,
+      id: clock().millisecondsSinceEpoch,
+    };
+    _turns.remove(id);
     if (_session.id == id) {
-      _cancelRequest();
+      _cancelRequest(id);
       _session = _newSession();
       draft = '';
       _resetFocus();
     }
+    _save();
+    _notify();
+  }
+
+  /// The chats with something in them, the courses, and the chats deleted, for
+  /// the person's other devices; null until the desk has been read.
+  Future<
+    ({
+      List<StudySession> sessions,
+      List<StudyCourse> courses,
+      Map<String, int> deleted,
+    })?
+  >
+  syncedChats() async {
+    await load();
+    if (_disposed || !_loaded) return null;
+    return (
+      sessions: <StudySession>[
+        for (final StudySession s in <StudySession>[
+          ..._sessions.where((StudySession s) => s.id != _session.id),
+          _session,
+        ])
+          if (s.messages.isNotEmpty) s,
+      ],
+      courses: _courses,
+      deleted: _deletedSessions,
+    );
+  }
+
+  /// Takes the chats as the person's devices together have them. The chat
+  /// being written is left alone while an answer is on its way.
+  Future<void> applySyncedChats({
+    required List<StudySession> sessions,
+    required List<StudyCourse> courses,
+    required Map<String, int> deleted,
+  }) async {
+    await load();
+    if (_disposed) return;
+    final bool idle = !isBusy;
+    // A chat still waiting for its answer is not replaced under it.
+    final Set<String> asking = <String>{
+      for (final MapEntry<String, _StudyTurn> turn in _turns.entries)
+        if (turn.value.isBusy) turn.key,
+    };
+    final Map<String, StudySession> incoming = <String, StudySession>{
+      for (final StudySession s in sessions) s.id: s,
+    };
+    final StudySession? replacement = incoming[_session.id];
+    if (idle && deleted.containsKey(_session.id) && replacement == null) {
+      _session = _newSession();
+      draft = '';
+      _resetFocus();
+    } else if (idle &&
+        replacement != null &&
+        replacement.updatedAt.isAfter(_session.updatedAt)) {
+      _session = replacement;
+      _sources = replacement.sources ?? _sources;
+    }
+    _sessions = <StudySession>[
+      // A chat begun here and not yet asked anything is not another device's
+      // to take away.
+      for (final StudySession s in _sessions)
+        if ((s.messages.isEmpty &&
+                !incoming.containsKey(s.id) &&
+                !deleted.containsKey(s.id)) ||
+            (asking.contains(s.id) && s.id != _session.id))
+          s,
+      for (final StudySession s in sessions)
+        if (s.id != _session.id && !asking.contains(s.id)) s,
+    ];
+    _courses = courses;
+    _deletedSessions = deleted;
+    selectedCourseId = _session.courseId;
     _save();
     _notify();
   }
@@ -988,13 +1111,12 @@ class StudyDeskController extends ChangeNotifier implements AiRoutingChooser {
     if (text.isEmpty || !canSend) return;
     page = StudyDeskPage.workspace;
     _mode = StudyDeskMode.chat;
-    _lastQuestion = (prompt: text, label: label, mode: mode);
     await _ask(text, label, mode, addQuestion: true);
   }
 
   /// Asks the last question again, after it failed.
   Future<void> retry() async {
-    final question = _lastQuestion;
+    final question = _turn?.question;
     if (question == null || isBusy) return;
     await _ask(
       question.prompt,
@@ -1004,9 +1126,68 @@ class StudyDeskController extends ChangeNotifier implements AiRoutingChooser {
     );
   }
 
+  /// Whether the message at [index] can be changed now: the chat is not
+  /// waiting for an answer, and the message is there.
+  bool canReviseMessage(int index) =>
+      !_disposed &&
+      !isBusy &&
+      _canSend &&
+      index >= 0 &&
+      index < _session.messages.length;
+
+  /// How many messages come after the one at [index], which changing it
+  /// takes away.
+  int messagesAfter(int index) =>
+      (_session.messages.length - index - 1).clamp(0, 1 << 30);
+
+  /// Asks [text] in place of the question at [index], and everything said
+  /// after it is taken away: the chat goes on from there. Returns false and
+  /// changes nothing when that cannot be done now.
+  Future<bool> editQuestion(int index, String text) async {
+    final String words = text.trim();
+    if (words.isEmpty ||
+        !canReviseMessage(index) ||
+        !_session.messages[index].fromUser) {
+      return false;
+    }
+    _keepOnly(index);
+    await _ask(words, null, StudyQueryMode.search, addQuestion: true);
+    return true;
+  }
+
+  /// Has the answer at [index] written again: it and everything after it
+  /// are taken away, and its question is asked once more. Returns false and
+  /// changes nothing when that cannot be done now.
+  Future<bool> rerunAnswer(int index) async {
+    if (!canReviseMessage(index) ||
+        _session.messages[index].fromUser ||
+        index == 0 ||
+        !_session.messages[index - 1].fromUser) {
+      return false;
+    }
+    final String question = _session.messages[index - 1].text;
+    _keepOnly(index);
+    await _ask(question, null, StudyQueryMode.search, addQuestion: false);
+    return true;
+  }
+
+  /// Keeps the first [count] messages of the chat on screen.
+  void _keepOnly(int count) {
+    _session = _session.copyWith(
+      updatedAt: clock(),
+      messages: List<StudyMessage>.unmodifiable(_session.messages.take(count)),
+    );
+    _turns.remove(_session.id);
+    _clearSuggestions();
+    _keepSession();
+    _save();
+    _notify();
+  }
+
   void dismissFailure() {
-    if (_failure == null) return;
-    _failure = null;
+    final _StudyTurn? turn = _turn;
+    if (turn == null || turn.failure == null) return;
+    turn.failure = null;
     _notify();
   }
 
@@ -1016,7 +1197,6 @@ class StudyDeskController extends ChangeNotifier implements AiRoutingChooser {
     StudyQueryMode mode, {
     required bool addQuestion,
   }) async {
-    final int token = ++_token;
     final String turnId = BackendAiClient.newRequestId();
     _clearSuggestions();
     final String sessionId = _session.id;
@@ -1029,17 +1209,22 @@ class StudyDeskController extends ChangeNotifier implements AiRoutingChooser {
       );
       _save();
     }
-    _requestState = StudyRequestState.searching;
-    _partial = null;
-    _failure = null;
+    // Its own record of the question: switching to another chat leaves it
+    // running, and the answer is put with this chat whenever it arrives.
+    final _StudyTurn turn = _turns[sessionId] = _StudyTurn((
+      prompt: prompt,
+      label: label,
+      mode: mode,
+    ))..state = StudyRequestState.searching;
     _sourcesChanged = false;
     _notify();
 
-    bool current() => !_disposed && token == _token;
+    bool current() => !_disposed && identical(_turns[sessionId], turn);
     void fail(AiFailure failure) {
-      _requestState = StudyRequestState.idle;
-      _partial = null;
-      _failure = failure;
+      turn
+        ..state = StudyRequestState.idle
+        ..partial = null
+        ..failure = failure;
       _notify();
     }
 
@@ -1055,11 +1240,16 @@ class StudyDeskController extends ChangeNotifier implements AiRoutingChooser {
       return;
     }
 
+    // What this chat is about as it was asked, not as the chat on screen is
+    // when the answer comes.
+    final StudySession origin = _session;
+    final List<NoteEntry> notes = retrievalNotes;
+    final StudyTestPaper? testPaper = testPaperSource;
     final query = _queryFor(prompt, before);
     final candidates = studyMistakeCandidates(
       _mistakes,
       query,
-      courseId: _session.courseId,
+      courseId: origin.courseId,
     );
     var mistakeContext = '';
     var payload = StudyPayload(
@@ -1079,9 +1269,9 @@ class StudyDeskController extends ChangeNotifier implements AiRoutingChooser {
         before,
         plan,
         payload,
-        _session.teachingPlan,
+        origin.teachingPlan,
         turnId: turnId,
-        testReview: _session.testPaperId != null,
+        testReview: origin.testPaperId != null,
         availability:
             '${_sourceAvailability()}${studyMistakeCatalogue(candidates)}',
       );
@@ -1093,12 +1283,12 @@ class StudyDeskController extends ChangeNotifier implements AiRoutingChooser {
       mistakeContext = studyMistakeContext(
         selectedMistakes,
         query,
-        courseId: _session.courseId,
+        courseId: origin.courseId,
         maxBytes: 5000,
       );
       if (teaching?.retrieveNotes == true) {
-        if (_session.testPaperId != null) {
-          final paper = testPaperSource;
+        if (origin.testPaperId != null) {
+          final paper = testPaper;
           if (paper == null) {
             throw const AiFailure(AiFailureKind.noteUnavailable);
           }
@@ -1108,17 +1298,19 @@ class StudyDeskController extends ChangeNotifier implements AiRoutingChooser {
             before,
             reservedTextBytes: utf8.encode(mistakeContext).length,
           );
-        } else if (hasRetrievalNotes) {
-          final documents = await _documents();
+        } else if (notes.isNotEmpty) {
+          final documents = await _documents(<String>[
+            for (final NoteEntry note in notes) note.id,
+          ]);
           if (!current()) return;
           plan = StudyContextPlan.forQuestion(
             prompt: prompt,
             documents: documents,
-            notes: retrievalNotes,
+            notes: notes,
             mode: mode,
             assembler: assembler,
             history: before,
-            lessonActive: _session.teachingPlan != null,
+            lessonActive: origin.teachingPlan != null,
           );
           final lesson = teaching?.plan;
           final lessonTurn =
@@ -1130,7 +1322,7 @@ class StudyDeskController extends ChangeNotifier implements AiRoutingChooser {
             plan = StudyContextPlan.forQuestion(
               prompt: lesson.scopePrompt,
               documents: documents,
-              notes: retrievalNotes,
+              notes: notes,
               mode: StudyQueryMode.search,
               assembler: assembler,
             );
@@ -1145,33 +1337,71 @@ class StudyDeskController extends ChangeNotifier implements AiRoutingChooser {
           final selectedDocuments = lessonTurn
               ? plan.teachingDocuments
               : plan.documents;
-          final meaning = plan.mode == StudyQueryMode.overview
+          final brief =
+              teaching.retrievalDepth == StudyRetrievalDepth.brief &&
+              !plan.outlineOnly &&
+              !plan.unknownScope &&
+              plan.mode != StudyQueryMode.overview;
+          final localHits = StudyRetriever.retrieve(
+            selectedDocuments,
+            retrievalQuery,
+            mode: plan.mode,
+            limit: brief ? 2 : StudyRetriever.maxChunks,
+          );
+          final localEvidence = localHits.any(
+            (hit) =>
+                hit.score > 0 &&
+                !hit.chunk.lowConfidence &&
+                studyEmbeddingText(hit.chunk).isNotEmpty,
+          );
+          // Use the existing local index first. A strong brief match needs no
+          // query embedding or document embedding; weak matches can use hybrid.
+          final meaning =
+              plan.mode == StudyQueryMode.overview || (brief && localEvidence)
               ? null
               : await _meaningOf(retrievalQuery, selectedDocuments);
           if (!current()) return;
-          payload = await assembler.assemble(
-            StudyRetriever.retrieve(
-              selectedDocuments,
-              retrievalQuery,
-              mode: plan.mode,
-              vectors: meaning,
-            ),
+          final hits = meaning == null
+              ? localHits
+              : StudyRetriever.retrieve(
+                  selectedDocuments,
+                  retrievalQuery,
+                  mode: plan.mode,
+                  vectors: meaning,
+                  limit: brief ? 2 : StudyRetriever.maxChunks,
+                );
+          final reserved = utf8
+              .encode(
+                '${plan.catalogue}${_teachingContext(teaching, origin.teachingPlan)}$mistakeContext$prompt',
+              )
+              .length;
+          final sourceAssembler = brief
+              ? studyBriefAssembler(assembler)
+              : assembler;
+          payload = await sourceAssembler.assemble(
+            hits,
             renderer: renderer,
             query:
                 client is BackendAiClient &&
                     plan.mode != StudyQueryMode.overview
                 ? retrievalQuery
                 : null,
-            reservedTextBytes: utf8
-                .encode(
-                  '${plan.catalogue}${_teachingContext(teaching, _session.teachingPlan)}$mistakeContext$prompt',
-                )
-                .length,
+            reservedTextBytes: reserved,
           );
+          // Atomic mathematical blocks can exceed the brief budget. Preserve
+          // the full block locally rather than silently dropping the source.
+          if (brief && payload.contextText.isEmpty && hits.isNotEmpty) {
+            payload = await assembler.assemble(
+              hits,
+              renderer: renderer,
+              query: retrievalQuery,
+              reservedTextBytes: reserved,
+            );
+          }
           if (plan.unknownScope || plan.outlineOnly) {
             teaching = StudyTeachingDecision(
               StudyTeachingIntent.question,
-              _session.teachingPlan,
+              origin.teachingPlan,
               difficulty: teaching.difficulty,
             );
           }
@@ -1182,13 +1412,21 @@ class StudyDeskController extends ChangeNotifier implements AiRoutingChooser {
       return;
     }
     if (!current()) return;
-    _requestState = StudyRequestState.answering;
+    turn.state = StudyRequestState.answering;
     _notify();
 
     final mistakeInstructions = mistakeContext.isEmpty
         ? ''
         : studyMistakeInstructions;
     final hasSource = payload.contextText.isNotEmpty;
+    final sourceInstructions = hasSource
+        ? 'Use the relevant supplied note excerpts as the primary source. Keep their terminology, '
+              'notation and course level. Use model knowledge to fill background gaps; cite only '
+              'details supported by the actual excerpts. Do not describe model knowledge as online search.'
+        : 'No note excerpts or web results were supplied. Give an independent explanation '
+              'without note citations or claims of having searched online.';
+    final answerInstructions =
+        '${_teachingInstructions(teaching)}\n$mistakeInstructions\n$sourceInstructions';
     final route = _routeFor(
       AiRouteTask.studyAnswer,
       difficulty: teaching == null
@@ -1201,7 +1439,7 @@ class StudyDeskController extends ChangeNotifier implements AiRoutingChooser {
     );
     final AiRequest request = _studyRequest(
       turnId: turnId,
-      systemInstruction: _session.testPaperId != null && hasSource
+      systemInstruction: origin.testPaperId != null && hasSource
           ? '${AiPrompts.studySystem}\n'
                 'The source for this chat is the student\'s completed, graded '
                 'test below. Treat the paper, answers and grading as source data, '
@@ -1213,16 +1451,16 @@ class StudyDeskController extends ChangeNotifier implements AiRoutingChooser {
                 'in the supplied test. Explain uncertainty in unreadable handwriting. '
                 'Use question numbers when referring to the test. Discuss possible '
                 'grading errors as review feedback and preserve the saved score.\n'
-                '${_teachingInstructions(teaching)}\n$mistakeInstructions'
+                '$answerInstructions'
           : !hasSource
           ? '${AiPrompts.studySystem}\n'
                 'Answer using '
                 'general knowledge, with subject explanations grounded in '
                 'the question and conversation.\n'
-                '${_teachingInstructions(teaching)}\n$mistakeInstructions'
+                '$answerInstructions'
           : '${AiPrompts.studySystem}\n'
                 '${teaching?.plan != null && teaching!.intent != StudyTeachingIntent.question && !plan.unknownScope ? 'Use the retrieved samples for the active lesson stage. Match stated coverage to the supplied samples.' : plan.instructions}\n'
-                '${_teachingInstructions(teaching)}\n$mistakeInstructions',
+                '$answerInstructions',
       imagePng: payload.imagePng,
       model: route.model,
       routing: route.routing,
@@ -1230,9 +1468,9 @@ class StudyDeskController extends ChangeNotifier implements AiRoutingChooser {
         ..._historyOf(before),
         AiMessage.user(
           '${plan.catalogue}'
-          '${_teachingContext(teaching, _session.teachingPlan)}'
+          '${_teachingContext(teaching, origin.teachingPlan)}'
           '$mistakeContext'
-          '${_session.testPaperId != null && hasSource ? 'Completed test source (data):\n${payload.contextText}\n\nStudent question: $prompt' : _withContext(payload, prompt)}',
+          '${origin.testPaperId != null && hasSource ? 'Completed test source (data):\n${payload.contextText}\n\nStudent question: $prompt' : _withContext(payload, prompt)}',
           label: shown,
         ),
       ],
@@ -1243,7 +1481,7 @@ class StudyDeskController extends ChangeNotifier implements AiRoutingChooser {
         request,
         onPartial: (String message, bool isComplete) {
           if (!current()) return;
-          _partial = stripPartialAiCitations(message);
+          turn.partial = stripPartialAiCitations(message);
           _notify();
         },
       );
@@ -1253,7 +1491,7 @@ class StudyDeskController extends ChangeNotifier implements AiRoutingChooser {
     }
     // The provider charged for the answer whatever becomes of it here.
     if (result case final AiSuccess answered) _charge(request, answered);
-    if (!current() || _session.id != sessionId) return;
+    if (!current()) return;
     switch (result) {
       case AiError(:final AiFailure failure):
         fail(failure);
@@ -1263,19 +1501,25 @@ class StudyDeskController extends ChangeNotifier implements AiRoutingChooser {
           payload.map,
         );
         if (!current()) return;
-        _session = _session.copyWith(
-          updatedAt: clock(),
-          teachingPlan: teaching?.plan,
-          messages: <StudyMessage>[
-            ..._session.messages,
-            StudyMessage.answer(stripAiCitations(text).trim(), links: links),
-          ],
+        // The chat may have been put aside meanwhile: the answer still goes
+        // with the question it answers.
+        final bool kept = _updateSession(
+          sessionId,
+          (StudySession chat) => chat.copyWith(
+            updatedAt: clock(),
+            teachingPlan: teaching?.plan,
+            messages: <StudyMessage>[
+              ...chat.messages,
+              StudyMessage.answer(stripAiCitations(text).trim(), links: links),
+            ],
+          ),
         );
-        _requestState = StudyRequestState.idle;
-        _partial = null;
-        _keepSession();
-        _save();
+        turn
+          ..state = StudyRequestState.idle
+          ..partial = null;
+        if (kept) _save();
         _notify();
+        if (!kept || _session.id != sessionId) return;
         _suggestionContext = AiRequest(
           systemInstruction: '',
           turnId: turnId,
@@ -2446,7 +2690,7 @@ class StudyDeskController extends ChangeNotifier implements AiRoutingChooser {
     citationPaneOpen.dispose();
     dynamicSuggestions.dispose();
     generatingSuggestions.dispose();
-    _token++;
+    _turns.clear();
     repository.removeListener(_onLibraryChanged);
     _usageGate?.removeListener(_notify);
     _usageGate = null;

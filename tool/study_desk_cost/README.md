@@ -77,3 +77,10 @@ uses saved answers without network calls and recognizes fenced JSON exactly as
 the production transport does. The smoke verifies retrieval behavior, rather
 than qualifying a new cheaper model route. See
 [`docs/study_desk_credit_drop_investigation.md`](../../docs/study_desk_credit_drop_investigation.md).
+
+The notes-first follow-up has a separate capture and result file. Set
+`STUDY_CAPTURE_OUTPUT` to `build/study_desk_cost_audit/captured_requests_notes_first.json`,
+capture as above, then add `--notes-first` to the paid gate evaluator command.
+It checks 18 cases and writes `notes_first_results.json`; the completed corrected
+run cost $0.006115. It preserves the earlier twelve-case result file.
+See [notes-first policy](../../docs/study_desk_notes_first_retrieval.md).

@@ -9,14 +9,16 @@ import '../../../app/theme/app_icons.dart';
 import '../../../shared/widgets/pressable.dart';
 import 'study_desk_controller.dart';
 
-/// The chat beside the page a citation points at, with a handle between them to
+//// The chat beside the page a citation points at, with a handle between them to
 /// drag.
 ///
-/// [trailing] comes and goes: it opens out from the handle while the chat gives
-/// way, and closes back into it, and is let go once closed. It is laid out
-/// once, at the width it will rest at, and only revealed, so what is on it
-/// (a page being written on, a marked paper) is not laid out again for each
-/// frame; the chat, which is, keeps its state throughout and is never rebuilt.
+/// [trailing] comes and goes. Neither side is ever laid out for each frame of
+/// that: the chat takes the width it will rest at (or all of it, as the page
+/// closes) the moment it changes, once, and the page is laid out once at its
+/// own resting width. All that moves after is a reveal: the page slides in
+/// from the edge over the room it is to take, and slides out again over what
+/// it uncovers, and is let go once shut. Text that wraps, maths that is
+/// typeset, and a page being written on are not measured sixty times a second.
 class StudyResizableSplit extends StatefulWidget {
   const StudyResizableSplit({super.key, required this.leading, this.trailing});
 
@@ -116,6 +118,7 @@ class _StudyResizableSplitState extends State<StudyResizableSplit>
         );
       });
       final Widget? shown = _shown;
+      final bool open = widget.trailing != null;
       final Widget handle = Semantics(
         label: 'Resize graded paper',
         value: paperWidth(0),
@@ -162,89 +165,108 @@ class _StudyResizableSplitState extends State<StudyResizableSplit>
           ),
         ),
       );
-      return AnimatedBuilder(
-        animation: _reveal,
-        builder: (context, _) {
-          final double r = shown == null ? 0 : _reveal.value.clamp(0.0, 1.0);
-          final double handleWidth = _handleWidth * r;
-          final double trailingWidth = restingTrailing * r;
-          final double leadingWidth = total - handleWidth - trailingWidth;
-          return Row(
-            crossAxisAlignment: CrossAxisAlignment.stretch,
-            children: [
-              SizedBox(width: leadingWidth, child: widget.leading),
-              if (shown != null) ...[
-                SizedBox(
-                  width: handleWidth,
-                  child: ClipRect(
-                    child: OverflowBox(
-                      alignment: AlignmentDirectional.center,
-                      minWidth: _handleWidth,
-                      maxWidth: _handleWidth,
-                      child: handle,
-                    ),
-                  ),
-                ),
-                SizedBox(
-                  width: trailingWidth,
-                  child: ClipRect(
-                    child: OverflowBox(
-                      alignment: AlignmentDirectional.centerStart,
-                      minWidth: restingTrailing,
-                      maxWidth: restingTrailing,
-                      child: ExcludeSemantics(
-                        excluding: widget.trailing == null,
-                        child: IgnorePointer(
-                          ignoring: widget.trailing == null,
-                          child: FadeTransition(opacity: _reveal, child: shown),
-                        ),
+      final double leadingWidth = open ? restingLeading : total;
+      final double restingRegion = _handleWidth + restingTrailing;
+      // Laid out once, as the page's width: it is slid, never resized.
+      final Widget trailingRegion = shown == null
+          ? const SizedBox.shrink()
+          : SizedBox(
+              width: restingRegion,
+              child: Row(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  handle,
+                  Expanded(
+                    child: ExcludeSemantics(
+                      excluding: !open,
+                      child: IgnorePointer(
+                        ignoring: !open,
+                        child: RepaintBoundary(child: shown),
                       ),
                     ),
                   ),
-                ),
-              ],
-            ],
-          );
-        },
+                ],
+              ),
+            );
+      return Stack(
+        clipBehavior: Clip.hardEdge,
+        children: [
+          PositionedDirectional(
+            start: 0,
+            top: 0,
+            bottom: 0,
+            width: leadingWidth,
+            child: widget.leading,
+          ),
+          if (shown != null)
+            AnimatedBuilder(
+              animation: _reveal,
+              child: trailingRegion,
+              builder: (context, child) {
+                final double r = _reveal.value.clamp(0.0, 1.0);
+                return PositionedDirectional(
+                  end: 0,
+                  top: 0,
+                  bottom: 0,
+                  width: restingRegion * r,
+                  child: ClipRect(
+                    child: OverflowBox(
+                      alignment: AlignmentDirectional.centerStart,
+                      minWidth: restingRegion,
+                      maxWidth: restingRegion,
+                      child: FadeTransition(opacity: _reveal, child: child),
+                    ),
+                  ),
+                );
+              },
+            ),
+        ],
       );
     },
   );
 }
 
-/// The history beside the desk: it slides open from the edge, pushing the desk
-/// over, and slides shut. Laid out once, at its own width, and revealed; let
-/// go (and with it everything it was holding) once shut.
-class StudySidebarSlot extends StatefulWidget {
-  const StudySidebarSlot({
+/// The desk with the history beside it: the history slides in from the edge and
+/// pushes the desk over, and slides out again.
+///
+/// The history is laid out once, at its own width, and the desk once, at the
+/// width it will rest at (all of it, as the history closes), the moment it
+/// opens or shuts: from then on both only move, which costs no layout, where
+/// resizing the desk for each frame would measure the chat's text and maths
+/// again each time. What the history held is let go once it is shut.
+class StudySidebarLayout extends StatefulWidget {
+  const StudySidebarLayout({
     super.key,
     required this.open,
     required this.width,
-    required this.child,
+    required this.sidebar,
+    required this.main,
     this.dividerColor,
   });
 
   final bool open;
   final double width;
-  final Widget child;
+  final Widget sidebar;
+  final Widget main;
   final Color? dividerColor;
 
   @override
-  State<StudySidebarSlot> createState() => _StudySidebarSlotState();
+  State<StudySidebarLayout> createState() => _StudySidebarLayoutState();
 }
 
-class _StudySidebarSlotState extends State<StudySidebarSlot>
+class _StudySidebarLayoutState extends State<StudySidebarLayout>
     with SingleTickerProviderStateMixin {
   late final AnimationController _run = AnimationController(
     vsync: this,
     value: widget.open ? 1 : 0,
   )..addStatusListener(_settled);
-  late Widget? _shown = widget.open ? widget.child : null;
+  late Widget? _shown = widget.open ? widget.sidebar : null;
 
   @override
-  void didUpdateWidget(StudySidebarSlot oldWidget) {
+  void didUpdateWidget(StudySidebarLayout oldWidget) {
     super.didUpdateWidget(oldWidget);
     if (widget.open) {
-      _shown = widget.child;
+      _shown = widget.sidebar;
       if (!oldWidget.open || _run.value < 1) {
         if (MediaQuery.disableAnimationsOf(context)) {
           unawaited(
@@ -298,41 +320,60 @@ class _StudySidebarSlotState extends State<StudySidebarSlot>
   @override
   Widget build(BuildContext context) {
     final Widget? shown = _shown;
-    if (shown == null) return const SizedBox.shrink();
     final Color? divider = widget.dividerColor;
-    return AnimatedBuilder(
-      animation: _run,
-      builder: (context, _) {
-        final double r = _run.value.clamp(0.0, 1.0);
-        return SizedBox(
-          width: widget.width * r,
-          child: DecoratedBox(
-            position: DecorationPosition.foreground,
-            decoration: BoxDecoration(
-              border: divider == null
-                  ? null
-                  : BorderDirectional(
-                      end: BorderSide(color: divider, width: AppSizes.hairline),
-                    ),
-            ),
-            child: ClipRect(
-              child: OverflowBox(
-                alignment: AlignmentDirectional.centerEnd,
-                minWidth: widget.width,
-                maxWidth: widget.width,
-                child: ExcludeSemantics(
-                  excluding: !widget.open,
-                  child: IgnorePointer(
-                    ignoring: !widget.open,
-                    child: FadeTransition(
-                      opacity: _run,
-                      child: RepaintBoundary(child: shown),
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final double total = constraints.maxWidth;
+        final double mainWidth = widget.open ? total - widget.width : total;
+        return AnimatedBuilder(
+          animation: _run,
+          child: widget.main,
+          builder: (context, main) {
+            final double r = _run.value.clamp(0.0, 1.0);
+            return Stack(
+              clipBehavior: Clip.hardEdge,
+              children: [
+                // The history comes first, as it reads, and they never overlap.
+                if (shown != null)
+                  PositionedDirectional(
+                    start: -widget.width * (1 - r),
+                    top: 0,
+                    bottom: 0,
+                    width: widget.width,
+                    child: ExcludeSemantics(
+                      excluding: !widget.open,
+                      child: IgnorePointer(
+                        ignoring: !widget.open,
+                        child: FadeTransition(
+                          opacity: _run,
+                          child: DecoratedBox(
+                            position: DecorationPosition.foreground,
+                            decoration: BoxDecoration(
+                              border: divider == null
+                                  ? null
+                                  : BorderDirectional(
+                                      end: BorderSide(
+                                        color: divider,
+                                        width: AppSizes.hairline,
+                                      ),
+                                    ),
+                            ),
+                            child: RepaintBoundary(child: shown),
+                          ),
+                        ),
+                      ),
                     ),
                   ),
+                PositionedDirectional(
+                  start: shown == null ? 0 : widget.width * r,
+                  top: 0,
+                  bottom: 0,
+                  width: mainWidth,
+                  child: main!,
                 ),
-              ),
-            ),
-          ),
+              ],
+            );
+          },
         );
       },
     );

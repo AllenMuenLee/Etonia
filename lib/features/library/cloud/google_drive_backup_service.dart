@@ -10,6 +10,7 @@ import '../note_content.dart';
 import '../note_repository.dart';
 import 'cloud_sync_state.dart';
 import 'google_drive_client.dart';
+import 'synced_settings.dart';
 
 Map<String, Object> _encodeAndHashJson(Map<String, Object?> json) {
   final Uint8List bytes = Uint8List.fromList(utf8.encode(jsonEncode(json)));
@@ -149,6 +150,7 @@ class SyncSummary {
     this.deletedForGood = 0,
     this.updated = 0,
     this.keptBoth = 0,
+    this.settingsUpdated = 0,
   });
 
   /// When the other device made the backup.
@@ -162,6 +164,9 @@ class SyncSummary {
 
   /// Notes changed on both devices: the other version came in beside.
   final int keptBoth;
+
+  /// Settings changed here (chats, AI, fonts) as they were set elsewhere.
+  final int settingsUpdated;
 
   /// How many notes changed here.
   int get changedNotes =>
@@ -186,6 +191,11 @@ class SyncSummary {
 /// brought here, unless this device changed the note later. A note deleted
 /// elsewhere moves to Recently Deleted here; one is deleted for good here
 /// only when the log says it was deleted for good.
+///
+/// The person's settings (chats, configured AI, handwriting fonts) travel
+/// with it when [settings] is given: one `settings-<hash>.json` in `notes`,
+/// which the manifest names as its `settings`, taken in before anything is
+/// sent and sent after the notes.
 class GoogleDriveBackupService {
   GoogleDriveBackupService({
     required this.client,
@@ -193,6 +203,7 @@ class GoogleDriveBackupService {
     CloudStateStore? state,
     this.flushPendingSaves,
     this.isNoteOpen,
+    this.settings,
     this.destinationName = 'Google Drive',
     this.orphanGrace = Duration.zero,
     DateTime Function()? clock,
@@ -254,6 +265,9 @@ class GoogleDriveBackupService {
   final GoogleDriveClient client;
   final NoteRepository repository;
   final CloudStateStore state;
+
+  /// The settings that go with the library; null for a backup of notes alone.
+  final SyncedSettings? settings;
 
   /// Saves edits still waiting for their autosave, before anything is
   /// read.
@@ -344,6 +358,8 @@ class GoogleDriveBackupService {
     final _Edits edits = previous == null
         ? _Edits()
         : await _pullEdits(previous, check: check, onProgress: onProgress);
+    // Settings changed elsewhere come here too, before this device's are sent.
+    if (previous != null) await _pullSettings(previous);
     if (sync.changedHere || edits.changedHere) {
       folders = await repository.allFolders();
       notes = await _allNotes(folders);
@@ -480,6 +496,13 @@ class GoogleDriveBackupService {
     ];
     check();
 
+    check();
+    final _SettingsRecord? settingsRecord = await _sendSettings(
+      notesFolder.id,
+      previous?.settings,
+    );
+    check();
+
     report(manifestName);
     final DateTime exportedAt = _clock();
     final Map<String, Object?> manifest = <String, Object?>{
@@ -494,6 +517,7 @@ class GoogleDriveBackupService {
       ],
       'notes': noteRecords,
       'trash': trashRecords,
+      if (settingsRecord != null) 'settings': settingsRecord.toJson(),
       'log': <String, Object?>{
         for (final MapEntry<String, _LogEntry> entry in sync.log.entries)
           entry.key: entry.value.toJson(),
@@ -512,6 +536,7 @@ class GoogleDriveBackupService {
     // What no snapshot refers to any more, left by an older backup or by
     // one that was stopped, goes to the trash.
     final Set<String> keep = <String>{
+      ?settingsRecord?.fileId,
       for (final Map<String, Object?> note in <Map<String, Object?>>[
         ...noteRecords,
         ...trashRecords,
@@ -616,6 +641,7 @@ class GoogleDriveBackupService {
       onProgress: onProgress,
       broughtIn: sync.broughtIn,
     );
+    final int settingsUpdated = await _pullSettings(remote);
     await _saveSynced(sync.synced);
     await _saveVersions(edits.versions);
     // A note left as it was, being open, is tried again on the next launch.
@@ -631,6 +657,7 @@ class GoogleDriveBackupService {
       deletedForGood: sync.deletedForGood,
       updated: edits.updated,
       keptBoth: edits.keptBoth,
+      settingsUpdated: settingsUpdated,
     );
   }
 
@@ -725,6 +752,7 @@ class GoogleDriveBackupService {
       downloaded,
       mode: mode,
     );
+    await _pullSettings(manifest);
     // Notes now as the log has them are in step with it.
     final Map<String, NoteStatus> synced = await _syncedStatuses(manifest.log);
     final Set<String> live = <String>{
@@ -1195,6 +1223,53 @@ class GoogleDriveBackupService {
     return jsonEncode(names);
   }
 
+  /// Brings in the settings [manifest] names, and how many sections changed
+  /// here. A backup whose settings cannot be had still syncs its notes; the
+  /// next backup sends them again.
+  Future<int> _pullSettings(_Manifest manifest) async {
+    final SyncedSettings? synced = settings;
+    final _SettingsRecord? record = manifest.settings;
+    if (synced == null || record == null) return 0;
+    try {
+      return await synced.import(
+        await _download(record.fileId, record.hash, 'your settings'),
+      );
+    } on GoogleDriveBackupException {
+      return 0;
+    } on GoogleDriveException {
+      return 0;
+    }
+  }
+
+  /// Puts this device's settings in [folderId], unless the backup has them
+  /// as they are, and says where they are; null when there are none.
+  Future<_SettingsRecord?> _sendSettings(
+    String folderId,
+    _SettingsRecord? previous,
+  ) async {
+    final Uint8List? bytes = await settings?.export();
+    if (bytes == null) return null;
+    final String hash = _hashBytes(bytes);
+    final String name = 'settings-${hash.substring(0, 16)}.json';
+    // Named by what they hold, so a copy already there is the one wanted,
+    // and a half-sent one never stands in for it.
+    for (final GoogleDriveItem item in await client.listChildren(folderId)) {
+      if (!item.isFolder && item.name == name) {
+        if (previous?.hash == hash && previous?.fileId == item.id) {
+          return previous;
+        }
+        return _SettingsRecord(fileId: item.id, hash: hash);
+      }
+    }
+    final GoogleDriveItem sent = await client.uploadFile(
+      parentId: folderId,
+      name: name,
+      bytes: bytes,
+      mimeType: 'application/json',
+    );
+    return _SettingsRecord(fileId: sent.id, hash: hash);
+  }
+
   /// The folder here at [path], as [_pathOf] gives it, made as needed.
   Future<String?> _folderAt(String path) async {
     String? parentId;
@@ -1523,6 +1598,7 @@ class _Manifest {
     required this.notes,
     required this.trash,
     required this.log,
+    this.settings,
   });
 
   factory _Manifest.fromJson(String fileId, Map<String, Object?> json) {
@@ -1551,6 +1627,7 @@ class _Manifest {
       ],
       notes: notes,
       trash: trash,
+      settings: _SettingsRecord.tryParse(json['settings']),
       log: log is Map<String, Object?>
           ? <String, _LogEntry>{
               for (final MapEntry<String, Object?> entry in log.entries)
@@ -1589,11 +1666,36 @@ class _Manifest {
   /// The latest status of every note, by id, deleted for good or not.
   final Map<String, _LogEntry> log;
 
+  /// Where the person's settings are; null in a backup made without them.
+  final _SettingsRecord? settings;
+
   /// [notes], then [trash].
   List<_NoteRecord> get allNotes => <_NoteRecord>[
     ...notes.values,
     ...trash.values,
   ];
+}
+
+/// The settings file a manifest names, and the hash it must have.
+class _SettingsRecord {
+  const _SettingsRecord({required this.fileId, required this.hash});
+
+  static _SettingsRecord? tryParse(Object? json) {
+    if (json is! Map<String, Object?>) return null;
+    final Object? fileId = json['fileId'];
+    final Object? hash = json['hash'];
+    return fileId is String && hash is String
+        ? _SettingsRecord(fileId: fileId, hash: hash)
+        : null;
+  }
+
+  final String fileId;
+  final String hash;
+
+  Map<String, Object?> toJson() => <String, Object?>{
+    'fileId': fileId,
+    'hash': hash,
+  };
 }
 
 /// Where a note is, as the backup's log has it.

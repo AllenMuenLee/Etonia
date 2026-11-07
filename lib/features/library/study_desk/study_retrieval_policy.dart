@@ -1,7 +1,16 @@
 import 'dart:convert';
 
 import 'practice/study_mistakes.dart';
-import 'study_rag_index.dart' show studyTokens;
+import 'study_rag_index.dart' show studyTokens, StudyContextAssembler;
+
+/// Most introductions need a small source anchor, not the full evidence budget.
+StudyContextAssembler studyBriefAssembler(StudyContextAssembler normal) =>
+    StudyContextAssembler(
+      maxTextTokens: normal.maxTextTokens > 800 ? 800 : normal.maxTextTokens,
+      maxPictures: normal.maxPictures > 1 ? 1 : normal.maxPictures,
+      maxSvgCharacters: 0,
+      maxTotalBytes: normal.maxTotalBytes,
+    );
 
 /// A bounded local index for the model's relevance decision, not full records.
 List<StudyMistake> studyMistakeCandidates(

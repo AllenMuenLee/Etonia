@@ -156,6 +156,7 @@ class EditorScreen extends StatefulWidget {
     this.toolbarShown,
     this.toolbarLayout,
     this.stylusActions,
+    this.onAiSessionRetired,
     this.initialNotationEnabled = true,
     this.tabs,
     this.aiCanvasConfig = const AiCanvasConfig(),
@@ -321,6 +322,11 @@ class EditorScreen extends StatefulWidget {
 
   /// Hardware stylus shortcuts shared across notes.
   final ValueNotifier<StylusActionBindings>? stylusActions;
+
+  /// Saves the assistant's conversations with the note, as they are once an
+  /// answer that was still on its way when the editor closed has arrived.
+  /// Without it, such an answer is let go.
+  final Future<void> Function(Map<String, Object?> session)? onAiSessionRetired;
 
   /// Whether the assistant may draw on the note when the editor opens. On,
   /// unless turned off in the editor's settings.
@@ -3237,8 +3243,14 @@ class EditorScreenState extends State<EditorScreen>
       ..removeListener(_onPalettePlacementChanged)
       ..dispose();
     _ruler.dispose();
-    _ai.dispose();
-    _ownedAiClient?.close();
+    // An answer still on its way is waited for, and saved with the note: the
+    // client it is coming through is closed once it has.
+    final AiClient? ownedClient = _ownedAiClient;
+    _ai.retire(
+      session: _document.aiSession,
+      save: widget.onAiSessionRetired,
+      release: ownedClient?.close,
+    );
     _editorFocus.dispose();
     _ownedDocument?.dispose();
     _tool

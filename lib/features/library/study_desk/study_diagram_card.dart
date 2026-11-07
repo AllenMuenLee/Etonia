@@ -5,6 +5,7 @@ import '../../../app/theme/app_tokens.dart';
 import 'study_desk_controller.dart';
 import 'study_desk_models.dart';
 import 'study_desk_widgets.dart';
+import 'study_view_cache.dart';
 
 /// A crop of the actual note, loaded once while this lazy transcript row lives.
 class StudyDiagramCard extends StatefulWidget {
@@ -24,9 +25,35 @@ class StudyDiagramCard extends StatefulWidget {
 
 class _StudyDiagramCardState extends State<StudyDiagramCard> {
   late int _epoch = widget.controller.pagesEpoch;
+  late Object? _key = _keyOf();
   late Future<Uint8List?> _crop = _load();
 
-  Future<Uint8List?> _load() async {
+  /// What this crop is made from: the same card, shown again as the chat is
+  /// scrolled or another chat is opened, is not cut out again.
+  Object? _keyOf() {
+    final citation = widget.citation;
+    final bounds = citation.bounds;
+    if (bounds == null || bounds.isEmpty) return null;
+    return (
+      identityHashCode(widget.controller.repository),
+      citation.noteId,
+      widget.controller.revisionOf(citation.noteId),
+      citation.pageIndex,
+      bounds.left,
+      bounds.top,
+      bounds.right,
+      bounds.bottom,
+      citation.kind,
+    );
+  }
+
+  Future<Uint8List?> _load() {
+    final Object? key = _key;
+    if (key == null) return Future<Uint8List?>.value();
+    return StudyViewCache.crops.load(key, _render);
+  }
+
+  Future<Uint8List?> _render() async {
     final citation = widget.citation;
     final controller = widget.controller;
     try {
@@ -68,6 +95,7 @@ class _StudyDiagramCardState extends State<StudyDiagramCard> {
         _epoch != widget.controller.pagesEpoch ||
         oldWidget.controller != widget.controller) {
       _epoch = widget.controller.pagesEpoch;
+      _key = _keyOf();
       _crop = _load();
     }
   }
@@ -84,6 +112,9 @@ class _StudyDiagramCardState extends State<StudyDiagramCard> {
             height: 150,
             child: FutureBuilder<Uint8List?>(
               future: _crop,
+              initialData: _key == null
+                  ? null
+                  : StudyViewCache.crops.peek(_key!),
               builder: (context, snap) => AnimatedSwitcher(
                 duration: AppMotion.resolve(context, AppMotion.fadeIn),
                 switchInCurve: AppMotion.fadeInCurve,

@@ -1077,6 +1077,77 @@ class AiAssistantController extends ChangeNotifier implements AiRoutingChooser {
     return true;
   }
 
+  /// Whether the message at [index] of the open conversation can be changed
+  /// now: nothing is on its way, a message can be sent, and it is there.
+  bool canReviseMessage(int index) =>
+      canSend && index >= 0 && index < messages.length;
+
+  /// How many messages come after the one at [index], which changing it takes
+  /// away.
+  int messagesAfter(int index) =>
+      (messages.length - index - 1).clamp(0, messages.length);
+
+  /// Sends [text] in place of the user's message at [index]: it and
+  /// everything after it are taken away, and the conversation goes on from
+  /// there. Returns false, and changes nothing, when it is blank, is not a
+  /// user's message, or cannot be sent now.
+  ///
+  /// What earlier answers drew on the note stays there: only the words go.
+  bool editMessage(int index, String text) {
+    final String words = text.trim();
+    if (words.isEmpty ||
+        !canReviseMessage(index) ||
+        messages[index].role != AiRole.user) {
+      return false;
+    }
+    _truncate(_conversation!, index);
+    return _submit(AiMessage.user(words));
+  }
+
+  /// Has the answer at [index] written again: it and everything after it are
+  /// taken away, and the question before it is asked once more. Returns
+  /// false, and changes nothing, when it is not an answer to a user's message
+  /// or cannot be sent now.
+  ///
+  /// What the answer drew on the note stays there, and a new answer may draw
+  /// again beside it.
+  bool rerunMessage(int index) {
+    if (!canReviseMessage(index) ||
+        index == 0 ||
+        messages[index].role != AiRole.model ||
+        messages[index - 1].role != AiRole.user) {
+      return false;
+    }
+    final _AiConversation conversation = _conversation!;
+    _truncate(conversation, index);
+    if (shownPage?.call() case final Object page) {
+      conversation.pages.add(page);
+    }
+    _start(conversation);
+    _session.notify();
+    return true;
+  }
+
+  /// Keeps the first [count] messages of [conversation], with nothing
+  /// failed or half written.
+  void _truncate(_AiConversation conversation, int count) {
+    conversation.messages = List<AiMessage>.unmodifiable(
+      conversation.messages.take(count),
+    );
+    conversation.links.removeWhere(
+      (int message, AiAnswerLinks _) => message >= count,
+    );
+    conversation
+      ..requestState = AiRequestState.idle
+      ..failure = null
+      ..partialAnswer = null
+      ..partialAnswerComplete = false;
+    final AiParagraphFocus? focus = _paragraphFocus.value;
+    if (focus != null && focus.ref.message >= count) {
+      _paragraphFocus.value = null;
+    }
+  }
+
   bool _submit(AiMessage message) {
     if (_disposed || message.text.isEmpty || !canSend) {
       return false;
@@ -1197,7 +1268,7 @@ class AiAssistantController extends ChangeNotifier implements AiRoutingChooser {
         : null;
     // The model sees the ink as it is now: its own earlier notes, and what
     // the user has written since, where the conversation's ink lies.
-    if (inkInArea != null) {
+    if (inkInArea != null && !_retired) {
       final AiSelectionContext context = conversation.context;
       await _refresh(conversation);
       if (_disposed || token != conversation.requestToken) {
@@ -1206,7 +1277,7 @@ class AiAssistantController extends ChangeNotifier implements AiRoutingChooser {
       image = context.image ?? image;
     }
     NoteImage? noteImage;
-    if (notationAuthorized) {
+    if (notationAuthorized && !_retired) {
       final AiNoteCapture? capture = captureNote;
       if (capture == null) {
         finish(const AiError(AiFailure(AiFailureKind.noteUnavailable)));
@@ -1221,6 +1292,12 @@ class AiAssistantController extends ChangeNotifier implements AiRoutingChooser {
       if (_disposed || token != conversation.requestToken) {
         return;
       }
+    }
+    if (_retired) {
+      // The note went before the question could be sent with what it needs
+      // from the note: the editor is gone, and nothing can be asked of it.
+      finish(const AiError(AiFailure(AiFailureKind.interrupted)));
+      return;
     }
     // Drawing also gets the selection as page-coordinate SVG, for exact
     // positions; the clean PNG beside it is what the model reads.
@@ -1271,7 +1348,8 @@ class AiAssistantController extends ChangeNotifier implements AiRoutingChooser {
     final String noSelection = isPage ? AiPrompts.noSelection : '';
     final NoteImage? liveNote = previewNotation == null ? null : noteImage;
     void endPreview() {
-      if (liveNote != null && !_disposed) {
+      // Nothing is shown once the note is gone: its editor is not there.
+      if (liveNote != null && !_disposed && !_retired) {
         endNotationPreview?.call(liveNote);
       }
     }
@@ -1319,7 +1397,7 @@ class AiAssistantController extends ChangeNotifier implements AiRoutingChooser {
         onNotation: liveNote == null
             ? null
             : (String svg) {
-                if (_disposed) return;
+                if (_disposed || _retired) return;
                 if (token == conversation.requestToken &&
                     _notationEnabled &&
                     revocations == _notationRevocations) {
@@ -1369,6 +1447,10 @@ class AiAssistantController extends ChangeNotifier implements AiRoutingChooser {
     NoteImage? noteImage,
   }) {
     if (_disposed || token != conversation.requestToken) {
+      return;
+    }
+    if (_retired) {
+      _finishRetired(conversation, result);
       return;
     }
     final String? streamed = conversation.partialAnswerComplete
@@ -1637,7 +1719,7 @@ class AiAssistantController extends ChangeNotifier implements AiRoutingChooser {
     _AiConversation conversation,
     AiSelectionContext context,
   ) async {
-    if (_disposed || context._image == null) {
+    if (_disposed || _retired || context._image == null) {
       return;
     }
     final Set<Stroke> notation = conversation.notationStrokes;
@@ -1820,6 +1902,145 @@ class AiAssistantController extends ChangeNotifier implements AiRoutingChooser {
     if (!_disposed && identical(context, _conversation?.context)) {
       notifyListeners();
     }
+  }
+
+  /// Whether the editor has gone while an answer was still on its way. The
+  /// request carries on without it, and its answer is saved with the note.
+  bool _retired = false;
+  Map<String, Object?>? _retiredSession;
+  Future<void> Function(Map<String, Object?> session)? _retiredSave;
+  VoidCallback? _retiredRelease;
+
+  /// Where each conversation sits in [_retiredSession], by its place in the
+  /// list [toJson] wrote.
+  final Map<_AiConversation, int> _retiredAt =
+      Map<_AiConversation, int>.identity();
+
+  /// Lets go of the controller when the editor goes, without losing an answer
+  /// still on its way: [session] is what [toJson] wrote for the note as it was
+  /// left. Each request in flight carries on, and its answer is added to
+  /// [session], which is handed to [save] once the last has come in; nothing
+  /// is drawn on the note, which is no longer open. [release] is called when
+  /// the controller has finished, for what it needed that is the caller's.
+  ///
+  /// Without an answer to wait for, this is [dispose].
+  void retire({
+    required Map<String, Object?>? session,
+    required Future<void> Function(Map<String, Object?> session)? save,
+    VoidCallback? release,
+  }) {
+    if (_disposed || _retired) return;
+    final bool waiting = _conversations.any(
+      (_AiConversation conversation) =>
+          conversation.requestState == AiRequestState.sending &&
+          conversation.messages.isNotEmpty,
+    );
+    if (!waiting || session == null || save == null) {
+      dispose();
+      release?.call();
+      return;
+    }
+    _retired = true;
+    // A copy to add answers to: the note's own last save holds the original.
+    final Object? saved = session['conversations'];
+    _retiredSession = <String, Object?>{
+      ...session,
+      if (saved is List)
+        'conversations': <Object?>[
+          for (final Object? conversation in saved)
+            if (conversation is Map<String, Object?>)
+              <String, Object?>{
+                ...conversation,
+                'messages': List<Object?>.of(
+                  (conversation['messages'] as List?) ?? const <Object?>[],
+                ),
+              }
+            else
+              conversation,
+        ],
+    };
+    _retiredSave = save;
+    _retiredRelease = release;
+    int at = 0;
+    for (final _AiConversation conversation in _conversations) {
+      if (conversation.messages.isNotEmpty) {
+        _retiredAt[conversation] = at++;
+      }
+    }
+    _usageGate?.removeListener(_onGateChanged);
+    _presentation = null;
+    _paragraphFocus.value = null;
+  }
+
+  /// Puts an answer that arrived after the editor went into the saved
+  /// session, and finishes once none is left to wait for.
+  void _finishRetired(_AiConversation conversation, AiResult result) {
+    final Object? list = _retiredSession?['conversations'];
+    final int? at = _retiredAt[conversation];
+    final Object? saved = list is List && at != null && at < list.length
+        ? list[at]
+        : null;
+    if (saved is Map<String, Object?>) {
+      switch (result) {
+        case AiSuccess(:final String text, :final AiNotation? notation):
+          // The note is closed, so a drawing cannot be added: the words are
+          // kept, and the drawing says it was not applied.
+          final AiMessage reply = AiMessage.model(
+            text,
+            notation: notation,
+            notationStatus: notation == null
+                ? AiNotationStatus.none
+                : AiNotationStatus.notAppliedRevoked,
+          );
+          final Object? messages = saved['messages'];
+          if (messages is List<Object?>) {
+            messages.add(<String, Object?>{
+              'role': AiRole.model.name,
+              'wire': reply.wireText,
+              'status': reply.notationStatus.name,
+            });
+            saved.remove('failure');
+          }
+          conversation.messages = List<AiMessage>.unmodifiable(<AiMessage>[
+            ...conversation.messages,
+            reply,
+          ]);
+          conversation.requestState = AiRequestState.idle;
+        case AiError(:final AiFailure failure):
+          saved['failure'] = failure.kind.name;
+          conversation.requestState = AiRequestState.failed;
+          conversation.failure = failure;
+      }
+    }
+    conversation
+      ..partialAnswer = null
+      ..partialAnswerComplete = false;
+    if (conversation.requestState == AiRequestState.sending) {
+      conversation.requestState = AiRequestState.failed;
+    }
+    final bool waiting = _conversations.any(
+      (_AiConversation other) => other.requestState == AiRequestState.sending,
+    );
+    if (waiting) return;
+    final Map<String, Object?>? session = _retiredSession;
+    final Future<void> Function(Map<String, Object?>)? save = _retiredSave;
+    final VoidCallback? release = _retiredRelease;
+    _retiredSession = null;
+    _retiredSave = null;
+    _retiredRelease = null;
+    dispose();
+    if (session == null || save == null) {
+      release?.call();
+      return;
+    }
+    unawaited(
+      save(session)
+          .catchError((Object _) {
+            // The note keeps the conversation as it was left: the question,
+            // to be asked again with Retry.
+          })
+          .whenComplete(() => release?.call()),
+    );
   }
 
   @override

@@ -45,6 +45,8 @@ import 'cloud/google_drive_client.dart';
 import 'cloud/google_drive_sheet.dart';
 import 'cloud/google_sign_in_screen.dart';
 import 'cloud/icloud_drive_client.dart';
+import 'cloud/library_synced_settings.dart';
+import 'cloud/synced_settings.dart';
 import 'file_note_repository.dart';
 import 'library_dialogs.dart';
 import 'library_models.dart';
@@ -505,6 +507,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
     pdfRasterizer: widget.pdfRasterizer,
     clock: widget.clock,
     onNoteWritten: _onDeskWroteNote,
+    onSaved: _settingsChanged,
   )..load();
 
   /// Whether Recently Deleted is shown in place of a folder, and how many
@@ -595,6 +598,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
     client: _drive,
     repository: _repository,
     state: _cloudState,
+    settings: _syncedSettings,
     isNoteOpen: (String id) =>
         _openNotes.notes.any((NoteEntry note) => note.id == id),
     clock: widget.clock,
@@ -603,9 +607,70 @@ class _LibraryScreenState extends State<LibraryScreen> {
   late final AutoBackupScheduler _autoBackup = AutoBackupScheduler(
     backup: _backup,
     client: _drive,
-    library: _repository,
+    library: _libraryOrSettings,
     clock: widget.clock,
   );
+
+  /// Counts every change to what follows the person to their devices (chats,
+  /// configured AI, handwriting fonts), so that a backup is made for it.
+  final ValueNotifier<int> _settingsRevision = ValueNotifier<int>(0);
+
+  /// Changes to the library or to the settings: what a backup is for.
+  late final Listenable _libraryOrSettings = Listenable.merge(<Listenable>[
+    _repository,
+    _settingsRevision,
+  ]);
+
+  void _settingsChanged() {
+    if (!mounted) return;
+    _settingsRevision.value++;
+    unawaited(_destinations.backUpSoon());
+  }
+
+  /// The chats, the AI as configured and the handwriting fonts, kept the same
+  /// on every device that backs up to the same place. Both destinations share
+  /// one record of what has been synced, so choosing the other does not make
+  /// this device's settings look newer than they are.
+  late final SyncedSettings _syncedSettings = SyncedSettings(
+    sections: <SyncedSettingsSection>[
+      StudyChatsSection(() => _studyDesk, clock: widget.clock),
+      AiSettingsSection(() => _subscription),
+      HandwritingFontsSection(() => _storedHandwriting),
+    ],
+    state: switch (widget.repository) {
+      final FileNoteRepository files => FileCloudStateStore(
+        File('${files.directory.path}/settings_sync.json'),
+      ),
+      _ => InMemoryCloudStateStore(),
+    },
+    clock: widget.clock,
+  );
+
+  SubscriptionController? _watchedSubscription;
+  AiRoutingPreferences? _syncedRouting;
+  AiModelId? _syncedModel;
+
+  /// A change to the configured AI is one to send; credits spent are not.
+  void _onSubscriptionChanged() {
+    final SubscriptionController subscription = _subscription;
+    if (!subscription.isLoaded) return;
+    final bool first = _syncedRouting == null;
+    final bool changed =
+        subscription.routing != _syncedRouting ||
+        subscription.preferredModel != _syncedModel;
+    _syncedRouting = subscription.routing;
+    _syncedModel = subscription.preferredModel;
+    if (changed && !first) _settingsChanged();
+  }
+
+  void _watchSubscription() {
+    final SubscriptionController subscription = _subscription;
+    if (identical(subscription, _watchedSubscription)) return;
+    _watchedSubscription?.removeListener(_onSubscriptionChanged);
+    _watchedSubscription = subscription..addListener(_onSubscriptionChanged);
+    _syncedRouting = null;
+    _onSubscriptionChanged();
+  }
 
   /// Google Drive and, on Apple devices, iCloud: the person chooses one.
   late final BackupDestinations _destinations = BackupDestinations(
@@ -638,6 +703,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
           },
       isNoteOpen: (String id) =>
           _openNotes.notes.any((NoteEntry note) => note.id == id),
+      settings: _syncedSettings,
       destinationName: BackupDestination.iCloud.label,
       // iCloud brings another device's files here in no particular order.
       orphanGrace: const Duration(days: 7),
@@ -650,7 +716,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
       scheduler: AutoBackupScheduler(
         backup: backup,
         client: client,
-        library: _repository,
+        library: _libraryOrSettings,
         clock: widget.clock,
       ),
     );
@@ -688,8 +754,13 @@ class _LibraryScreenState extends State<LibraryScreen> {
 
   SubscriptionController? _ownedSubscription;
 
+  /// The writer's hand as kept, and the same, telling of every write: the
+  /// one everything but a backup uses.
+  late HandwritingProfileStore _storedHandwriting = handwritingProfileStoreFor(
+    widget.repository,
+  );
   late HandwritingProfileStore _handwritingProfileStore =
-      handwritingProfileStoreFor(widget.repository);
+      ObservedHandwritingProfileStore(_storedHandwriting, _settingsChanged);
 
   SubscriptionController get _subscription =>
       widget.subscription ??
@@ -754,6 +825,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
     _reload();
     _repository.purgeTrash(_trashKeeps);
     unawaited(_destinations.start());
+    _watchSubscription();
     _openNotes.addListener(_backUpLeftNotes);
     AppErrorMonitor.instance.addListener(_backUpAfterError);
     // Saved edits from a run that crashed may not have reached the backup.
@@ -807,7 +879,13 @@ class _LibraryScreenState extends State<LibraryScreen> {
       // As connecting from the backup section does, so backups may run.
       await _destinations.googleConnected();
     }
-    unawaited(_pullFromBackup());
+    // The fonts of a device already set up come first, so that a new one is
+    // not asked to make its own while they are on their way.
+    await _pullFromBackup().timeout(
+      const Duration(seconds: 4),
+      onTimeout: () {},
+    );
+    if (!mounted) return;
     final HandwritingCalibrationState? state = await _handwritingProfileStore
         .read();
     if (state == null && mounted) await _calibrateHandwriting();
@@ -862,7 +940,11 @@ class _LibraryScreenState extends State<LibraryScreen> {
         rasterizer: widget.pdfRasterizer,
         maxBytes: widget.cacheBudget.homeBytes,
       );
-      _handwritingProfileStore = handwritingProfileStoreFor(widget.repository);
+      _storedHandwriting = handwritingProfileStoreFor(widget.repository);
+      _handwritingProfileStore = ObservedHandwritingProfileStore(
+        _storedHandwriting,
+        _settingsChanged,
+      );
       _studyDesk.dispose();
       _studyDesk = _makeStudyDesk();
       _studyDeskOpen = false;
@@ -870,6 +952,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
       _listings.clear();
       _reload();
     }
+    if (oldWidget.subscription != widget.subscription) _watchSubscription();
     if (oldWidget.sharedDocuments != widget.sharedDocuments) {
       _sharedDocumentsSubscription?.cancel();
       _sharedDocumentsSubscription = widget.sharedDocuments.incomingDocuments
@@ -903,6 +986,8 @@ class _LibraryScreenState extends State<LibraryScreen> {
     _openNotes.dispose();
     _editorAtRest.dispose();
     _destinations.dispose();
+    _watchedSubscription?.removeListener(_onSubscriptionChanged);
+    _settingsRevision.dispose();
     if (_studyDeskBarsAway) SystemBars.showAll();
     _studyDesk.dispose();
     _ownedStudyClient?.close();
@@ -4049,14 +4134,8 @@ class _FolderPainter extends CustomPainter {
     );
     final Color backColor = isNeutral
         ? surface
-        : Color.alphaBlend(
-            tint.withValues(alpha: dark ? 0.62 : 0.55),
-            surface,
-          );
-    canvas.drawPath(
-      back,
-      Paint()..color = backColor,
-    );
+        : Color.alphaBlend(tint.withValues(alpha: dark ? 0.62 : 0.55), surface);
+    canvas.drawPath(back, Paint()..color = backColor);
     if (isNeutral && dividerColor != null) {
       canvas.drawPath(
         back,
@@ -4073,14 +4152,8 @@ class _FolderPainter extends CustomPainter {
     );
     final Color frontColor = isNeutral
         ? surface
-        : Color.alphaBlend(
-            tint.withValues(alpha: dark ? 0.86 : 0.78),
-            surface,
-          );
-    canvas.drawRRect(
-      front,
-      Paint()..color = frontColor,
-    );
+        : Color.alphaBlend(tint.withValues(alpha: dark ? 0.86 : 0.78), surface);
+    canvas.drawRRect(front, Paint()..color = frontColor);
     if (isNeutral && dividerColor != null) {
       canvas.drawRRect(
         front,

@@ -43,6 +43,7 @@ class _Embeddings implements StudyEmbedder {
 Map<String, Object?> decision({
   bool notes = false,
   List<int> mistakes = const [],
+  bool brief = false,
 }) => {
   'intent': 'question',
   'difficulty': 2,
@@ -50,6 +51,7 @@ Map<String, Object?> decision({
     'notes': notes,
     'mistakeIndices': mistakes,
     'query': notes ? 'force mass acceleration' : '',
+    'depth': brief ? 'brief' : 'full',
   },
 };
 
@@ -60,20 +62,25 @@ Future<
     _Embeddings embeddings,
   })
 >
-fixture(List<Object> decisions) async {
+fixture(
+  List<Object> decisions, {
+  String noteText =
+      'LECTURE_PRIVATE_BODY: Force equals mass times acceleration.',
+  String noteTitle = 'Physics',
+}) async {
   final repo = InMemoryNoteRepository();
-  final note = await repo.createNote(title: 'Physics');
+  final note = await repo.createNote(title: noteTitle);
   await repo.saveNote(
     note.id,
-    const NoteContent([
+    NoteContent([
       StoredPage(
-        setup: PageSetup(),
-        strokes: [],
+        setup: const PageSetup(),
+        strokes: const [],
         textElements: [
           NoteTextElement(
             id: 'text',
-            position: InkVector(20, 30),
-            text: 'LECTURE_PRIVATE_BODY: Force equals mass times acceleration.',
+            position: const InkVector(20, 30),
+            text: noteText,
           ),
         ],
       ),
@@ -148,6 +155,58 @@ List<Map<String, Object?>> taskCalls(
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
+  test(
+    'an introduction uses a small note anchor without paid embeddings on a local match',
+    () async {
+      final text = [
+        for (var i = 0; i < 45; i++)
+          'Force section $i: A force changes motion. Mass describes resistance to acceleration. '
+              'A larger applied force produces a larger acceleration for the same mass.',
+      ].join('\n\n');
+      final f = await fixture(
+        [decision(notes: true, brief: true)],
+        noteText: text,
+        noteTitle: 'Lecture 1',
+      );
+      await f.desk.send('Introduce force.');
+      final answer = taskCalls(f.calls, 'study.answer').single;
+      final prompt = answer['prompt']! as String;
+      final source = prompt
+          .split('help:\n\n')
+          .last
+          .split('\n\nQuestion: ')
+          .first;
+      expect(source, contains('[Source '));
+      expect(source, contains('Force section'));
+      expect(
+        StudyContextAssembler.estimateTokens(source),
+        lessThanOrEqualTo(800),
+      );
+      expect(answer['systemInstruction'], contains('primary source'));
+      expect(f.embeddings.calls, 0);
+      expect(f.desk.index.reads, 1);
+      expect(
+        taskCalls(f.calls, 'study.plan').single['prompt'],
+        isNot(contains('Force section')),
+      );
+    },
+  );
+  test(
+    'a brief budget expands locally when it would drop an intact mathematical block',
+    () async {
+      final text =
+          'Force = mass * acceleration. ${'This force law applies to a constant mass in an inertial reference frame. ' * 80}BOUNDARY_CONDITION_END';
+      final f = await fixture([
+        decision(notes: true, brief: true),
+      ], noteText: text);
+      await f.desk.send('Introduce force.');
+      final prompt =
+          taskCalls(f.calls, 'study.answer').single['prompt']! as String;
+      expect(prompt, contains('Force = mass * acceleration.'));
+      expect(prompt, contains('BOUNDARY_CONDITION_END'));
+      expect(f.embeddings.calls, 0);
+    },
+  );
   test(
     'each turn gets a fresh model decision before any note indexing or embedding',
     () async {
@@ -248,6 +307,12 @@ void main() {
         'query': '',
       },
       {'notes': true, 'mistakeIndices': <int>[], 'query': 'x' * 301},
+      {
+        'notes': true,
+        'mistakeIndices': <int>[],
+        'query': '',
+        'depth': 'unbounded',
+      },
     ]) {
       expect(
         StudyTeachingDecision.parse(

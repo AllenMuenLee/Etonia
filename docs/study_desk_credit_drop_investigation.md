@@ -1,5 +1,10 @@
 # Study Desk retrieval gate and free-credit investigation
 
+Follow-up: [notes-first teaching with a small source budget](study_desk_notes_first_retrieval.md)
+relaxes this initial gate for ordinary introductions and explanations. Such
+requests now prefer a brief relevant note check without needing an explicit
+“use my notes” phrase. The billing findings below remain historical evidence.
+
 Investigation: November 7, 2026. Production inspection used read-only SQL and
 numeric billing metadata. No production prompts, answers, notes, email addresses,
 or raw account identifiers were read. No balances, grants or historical charges

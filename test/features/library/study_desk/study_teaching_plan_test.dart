@@ -80,7 +80,7 @@ class _Router extends AiModelRouter {
           final value = jsonDecode(result.text) as Map<String, dynamic>;
           value.putIfAbsent(
             'retrieval',
-            () => {'notes': true, 'mistakeIndices': [], 'query': ''},
+            () => {'notes': true, 'mistakeIndices': <int>[], 'query': ''},
           );
           return AiSuccess(jsonEncode(value));
         } on Object {
@@ -195,7 +195,7 @@ void main() {
                     if (planCalls == 1) 'plan': lesson() else 'activeStep': 1,
                     'retrieval': {
                       'notes': false,
-                      'mistakeIndices': [],
+                      'mistakeIndices': <int>[],
                       'query': '',
                     },
                   })
@@ -672,6 +672,7 @@ void main() {
   test('late planning results cannot enter a different chat', () async {
     final router = _Router()..plannerGate = Completer<AiResult>();
     final desk = await fixture(router);
+    final original = desk.currentSession.id;
     final pending = desk.send('Teach algebra');
     while (router.requests.isEmpty) {
       await Future<void>.delayed(Duration.zero);
@@ -681,9 +682,13 @@ void main() {
       AiSuccess(jsonEncode({'intent': 'topic', 'plan': lesson()})),
     );
     await pending;
-    expect(router.answers, isEmpty);
+    expect(router.answers, hasLength(1));
     expect(desk.messages, isEmpty);
     expect(desk.currentSession.teachingPlan, isNull);
+    expect(
+      desk.allSessions.singleWhere((s) => s.id == original).teachingPlan,
+      isNotNull,
+    );
   });
 
   test('oversized sources request a scope before planning a lesson', () async {

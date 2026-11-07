@@ -9,6 +9,7 @@ import 'package:speech_to_text/speech_to_text.dart';
 
 import '../../../shared/widgets/processing.dart';
 import '../../../shared/widgets/etonia_mark.dart';
+import '../../../shared/widgets/hold_menu.dart';
 import '../../../app/theme/app_tokens.dart';
 import '../../../app/theme/app_icons.dart';
 import '../../../shared/widgets/app_controls.dart';
@@ -608,6 +609,88 @@ class _AiAssistantPanelState extends State<AiAssistantPanel> {
         (controller.selectionChanged ? 1 : 0);
   }
 
+  /// What holding the message at [index] offers, as things stand now.
+  List<HoldMenuAction> _messageActions(int index) {
+    final AiAssistantController controller = widget.controller;
+    final List<AiMessage> messages = controller.messages;
+    if (index >= messages.length) return const <HoldMenuAction>[];
+    final AiMessage message = messages[index];
+    final bool revisable = controller.canReviseMessage(index);
+    return <HoldMenuAction>[
+      if (revisable && message.role == AiRole.user)
+        HoldMenuAction(
+          label: 'Edit',
+          icon: AppIcons.rename,
+          onSelected: () => unawaited(_editMessage(index)),
+        ),
+      if (revisable &&
+          message.role == AiRole.model &&
+          index > 0 &&
+          messages[index - 1].role == AiRole.user)
+        HoldMenuAction(
+          label: 'Run again',
+          icon: AppIcons.restore,
+          onSelected: () => unawaited(_rerunMessage(index)),
+        ),
+      HoldMenuAction(
+        label: 'Copy',
+        icon: AppIcons.copy,
+        onSelected: () => unawaited(
+          Clipboard.setData(ClipboardData(text: message.displayText)),
+        ),
+      ),
+    ];
+  }
+
+  /// Asks whether to go on, when changing a message takes later ones with it.
+  Future<bool> _confirmDropping(int index, String action) async {
+    final int after = widget.controller.messagesAfter(index);
+    if (after == 0) return true;
+    final bool? confirmed = await showDialog<bool>(
+      context: context,
+      builder: (BuildContext context) => AlertDialog(
+        title: Text(action),
+        content: Text(
+          after == 1
+              ? 'The message after it will be removed from this chat. '
+                    'Notes it drew on the page stay.'
+              : 'The $after messages after it will be removed from this chat. '
+                    'Notes they drew on the page stay.',
+        ),
+        actions: <Widget>[
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(false),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.of(context).pop(true),
+            child: Text(action),
+          ),
+        ],
+      ),
+    );
+    return confirmed == true && mounted;
+  }
+
+  Future<void> _rerunMessage(int index) async {
+    if (!await _confirmDropping(index, 'Run again')) return;
+    widget.controller.rerunMessage(index);
+  }
+
+  Future<void> _editMessage(int index) async {
+    final List<AiMessage> messages = widget.controller.messages;
+    if (index >= messages.length) return;
+    final String? edited = await showDialog<String>(
+      context: context,
+      builder: (BuildContext context) =>
+          _EditMessageDialog(initial: messages[index].displayText),
+    );
+    if (edited == null || edited.trim().isEmpty || !mounted) return;
+    if (edited.trim() == messages[index].displayText.trim()) return;
+    if (!await _confirmDropping(index, 'Send edit')) return;
+    widget.controller.editMessage(index, edited);
+  }
+
   Widget _bodyItem(
     BuildContext context,
     AiAssistantController controller,
@@ -658,9 +741,14 @@ class _AiAssistantPanelState extends State<AiAssistantPanel> {
     if (messageIndex >= 0 && messageIndex < controller.messages.length) {
       return Padding(
         padding: const EdgeInsets.only(bottom: AppSpacing.sm),
-        child: _MessageBubble(
-          message: controller.messages[messageIndex],
-          answer: _answerLinking(controller, messageIndex),
+        // Held, a message offers to be changed: yours to be edited, the
+        // assistant's to be written again.
+        child: HoldMenu(
+          actions: () => _messageActions(messageIndex),
+          child: _MessageBubble(
+            message: controller.messages[messageIndex],
+            answer: _answerLinking(controller, messageIndex),
+          ),
         ),
       );
     }
@@ -752,6 +840,61 @@ class _AiAssistantPanelState extends State<AiAssistantPanel> {
       return const SizedBox(height: AppSizes.minTouchTarget * 2);
     }
     throw RangeError.index(index, controller.messages, 'index');
+  }
+}
+
+/// Where a message is changed before it is sent again.
+class _EditMessageDialog extends StatefulWidget {
+  const _EditMessageDialog({required this.initial});
+
+  final String initial;
+
+  @override
+  State<_EditMessageDialog> createState() => _EditMessageDialogState();
+}
+
+class _EditMessageDialogState extends State<_EditMessageDialog> {
+  late final TextEditingController _text = TextEditingController(
+    text: widget.initial,
+  );
+
+  @override
+  void dispose() {
+    _text.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AlertDialog(
+      title: const Text('Edit your message'),
+      content: SizedBox(
+        width: 420,
+        child: TextField(
+          key: const ValueKey<String>('ai-edit-message'),
+          controller: _text,
+          autofocus: true,
+          minLines: 2,
+          maxLines: 8,
+          textInputAction: TextInputAction.newline,
+        ),
+      ),
+      actions: <Widget>[
+        TextButton(
+          onPressed: () => Navigator.of(context).pop(),
+          child: const Text('Cancel'),
+        ),
+        ListenableBuilder(
+          listenable: _text,
+          builder: (BuildContext context, Widget? _) => FilledButton(
+            onPressed: _text.text.trim().isEmpty
+                ? null
+                : () => Navigator.of(context).pop(_text.text),
+            child: const Text('Send'),
+          ),
+        ),
+      ],
+    );
   }
 }
 

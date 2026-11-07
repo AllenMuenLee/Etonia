@@ -1,0 +1,170 @@
+{
+  "scope": "Synthetic retrieval gate behaviors, actual auto route; no production learner data or app credit charges; not a model qualification.",
+  "cases": 18,
+  "passed": 18,
+  "costMicro": 6115,
+  "results": [
+    {
+      "id": "greeting",
+      "passed": true,
+      "model": "haiku",
+      "effort": "high",
+      "inputTokens": 2066,
+      "outputTokens": 306,
+      "costMicro": 406
+    },
+    {
+      "id": "arithmetic",
+      "passed": true,
+      "model": "haiku",
+      "effort": "high",
+      "inputTokens": 2073,
+      "outputTokens": 272,
+      "costMicro": 180
+    },
+    {
+      "id": "general-definition",
+      "passed": true,
+      "model": "haiku",
+      "effort": "high",
+      "inputTokens": 2085,
+      "outputTokens": 446,
+      "costMicro": 268
+    },
+    {
+      "id": "formatting",
+      "passed": true,
+      "model": "haiku",
+      "effort": "high",
+      "inputTokens": 2123,
+      "outputTokens": 454,
+      "costMicro": 276
+    },
+    {
+      "id": "conversation-followup",
+      "passed": true,
+      "model": "haiku",
+      "effort": "high",
+      "inputTokens": 2129,
+      "outputTokens": 421,
+      "costMicro": 260
+    },
+    {
+      "id": "explicit-note-connection",
+      "passed": true,
+      "model": "haiku",
+      "effort": "high",
+      "inputTokens": 2088,
+      "outputTokens": 884,
+      "costMicro": 487
+    },
+    {
+      "id": "specific-note-review",
+      "passed": true,
+      "model": "haiku",
+      "effort": "high",
+      "inputTokens": 2083,
+      "outputTokens": 588,
+      "costMicro": 339
+    },
+    {
+      "id": "exact-past-error",
+      "passed": true,
+      "model": "haiku",
+      "effort": "high",
+      "inputTokens": 2072,
+      "outputTokens": 511,
+      "costMicro": 299
+    },
+    {
+      "id": "shared-error-mechanism",
+      "passed": true,
+      "model": "haiku",
+      "effort": "high",
+      "inputTokens": 2086,
+      "outputTokens": 577,
+      "costMicro": 334
+    },
+    {
+      "id": "broad-topic-not-a-match",
+      "passed": true,
+      "model": "haiku",
+      "effort": "high",
+      "inputTokens": 2079,
+      "outputTokens": 461,
+      "costMicro": 275
+    },
+    {
+      "id": "independent-topic",
+      "passed": true,
+      "model": "haiku",
+      "effort": "high",
+      "inputTokens": 2084,
+      "outputTokens": 1977,
+      "costMicro": 1033
+    },
+    {
+      "id": "completed-test-review",
+      "passed": true,
+      "model": "haiku",
+      "effort": "high",
+      "inputTokens": 1872,
+      "outputTokens": 657,
+      "costMicro": 352
+    },
+    {
+      "id": "introduce-with-relevant-notes",
+      "passed": true,
+      "model": "haiku",
+      "effort": "high",
+      "inputTokens": 2068,
+      "outputTokens": 416,
+      "costMicro": 251
+    },
+    {
+      "id": "generic-filename-introduction",
+      "passed": true,
+      "model": "haiku",
+      "effort": "high",
+      "inputTokens": 1888,
+      "outputTokens": 426,
+      "costMicro": 238
+    },
+    {
+      "id": "explain-without-explicit-note-request",
+      "passed": true,
+      "model": "haiku",
+      "effort": "high",
+      "inputTokens": 2070,
+      "outputTokens": 467,
+      "costMicro": 277
+    },
+    {
+      "id": "clearly-unrelated-introduction",
+      "passed": true,
+      "model": "haiku",
+      "effort": "high",
+      "inputTokens": 2072,
+      "outputTokens": 475,
+      "costMicro": 281
+    },
+    {
+      "id": "detailed-source-derivation",
+      "passed": true,
+      "model": "haiku",
+      "effort": "high",
+      "inputTokens": 2098,
+      "outputTokens": 472,
+      "costMicro": 282
+    },
+    {
+      "id": "explicit-independent-introduction",
+      "passed": true,
+      "model": "haiku",
+      "effort": "high",
+      "inputTokens": 2073,
+      "outputTokens": 466,
+      "costMicro": 277
+    }
+  ]
+}

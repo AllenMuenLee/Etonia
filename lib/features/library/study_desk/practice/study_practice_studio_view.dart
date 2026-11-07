@@ -246,9 +246,11 @@ class _StudyPracticeStudioViewState extends State<StudyPracticeStudioView> {
 
   @override
   Widget build(BuildContext context) {
-    return ListenableBuilder(
+    // Kept built behind the chat, it follows the controller only while it is
+    // the one in view.
+    return StudyScenedBuilder(
       listenable: _controller,
-      builder: (BuildContext context, Widget? _) {
+      builder: (BuildContext context) {
         final paper = _controller.testPapers
             .where((p) => p.id == _controller.activeTestPaperId)
             .firstOrNull;

@@ -642,9 +642,8 @@ class _StudyHistorySidebarState extends State<StudyHistorySidebar> {
                     : null,
               ),
               Expanded(
-                child: ListView(
-                  padding: const EdgeInsets.symmetric(horizontal: 8),
-                  children: [
+                child: _LazyRows(
+                  head: [
                     Padding(
                       padding: const EdgeInsets.only(left: 8),
                       child: Row(
@@ -695,21 +694,20 @@ class _StudyHistorySidebarState extends State<StudyHistorySidebar> {
                             ?.copyWith(color: colors.textSecondary),
                       ),
                     ),
-                    for (final entry in activity) entry.build(),
-                    if (activity.isEmpty)
-                      Padding(
-                        padding: const EdgeInsets.all(12),
-                        child: Text(
-                          _query.isEmpty
-                              ? 'Your work will appear here.'
-                              : 'No results',
-                          style: TextStyle(
-                            color: colors.textSecondary,
-                            fontSize: 12,
-                          ),
-                        ),
-                      ),
                   ],
+                  rows: [for (final entry in activity) entry.build],
+                  empty: Padding(
+                    padding: const EdgeInsets.all(12),
+                    child: Text(
+                      _query.isEmpty
+                          ? 'Your work will appear here.'
+                          : 'No results',
+                      style: TextStyle(
+                        color: colors.textSecondary,
+                        fontSize: 12,
+                      ),
+                    ),
+                  ),
                 ),
               ),
               Padding(
@@ -744,6 +742,30 @@ class _StudyHistorySidebarState extends State<StudyHistorySidebar> {
       ),
     ),
   ];
+}
+
+/// The history's list: the few rows at its head, then the work done, built
+/// only as they scroll into view (a long history costs what is on screen, not
+/// what is kept).
+class _LazyRows extends StatelessWidget {
+  const _LazyRows({required this.head, required this.rows, required this.empty});
+
+  final List<Widget> head;
+  final List<Widget Function()> rows;
+  final Widget empty;
+
+  @override
+  Widget build(BuildContext context) {
+    final int tail = rows.isEmpty ? 1 : rows.length;
+    return ListView.builder(
+      padding: const EdgeInsets.symmetric(horizontal: 8),
+      itemCount: head.length + tail,
+      itemBuilder: (BuildContext context, int index) {
+        if (index < head.length) return head[index];
+        return rows.isEmpty ? empty : rows[index - head.length]();
+      },
+    );
+  }
 }
 
 class _DialogTextField extends StatefulWidget {
