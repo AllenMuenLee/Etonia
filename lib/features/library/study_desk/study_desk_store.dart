@@ -68,7 +68,8 @@ class FileStudyDeskStore implements StudyDeskStore {
                 128 +
                 citation.strokeKeys.length * 64 +
                 citation.strokeIndices.length * 8 +
-                citation.rings.length * 64;
+                citation.rings.length * 64 +
+                citation.highlights.length * 64;
           }
         }
         if (size >= _offMainCharacters) break;
@@ -161,7 +162,7 @@ class FileStudyChunkCache implements StudyChunkDiskCache {
 
   /// Moves on whenever the chunks of the same revision would come out
   /// differently, so that older ones are not used.
-  static const int version = 3;
+  static const int version = 5;
 
   File _file(String noteId) => File('${directory.path}/$noteId.json');
 

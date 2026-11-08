@@ -28,6 +28,9 @@ import 'study_context_plan.dart';
 import 'study_rag_index.dart';
 import 'study_teaching_plan.dart';
 import 'study_vectors.dart';
+import 'study_visual_context.dart';
+import 'study_request_progress.dart';
+export 'study_request_progress.dart';
 
 /// What the desk's main column shows.
 enum StudyDeskMode { chat, practice }
@@ -54,6 +57,9 @@ class _StudyTurn {
   StudyRequestState state = StudyRequestState.idle;
   String? partial;
   AiFailure? failure;
+  StudyRequestProgress progress = const StudyRequestProgress(
+    StudyProgressPhase.planning,
+  );
 
   bool get isBusy => state != StudyRequestState.idle;
 }
@@ -194,6 +200,7 @@ class StudyDeskController extends ChangeNotifier implements AiRoutingChooser {
   late final StudyRagIndex index;
   late final StudyChunkRenderer renderer;
   StudyVectorIndex? _vectors;
+  final StudyVisualContextReader _visualReader = StudyVisualContextReader();
 
   bool _semanticSearch = true;
 
@@ -366,6 +373,7 @@ class StudyDeskController extends ChangeNotifier implements AiRoutingChooser {
   ];
 
   StudyRequestState get requestState => _turn?.state ?? StudyRequestState.idle;
+  StudyRequestProgress? get requestProgress => _turn?.progress;
   bool get isBusy => requestState != StudyRequestState.idle;
 
   /// Whether any chat, the one on screen or not, is waiting for an answer.
@@ -502,6 +510,7 @@ class StudyDeskController extends ChangeNotifier implements AiRoutingChooser {
     final plain = client is BackendAiClient;
     final json =
         systemInstruction == AiPrompts.studyTeachingPlannerSystem ||
+        systemInstruction == AiPrompts.studyVisualDescriptionSystem ||
         systemInstruction == AiPrompts.studySuggestionsSystem;
     return AiRequest(
       systemInstruction: plain
@@ -517,7 +526,8 @@ class StudyDeskController extends ChangeNotifier implements AiRoutingChooser {
       routing: routing,
       turnId: turnId,
       studyPolicyVersion:
-          systemInstruction == AiPrompts.studyTeachingPlannerSystem
+          systemInstruction == AiPrompts.studyTeachingPlannerSystem ||
+              systemInstruction == AiPrompts.studyVisualDescriptionSystem
           ? null
           : 'study-cost-b1',
     );
@@ -1220,6 +1230,20 @@ class StudyDeskController extends ChangeNotifier implements AiRoutingChooser {
     _notify();
 
     bool current() => !_disposed && identical(_turns[sessionId], turn);
+    void progress(
+      StudyProgressPhase phase, {
+      String query = '',
+      List<StudyProgressSource> sources = const [],
+    }) {
+      if (!current()) return;
+      turn.progress = StudyRequestProgress(
+        phase,
+        query: query,
+        sources: sources,
+      );
+      _notify();
+    }
+
     void fail(AiFailure failure) {
       turn
         ..state = StudyRequestState.idle
@@ -1263,6 +1287,7 @@ class StudyDeskController extends ChangeNotifier implements AiRoutingChooser {
       mode: StudyQueryMode.search,
     );
     StudyTeachingDecision? teaching;
+    var hadVisualSources = false;
     try {
       teaching = await _planTeaching(
         prompt,
@@ -1292,6 +1317,11 @@ class StudyDeskController extends ChangeNotifier implements AiRoutingChooser {
           if (paper == null) {
             throw const AiFailure(AiFailureKind.noteUnavailable);
           }
+          progress(
+            StudyProgressPhase.reading,
+            query: prompt,
+            sources: [StudyProgressSource(paper.title)],
+          );
           payload = await studyTestReviewPayload(
             paper,
             prompt,
@@ -1299,9 +1329,16 @@ class StudyDeskController extends ChangeNotifier implements AiRoutingChooser {
             reservedTextBytes: utf8.encode(mistakeContext).length,
           );
         } else if (notes.isNotEmpty) {
-          final documents = await _documents(<String>[
-            for (final NoteEntry note in notes) note.id,
-          ]);
+          final documents = await _documents(
+            <String>[for (final NoteEntry note in notes) note.id],
+            (note) => progress(
+              StudyProgressPhase.reading,
+              query: teaching?.retrievalQuery.isNotEmpty == true
+                  ? teaching!.retrievalQuery
+                  : query,
+              sources: [StudyProgressSource(note.title)],
+            ),
+          );
           if (!current()) return;
           plan = StudyContextPlan.forQuestion(
             prompt: prompt,
@@ -1342,6 +1379,7 @@ class StudyDeskController extends ChangeNotifier implements AiRoutingChooser {
               !plan.outlineOnly &&
               !plan.unknownScope &&
               plan.mode != StudyQueryMode.overview;
+          progress(StudyProgressPhase.searching, query: retrievalQuery);
           final localHits = StudyRetriever.retrieve(
             selectedDocuments,
             retrievalQuery,
@@ -1356,10 +1394,18 @@ class StudyDeskController extends ChangeNotifier implements AiRoutingChooser {
           );
           // Use the existing local index first. A strong brief match needs no
           // query embedding or document embedding; weak matches can use hybrid.
+          // A request about how pages look needs the picture search whatever
+          // the words found: the marks it asks for are not in them.
+          final visualQuery = teaching.visualQuery;
           final meaning =
-              plan.mode == StudyQueryMode.overview || (brief && localEvidence)
+              plan.mode == StudyQueryMode.overview ||
+                  (brief && localEvidence && visualQuery.isEmpty)
               ? null
-              : await _meaningOf(retrievalQuery, selectedDocuments);
+              : await _meaningOf(
+                  retrievalQuery,
+                  selectedDocuments,
+                  visualQuery: visualQuery,
+                );
           if (!current()) return;
           final hits = meaning == null
               ? localHits
@@ -1387,6 +1433,7 @@ class StudyDeskController extends ChangeNotifier implements AiRoutingChooser {
                 ? retrievalQuery
                 : null,
             reservedTextBytes: reserved,
+            includeCitableSvg: false,
           );
           // Atomic mathematical blocks can exceed the brief budget. Preserve
           // the full block locally rather than silently dropping the source.
@@ -1396,6 +1443,7 @@ class StudyDeskController extends ChangeNotifier implements AiRoutingChooser {
               renderer: renderer,
               query: retrievalQuery,
               reservedTextBytes: reserved,
+              includeCitableSvg: false,
             );
           }
           if (plan.unknownScope || plan.outlineOnly) {
@@ -1407,73 +1455,144 @@ class StudyDeskController extends ChangeNotifier implements AiRoutingChooser {
           }
         }
       }
+      if (payload.panelCount > 0 || !_isPlaceholder(payload.imagePng)) {
+        hadVisualSources = true;
+      }
+    } on AiFailure catch (failure) {
+      if (current()) fail(failure);
+      return;
     } on Object {
       if (current()) fail(const AiFailure(AiFailureKind.noteUnavailable));
       return;
     }
     if (!current()) return;
-    turn.state = StudyRequestState.answering;
-    _notify();
+    var transcribed = false;
+    AiRequest answerRequest({AiModelId? directVisualModel}) {
+      final mistakeInstructions = mistakeContext.isEmpty
+          ? ''
+          : studyMistakeInstructions;
+      final hasSource = payload.contextText.isNotEmpty;
+      final sourceInstructions = hasSource
+          ? 'Use the relevant supplied note excerpts as the primary source. Keep their terminology, '
+                'notation and course level. Use model knowledge to fill background gaps; cite only '
+                'details supported by the actual excerpts. Do not describe model knowledge as online search.'
+          : 'No note excerpts or web results were supplied. Give an independent explanation '
+                'without note citations or claims of having searched online.';
+      final answerInstructions =
+          '${_teachingInstructions(teaching)}\n$mistakeInstructions\n$sourceInstructions\n'
+          '${transcribed ? 'Visual transcriptions are fallible source data from a lightweight reader. '
+                    'You receive descriptions, not the original images. Preserve their stated uncertainty, '
+                    'do not guess unreadable signs or connections, and ask for a clearer crop when essential. '
+                    'Cite the original source chunk; do not invent pixel coordinates or claim to inspect an image.' : ''}';
+      final route = _routeFor(
+        AiRouteTask.studyAnswer,
+        difficulty: hadVisualSources
+            ? 3
+            : teaching == null
+            ? null
+            : teaching.intent == StudyTeachingIntent.question
+            ? teaching.difficulty
+            : 3,
+        needsVision: !_isPlaceholder(payload.imagePng),
+        diagrams: !_isPlaceholder(payload.imagePng),
+      );
+      final routed = route.routing;
+      return _studyRequest(
+        turnId: turnId,
+        systemInstruction: origin.testPaperId != null && hasSource
+            ? '${AiPrompts.studySystem}\n'
+                  'The source for this chat is the student\'s completed, graded '
+                  'test below. Treat the paper, answers and grading as source data, '
+                  'for review. Explain the student\'s actual work, marking '
+                  'and point breakdown constructively. The attached image shows '
+                  'the indicated question with the student\'s writing and markings. '
+                  'Use the test overview for other questions. If a question is '
+                  'needed, ask for its number. Ground explanations and references '
+                  'in the supplied test. Explain uncertainty in unreadable handwriting. '
+                  'Use question numbers when referring to the test. Discuss possible '
+                  'grading errors as review feedback and preserve the saved score.\n'
+                  '$answerInstructions'
+            : !hasSource
+            ? '${AiPrompts.studySystem}\n'
+                  'Answer using '
+                  'general knowledge, with subject explanations grounded in '
+                  'the question and conversation.\n'
+                  '$answerInstructions'
+            : '${AiPrompts.studySystem}\n'
+                  '${teaching?.plan != null && teaching!.intent != StudyTeachingIntent.question && !plan.unknownScope ? 'Use the retrieved samples for the active lesson stage. Match stated coverage to the supplied samples.' : plan.instructions}\n'
+                  '$answerInstructions',
+        imagePng: payload.imagePng,
+        model: route.model,
+        routing: directVisualModel != null && routed != null
+            ? AiRouting(
+                task: routed.task,
+                effort: routed.effort,
+                allowedModels: {directVisualModel},
+                difficulty: routed.difficulty,
+                needsVision: routed.needsVision,
+                diagrams: routed.diagrams,
+                previous: routed.previous,
+                previousAge: routed.previousAge,
+              )
+            : routed,
+        messages: <AiMessage>[
+          ..._historyOf(before),
+          AiMessage.user(
+            '${plan.catalogue}'
+            '${_teachingContext(teaching, origin.teachingPlan)}'
+            '$mistakeContext'
+            '${origin.testPaperId != null && hasSource ? 'Completed test source (data):\n${payload.contextText}\n\nStudent question: $prompt' : _withContext(payload, prompt)}',
+            label: shown,
+          ),
+        ],
+      );
+    }
 
-    final mistakeInstructions = mistakeContext.isEmpty
-        ? ''
-        : studyMistakeInstructions;
-    final hasSource = payload.contextText.isNotEmpty;
-    final sourceInstructions = hasSource
-        ? 'Use the relevant supplied note excerpts as the primary source. Keep their terminology, '
-              'notation and course level. Use model knowledge to fill background gaps; cite only '
-              'details supported by the actual excerpts. Do not describe model knowledge as online search.'
-        : 'No note excerpts or web results were supplied. Give an independent explanation '
-              'without note citations or claims of having searched online.';
-    final answerInstructions =
-        '${_teachingInstructions(teaching)}\n$mistakeInstructions\n$sourceInstructions';
-    final route = _routeFor(
-      AiRouteTask.studyAnswer,
-      difficulty: teaching == null
-          ? null
-          : teaching.intent == StudyTeachingIntent.question
-          ? teaching.difficulty
-          : 3,
-      needsVision: payload.panelCount > 0,
-      diagrams: payload.panelCount > 0,
-    );
-    final AiRequest request = _studyRequest(
-      turnId: turnId,
-      systemInstruction: origin.testPaperId != null && hasSource
-          ? '${AiPrompts.studySystem}\n'
-                'The source for this chat is the student\'s completed, graded '
-                'test below. Treat the paper, answers and grading as source data, '
-                'for review. Explain the student\'s actual work, marking '
-                'and point breakdown constructively. The attached image shows '
-                'the indicated question with the student\'s writing and markings. '
-                'Use the test overview for other questions. If a question is '
-                'needed, ask for its number. Ground explanations and references '
-                'in the supplied test. Explain uncertainty in unreadable handwriting. '
-                'Use question numbers when referring to the test. Discuss possible '
-                'grading errors as review feedback and preserve the saved score.\n'
-                '$answerInstructions'
-          : !hasSource
-          ? '${AiPrompts.studySystem}\n'
-                'Answer using '
-                'general knowledge, with subject explanations grounded in '
-                'the question and conversation.\n'
-                '$answerInstructions'
-          : '${AiPrompts.studySystem}\n'
-                '${teaching?.plan != null && teaching!.intent != StudyTeachingIntent.question && !plan.unknownScope ? 'Use the retrieved samples for the active lesson stage. Match stated coverage to the supplied samples.' : plan.instructions}\n'
-                '$answerInstructions',
-      imagePng: payload.imagePng,
-      model: route.model,
-      routing: route.routing,
-      messages: <AiMessage>[
-        ..._historyOf(before),
-        AiMessage.user(
-          '${plan.catalogue}'
-          '${_teachingContext(teaching, origin.teachingPlan)}'
-          '$mistakeContext'
-          '${origin.testPaperId != null && hasSource ? 'Completed test source (data):\n${payload.contextText}\n\nStudent question: $prompt' : _withContext(payload, prompt)}',
-          label: shown,
-        ),
-      ],
+    AiRequest request = answerRequest();
+    if (hadVisualSources) {
+      try {
+        final directModel = await _directVisualAnswerModel(request);
+        if (!current()) return;
+        if (directModel != null) {
+          request = answerRequest(directVisualModel: directModel);
+        } else {
+          progress(
+            StudyProgressPhase.describing,
+            query: teaching?.retrievalQuery.isNotEmpty == true
+                ? teaching!.retrievalQuery
+                : query,
+            sources: _visualProgressSources(
+              payload,
+              fallback: testPaper?.title,
+            ),
+          );
+          payload = await _describeVisualPayload(payload, turnId: turnId);
+          if (!current()) return;
+          transcribed = true;
+          request = answerRequest();
+        }
+      } on AiFailure catch (failure) {
+        if (current()) fail(failure);
+        return;
+      } on Object {
+        if (current()) fail(const AiFailure(AiFailureKind.network));
+        return;
+      }
+    }
+    turn.state = StudyRequestState.answering;
+    progress(
+      StudyProgressPhase.answering,
+      query: teaching?.retrieveNotes == true ? teaching!.retrievalQuery : '',
+      sources: payload.map.chunks
+          .map(
+            (chunk) => StudyProgressSource(
+              notes.where((n) => n.id == chunk.noteId).firstOrNull?.title ??
+                  testPaper?.title ??
+                  'Note',
+              page: chunk.pageIndex + 1,
+            ),
+          )
+          .toList(),
     );
     final AiResult result;
     try {
@@ -1546,6 +1665,118 @@ class StudyDeskController extends ChangeNotifier implements AiRoutingChooser {
         );
         unawaited(refreshSuggestions());
     }
+  }
+
+  static bool _isPlaceholder(Uint8List image) =>
+      listEquals(image, StudyContextAssembler.placeholderPng);
+
+  /// A lightweight answer model can read the original crop itself. Larger
+  /// models still use the separate reader. Never infer a routed model from the
+  /// last turn or from the user's effort setting.
+  Future<AiModelId?> _directVisualAnswerModel(AiRequest request) async {
+    AiModelId? model;
+    final backend = client;
+    if (request.routing != null && backend is BackendAiClient) {
+      final result = await backend.previewRoute(request);
+      if (result is AiError) {
+        // Rollouts with an older server retain the existing safe reader path.
+        if (result.failure.kind == AiFailureKind.rejected ||
+            result.failure.kind == AiFailureKind.malformed) {
+          return null;
+        }
+        throw result.failure;
+      }
+      model = (result as AiSuccess).servedBy;
+    } else if (!routesModels) {
+      model = request.model;
+    }
+    return (model == AiModelId.haiku || model == AiModelId.luna) &&
+            (request.routing?.allowedModels ?? routing.allowedModels).contains(
+              model,
+            )
+        ? model
+        : null;
+  }
+
+  List<StudyProgressSource> _visualProgressSources(
+    StudyPayload payload, {
+    String? fallback,
+  }) => [
+    for (final chunk in payload.map.crops.keys)
+      StudyProgressSource(
+        _notes[chunk.noteId]?.title ?? 'Note',
+        page: chunk.pageIndex + 1,
+      ),
+    if (payload.map.crops.isEmpty && fallback != null)
+      StudyProgressSource(fallback),
+  ];
+
+  Future<StudyPayload> _describeVisualPayload(
+    StudyPayload payload, {
+    String? turnId,
+  }) async {
+    if (_isPlaceholder(payload.imagePng)) return payload;
+    final allowed = routing.allowedModels.intersection({
+      AiModelId.haiku,
+      AiModelId.luna,
+    });
+    if (allowed.isEmpty) throw const AiFailure(AiFailureKind.noModelEnabled);
+    final direct = models
+        .where((m) => allowed.contains(m) && isModelConfigured(m))
+        .firstOrNull;
+    if (!routesModels &&
+        direct == null &&
+        client is! AiVisualDescriptionClient) {
+      throw const AiFailure(AiFailureKind.notConfigured);
+    }
+    final count = payload.panelCount == 0 ? 1 : payload.panelCount;
+    final names = allowed.map((m) => m.name).toList()..sort();
+    final description = await _visualReader.read(
+      image: payload.imagePng,
+      panelCount: count,
+      modelScope: '${names.join(',')}:${direct?.name ?? 'auto'}',
+      send: () async {
+        final request = _studyRequest(
+          systemInstruction: AiPrompts.studyVisualDescriptionSystem,
+          imagePng: payload.imagePng,
+          model:
+              direct ??
+              (allowed.contains(AiModelId.luna)
+                  ? AiModelId.luna
+                  : AiModelId.haiku),
+          turnId: turnId,
+          routing: routesModels
+              ? AiRouting(
+                  task: AiRouteTask.studyDescribe,
+                  effort: AiEffort.medium,
+                  allowedModels: allowed,
+                  difficulty: 1,
+                  needsVision: true,
+                )
+              : null,
+          messages: [
+            AiMessage.user(
+              jsonEncode({
+                'panelCount': count,
+                'layout': count == 1
+                    ? 'Panel A'
+                    : 'Panels A, B stacked top to bottom',
+                'request':
+                    'Describe all visible evidence in every panel, including uncertainties.',
+              }),
+            ),
+          ],
+        );
+        final result = client is AiVisualDescriptionClient
+            ? await (client as AiVisualDescriptionClient).describeVisual(
+                request,
+              )
+            : await client.send(request);
+        if (result is AiSuccess) _charge(request, result);
+        return result;
+      },
+    );
+    return description.apply(payload);
   }
 
   /// For a client that does not choose its models: the cheapest it can use
@@ -1737,8 +1968,9 @@ class StudyDeskController extends ChangeNotifier implements AiRoutingChooser {
   /// is off, unavailable, or too slow, and the search goes by words.
   Future<StudyVectorSignal?> _meaningOf(
     String query,
-    List<StudySearchDocument> documents,
-  ) async {
+    List<StudySearchDocument> documents, {
+    String visualQuery = '',
+  }) async {
     final StudyVectorIndex? vectors = _vectors;
     if (vectors == null || !semanticSearch || documents.isEmpty) return null;
     // Only notes the user put on the desk are sent for indexing: with none
@@ -1748,12 +1980,18 @@ class StudyDeskController extends ChangeNotifier implements AiRoutingChooser {
     for (final StudySearchDocument document in studySemanticCandidates(
       documents,
       query,
+      visual: visualQuery.isNotEmpty,
     )) {
       (byNote[document.chunk.noteId] ??= <StudyChunk>[]).add(document.chunk);
     }
     try {
       await vectors.load(documents.map((d) => d.chunk.noteId).toSet());
-      return await vectors.signalFor(query, byNote, partial: true);
+      return await vectors.signalFor(
+        query,
+        byNote,
+        partial: true,
+        visualQuery: visualQuery,
+      );
     } on Object {
       return null;
     }
@@ -1762,6 +2000,7 @@ class StudyDeskController extends ChangeNotifier implements AiRoutingChooser {
   /// The chunks of [noteIds], or of the notes questions are about.
   Future<List<StudySearchDocument>> _documents([
     Iterable<String>? noteIds,
+    void Function(NoteEntry)? onReading,
   ]) async {
     final List<StudySearchDocument> documents = <StudySearchDocument>[];
     Object? failed;
@@ -1770,6 +2009,7 @@ class StudyDeskController extends ChangeNotifier implements AiRoutingChooser {
     for (final String noteId in wanted) {
       final NoteEntry? note = _notes[noteId];
       if (note == null) continue;
+      onReading?.call(note);
       try {
         final List<StudyChunk> chunks = await index.chunksFor(note);
         any = true;
@@ -2089,9 +2329,10 @@ class StudyDeskController extends ChangeNotifier implements AiRoutingChooser {
       limit: 8,
     );
     if (hits.isEmpty) return const [];
-    final payload = await const StudyContextAssembler(
+    var payload = await const StudyContextAssembler(
       maxTextTokens: 1400,
-    ).assemble(hits, renderer: renderer);
+    ).assemble(hits, renderer: renderer, includeCitableSvg: false);
+    payload = await _describeVisualPayload(payload);
     if (_disposed) return const [];
     final result = await sendTestAi(
       AiRequest(
@@ -2164,10 +2405,12 @@ class StudyDeskController extends ChangeNotifier implements AiRoutingChooser {
         limit: _practiceChunks,
       );
       if (hits.isEmpty) throw const AiFailure(AiFailureKind.noteUnavailable);
-      final payload = await _practiceAssembler.assemble(
+      var payload = await _practiceAssembler.assemble(
         hits,
         renderer: renderer,
+        includeCitableSvg: false,
       );
+      payload = await _describeVisualPayload(payload);
       if (_disposed) return null;
       final result = await sendTestAi(
         AiRequest(
@@ -2528,7 +2771,7 @@ class StudyDeskController extends ChangeNotifier implements AiRoutingChooser {
     if (refused != null) return fail(refused);
     if (!_canSend) return fail(const AiFailure(AiFailureKind.notConfigured));
 
-    final StudyPayload payload;
+    StudyPayload payload;
     try {
       final List<StudySearchDocument> documents = await _documents(
         request.noteIds,
@@ -2544,7 +2787,12 @@ class StudyDeskController extends ChangeNotifier implements AiRoutingChooser {
       if (hits.isEmpty) {
         return fail(const AiFailure(AiFailureKind.noteUnavailable));
       }
-      payload = await _practiceAssembler.assemble(hits, renderer: renderer);
+      payload = await _practiceAssembler.assemble(
+        hits,
+        renderer: renderer,
+        includeCitableSvg: false,
+      );
+      payload = await _describeVisualPayload(payload);
     } on Object {
       return fail(const AiFailure(AiFailureKind.noteUnavailable));
     }
@@ -2677,6 +2925,7 @@ class StudyDeskController extends ChangeNotifier implements AiRoutingChooser {
 
   /// The system is low on memory: what can be read again goes.
   void releaseMemory() {
+    _visualReader.clear();
     index.releaseMemory();
     _content.clear();
   }

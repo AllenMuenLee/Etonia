@@ -226,7 +226,7 @@ void main() {
   );
 
   testWidgets(
-    'source chips scroll with history, open preview, and remove only with x',
+    'source chips stay above the message field, open preview, and remove only with x',
     (tester) async {
       final f = await fixture(
         messages: [
@@ -235,17 +235,24 @@ void main() {
         ],
       );
       await mount(tester, f.desk);
-      expect(key('study-chat-source-${f.first}').hitTestable(), findsNothing);
-      final transcript = find.ancestor(
-        of: key('study-chat-sources'),
-        matching: find.byType(Scrollable),
+      // Not part of the history: in reach however far it is scrolled, right
+      // above the field the next question is written in.
+      expect(key('study-chat-source-${f.first}').hitTestable(), findsOneWidget);
+      expect(
+        find.ancestor(
+          of: key('study-chat-sources'),
+          matching: find.byType(Scrollable),
+        ),
+        findsNothing,
+      );
+      expect(
+        tester.getBottomLeft(key('study-chat-sources')).dy,
+        lessThanOrEqualTo(tester.getTopLeft(key('study-composer-bar')).dy),
       );
       final list = find.byType(ListView).last;
       await tester.drag(list, const Offset(0, 2500));
       await tester.pumpAndSettle();
-      await tester.ensureVisible(key('study-chat-source-${f.first}'));
-      await tester.pumpAndSettle();
-      expect(transcript, findsOneWidget);
+      expect(key('study-chat-source-${f.first}').hitTestable(), findsOneWidget);
       await tester.tap(key('study-chat-source-${f.first}'));
       await tester.pumpAndSettle();
       expect(f.desk.sources.single.noteId, f.first);

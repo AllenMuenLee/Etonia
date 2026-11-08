@@ -2,6 +2,36 @@ import { PGlite } from "npm:@electric-sql/pglite@0.3.14";
 import { strict as assert } from "node:assert";
 import { describePass } from "../functions/_shared/ai_usage.ts";
 
+Deno.test("Flash is admitted on free credit and its Gemini usage settles as metered", async () => {
+  const db = await migrated();
+  try {
+    await db.exec("set role service_role");
+    await db.query("select public.billing_touch($1,false,$2)", [user, "dddddddd-dddd-4ddd-8ddd-dddddddddddd"]);
+    const reserved = await db.query<{ r: { unlimited: boolean } }>(
+      "select public.ai_reserve($1,$2,'flash',null,'medium') r", [user, req1],
+    );
+    assert.equal(reserved.rows[0].r.unlimited, false);
+    const pass = describePass("flash", {
+      provider: "gemini", model: "gemini-3.8-flash", inputMicroPerKilo: 750,
+      cachedInputMicroPerKilo: 75, outputMicroPerKilo: 3750, maxOutputTokens: 16384,
+    }, "medium", "answer", { input: 1000, output: 1000, cached: 0, cacheWrites: 0, reasoning: 200 });
+    assert.equal(pass.costMicro, 4500);
+    await db.query(
+      "select public.ai_settle_usage($1,$2,$3,1000,1000,false,'study.answer',$4,'medium',$5::jsonb)",
+      [user, req1, pass.costMicro, req2, JSON.stringify([pass])],
+    );
+    await db.exec("reset role");
+    const row = (await db.query<{ model: string; status: string; charged: number }>(
+      "select model,status,charged from billing_private.requests where request_id=$1", [req1],
+    )).rows[0];
+    assert.equal(row.model, "flash");
+    assert.equal(row.status, "settled");
+    assert.equal(Number(row.charged), 4500);
+  } finally {
+    await db.close();
+  }
+});
+
 Deno.test("AI per-pass settlement is atomic, private, reconciled, and idempotent", async () => {
   const db = await migrated();
   try {
@@ -54,6 +84,32 @@ Deno.test("AI per-pass settlement is atomic, private, reconciled, and idempotent
     assert.equal(row.turn_id, req2);
     assert.equal(Number(row.provider_cost), pass.costMicro);
     assert.deepEqual(row.usage_details, { pricingVersion: "token-v2", passes: [pass] });
+    await db.exec("set role service_role");
+    await db.query("select public.ai_reserve($1,$2,'luna',null,'medium')", [user, req2]);
+    const visual = describePass(
+      "luna",
+      {
+        provider: "openai",
+        model: "gpt-6-luna",
+        inputMicroPerKilo: 100,
+        outputMicroPerKilo: 500,
+        maxOutputTokens: 4096,
+      },
+      "medium",
+      "answer",
+      { input: 1000, output: 200, cached: 0, cacheWrites: 0 },
+    );
+    await db.query(
+      "select public.ai_settle_usage($1,$2,$3,1000,200,false,'study.describe',$4,'medium',$5::jsonb)",
+      [user, req2, visual.costMicro, req1, JSON.stringify([visual])],
+    );
+    await db.exec("reset role");
+    const visualRow = (await db.query<{ task: string; provider_cost: number }>(
+      "select task,provider_cost from billing_private.requests where request_id=$1",
+      [req2],
+    )).rows[0];
+    assert.equal(visualRow.task, "study.describe");
+    assert.equal(Number(visualRow.provider_cost), visual.costMicro);
     await db.exec("set role authenticated");
     await assert.rejects(() => settle([pass]), /permission denied/);
     await assert.rejects(

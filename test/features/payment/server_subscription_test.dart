@@ -75,7 +75,7 @@ void main() {
   });
 
   test(
-    'the free one-time credit pays only for Haiku, Luna, Sonnet and Sol',
+    'the free one-time credit pays only for Haiku, Luna, Sonnet, Sol and Flash',
     () async {
       final backend = TestBillingBackend()
         ..result = const SubscriptionState(

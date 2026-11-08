@@ -223,10 +223,10 @@ void main() {
       expect(
         progress.map((CloudProgress p) => p.phase),
         containsAllInOrder(<String>[
-          'Replicating folder 1 / 1',
-          'Replicating folder 2 / 2',
-          'Importing file 1 of 5',
-          'Importing file 5 of 5',
+          'Reading folder 1 / 1',
+          'Reading folder 2 / 2',
+          'Importing file 1 of 4',
+          'Importing file 4 of 4',
         ]),
       );
     });
@@ -441,6 +441,162 @@ void main() {
 
         expect(summary.failed.single.path, 'Broken.goodnotes');
         expect(summary.imported, <String>['Fine.pdf']);
+      },
+    );
+  });
+
+  group('scanning, then loading', () {
+    test('lists every folder and file before downloading any', () async {
+      final GoogleDriveItem root = driveTree().root;
+
+      final GoodnotesImportSession session = await replicator().scan(root);
+
+      // Every folder is in the library, and no file has been fetched.
+      expect(
+        (await library()).keys,
+        containsAll(<String>['', 'MGY377', 'MGY377/Lectures', 'MGY377/Labs']),
+      );
+      expect(drive.downloads, isEmpty);
+      expect((await repository.allNotes()), isEmpty);
+      expect(session.pendingIn(null).map((ImportItem i) => i.title), <String>[
+        'Inbox',
+      ]);
+      final Folder lectures = (await repository.allFolders()).singleWhere(
+        (Folder f) => f.name == 'Lectures',
+      );
+      expect(
+        session.pendingIn(lectures.id).map((ImportItem i) => i.title),
+        <String>['Lecture 1', 'Lecture 2'],
+      );
+      // Only files that can be imported are counted.
+      expect(session.counts, (done: 0, total: 4));
+    });
+
+    test(
+      'loads one at a time, in order, and keeps the session honest',
+      () async {
+        final GoogleDriveItem root = driveTree().root;
+        final GoodnotesImportSession session = await replicator().scan(root);
+        final List<String> pendingAfterEach = <String>[];
+        session.addListener(() {
+          pendingAfterEach.add(
+            session.items
+                .where((ImportItem i) => i.status == ImportStatus.loading)
+                .length
+                .toString(),
+          );
+        });
+
+        final ReplicationSummary summary = await replicator().load(session);
+
+        expect(summary.imported, hasLength(4));
+        expect(drive.downloads, <String>[
+          'Inbox.goodnotes',
+          'Lab 1.pdf',
+          'Lecture 1.goodnotes',
+          'Lecture 2.pdf',
+        ]);
+        // Never more than one at once.
+        expect(
+          pendingAfterEach.every((String n) => n == '0' || n == '1'),
+          isTrue,
+        );
+        expect(session.isFinished, isTrue);
+        expect(session.pendingIn(null), isEmpty);
+      },
+    );
+
+    test('a file asked for loads before the rest', () async {
+      final ({GoogleDriveItem root, GoogleDriveItem lecture2}) tree =
+          driveTree();
+      final GoodnotesImportSession session = await replicator().scan(tree.root);
+      final ImportItem asked = session.items.singleWhere(
+        (ImportItem i) => i.driveId == tree.lecture2.id,
+      );
+
+      final Future<void> arrived = session.prioritize(asked);
+      expect(asked.requested, isTrue);
+      final Future<ReplicationSummary> loading = replicator().load(session);
+      await arrived;
+
+      // The one asked for is a note, and was the first fetched.
+      expect(drive.downloads.first, 'Lecture 2.pdf');
+      expect(asked.status, ImportStatus.imported);
+      expect(asked.noteId, isNotNull);
+      expect((await noteTitled('Lecture 2')).id, asked.noteId);
+      await loading;
+      expect((await repository.allNotes()), hasLength(4));
+    });
+
+    test('asking for a notebook export loads the notebook', () async {
+      final GoogleDriveItem root = drive.addFolder('GoodNotes');
+      drive.addFile(
+        'A.pdf',
+        _pdf('a'),
+        parentId: root.id,
+        mimeType: 'application/pdf',
+      );
+      drive.addFile(
+        'B.goodnotes',
+        syntheticGoodnotesNotebook(),
+        parentId: root.id,
+      );
+      final GoogleDriveItem export = drive.addFile(
+        'B.pdf',
+        _pdf('b flattened'),
+        parentId: root.id,
+        mimeType: 'application/pdf',
+      );
+      final GoodnotesImportSession session = await replicator().scan(root);
+      final ImportItem exportItem = session.items.singleWhere(
+        (ImportItem i) => i.driveId == export.id,
+      );
+      expect(exportItem.isExport, isTrue);
+      // The export is not shown as a file of its own.
+      expect(session.pendingIn(null).map((ImportItem i) => i.title), <String>[
+        'A',
+        'B',
+      ]);
+
+      final Future<void> arrived = session.prioritize(exportItem);
+      final Future<ReplicationSummary> loading = replicator().load(session);
+      await arrived;
+
+      expect(drive.downloads.first, 'B.goodnotes');
+      await loading;
+      expect(exportItem.status, ImportStatus.covered);
+      expect(
+        (await repository.allNotes()).map((NoteEntry n) => n.title).toList()
+          ..sort(),
+        <String>['A', 'B'],
+      );
+    });
+
+    test(
+      'stopping ends the session, and what was asked for completes',
+      () async {
+        final ({GoogleDriveItem root, GoogleDriveItem lecture2}) tree =
+            driveTree();
+        final ImportCancellationToken token = ImportCancellationToken();
+        final GoodnotesImportSession session = await replicator().scan(
+          tree.root,
+          cancellation: token,
+        );
+        token.cancel();
+        final ImportItem asked = session.items.firstWhere(
+          (ImportItem i) => i.driveId == tree.lecture2.id,
+        );
+        final Future<void> arrived = session.prioritize(asked);
+
+        final ReplicationSummary summary = await replicator().load(
+          session,
+          cancellation: token,
+        );
+        await arrived;
+
+        expect(summary.cancelled, isTrue);
+        expect(asked.noteId, isNull);
+        expect(session.isFinished, isTrue);
       },
     );
   });

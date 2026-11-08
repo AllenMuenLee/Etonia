@@ -14,8 +14,25 @@ export interface ModelConfig {
   /** Explicit prefix caching is opt-in and only used on supported OpenAI models. */
   cacheMode?: "implicit" | "explicit";
 }
-export const aliases = ["haiku", "luna", "sonnet", "sol", "opus", "argon", "astra"];
+export const aliases = ["haiku", "luna", "sonnet", "sol", "flash", "opus", "argon", "astra"];
+
+/** Optional overrides preserve the existing catalog when enabling another model. */
+export function parseModelCatalog(raw: string, overrides?: string): Record<string, ModelConfig> {
+  try {
+    const base = JSON.parse(raw);
+    const extra = overrides ? JSON.parse(overrides) : {};
+    if (!base || typeof base !== "object" || Array.isArray(base) ||
+      !extra || typeof extra !== "object" || Array.isArray(extra)) {
+      throw new Error();
+    }
+    return { ...base, ...extra };
+  } catch {
+    throw new Failure("not_configured", 503);
+  }
+}
 export interface AiInput {
+  /** Routing preview only: never reserve credits or call an AI provider. */
+  routeOnly?: boolean;
   task?: "testGrading";
   requestId: string;
   /** Opaque correlation ID shared by a tutor turn's helper and answer requests. */
@@ -128,6 +145,7 @@ export function validateInput(body: Record<string, unknown>) {
     Object.keys(body).some((k) =>
       ![
         "requestId",
+        "routeOnly",
         "turnId",
         "responseFormat",
         "studyPolicyVersion",
@@ -154,6 +172,8 @@ export function validateInput(body: Record<string, unknown>) {
       body.requestId,
     ) ||
     typeof body.model !== "string" || (body.model !== "auto" && !aliases.includes(body.model)) ||
+    (body.routeOnly !== undefined &&
+      (body.routeOnly !== true || body.model !== "auto" || body.task !== undefined)) ||
     (body.turnId !== undefined && (typeof body.turnId !== "string" ||
       !/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
         body.turnId,
@@ -311,7 +331,7 @@ export function providerEffort(
  * the always-included models. Cost reservation still uses both real models. */
 export function billingModel(answer: string, notation?: string): string {
   const rank = (model: string) =>
-    ["opus", "argon", "astra"].includes(model) ? 2 : ["sonnet", "sol"].includes(model) ? 1 : 0;
+    ["opus", "argon", "astra"].includes(model) ? 2 : ["sonnet", "sol", "flash"].includes(model) ? 1 : 0;
   return notation !== undefined && rank(notation) > rank(answer) ? notation : answer;
 }
 

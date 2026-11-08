@@ -1,7 +1,6 @@
 import 'package:flutter/foundation.dart';
 
 import 'ai_client.dart';
-import 'ai_routing.dart';
 
 /// What the user's plan allows with one model.
 enum AiModelAccess {
@@ -51,8 +50,9 @@ abstract mixin class AiUsageGate implements Listenable {
       final AiFailure? refused = checkAccess(model);
       if (refused == null) return null;
       first ??= refused;
-      if (refused.kind == AiFailureKind.insufficientCredits)
+      if (refused.kind == AiFailureKind.insufficientCredits) {
         credits ??= refused;
+      }
     }
     return credits ?? first;
   }

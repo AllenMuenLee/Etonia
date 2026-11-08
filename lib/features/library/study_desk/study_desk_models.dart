@@ -31,27 +31,44 @@ enum StudyChunkKind {
 
 /// One row of words in a chunk. [first] and [last] are the page's strokes
 /// behind it, from one, as a citation names them; both are 0 for typed text,
-/// which no line number can name.
+/// which no line number can name. A line with no strokes is cited by its place
+/// among such lines in its chunk, `T1`, `T2`, ..., when its [bounds] are known.
 @immutable
 class StudyChunkLine {
-  const StudyChunkLine(this.first, this.last, this.text);
+  const StudyChunkLine(this.first, this.last, this.text, {this.bounds});
 
   factory StudyChunkLine.fromJson(Map<String, Object?> json) => StudyChunkLine(
     json['f']! as int,
     json['l']! as int,
     json['t']! as String,
+    bounds: switch (json['b']) {
+      [final num l, final num t, final num r, final num b] => Rect.fromLTRB(
+        l.toDouble(),
+        t.toDouble(),
+        r.toDouble(),
+        b.toDouble(),
+      ),
+      _ => null,
+    },
   );
 
   final int first;
   final int last;
   final String text;
 
+  /// Where the line lies on its page, so that it can be marked by itself.
+  final Rect? bounds;
+
   bool get hasStrokes => first > 0;
+
+  /// Whether a `T` number can name this line.
+  bool get isTyped => !hasStrokes && bounds != null;
 
   Map<String, Object?> toJson() => <String, Object?>{
     'f': first,
     'l': last,
     't': text,
+    if (bounds != null) 'b': _rectJson(bounds!),
   };
 }
 
@@ -187,8 +204,25 @@ class StudyChunk {
 
   final StudySourceSection? sourceSection;
 
+  /// Tags that say the ink on this chunk marks, corrects or annotates other
+  /// content: ticks, crosses, circles, strike-throughs, or another pen colour.
+  static const String markedTag = 'marked';
+  static const String annotatedTag = 'annotated';
+
+  /// Whether the chunk carries marks. Their words, if any, are only part of
+  /// what they say: a cross beside a line is read from the picture alone.
+  bool get hasMarks => tags.contains(markedTag) || tags.contains(annotatedTag);
+
   /// Whether a model has to see this to use it: its words do not carry it.
-  bool get needsPicture => kind != StudyChunkKind.text || lowConfidence;
+  bool get needsPicture =>
+      kind != StudyChunkKind.text || lowConfidence || hasMarks;
+
+  /// The lines a `T` number names, by that number from one: those with no
+  /// strokes and a place on the page.
+  List<StudyChunkLine> get typedLines => <StudyChunkLine>[
+    for (final StudyChunkLine line in lines)
+      if (line.isTyped) line,
+  ];
 
   Map<String, Object?> toJson() => <String, Object?>{
     'noteId': noteId,
@@ -257,6 +291,8 @@ class StudyCitation {
     this.strokeKeys = const <String>[],
     this.strokeIndices = const <int>[],
     this.rings = const <Rect>[],
+    this.highlights = const <Rect>[],
+    this.focus,
     this.kind,
     this.bounds,
     this.diagramBounds = const <Rect>[],
@@ -307,6 +343,31 @@ class StudyCitation {
             bottom.toDouble(),
           ),
     ],
+    focus: switch (json['focus']) {
+      [final num l, final num t, final num r, final num b] => Rect.fromLTRB(
+        l.toDouble(),
+        t.toDouble(),
+        r.toDouble(),
+        b.toDouble(),
+      ),
+      _ => null,
+    },
+    highlights: <Rect>[
+      for (final Object? line
+          in (json['highlights'] as List?) ?? const <Object?>[])
+        if (line case [
+          final num left,
+          final num top,
+          final num right,
+          final num bottom,
+        ])
+          Rect.fromLTRB(
+            left.toDouble(),
+            top.toDouble(),
+            right.toDouble(),
+            bottom.toDouble(),
+          ),
+    ],
   );
 
   final String noteId;
@@ -321,6 +382,15 @@ class StudyCitation {
 
   /// Details to ring, in page coordinates.
   final List<Rect> rings;
+
+  /// The typed or printed lines cited, each marked by itself: in page
+  /// coordinates, one for each line, so that only the words cited are marked.
+  final List<Rect> highlights;
+
+  /// What the view comes to rest on: the part of the marks that this citation
+  /// is about. A paragraph that cites two places on a page marks both but is
+  /// shown the first, not a view wide enough for both.
+  final Rect? focus;
   final StudyChunkKind? kind;
   final Rect? bounds;
 
@@ -382,6 +452,7 @@ class StudyCitation {
     strokeKeys: strokeKeys.toSet(),
     strokeIndices: currentRevision == revision ? strokeIndices : const <int>[],
     rings: rings,
+    highlights: highlights,
   );
 
   /// The cited strokes on [page] as it now stands in the note at
@@ -407,6 +478,8 @@ class StudyCitation {
     strokeKeys: <String>{...strokeKeys, ...other.strokeKeys}.toList(),
     strokeIndices: <int>{...strokeIndices, ...other.strokeIndices}.toList(),
     rings: <Rect>[...rings, ...other.rings],
+    highlights: <Rect>[...highlights, ...other.highlights],
+    focus: focus ?? other.focus,
   );
 
   Map<String, Object?> toJson() => <String, Object?>{
@@ -421,6 +494,11 @@ class StudyCitation {
     if (strokeIndices.isNotEmpty) 'indices': strokeIndices,
     if (rings.isNotEmpty)
       'rings': <Object?>[for (final Rect ring in rings) _rectJson(ring)],
+    if (highlights.isNotEmpty)
+      'highlights': <Object?>[
+        for (final Rect line in highlights) _rectJson(line),
+      ],
+    if (focus != null) 'focus': _rectJson(focus!),
   };
 }
 

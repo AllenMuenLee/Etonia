@@ -82,6 +82,20 @@ read adds `vision`; a diagram adds `diagrams`.
 
 ## Settings
 
+Gemini 3.8 Flash (`flash`) is a standard, balanced model alongside Sonnet and
+Sol. It uses the native Gemini Generate Content API and `LOW`, `MEDIUM`, or
+`HIGH` thinking levels. Its introductory rates through December 31, 2026 are
+$0.75 input, $0.075 cached input, and $3.75 output per million tokens, including
+thinking. Review rates before January 1, 2027; Google lists $1.50/$0.15/$7.50
+from that date. See [Google's pricing](https://ai.google.dev/gemini-api/docs/pricing).
+
+`AI_MODEL_CONFIG_OVERRIDES` is an optional JSON object merged over
+`AI_MODEL_CONFIG`. It can enable `flash` without replacing existing provider
+models or prices. The app's optional model-ID override is `FLASH_MODEL_ID`.
+Apply `202611090001_visual_description_usage.sql` and
+`202611100001_flash_balanced_model.sql` before releasing the corresponding AI
+function: both task and model aliases must be accepted by billing settlement.
+
 Default settings show one control, **Thinking**: Auto, Low, Medium or High. Auto
 lets the router decide. A fixed level is used exactly, unless credits cannot pay
 for it (see above).

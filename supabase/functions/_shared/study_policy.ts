@@ -98,6 +98,7 @@ export function studyOutputCeiling(
   configured: number,
   effort?: string,
 ): number {
+  if (task === "study.describe") return Math.min(configured, 4096);
   if (effort === "high") return configured;
   if (task === "study.suggestions") return Math.min(configured, 2048);
   if (task === "study.plan") return Math.min(configured, 8192);
@@ -119,6 +120,26 @@ export function usableStudyResponse(
       return false;
     }
     if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+    if (task === "study.describe") {
+      let count: number;
+      try {
+        count = JSON.parse(input.prompt).panelCount;
+      } catch {
+        return false;
+      }
+      return [1, 2].includes(count) && Object.keys(value).length === 1 &&
+        Array.isArray(value.panels) && value.panels.length === count &&
+        value.panels.every((panel: any, i: number) =>
+          panel && Object.keys(panel).length === 3 &&
+          panel.panel === String.fromCharCode(65 + i) &&
+          typeof panel.description === "string" && panel.description.trim() &&
+          panel.description.length <= 6000 &&
+          Array.isArray(panel.uncertainties) && panel.uncertainties.length <= 8 &&
+          panel.uncertainties.every((s: any) =>
+            typeof s === "string" && s.trim() && s.length <= 240
+          )
+        );
+    }
     if (task === "study.suggestions") {
       return Array.isArray(value.questions) && value.questions.length === 3 &&
         value.questions.every((q: any) => typeof q === "string" && q.trim() && q.length <= 180) &&

@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:typed_data';
 import 'dart:ui';
 
@@ -16,7 +17,7 @@ import 'package:greatnote/features/editor/ink/ink_selection.dart';
 
 /// An [AiClient] that records what it is sent and answers when the test
 /// says so. It never touches the network.
-class FakeAiClient implements AiClient {
+class FakeAiClient implements AiClient, AiVisualDescriptionClient {
   FakeAiClient({this.isConfigured = true});
 
   @override
@@ -28,9 +29,16 @@ class FakeAiClient implements AiClient {
   /// Retrieval planning is independent of the manually completed answer queue.
   /// Tests of the gate itself supply explicit decisions through BackendAiClient.
   final List<AiRequest> studyPlanningRequests = <AiRequest>[];
+  final List<AiRequest> visualDescriptionRequests = <AiRequest>[];
   AiResult studyPlanningResult = const AiSuccess(
     '{"intent":"question","retrieval":{"notes":true,"mistakeIndices":[1,2,3],"query":""}}',
   );
+  @override
+  Future<AiResult> describeVisual(AiRequest request) async {
+    visualDescriptionRequests.add(request);
+    return fakeStudyVisualDescription(request);
+  }
+
   final List<Completer<AiResult>> _pending = <Completer<AiResult>>[];
   final List<AiPartialCallback?> _partials = <AiPartialCallback?>[];
   final List<AiNotationPartialCallback?> _notations =
@@ -46,6 +54,10 @@ class FakeAiClient implements AiClient {
     AiPartialCallback? onPartial,
     AiNotationPartialCallback? onNotation,
   }) {
+    if (request.systemInstruction == AiPrompts.studyVisualDescriptionSystem) {
+      visualDescriptionRequests.add(request);
+      return Future.value(fakeStudyVisualDescription(request));
+    }
     if (request.systemInstruction == AiPrompts.studyTeachingPlannerSystem) {
       studyPlanningRequests.add(request);
       return Future.value(studyPlanningResult);
@@ -97,6 +109,24 @@ class FakeAiClient implements AiClient {
 
 /// A renderer that makes no native image: it returns a few bytes that say
 /// which render they came from, when the test lets it.
+AiSuccess fakeStudyVisualDescription(AiRequest request) {
+  final count =
+      (jsonDecode(request.messages.last.text) as Map)['panelCount'] as int;
+  return AiSuccess(
+    jsonEncode({
+      'panels': [
+        for (var i = 0; i < count; i++)
+          {
+            'panel': String.fromCharCode(65 + i),
+            'description':
+                'A labelled source diagram with its visible note content.',
+            'uncertainties': <String>[],
+          },
+      ],
+    }),
+  );
+}
+
 class FakeSelectionImageRenderer extends SelectionImageRenderer {
   FakeSelectionImageRenderer();
 
@@ -230,6 +260,7 @@ class FakeAiModelRouter extends FakeAiClient implements AiModelRouter {
   List<AiModelId> get models => AiModelId.values;
 
   /// Whether the fake chooses the model itself, as the backend does.
+  @override
   bool routes = false;
 
   @override

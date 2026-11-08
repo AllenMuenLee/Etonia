@@ -1,7 +1,6 @@
 import 'package:flutter/foundation.dart';
 
 import 'ai_client.dart';
-import 'ai_models.dart';
 import 'ai_usage_gate.dart';
 
 /// How long the assistant thinks before it answers. The user sets this, and
@@ -42,6 +41,7 @@ enum AiEffort {
 enum AiRouteTask {
   studyAnswer('study.answer'),
   studyPlan('study.plan'),
+  studyDescribe('study.describe'),
   studySuggestions('study.suggestions'),
   studyPractice('study.practice'),
   editorAnswer('editor.answer'),

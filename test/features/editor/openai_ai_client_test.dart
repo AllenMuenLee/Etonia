@@ -188,7 +188,7 @@ void main() {
         (messages[3]! as Map<String, Object?>)['content']! as List<Object?>;
     expect(
       (last[0]! as Map<String, Object?>)['text'],
-      contains('you are not shown the whole sheet'),
+      contains('selected part is supplied as an image'),
     );
     expect(
       (last[0]! as Map<String, Object?>)['text'],
@@ -321,6 +321,7 @@ void main() {
       expect(plain.providerModelId(AiModelId.sol), 'gpt-6.1-sol');
       expect(plain.providerModelId(AiModelId.astra), 'gpt-6-astra');
       expect(plain.providerModelId(AiModelId.argon), 'gemini-4-argon');
+      expect(plain.providerModelId(AiModelId.flash), 'gemini-3.8-flash');
       const AiApiConfig overridden = AiApiConfig(
         apiKey: '',
         model: 'gemini-old',
@@ -384,6 +385,7 @@ void main() {
         (AiModelId.astra, 'gpt-6-astra'),
       ]);
       expect(made[AiProvider.gemini], <(AiModelId, String)>[
+        (AiModelId.flash, 'gemini-3.8-flash'),
         (AiModelId.argon, 'gemini-4-argon'),
       ]);
       router.close();

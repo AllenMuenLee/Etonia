@@ -15,6 +15,7 @@ import 'package:greatnote/features/library/study_desk/study_desk_controller.dart
 import 'package:greatnote/features/library/study_desk/study_desk_models.dart';
 import 'package:greatnote/features/library/study_desk/study_desk_store.dart';
 import 'package:greatnote/features/library/study_desk/study_teaching_plan.dart';
+import '../../../helpers/ai_fakes.dart' show fakeStudyVisualDescription;
 
 Map<String, Object?> lesson() => {
   'topic': 'Algebra',
@@ -69,6 +70,8 @@ class _Router extends AiModelRouter {
     AiNotationPartialCallback? onNotation,
   }) async {
     requests.add(request);
+    if (request.systemInstruction == AiPrompts.studyVisualDescriptionSystem)
+      return fakeStudyVisualDescription(request);
     if (request.systemInstruction == AiPrompts.studyTeachingPlannerSystem) {
       if (plannerGate != null) return plannerGate!.future;
       final result = decisions.isEmpty

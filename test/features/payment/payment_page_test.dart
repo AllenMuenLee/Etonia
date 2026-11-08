@@ -63,17 +63,17 @@ void main() {
           (
             SubscriptionPlan.starter699,
             '\$6.99 / month',
-            'AI tokens for Sonnet & Sol combined',
+            'AI tokens for Sonnet, Sol & Flash combined',
           ),
           (
             SubscriptionPlan.pro1499,
             '\$14.99 / month',
-            'AI tokens for Sonnet, Sol, Opus, Argon & Astra combined',
+            'AI tokens for Sonnet, Sol, Flash, Opus, Argon & Astra combined',
           ),
           (
             SubscriptionPlan.max2499,
             '\$24.99 / month',
-            'AI tokens for all models (Sonnet, Sol, Opus, Argon & '
+            'AI tokens for all models (Sonnet, Sol, Flash, Opus, Argon & '
                 'Astra combined)',
           ),
         ]) {

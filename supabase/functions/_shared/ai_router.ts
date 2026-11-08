@@ -22,6 +22,7 @@ export type Capability = typeof capabilities[number];
 export const tasks = [
   "study.answer",
   "study.plan",
+  "study.describe",
   "study.suggestions",
   "study.practice",
   "editor.answer",
@@ -84,6 +85,7 @@ const baselineTier: Record<string, Tier> = {
   luna: "unlimited",
   sonnet: "standard",
   sol: "standard",
+  flash: "standard",
   opus: "frontier",
   argon: "frontier",
   astra: "frontier",
@@ -156,6 +158,7 @@ interface TaskProfile {
 export const taskProfiles: Record<Task, TaskProfile> = {
   "study.suggestions": { needs: ["structured"], threshold: 30, step: 0, outputTokens: 150 },
   "study.plan": { needs: ["structured", "reasoning"], threshold: 45, step: 8, outputTokens: 700 },
+  "study.describe": { needs: ["vision", "structured"], threshold: 45, step: 0, outputTokens: 1800 },
   "study.answer": { needs: ["reasoning"], threshold: 55, step: 12, outputTokens: 1200 },
   "study.practice": {
     needs: ["structured", "reasoning"],
@@ -313,6 +316,13 @@ export function route(
   }
 
   let pool = catalog.filter((model) => !context.allowed || context.allowed.includes(model.alias));
+  // Image transcription is a lightweight stage. Never silently send it to a
+  // premium model, even when the user's main-answer setting is High.
+  if (context.task === "study.describe") {
+    pool = pool.filter((model) =>
+      ["haiku", "luna"].includes(model.alias) && model.tier === "unlimited"
+    );
+  }
   if (pool.length === 0) return { ok: false, reason: "no_model_enabled" };
   pool = pool.filter((model) => entitled(plan, model));
   if (pool.length === 0) return { ok: false, reason: "plan_required" };
@@ -338,6 +348,7 @@ export function route(
     affordable = [];
     for (const model of pool) {
       for (const effort of pass) {
+        if (context.task === "study.describe" && effort === "high") continue;
         const unlimited = isUnlimited(plan, model, effort);
         const cost = estimateCost(model, effort, context.task, hints, warm(model), options);
         // Metered pairs need credit that covers them, so a nearly empty balance

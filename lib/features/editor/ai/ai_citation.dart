@@ -19,7 +19,8 @@ const String _circlePattern =
     r'(\d+(?:\.\d+)?)[\s,]+(\d+(?:\.\d+)?)\s*\]\]';
 
 /// Cites a page of one of several notes, numbered per request: its lines
-/// `[[N1:P2:L4-L7]]`, a chunk `[[N1:P2:C3]]`, a detail of what was shown
+/// `[[N1:P2:L4-L7]]`, typed or printed lines of one chunk `[[N1:P2:C3:T2-T4]]`,
+/// a chunk `[[N1:P2:C3]]`, a detail of what was shown
 /// `[[N1:P2:C 100 200 300 400]]` or `[[N1:P2:C3 100 200 300 400]]`, or the page
 /// itself `[[N1:P2]]`.
 const String _notePattern =
@@ -113,6 +114,7 @@ class AiNoteCitation {
     required this.note,
     required this.page,
     this.ranges = const <AiLineRange>[],
+    this.typedRanges = const <AiLineRange>[],
     this.chunk,
     this.box,
   });
@@ -122,6 +124,10 @@ class AiNoteCitation {
 
   /// The lines cited. A line is a stroke, counted from one down the page.
   final List<AiLineRange> ranges;
+
+  /// The typed or printed lines cited, `T2-T4`, counted from one within
+  /// [chunk]: they have no strokes to number.
+  final List<AiLineRange> typedRanges;
 
   /// The chunk cited, or the one [box] is measured on.
   final int? chunk;
@@ -137,6 +143,30 @@ final RegExp _chunkBody = RegExp(
   caseSensitive: false,
 );
 final RegExp _chunkOnlyBody = RegExp(r'^C\s*(\d+)$', caseSensitive: false);
+
+/// `C3:T2-T4`, `C3 T2`, `C3:T2-T4,T7`: typed lines of a chunk.
+final RegExp _chunkTypedBody = RegExp(
+  r'^C\s*(\d+)\s*[:,\s]\s*(T\s*\d+(?:\s*[-–]\s*T?\s*\d+)?'
+  r'(?:\s*,\s*T?\s*\d+(?:\s*[-–]\s*T?\s*\d+)?)*)$',
+  caseSensitive: false,
+);
+
+List<AiLineRange> _typedIn(String list) {
+  final List<AiLineRange> cited = <AiLineRange>[];
+  final RegExp number = RegExp(r'\d+');
+  for (final String part in list.split(',')) {
+    final List<int> ends = <int>[
+      for (final Match end in number.allMatches(part)) int.parse(end[0]!),
+    ];
+    if (ends.isEmpty) continue;
+    final int first = ends.first;
+    final int last = ends.last;
+    cited.add(
+      first <= last ? AiLineRange(first, last) : AiLineRange(last, first),
+    );
+  }
+  return cited;
+}
 
 /// Every `[[N..:P..]]` citation in [text], in order. What follows the page, if
 /// it cannot be read, leaves a citation of the page: the model meant at least
@@ -165,6 +195,15 @@ AiNoteCitation _noteCitationOf(int note, int page, String body) {
         double.parse(box[4]!),
         double.parse(box[5]!),
       ),
+    );
+  }
+  final Match? typed = _chunkTypedBody.firstMatch(body);
+  if (typed != null) {
+    return AiNoteCitation(
+      note: note,
+      page: page,
+      chunk: int.parse(typed[1]!),
+      typedRanges: _typedIn(typed[2]!),
     );
   }
   final Match? chunk = _chunkOnlyBody.firstMatch(body);
@@ -233,6 +272,7 @@ class AiNoteMarks {
     this.strokeKeys = const <String>{},
     this.strokeIndices = const <int>[],
     this.rings = const <Rect>[],
+    this.highlights = const <Rect>[],
   });
 
   final String noteId;
@@ -240,6 +280,10 @@ class AiNoteMarks {
   /// From zero.
   final int pageIndex;
   final Set<String> strokeKeys;
+
+  /// Typed or printed lines to highlight, in page coordinates: text has no
+  /// strokes to mark, and a ring round a line says less than a highlighter.
+  final List<Rect> highlights;
 
   /// By place on the page, for when no key is found: given only while the note
   /// has not changed since it was cited.

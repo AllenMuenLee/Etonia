@@ -11,10 +11,10 @@ import 'openai_ai_client.dart';
 typedef AiProviderClientFactory =
     AiClient Function(AiModelId model, String providerModelId);
 
-/// Answers each request with the model it names: Luna, Sol, and Argon on
-/// Gemini, Haiku, Sonnet, and Opus on Claude, and Astra on OpenAI. Every
-/// one returns the same version-2 JSON, so chat and Notation behave alike
-/// whichever is picked.
+/// Routes each request to its model's native provider API.
+///
+/// Flash and Argon use Gemini; Haiku, Sonnet, and Opus use Claude; Luna, Sol,
+/// and Astra use OpenAI. Each client returns the same assistant response.
 ///
 /// A client per model is made on first use and kept, sharing one
 /// [http.Client], and all of them are closed by [close].

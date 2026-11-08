@@ -126,6 +126,7 @@ void main() {
     await _toggle(tester, 'ai-model-luna');
     expect(plan.routing.disabledModels, <AiModelId>{
       AiModelId.argon,
+      AiModelId.flash,
       AiModelId.luna,
     });
     await tester.tap(find.text('Done'));

@@ -18,6 +18,7 @@ import {
   outputBudget,
   providerAnswer,
   providerRequest,
+  parseModelCatalog,
   readProviderStream,
   requestModel,
   stepMessage,
@@ -141,7 +142,10 @@ Deno.serve(endpoint(async (req) => {
   const user = await userFor(req, db);
   await rpc(db, "billing_rate_limit", { p_user: user });
   const input = validateInput(await readBody(req, null));
-  const catalog = JSON.parse(secret("AI_MODEL_CONFIG"));
+  const catalog = parseModelCatalog(
+    secret("AI_MODEL_CONFIG"),
+    Deno.env.get("AI_MODEL_CONFIG_OVERRIDES"),
+  );
   const routed = input.model === "auto";
   if (!routed && input.routing !== undefined) throw new Failure("rejected");
   // Live store verification fails closed, including renewals, refunds and expiry.
@@ -205,6 +209,15 @@ Deno.serve(endpoint(async (req) => {
     const chosen = route(routerCatalog, context);
     if (!chosen.ok) throw denial(chosen.reason);
     decision = chosen;
+  }
+  // Read-only selection uses exactly the same input, billing state, catalog and
+  // provider health as execution. Return before any reservation/provider call.
+  if (input.routeOnly) {
+    if (!decision) throw new Failure("rejected");
+    return json({
+      routePreview: true,
+      servedBy: { model: decision.alias, effort: decision.effort },
+    });
   }
   const tried: string[] = decision ? [pairKey(decision.alias, decision.effort)] : [];
   let escalations = 0;
@@ -332,6 +345,12 @@ Deno.serve(endpoint(async (req) => {
       redirect: "error",
     });
     if (!response.ok) {
+      console.warn(JSON.stringify({
+        event: "ai_provider_refused",
+        provider: answerer.provider,
+        model: answerer.model,
+        status: response.status,
+      }));
       await response.body?.cancel();
       return { refused: response.status };
     }

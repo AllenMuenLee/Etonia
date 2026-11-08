@@ -3,11 +3,11 @@ import 'package:flutter/material.dart';
 import '../../../app/theme/app_icons.dart';
 import '../../../app/theme/app_tokens.dart';
 import '../../../shared/widgets/processing.dart';
-import '../../editor/document_io/document_importer.dart';
 import '../library_screen.dart' show formatModified;
 import 'auto_backup_scheduler.dart';
 import 'backup_destinations.dart';
 import 'cloud_sync_state.dart';
+import 'cloud_task_controller.dart';
 import 'goodnotes_drive_replicator.dart';
 import 'google_drive_backup_service.dart';
 import 'google_drive_client.dart';
@@ -23,6 +23,7 @@ Future<void> showGoogleDriveSheet(
   required GoogleDriveBackupService backup,
   required GoodnotesDriveReplicator replicator,
   AutoBackupScheduler? autoBackup,
+  CloudTaskController? tasks,
   ValueChanged<String>? onOpenFolder,
   DateTime Function() clock = DateTime.now,
 }) {
@@ -34,13 +35,12 @@ Future<void> showGoogleDriveSheet(
       backup: backup,
       replicator: replicator,
       autoBackup: autoBackup,
+      tasks: tasks,
       onOpenFolder: onOpenFolder,
       clock: clock,
     ),
   );
 }
-
-enum _Task { backUp, restore, replicate }
 
 class GoogleDriveSheet extends StatefulWidget {
   const GoogleDriveSheet({
@@ -50,6 +50,7 @@ class GoogleDriveSheet extends StatefulWidget {
     required this.replicator,
     this.autoBackup,
     this.destinations,
+    this.tasks,
     this.onOpenFolder,
     this.clock = DateTime.now,
     this.embedded = false,
@@ -70,6 +71,11 @@ class GoogleDriveSheet extends StatefulWidget {
   /// Where backups go. Offers the choice where there is one; [client] stays
   /// the Google account, which Goodnotes import needs whichever is chosen.
   final BackupDestinations? destinations;
+
+  /// What runs the backup, restore and import. Kept by the library, so the
+  /// work goes on when this is closed; without one, the work belongs to this
+  /// and stops with it.
+  final CloudTaskController? tasks;
   final ValueChanged<String>? onOpenFolder;
   final DateTime Function() clock;
 
@@ -80,17 +86,19 @@ class GoogleDriveSheet extends StatefulWidget {
 class _GoogleDriveSheetState extends State<GoogleDriveSheet> {
   GoogleDriveAccount? _account;
   DateTime? _lastBackup;
-  _Task? _task;
-  CloudProgress? _progress;
-  ImportCancellationToken? _cancellation;
 
-  /// The outcome of the last action, and whether it was a failure.
+  late final CloudTaskController _tasks =
+      widget.tasks ?? CloudTaskController(clock: widget.clock);
+
+  /// Whether the work is this sheet's own, and so ends with it.
+  bool get _ownsTasks => widget.tasks == null;
+
+  /// The outcome of what the sheet itself did, such as signing in; the
+  /// outcome of the work is [_tasks]'s.
   String? _message;
   bool _messageIsError = false;
-  List<ReplicationIssue> _issues = const <ReplicationIssue>[];
-  String? _replicatedFolderId;
 
-  bool get _busy => _task != null;
+  bool get _busy => _tasks.busy;
 
   BackupTarget? get _target => widget.destinations?.current;
   GoogleDriveBackupService get _backupService =>
@@ -130,6 +138,7 @@ class _GoogleDriveSheetState extends State<GoogleDriveSheet> {
   @override
   void initState() {
     super.initState();
+    _tasks.addListener(_onTasksChanged);
     widget.destinations?.addListener(_onDestinationChanged);
     _account = widget.client.currentAccount;
     if (_account == null) {
@@ -144,10 +153,17 @@ class _GoogleDriveSheetState extends State<GoogleDriveSheet> {
   @override
   void dispose() {
     widget.destinations?.removeListener(_onDestinationChanged);
-    // A closed sheet stops what it started; a note being imported is
-    // rolled back.
-    _cancellation?.cancel();
+    _tasks.removeListener(_onTasksChanged);
+    // Work the library is running goes on without the sheet. Work of the
+    // sheet's own stops with it; a note being imported is rolled back.
+    if (_ownsTasks) _tasks.dispose();
     super.dispose();
+  }
+
+  void _onTasksChanged() {
+    if (!mounted) return;
+    if (_tasks.signInLost) _account = widget.client.currentAccount;
+    setState(() {});
   }
 
   Future<void> _restoreSession() async {
@@ -220,85 +236,11 @@ class _GoogleDriveSheetState extends State<GoogleDriveSheet> {
     });
   }
 
-  /// Runs [work] as [task], with progress and a way to cancel it, and
-  /// shows what went wrong if it fails.
-  Future<void> _run(
-    _Task task,
-    Future<void> Function(
-      ImportCancellationToken cancellation,
-      ValueChanged<CloudProgress> onProgress,
-    )
-    work,
-  ) async {
-    final ImportCancellationToken cancellation = ImportCancellationToken();
-    setState(() {
-      _task = task;
-      _progress = null;
-      _message = null;
-      _issues = const <ReplicationIssue>[];
-      _replicatedFolderId = null;
-      _cancellation = cancellation;
-    });
-    try {
-      await work(cancellation, (CloudProgress progress) {
-        if (mounted) setState(() => _progress = progress);
-      });
-    } on Object catch (error) {
-      if (!mounted) return;
-      if (error is GoogleDriveException &&
-          error.kind == GoogleDriveErrorKind.unauthorized) {
-        _account = widget.client.currentAccount;
-      }
-      _show(_describe(error), error: error is! CloudCancelledException);
-    } finally {
-      if (mounted) {
-        setState(() {
-          _task = null;
-          _progress = null;
-          _cancellation = null;
-        });
-      }
-    }
-  }
-
-  static String _describe(Object error) {
-    return switch (error) {
-      CloudCancelledException() => 'Cancelled',
-      GoogleDriveException(:final String message) => message,
-      GoogleDriveBackupException(:final String message) => message,
-      GoodnotesFolderNotFoundException() => noGoodnotesFolderMessage,
-      _ => 'Something went wrong. Try again.',
-    };
-  }
-
   Future<void> _backUp() async {
-    await _run(_Task.backUp, (
-      ImportCancellationToken cancellation,
-      ValueChanged<CloudProgress> onProgress,
-    ) async {
-      final BackupSummary summary = await _backupService.backUp(
-        onProgress: onProgress,
-        cancellation: cancellation,
-      );
-      if (!mounted) return;
-      setState(() => _lastBackup = summary.exportedAt);
-      _show(
-        <String>[
-          'Backed up ${_count(summary.noteCount, 'note')} and '
-              '${_count(summary.folderCount, 'folder')}. '
-              '${summary.uploadedFiles} uploaded, '
-              '${summary.unchangedFiles} already up to date.',
-          if (summary.addedHere > 0)
-            '${_count(summary.addedHere, 'note')} from other devices added.',
-          if (summary.movedToDeleted > 0)
-            '${_count(summary.movedToDeleted, 'note')} deleted elsewhere '
-                'moved to Recently Deleted.',
-          if (summary.deletedForGood > 0)
-            '${_count(summary.deletedForGood, 'note')} deleted for good '
-                'elsewhere removed.',
-        ].join(' '),
-      );
-    });
+    setState(() => _message = null);
+    final GoogleDriveBackupService service = _backupService;
+    await _tasks.backUp(service);
+    if (mounted && identical(service, _backupService)) _loadLastBackup();
   }
 
   Future<void> _restore() async {
@@ -328,73 +270,22 @@ class _GoogleDriveSheetState extends State<GoogleDriveSheet> {
       ),
     );
     if (mode == null || !mounted) return;
-    await _run(_Task.restore, (
-      ImportCancellationToken cancellation,
-      ValueChanged<CloudProgress> onProgress,
-    ) async {
-      final RestoreSummary summary = await _backupService.restore(
-        mode: mode,
-        onProgress: onProgress,
-        cancellation: cancellation,
-      );
-      if (!mounted) return;
-      _show(
-        <String>[
-          'Restored ${_count(summary.notesRestored, 'note')} from the backup '
-              'of ${formatModified(summary.exportedAt, widget.clock())}.',
-          if (summary.notesSkipped > 0)
-            'Skipped ${_count(summary.notesSkipped, 'note')} already here.',
-          if (summary.deletedRestored > 0)
-            '${_count(summary.deletedRestored, 'note')} put back in Recently '
-                'Deleted.',
-        ].join(' '),
-      );
-    });
+    setState(() => _message = null);
+    await _tasks.restore(_backupService, mode);
   }
 
   Future<void> _importGoodnotes() async {
     // Goodnotes is read from Google Drive, whichever way the person signed
     // into Etonia and wherever they back up to.
     if (_account == null && !await _signInToGoogle()) return;
-    await _run(_Task.replicate, (
-      ImportCancellationToken cancellation,
-      ValueChanged<CloudProgress> onProgress,
-    ) async {
-      onProgress(
-        const CloudProgress(
-          phase: 'Looking for your Goodnotes folder',
-          completedItems: 0,
-          totalItems: 0,
-        ),
-      );
-      final List<GoodnotesDriveRoot> roots = await widget.replicator
-          .findRoots();
-      if (!mounted || cancellation.isCancelled) return;
-      final GoodnotesDriveRoot? root = roots.length == 1
-          ? roots.single
-          : await _pickRoot(roots);
-      if (root == null || !mounted) return;
-      final ReplicationSummary summary = await widget.replicator.replicate(
-        root.folder,
-        onProgress: onProgress,
-        cancellation: cancellation,
-      );
-      if (!mounted) return;
-      final int notImported = summary.skipped.length + summary.failed.length;
-      setState(() {
-        _issues = <ReplicationIssue>[...summary.failed, ...summary.skipped];
-        _replicatedFolderId = summary.localRootId;
-      });
-      _show(
-        <String>[
-          if (summary.cancelled) 'Stopped.',
-          'Imported ${_count(summary.imported.length, 'file')} into '
-              '${summary.localRootId == null ? 'Library' : root.folder.name}.',
-          if (summary.unchanged > 0) '${summary.unchanged} already up to date.',
-          if (notImported > 0) '$notImported not imported.',
-        ].join(' '),
-      );
-    });
+    setState(() => _message = null);
+    await _tasks.importGoodnotes(
+      widget.replicator,
+      // With the sheet closed there is no one to ask: the folder that is
+      // listed first is the one used by default.
+      pickRoot: (List<GoodnotesDriveRoot> roots) async =>
+          mounted ? await _pickRoot(roots) : roots.first,
+    );
   }
 
   Future<GoodnotesDriveRoot?> _pickRoot(List<GoodnotesDriveRoot> roots) {
@@ -433,9 +324,6 @@ class _GoogleDriveSheetState extends State<GoogleDriveSheet> {
       },
     );
   }
-
-  static String _count(int count, String noun) =>
-      '$count $noun${count == 1 ? '' : 's'}';
 
   @override
   Widget build(BuildContext context) {
@@ -478,31 +366,28 @@ class _GoogleDriveSheetState extends State<GoogleDriveSheet> {
       if (_busy) ...<Widget>[
         const SizedBox(height: AppSpacing.lg),
         _ProgressPanel(
-          progress: _progress,
-          destinationName: _task == _Task.replicate
+          progress: _tasks.progress,
+          destinationName: _tasks.task == CloudTask.replicate
               ? BackupDestination.googleDrive.label
               : _destinationName,
-          onCancel:
-              _task == _Task.restore && _progress?.phase == 'Restoring library'
-              ? null
-              : () {
-                  _cancellation?.cancel();
-                  setState(() {});
-                },
-          cancelling: _cancellation?.isCancelled ?? false,
+          onCancel: _tasks.canCancel ? _tasks.cancel : null,
+          cancelling: _tasks.cancelling,
+          keepsGoing: !_ownsTasks,
         ),
       ],
-      if (_message != null) ...<Widget>[
+      if (!_busy && (_tasks.message ?? _message) != null) ...<Widget>[
         const SizedBox(height: AppSpacing.lg),
         _ResultPanel(
-          message: _message!,
-          error: _messageIsError,
-          issues: _issues,
+          message: (_tasks.message ?? _message)!,
+          error: _tasks.message != null
+              ? _tasks.messageIsError
+              : _messageIsError,
+          issues: _tasks.issues,
           onOpenFolder:
-              _replicatedFolderId == null || widget.onOpenFolder == null
+              _tasks.replicatedFolderId == null || widget.onOpenFolder == null
               ? null
               : () {
-                  final String id = _replicatedFolderId!;
+                  final String id = _tasks.replicatedFolderId!;
                   // Back to the library, which then shows the folder.
                   Navigator.of(context).pop();
                   widget.onOpenFolder!(id);
@@ -1001,10 +886,14 @@ class _ProgressPanel extends StatelessWidget {
     required this.destinationName,
     required this.onCancel,
     required this.cancelling,
+    required this.keepsGoing,
   });
 
   final CloudProgress? progress;
   final String destinationName;
+
+  /// Whether the work carries on if this is closed, which it says.
+  final bool keepsGoing;
 
   /// Null while the work can no longer be stopped.
   final VoidCallback? onCancel;
@@ -1052,6 +941,13 @@ class _ProgressPanel extends StatelessWidget {
                 overflow: TextOverflow.ellipsis,
               ),
             ),
+          if (keepsGoing) ...<Widget>[
+            const SizedBox(height: AppSpacing.xxs),
+            Text(
+              'This keeps going if you leave this page.',
+              style: text.bodySmall!.copyWith(color: colors.textSecondary),
+            ),
+          ],
           const SizedBox(height: AppSpacing.xs),
           Align(
             alignment: AlignmentDirectional.centerEnd,

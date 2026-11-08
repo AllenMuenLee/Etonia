@@ -22,6 +22,7 @@ import '../library_models.dart';
 import '../note_content.dart';
 import '../note_repository.dart';
 import 'study_desk_models.dart';
+import 'study_citation_refiner.dart';
 import 'study_desk_store.dart';
 import 'study_vectors.dart';
 
@@ -179,6 +180,7 @@ class StudyStrokeData {
     required this.bounds,
     required this.points,
     this.highlighter = false,
+    this.inkFamily = studyNeutralInk,
   });
 
   factory StudyStrokeData.of(Stroke stroke, int index) {
@@ -192,6 +194,7 @@ class StudyStrokeData {
       bounds: stroke.bounds,
       points: points,
       highlighter: stroke.style.isHighlighter,
+      inkFamily: studyInkFamily(stroke.style.ink.onLightPaper),
     );
   }
 
@@ -201,6 +204,41 @@ class StudyStrokeData {
   /// x, then y, for each point.
   final Float32List points;
   final bool highlighter;
+
+  /// The pen's colour by name (`red`, `blue`, ...), or [studyNeutralInk] for
+  /// black, graphite and the like. Not the exact shade: a note's inks are
+  /// compared, and few readers tell two blues apart.
+  final String inkFamily;
+}
+
+/// What black, grey and white ink are called.
+const String studyNeutralInk = 'neutral';
+
+/// The name of [color]'s hue: `red`, `orange`, `yellow`, `green`, `blue` or
+/// `purple`, or [studyNeutralInk] when it is too grey or too dark to have one.
+String studyInkFamily(ui.Color color) {
+  final double r = color.r;
+  final double g = color.g;
+  final double b = color.b;
+  final double high = math.max(r, math.max(g, b));
+  final double low = math.min(r, math.min(g, b));
+  final double span = high - low;
+  if (high < 0.2 || span / high < 0.25) return studyNeutralInk;
+  double hue;
+  if (high == r) {
+    hue = 60 * (((g - b) / span) % 6);
+  } else if (high == g) {
+    hue = 60 * ((b - r) / span + 2);
+  } else {
+    hue = 60 * ((r - g) / span + 4);
+  }
+  if (hue < 0) hue += 360;
+  if (hue < 20 || hue >= 340) return 'red';
+  if (hue < 50) return 'orange';
+  if (hue < 70) return 'yellow';
+  if (hue < 170) return 'green';
+  if (hue < 260) return 'blue';
+  return 'purple';
 }
 
 enum StudyBoxKind { image, sticky, text }
@@ -299,6 +337,23 @@ abstract final class StudyChunker {
   /// Words read with less than this, on average, are shown to the model too.
   static const double confidentReading = 0.6;
 
+  /// A page with less ink than this has no usual pen to differ from.
+  static const int minInksForContrast = 6;
+
+  /// Strokes in another pen, at least this many in a chunk, are annotations.
+  static const int minContrastStrokes = 3;
+
+  /// Marks are looked for among at most this many strokes of a chunk.
+  static const int maxMarkCandidates = 80;
+
+  /// A tick or cross has this much clear paper round it to count when it is
+  /// in the page's own pen: in the middle of writing, it is a letter.
+  static const double markClearance = 8;
+
+  /// The size a hand-drawn tick or cross is, longest side, logical pixels.
+  static const double minMarkSide = 14;
+  static const double maxMarkSide = 120;
+
   /// A note's chunks, in page order. Pure, and safe on any isolate.
   static List<StudyChunk> chunkNote(StudyNoteData note) => <StudyChunk>[
     for (final StudyPageData page in note.pages)
@@ -335,6 +390,7 @@ abstract final class StudyChunker {
             final int top = a.bounds.top.compareTo(b.bounds.top);
             return top != 0 ? top : a.bounds.left.compareTo(b.bounds.left);
           });
+    final String? dominantInk = _dominantInk(page.strokes);
     return <StudyChunk>[
       for (int i = 0; i < kept.length; i++)
         _chunkOf(
@@ -345,8 +401,31 @@ abstract final class StudyChunker {
           placed,
           page.boxes,
           i == 0 ? page.sourceSection : null,
+          dominantInk,
         ),
     ];
+  }
+
+  /// The pen most of a page is written in, or null when it holds too little
+  /// ink to say. Another pen on the same page is then a mark made over it.
+  static String? _dominantInk(List<StudyStrokeData> strokes) {
+    final Map<String, int> counts = <String, int>{};
+    int total = 0;
+    for (final StudyStrokeData stroke in strokes) {
+      if (stroke.highlighter) continue;
+      counts[stroke.inkFamily] = (counts[stroke.inkFamily] ?? 0) + 1;
+      total++;
+    }
+    if (total < minInksForContrast) return null;
+    String best = studyNeutralInk;
+    int most = counts[best] ?? 0;
+    for (final MapEntry<String, int> entry in counts.entries) {
+      if (entry.value > most) {
+        best = entry.key;
+        most = entry.value;
+      }
+    }
+    return best;
   }
 
   /// Unites what lies near together, walking down the page, so that each
@@ -426,6 +505,7 @@ abstract final class StudyChunker {
     List<_PlacedWord> everyWord,
     List<StudyBoxData> everyBox,
     StudySourceSection? sourceSection,
+    String? dominantInk,
   ) {
     final List<StudyStrokeData> strokes = <StudyStrokeData>[
       for (final _Element element in cluster.elements)
@@ -514,9 +594,7 @@ abstract final class StudyChunker {
     }
     final List<StudyChunkLine> lines = <StudyChunkLine>[
       ..._linesOf(cluster.words),
-      for (final StudyBoxData box in typed)
-        for (final String line in const LineSplitter().convert(box.text))
-          if (line.trim().isNotEmpty) StudyChunkLine(0, 0, line.trim()),
+      for (final StudyBoxData box in typed) ..._typedLinesOf(box),
     ];
     final ui.Rect? other = boxes.isEmpty
         ? null
@@ -542,10 +620,56 @@ abstract final class StudyChunker {
         ...svgText,
         for (final StudyBoxData image in images) image.text,
       ].where((String text) => text.isNotEmpty).join(' '),
-      tags: visual || lowConfidence ? _structureOf(ink) : const <String>[],
+      tags: <String>[
+        if (visual || lowConfidence) ..._structureOf(ink),
+        ..._marksOf(
+          ink: ink,
+          read: read,
+          words: cluster.words,
+          typed: typed,
+          dominantInk: dominantInk,
+        ),
+      ],
       lowConfidence: lowConfidence,
       sourceSection: sourceSection,
     );
+  }
+
+  /// A text box's lines, each with the part of the box it lies in. A box does
+  /// not say where its lines fall, so its height is shared out by their length:
+  /// a paragraph that wraps takes the room of the rows it wraps to. A PDF's
+  /// runs are one line each, so for them this is exact.
+  static List<StudyChunkLine> _typedLinesOf(StudyBoxData box) {
+    final List<String> lines = <String>[
+      for (final String line in const LineSplitter().convert(box.text))
+        if (line.trim().isNotEmpty) line.trim(),
+    ];
+    if (lines.isEmpty) return const <StudyChunkLine>[];
+    if (lines.length == 1) {
+      return <StudyChunkLine>[
+        StudyChunkLine(0, 0, lines.single, bounds: box.bounds),
+      ];
+    }
+    final double total = lines.fold<double>(
+      0,
+      (double sum, String line) => sum + math.max(line.length, 8),
+    );
+    double top = box.bounds.top;
+    return <StudyChunkLine>[
+      for (final String line in lines)
+        () {
+          final double height =
+              box.bounds.height * math.max(line.length, 8) / total;
+          final ui.Rect rect = ui.Rect.fromLTRB(
+            box.bounds.left,
+            top,
+            box.bounds.right,
+            top + height,
+          );
+          top += height;
+          return StudyChunkLine(0, 0, line, bounds: rect);
+        }(),
+    ];
   }
 
   /// The words in rows down the chunk, each row left to right.
@@ -581,12 +705,16 @@ abstract final class StudyChunker {
         if (placed.word.stickyId == null) ...placed.word.strokeIndices,
     ];
     final String text = row.map((w) => w.word.text).join(' ');
+    final ui.Rect bounds = row
+        .map((_PlacedWord placed) => placed.bounds)
+        .reduce((ui.Rect a, ui.Rect b) => a.expandToInclude(b));
     return strokes.isEmpty
-        ? StudyChunkLine(0, 0, text)
+        ? StudyChunkLine(0, 0, text, bounds: bounds)
         : StudyChunkLine(
             strokes.reduce(math.min) + 1,
             strokes.reduce(math.max) + 1,
             text,
+            bounds: bounds,
           );
   }
 
@@ -614,6 +742,198 @@ abstract final class StudyChunker {
   }
 
   static const int _maxSvgText = 600;
+
+  /// Words for the marks on a chunk: ticks, crosses, circled and struck-through
+  /// writing, and a second pen over the first. A mark says nothing in the
+  /// words a recognizer reads, so these words are what a search for "my
+  /// mistakes" or "what was marked wrong" has to go on. The synonyms are
+  /// there because BM25 matches only the words it is given.
+  ///
+  /// Conservative on purpose: ink the recognizer read as writing is not a
+  /// mark unless it is in another pen, and a tick or cross in the page's own
+  /// pen counts only with clear paper round it, since a letter looks the same.
+  static List<String> _marksOf({
+    required List<StudyStrokeData> ink,
+    required Set<int> read,
+    required List<_PlacedWord> words,
+    required List<StudyBoxData> typed,
+    required String? dominantInk,
+  }) {
+    if (ink.isEmpty) return const <String>[];
+    final List<StudyStrokeData> other = dominantInk == null
+        ? const <StudyStrokeData>[]
+        : <StudyStrokeData>[
+            for (final StudyStrokeData stroke in ink)
+              if (stroke.inkFamily != dominantInk) stroke,
+          ];
+    final Set<StudyStrokeData> contrast = other.toSet();
+    final List<StudyStrokeData> candidates = <StudyStrokeData>[
+      for (final StudyStrokeData stroke in ink)
+        if (!read.contains(stroke.index) || contrast.contains(stroke)) stroke,
+    ].take(maxMarkCandidates).toList();
+    final List<ui.Rect> targets = <ui.Rect>[
+      for (final _PlacedWord word in words) word.bounds,
+      for (final StudyBoxData box in typed) box.bounds,
+    ];
+
+    final List<(StudyStrokeData, _Shape)> shapes = <(StudyStrokeData, _Shape)>[
+      for (final StudyStrokeData stroke in candidates)
+        if (_Shape.of(stroke) case final _Shape shape) (stroke, shape),
+    ];
+    final Set<String> found = <String>{};
+
+    bool clear(ui.Rect area, List<StudyStrokeData> own) {
+      final ui.Rect reach = area.inflate(markClearance);
+      for (final StudyStrokeData stroke in ink) {
+        if (own.any((StudyStrokeData s) => identical(s, stroke))) continue;
+        if (reach.overlaps(stroke.bounds)) return false;
+      }
+      return true;
+    }
+
+    bool counts(ui.Rect area, List<StudyStrokeData> own) =>
+        own.any(contrast.contains) || clear(area, own);
+
+    for (final StudyStrokeData stroke in candidates) {
+      if (_isTick(stroke) && counts(stroke.bounds, [stroke])) {
+        found.add('tick');
+        break;
+      }
+    }
+
+    final List<(StudyStrokeData, _Shape)> diagonals =
+        <(StudyStrokeData, _Shape)>[
+          for (final (StudyStrokeData, _Shape) entry in shapes)
+            if (entry.$2.isStraight &&
+                entry.$2.chord >= minMarkSide &&
+                entry.$2.chord <= maxMarkSide &&
+                !entry.$2.isLevel &&
+                !entry.$2.isUpright)
+              entry,
+        ];
+    for (int i = 0; i < diagonals.length && !found.contains('cross'); i++) {
+      for (int j = i + 1; j < diagonals.length; j++) {
+        final (StudyStrokeData a, _Shape sa) = diagonals[i];
+        final (StudyStrokeData b, _Shape sb) = diagonals[j];
+        if (!sa.slopesOppositeTo(sb) || !sa.crossesNearMiddleOf(sb)) continue;
+        final double ratio = math.min(sa.chord, sb.chord) /
+            math.max(sa.chord, sb.chord);
+        if (ratio < 0.5) continue;
+        if (counts(a.bounds.expandToInclude(b.bounds), [a, b])) {
+          found.add('cross');
+          break;
+        }
+      }
+    }
+
+    if (targets.isNotEmpty) {
+      for (final (StudyStrokeData stroke, _Shape shape) in shapes) {
+        if (found.containsAll(const <String>['circled', 'strikethrough'])) {
+          break;
+        }
+        if (shape.isClosed && stroke.bounds.width >= 24) {
+          // It rings a word or a line of type that is smaller than it is.
+          for (final ui.Rect target in targets) {
+            if (stroke.bounds.contains(target.center) &&
+                target.width <= stroke.bounds.width * 1.1 &&
+                target.height <= stroke.bounds.height * 1.1) {
+              found.add('circled');
+              break;
+            }
+          }
+        } else if (shape.isStraight &&
+            shape.isLevel &&
+            shape.chord >= 24 &&
+            (!read.contains(stroke.index) || contrast.contains(stroke))) {
+          // A level line through the middle of a word, along all of it.
+          final double y = (shape.y0 + shape.y1) / 2;
+          final double left = math.min(shape.x0, shape.x1);
+          final double right = math.max(shape.x0, shape.x1);
+          for (final ui.Rect target in targets) {
+            if (target.height <= 0 || target.width <= 0) continue;
+            final double through = (y - target.top) / target.height;
+            final double covered =
+                (math.min(right, target.right) - math.max(left, target.left)) /
+                target.width;
+            if (through >= 0.25 && through <= 0.75 && covered >= 0.7) {
+              found.add('strikethrough');
+              break;
+            }
+          }
+        }
+      }
+    }
+
+    final Set<String> inks = <String>{
+      for (final StudyStrokeData stroke in other)
+        if (stroke.inkFamily != studyNeutralInk) stroke.inkFamily,
+    };
+    final int inOtherPen = other
+        .where((StudyStrokeData s) => s.inkFamily != studyNeutralInk)
+        .length;
+
+    final Set<String> tags = <String>{};
+    for (final String mark in found) {
+      tags.addAll(_markWords[mark]!);
+    }
+    if (found.isNotEmpty) tags.add(StudyChunk.markedTag);
+    if (inOtherPen >= minContrastStrokes) {
+      tags.add(StudyChunk.annotatedTag);
+      for (final String family in inks) {
+        tags
+          ..add('$family-ink')
+          ..add(family);
+      }
+    }
+    return tags.toList(growable: false);
+  }
+
+  /// What each mark is called, and what it means to a student.
+  static const Map<String, List<String>> _markWords = <String, List<String>>{
+    'tick': <String>['tick', 'checkmark', 'correct'],
+    'cross': <String>['cross', 'wrong', 'incorrect', 'mistake'],
+    'circled': <String>['circled', 'circle'],
+    'strikethrough': <String>[
+      'strikethrough',
+      'crossed-out',
+      'corrected',
+      'correction',
+    ],
+  };
+
+  /// Whether [stroke] is drawn like a tick: a short stroke down, then a longer
+  /// one up and to the right. A letter v has two legs alike, and so is not one.
+  static bool _isTick(StudyStrokeData stroke) {
+    final Float32List p = stroke.points;
+    final int n = p.length ~/ 2;
+    if (n < 3) return false;
+    final double span = math.max(stroke.bounds.width, stroke.bounds.height);
+    if (span < minMarkSide || span > maxMarkSide) return false;
+    int low = 0;
+    for (int i = 1; i < n; i++) {
+      if (p[i * 2 + 1] > p[low * 2 + 1]) low = i;
+    }
+    if (low == 0 || low == n - 1) return false;
+    final double x0 = p[0];
+    final double y0 = p[1];
+    final double xb = p[low * 2];
+    final double yb = p[low * 2 + 1];
+    final double x1 = p[(n - 1) * 2];
+    final double y1 = p[(n - 1) * 2 + 1];
+    final double down = math.sqrt((xb - x0) * (xb - x0) + (yb - y0) * (yb - y0));
+    final double up = math.sqrt((x1 - xb) * (x1 - xb) + (y1 - yb) * (y1 - yb));
+    if (down < 5 || up < down * 1.2) return false;
+    if (yb - y0 < down * 0.25 || yb - y1 < up * 0.25) return false;
+    if (x1 - xb < up * 0.3 || xb < x0 - down * 0.3) return false;
+    double length = 0;
+    for (int i = 2; i + 1 < p.length; i += 2) {
+      final double dx = p[i] - p[i - 2];
+      final double dy = p[i + 1] - p[i - 1];
+      length += math.sqrt(dx * dx + dy * dy);
+    }
+    // Two straight legs, not a scribble.
+    return length <= (down + up) * 1.4;
+  }
 
   /// A few plain words for what [ink] looks like, from its shapes alone.
   static List<String> _structureOf(List<StudyStrokeData> ink) {
@@ -735,6 +1055,26 @@ class _Shape {
 
   bool get isLevel => (y1 - y0).abs() <= (x1 - x0).abs() * 0.2;
   bool get isUpright => (x1 - x0).abs() <= (y1 - y0).abs() * 0.2;
+
+  /// One runs like a backslash and the other like a slash.
+  bool slopesOppositeTo(_Shape other) =>
+      (x1 - x0) * (y1 - y0) * (other.x1 - other.x0) * (other.y1 - other.y0) < 0;
+
+  /// Whether the two straight lines meet, each well away from its ends: an
+  /// X, not a T or a corner.
+  bool crossesNearMiddleOf(_Shape other) {
+    final double rx = x1 - x0;
+    final double ry = y1 - y0;
+    final double sx = other.x1 - other.x0;
+    final double sy = other.y1 - other.y0;
+    final double denominator = rx * sy - ry * sx;
+    if (denominator.abs() < 1e-6) return false;
+    final double qx = other.x0 - x0;
+    final double qy = other.y0 - y0;
+    final double t = (qx * sy - qy * sx) / denominator;
+    final double u = (qx * ry - qy * rx) / denominator;
+    return t >= 0.2 && t <= 0.8 && u >= 0.2 && u <= 0.8;
+  }
 
   /// Whether a shorter stroke, like an arrow's head, starts or ends at an end
   /// of this one.
@@ -1073,6 +1413,13 @@ List<String> studyTokens(String text) {
   return tokens;
 }
 
+/// [studyTokens] without the words every sentence has and the one-letter
+/// symbols a formula is made of: what is left says what a passage is about.
+List<String> studyContentTokens(String text) => <String>[
+  for (final String token in studyTokens(text))
+    if (token.length >= 2 && !_stopWords.contains(token)) token,
+];
+
 final RegExp _wordPattern = RegExp(r'[\p{L}\p{N}]+', unicode: true);
 final RegExp _cjkPattern = RegExp(r'[぀-ヿ㐀-鿿가-힯]');
 
@@ -1319,7 +1666,8 @@ abstract final class StudyRetriever {
   }
 
   /// Words and meaning together. Each is a ranked list (words, the question's
-  /// meaning against each chunk's words, against each chunk's picture), and a
+  /// meaning against each chunk's words, against each chunk's picture, and a
+  /// description of how the page should look against each picture), and a
   /// chunk's place is the sum of how high it comes in each, since the lists'
   /// scores are not on one scale.
   ///
@@ -1337,8 +1685,11 @@ abstract final class StudyRetriever {
         <(StudySearchDocument, double)>[];
     final List<(StudySearchDocument, double)> byImage =
         <(StudySearchDocument, double)>[];
+    final List<(StudySearchDocument, double)> byLook =
+        <(StudySearchDocument, double)>[];
     final Map<StudySearchDocument, (double, double)> nearness =
         <StudySearchDocument, (double, double)>{};
+    final Float32List? look = vectors.visual;
     for (final StudySearchDocument document in documents) {
       final StudyChunkVectors? known = vectors.lookup(document.chunk);
       final Float32List? text = known?.text;
@@ -1349,9 +1700,14 @@ abstract final class StudyRetriever {
       final double imageCos = image == null
           ? -1
           : studyCosine(vectors.query, image);
-      nearness[document] = (textCos, imageCos);
+      // How near its picture is to a description of how the page should look.
+      final double lookCos = image == null || look == null
+          ? -1
+          : studyCosine(look, image);
+      nearness[document] = (textCos, math.max(imageCos, lookCos));
       if (textCos >= textFloor) byText.add((document, textCos));
       if (imageCos >= imageFloor) byImage.add((document, imageCos));
+      if (lookCos >= imageFloor) byLook.add((document, lookCos));
     }
     int byCosine(
       (StudySearchDocument, double) a,
@@ -1359,6 +1715,7 @@ abstract final class StudyRetriever {
     ) => b.$2.compareTo(a.$2);
     byText.sort(byCosine);
     byImage.sort(byCosine);
+    byLook.sort(byCosine);
 
     final Map<StudySearchDocument, double> fused =
         <StudySearchDocument, double>{};
@@ -1377,6 +1734,10 @@ abstract final class StudyRetriever {
     );
     rank(byText.map(((StudySearchDocument, double) e) => e.$1));
     rank(byImage.map(((StudySearchDocument, double) e) => e.$1));
+    // Only the closest few: a description of a look fits many pages a little.
+    rank(
+      byLook.take(limit * 2).map(((StudySearchDocument, double) e) => e.$1),
+    );
     final List<StudyHit> hits = <StudyHit>[
       for (final MapEntry<StudySearchDocument, double> e in fused.entries)
         StudyHit(e.key, e.value),
@@ -1561,6 +1922,12 @@ class StudySourceMap {
     return null;
   }
 
+  /// What was sent of one page, in the order it was sent.
+  List<StudyChunk> chunksOnPage(String noteId, int pageIndex) => <StudyChunk>[
+    for (final StudyChunk chunk in chunks)
+      if (chunk.noteId == noteId && chunk.pageIndex == pageIndex) chunk,
+  ];
+
   /// What a box with no chunk named was measured on: the one picture of that
   /// page, if there was just one.
   ui.Rect? onlyCropOn(String noteId, int pageIndex) {
@@ -1731,6 +2098,7 @@ class StudyContextAssembler {
     StudyChunkRenderer? renderer,
     int reservedTextBytes = 0,
     String? query,
+    bool includeCitableSvg = true,
   }) async {
     final Map<String, int> noteNumbers = <String, int>{};
     for (final StudyHit hit in hits) {
@@ -1788,7 +2156,8 @@ class StudyContextAssembler {
     }
     // Lines to cite in a picture go after all words, within what is left over.
     int bytes = reservedTextBytes + utf8.encode(text.toString()).length;
-    for (final StudyCrop crop in crops) {
+    for (final StudyCrop crop
+        in includeCitableSvg ? crops : const <StudyCrop>[]) {
       final String? svg = crop.svg;
       if (svg == null || svg.length > maxSvgCharacters) continue;
       final int size = utf8.encode(svg).length;
@@ -1861,6 +2230,14 @@ class StudyContextAssembler {
     if (lines.length < chunk.lines.length) {
       out.write('\nUnrelated paragraphs omitted; remaining text is verbatim.');
     }
+    // Typed and printed lines are numbered within their chunk, so that a
+    // citation can name just the ones used, not the whole chunk.
+    final Map<StudyChunkLine, int> typedNumber =
+        Map<StudyChunkLine, int>.identity();
+    final List<StudyChunkLine> typed = chunk.typedLines;
+    for (int i = 0; i < typed.length; i++) {
+      typedNumber[typed[i]] = i + 1;
+    }
     for (final StudyChunkLine line in lines) {
       out.write('\n');
       if (line.hasStrokes) {
@@ -1869,6 +2246,8 @@ class StudyContextAssembler {
               ? 'L${line.first}: '
               : 'L${line.first}-L${line.last}: ',
         );
+      } else if (typedNumber[line] case final int number) {
+        out.write('T$number: ');
       }
       out.write(line.text);
     }
@@ -2263,7 +2642,7 @@ class StudyCitationResolver {
       for (final AiNoteCitation cited in parseAiNoteCitations(
         blocks[i].source,
       )) {
-        final StudyCitation? citation = _resolveOne(cited);
+        final StudyCitation? citation = _resolveOne(cited, blocks[i].text);
         if (citation == null) continue;
         final (String, int) key = (citation.noteId, citation.pageIndex);
         byPage[key] = byPage[key]?.merged(citation) ?? citation;
@@ -2295,25 +2674,20 @@ class StudyCitationResolver {
       diagramBounds: citation.diagramBounds,
       strokeIndices: citation.strokeIndices,
       rings: citation.rings.take(AiSourceMap.maxCircles).toList(),
+      highlights: citation.highlights,
+      focus: citation.focus,
     );
   }
 
-  StudyCitation? _resolveOne(AiNoteCitation cited) {
+  StudyCitation? _resolveOne(AiNoteCitation cited, String paragraph) {
     final String? noteId = map.noteIds[cited.note];
     if (noteId == null || cited.page < 1) return null;
     final int pageIndex = cited.page - 1;
     final StoredPage? page = pageOf(noteId, pageIndex);
     if (page == null) return null;
-    final List<int> indices = <int>[];
-    for (final AiLineRange range in cited.ranges) {
-      // Bounded by what exists: a model can write any number here.
-      final int first = math.max(range.first, 1);
-      final int last = math.min(range.last, page.strokes.length);
-      for (int line = first; line <= last; line++) {
-        indices.add(line - 1);
-      }
-    }
+    final Set<int> indices = <int>{};
     final List<ui.Rect> rings = <ui.Rect>[];
+    final List<ui.Rect> highlights = <ui.Rect>[];
     final StudyChunk? chunk = cited.chunk == null
         ? null
         : map.chunkOn(noteId, pageIndex, cited.chunk!);
@@ -2327,16 +2701,64 @@ class StudyCitationResolver {
       if (ring != null && !StudyCitation.coversPage(ring, page)) {
         rings.add(ring);
       }
-    } else if (chunk != null) {
-      indices.addAll(
-        chunk.strokeIndices.where((int i) => i < page.strokes.length),
+    } else if (cited.typedRanges.isNotEmpty) {
+      // Typed or printed lines of one chunk, named by their place in it.
+      if (chunk != null) {
+        final List<StudyChunkLine> typed = chunk.typedLines;
+        final List<int> named = <int>[];
+        for (final AiLineRange range in cited.typedRanges) {
+          final int first = math.max(range.first, 1);
+          final int last = math.min(range.last, typed.length);
+          for (int number = first; number <= last; number++) {
+            named.add(chunk.lines.indexOf(typed[number - 1]));
+          }
+        }
+        _mark(chunk, named, paragraph, page, indices, highlights);
+      }
+    } else if (cited.ranges.isNotEmpty) {
+      _markRanges(
+        noteId,
+        pageIndex,
+        chunk,
+        cited,
+        paragraph,
+        page,
+        indices,
+        highlights,
       );
-      // What no stroke can mark: a picture, a sticky note, typed text.
-      if (chunk.otherBounds case final ui.Rect other
-          when !StudyCitation.coversPage(other, page)) {
-        rings.add(other);
+    } else if (chunk != null) {
+      final List<int>? lines = StudyCitationRefiner.linesForChunk(
+        chunk,
+        paragraph,
+      );
+      if (lines != null && lines.length < chunk.lines.length) {
+        _mark(
+          chunk,
+          lines,
+          paragraph,
+          page,
+          indices,
+          highlights,
+          refine: false,
+        );
+      } else {
+        indices.addAll(
+          chunk.strokeIndices.where((int i) => i < page.strokes.length),
+        );
+        // What no stroke can mark: a picture, a sticky note, typed text.
+        if (chunk.otherBounds case final ui.Rect other
+            when !StudyCitation.coversPage(other, page)) {
+          rings.add(other);
+        }
       }
     }
+    final List<int> ordered = indices.toList()..sort();
+    ui.Rect? focus;
+    void include(ui.Rect rect) => focus = focus?.expandToInclude(rect) ?? rect;
+    for (final int i in ordered) {
+      include(page.strokes[i].bounds);
+    }
+    highlights.forEach(include);
     return StudyCitation(
       noteId: noteId,
       pageIndex: pageIndex,
@@ -2348,12 +2770,103 @@ class StudyCitationResolver {
           chunk.logicalBounds,
       ],
       strokeKeys: <String>[
-        for (final int i in indices) aiStrokeKey(page.strokes[i]),
+        for (final int i in ordered) aiStrokeKey(page.strokes[i]),
       ],
-      strokeIndices: indices,
+      strokeIndices: ordered,
       rings: rings,
+      highlights: highlights,
+      focus: focus,
     );
   }
+
+  /// Marks the cited stroke ranges: as the lines of the chunks they fall in,
+  /// settled against the paragraph, wherever those can be told; as the strokes
+  /// themselves where they cannot, such as a drawing, which is cited by picture.
+  void _markRanges(
+    String noteId,
+    int pageIndex,
+    StudyChunk? named,
+    AiNoteCitation cited,
+    String paragraph,
+    StoredPage page,
+    Set<int> indices,
+    List<ui.Rect> highlights,
+  ) {
+    final Set<int> raw = <int>{};
+    for (final AiLineRange range in cited.ranges) {
+      // Bounded by what exists: a model can write any number here.
+      final int first = math.max(range.first, 1);
+      final int last = math.min(range.last, page.strokes.length);
+      for (int line = first; line <= last; line++) {
+        raw.add(line - 1);
+      }
+    }
+    final List<StudyChunk> candidates = named != null
+        ? <StudyChunk>[named]
+        : map.chunksOnPage(noteId, pageIndex);
+    final Set<int> consumed = <int>{};
+    for (final StudyChunk chunk in candidates) {
+      if (!StudyCitationRefiner.canRefine(chunk)) continue;
+      final List<int> lines = <int>[
+        for (int i = 0; i < chunk.lines.length; i++)
+          if (chunk.lines[i].hasStrokes &&
+              cited.ranges.any(
+                (AiLineRange range) =>
+                    chunk.lines[i].first <= range.last &&
+                    chunk.lines[i].last >= range.first,
+              ))
+            i,
+      ];
+      if (lines.isEmpty) continue;
+      consumed.addAll(chunk.strokeIndices);
+      _mark(chunk, lines, paragraph, page, indices, highlights);
+    }
+    indices.addAll(raw.where((int i) => !consumed.contains(i)));
+  }
+
+  /// Marks [lines] of [chunk], refined against [paragraph] unless [refine] is
+  /// false: each handwritten line by the strokes lying in it, and each typed or
+  /// printed line by itself.
+  void _mark(
+    StudyChunk chunk,
+    List<int> lines,
+    String paragraph,
+    StoredPage page,
+    Set<int> indices,
+    List<ui.Rect> highlights, {
+    bool refine = true,
+  }) {
+    final List<int> settled = refine
+        ? StudyCitationRefiner.refineLines(chunk, lines, paragraph)
+        : lines;
+    for (final int index in settled) {
+      final StudyChunkLine line = chunk.lines[index];
+      if (line.hasStrokes) {
+        for (final int stroke in chunk.strokeIndices) {
+          if (stroke >= page.strokes.length) continue;
+          final ui.Rect? bounds = line.bounds;
+          final bool inLine = bounds == null
+              ? stroke + 1 >= line.first && stroke + 1 <= line.last
+              : bounds
+                    .inflate(_lineSlack)
+                    .contains(page.strokes[stroke].bounds.center);
+          if (inLine) indices.add(stroke);
+        }
+      } else if (line.bounds case final ui.Rect bounds) {
+        if (highlights.length < _maxHighlights &&
+            !StudyCitation.coversPage(bounds, page)) {
+          highlights.add(bounds);
+        }
+      }
+    }
+  }
+
+  /// How far past a line's words a stroke may lie and still be one of its own:
+  /// an underline, a tick, a mark across the line.
+  static const double _lineSlack = 6;
+
+  /// The most lines of typed text one citation marks.
+  static const int _maxHighlights = 40;
 
   static ui.Rect _pageRect(StoredPage page) => StudyCitation.pageBounds(page);
 }

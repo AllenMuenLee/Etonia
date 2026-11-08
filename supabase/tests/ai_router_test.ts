@@ -80,10 +80,47 @@ const context = (over: Partial<RouteContext> = {}): RouteContext => ({
   ...over,
 });
 
+Deno.test("Flash is a metered balanced Gemini model available on free credit and Starter", () => {
+  const models = buildCatalog({
+    flash: {
+      provider: "gemini", model: "gemini-3.8-flash", inputMicroPerKilo: 750,
+      cachedInputMicroPerKilo: 75, outputMicroPerKilo: 3750, maxOutputTokens: 16384,
+    },
+  });
+  assert.equal(models.length, 1);
+  assert.equal(models[0].tier, "standard");
+  for (const plan of ["free", "starter", "pro", "max"] as const) {
+    const chosen = decided(route(models, context({ plan, allowed: ["flash"] })));
+    assert.equal(chosen.alias, "flash");
+    assert.equal(chosen.provider, "gemini");
+    assert.equal(chosen.billing, "metered");
+  }
+  const parsed = parseRoutingRequest({ allowedModels: ["flash"] });
+  assert.deepEqual(parsed.allowed, ["flash"]);
+  assert.equal(route(models, context({ allowed: ["sol"] })).ok, false);
+});
+
 function decided(result: Decision | Denied): Decision {
   assert.equal(result.ok, true, JSON.stringify(result));
   return result as Decision;
 }
+
+Deno.test("direct visual chat stays on its selected lightweight model on retries", () => {
+  for (const alias of ["haiku", "luna"]) {
+    const ctx = context({
+      allowed: [alias],
+      previous: { alias: "sol", ageMs: 0 },
+      hints: { inputTokens: 12000, difficulty: 3, needsVision: true, diagrams: true },
+    });
+    const chosen = decided(route(catalog(), ctx));
+    assert.equal(chosen.alias, alias);
+    const retry = escalate(catalog(), ctx, chosen);
+    if (retry.ok) assert.equal(retry.alias, alias);
+    else assert.equal(retry.reason, "no_stronger_model");
+    const outage = route(catalog(), { ...ctx, unhealthyProviders: [chosen.provider] });
+    assert.equal(outage.ok, false);
+  }
+});
 
 function denied(result: Decision | Denied): Denied {
   assert.equal(result.ok, false, JSON.stringify(result));
@@ -96,6 +133,32 @@ Deno.test("auto picks the cheapest pair that is capable enough", () => {
   const pick = decided(route(catalog(), context()));
   assert.deepEqual([pick.alias, pick.effort, pick.capable], ["sonnet", "medium", true]);
   assert.equal(pick.billing, "metered");
+});
+
+Deno.test("visual descriptions stay on enabled lightweight vision models, including High settings", () => {
+  const base = context({
+    task: "study.describe",
+    setting: "high",
+    hints: { inputTokens: 5000, difficulty: 3, needsVision: true },
+    plan: "free",
+  });
+  const pick = decided(route(catalog(), base));
+  assert(["haiku", "luna"].includes(pick.alias));
+  assert.notEqual(pick.effort, "high");
+  assert.equal(pick.billing, "metered");
+  assert(pick.capable);
+  const luna = decided(route(catalog(), { ...base, allowed: ["luna", "sol"] }));
+  assert.equal(luna.alias, "luna");
+  assert.equal(
+    denied(route(catalog(), { ...base, allowed: ["sol", "opus"] })).reason,
+    "no_model_enabled",
+  );
+  const noVision = catalog().map((m) => ({ ...m, vision: false }));
+  assert.equal(denied(route(noVision, base)).reason, "unsupported_input");
+  assert.equal(
+    denied(route(catalog(), { ...base, creditsMicro: 0 })).reason,
+    "free_credit_exhausted",
+  );
 });
 
 Deno.test("an easy task is answered by an unlimited model, free to a paid plan", () => {

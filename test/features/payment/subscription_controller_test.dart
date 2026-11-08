@@ -20,6 +20,7 @@ const Set<AiModelId> _unlimited = <AiModelId>{AiModelId.haiku, AiModelId.luna};
 const Set<AiModelId> _metered = <AiModelId>{
   AiModelId.sonnet,
   AiModelId.sol,
+  AiModelId.flash,
   AiModelId.opus,
   AiModelId.argon,
   AiModelId.astra,
@@ -35,51 +36,55 @@ const AiTokenUsage _turn = AiTokenUsage(inputTokens: 1000, outputTokens: 1000);
 
 void main() {
   group('plans', () {
-    test('Starter: unlimited Haiku and Luna, \$2.45 for Sonnet and Sol, the '
-        'rest locked', () async {
-      final SubscriptionController plan = await loadedSubscription(
-        plan: SubscriptionPlan.starter699,
-      );
-      expect(plan.remainingCreditsMicroUsd, 2450000);
-      expect(plan.includedCreditsMicroUsd, 2450000);
-      for (final AiModelId model in _unlimited) {
-        expect(plan.accessFor(model), AiModelAccess.unlimited);
-        expect(plan.checkAccess(model), isNull);
-        plan.recordUsage(model, _turn);
-      }
-      // \$0 for any number of unlimited turns.
-      expect(plan.remainingCreditsMicroUsd, 2450000);
-      for (final AiModelId model in <AiModelId>[
-        AiModelId.sonnet,
-        AiModelId.sol,
-      ]) {
-        expect(plan.accessFor(model), AiModelAccess.metered);
-        expect(plan.checkAccess(model), isNull);
-      }
-      for (final AiModelId model in <AiModelId>[
-        AiModelId.opus,
-        AiModelId.argon,
-        AiModelId.astra,
-      ]) {
-        expect(plan.accessFor(model), AiModelAccess.locked);
-        expect(plan.checkAccess(model)?.kind, AiFailureKind.planRequired);
-      }
-      expect(SubscriptionPlan.starter699.lockedModels, <AiModelId>{
-        AiModelId.opus,
-        AiModelId.argon,
-        AiModelId.astra,
-      });
-      expect(plan.creditsLabel, '100% tokens');
-      expect(plan.tokenFraction, 1.0);
-      expect(plan.isOutOfTokens, isFalse);
-    });
+    test(
+      'Starter: unlimited Haiku and Luna, \$2.45 for Sonnet, Sol and Flash, the '
+      'rest locked',
+      () async {
+        final SubscriptionController plan = await loadedSubscription(
+          plan: SubscriptionPlan.starter699,
+        );
+        expect(plan.remainingCreditsMicroUsd, 2450000);
+        expect(plan.includedCreditsMicroUsd, 2450000);
+        for (final AiModelId model in _unlimited) {
+          expect(plan.accessFor(model), AiModelAccess.unlimited);
+          expect(plan.checkAccess(model), isNull);
+          plan.recordUsage(model, _turn);
+        }
+        // \$0 for any number of unlimited turns.
+        expect(plan.remainingCreditsMicroUsd, 2450000);
+        for (final AiModelId model in <AiModelId>[
+          AiModelId.sonnet,
+          AiModelId.sol,
+          AiModelId.flash,
+        ]) {
+          expect(plan.accessFor(model), AiModelAccess.metered);
+          expect(plan.checkAccess(model), isNull);
+        }
+        for (final AiModelId model in <AiModelId>[
+          AiModelId.opus,
+          AiModelId.argon,
+          AiModelId.astra,
+        ]) {
+          expect(plan.accessFor(model), AiModelAccess.locked);
+          expect(plan.checkAccess(model)?.kind, AiFailureKind.planRequired);
+        }
+        expect(SubscriptionPlan.starter699.lockedModels, <AiModelId>{
+          AiModelId.opus,
+          AiModelId.argon,
+          AiModelId.astra,
+        });
+        expect(plan.creditsLabel, '100% tokens');
+        expect(plan.tokenFraction, 1.0);
+        expect(plan.isOutOfTokens, isFalse);
+      },
+    );
 
     for (final (SubscriptionPlan tier, int credits, String label)
         in <(SubscriptionPlan, int, String)>[
           (SubscriptionPlan.pro1499, 5250000, '100% tokens'),
           (SubscriptionPlan.max2499, 8750000, '100% tokens'),
         ]) {
-      test('${tier.title}: unlimited Haiku and Luna, $label across all five '
+      test('${tier.title}: unlimited Haiku and Luna, $label across all six '
           'metered models', () async {
         final SubscriptionController plan = await loadedSubscription(
           plan: tier,

@@ -16,82 +16,140 @@ class StudyChatSources extends StatelessWidget {
     required this.controller,
     this.onOpenSource,
     this.onAddSources,
+    this.compact = false,
   });
   final StudyDeskController controller;
   final ValueChanged<String>? onOpenSource;
   final VoidCallback? onAddSources;
 
+  /// For sitting right above the message field: the heading and Add source
+  /// share a line, so the sources take as little of the chat as they can.
+  final bool compact;
+
+  void _open(StudySourceItem source) {
+    if (onOpenSource != null) {
+      onOpenSource!(source.noteId);
+    } else {
+      controller.focusCitation(
+        StudyCitation(
+          noteId: source.noteId,
+          pageIndex: 0,
+          revision: controller.revisionOf(source.noteId),
+        ),
+        message: -1,
+        paragraph: 0,
+      );
+    }
+  }
+
+  Widget _chips(BuildContext context, double maxWidth) => SingleChildScrollView(
+    key: const ValueKey('study-chat-source-row'),
+    scrollDirection: Axis.horizontal,
+    child: Row(
+      children: [
+        for (final source in controller.sources)
+          Padding(
+            padding: const EdgeInsetsDirectional.only(end: AppSpacing.xs),
+            child: ConstrainedBox(
+              constraints: BoxConstraints(maxWidth: maxWidth),
+              child: InputChip(
+                key: ValueKey('study-chat-source-${source.noteId}'),
+                avatar: const Icon(AppIcons.note, size: 16),
+                label: Text(
+                  controller.noteOf(source.noteId)?.title ?? 'Note',
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                ),
+                visualDensity: compact ? VisualDensity.compact : null,
+                onPressed: () => _open(source),
+                onDeleted: () => controller.removeSource(source.noteId),
+                deleteButtonTooltipMessage: 'Remove source',
+              ),
+            ),
+          ),
+      ],
+    ),
+  );
+
+  Widget _add(BuildContext context) => TextButton.icon(
+    key: const ValueKey('study-chat-add-source'),
+    onPressed:
+        onAddSources ??
+        () => showStudySourcePicker(context, controller: controller),
+    style: compact
+        ? TextButton.styleFrom(
+            visualDensity: VisualDensity.compact,
+            tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+          )
+        : null,
+    icon: const Icon(AppIcons.add, size: 18),
+    label: const Text('Add source'),
+  );
+
   @override
   Widget build(BuildContext context) => ListenableBuilder(
     listenable: controller,
-    builder: (context, _) => Column(
-      key: const ValueKey('study-chat-sources'),
-      mainAxisSize: MainAxisSize.min,
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        Text(
-          'Sources for this chat',
-          style: Theme.of(context).textTheme.labelMedium,
-        ),
-        const SizedBox(height: AppSpacing.xs),
-        LayoutBuilder(
-          builder: (context, constraints) => SingleChildScrollView(
-            key: const ValueKey('study-chat-source-row'),
-            scrollDirection: Axis.horizontal,
-            child: Row(
+    builder: (context, _) {
+      final TextTheme theme = Theme.of(context).textTheme;
+      if (compact) {
+        final bool any = controller.sources.isNotEmpty;
+        final Color secondary = AppColors.of(context).textSecondary;
+        return Column(
+          key: const ValueKey('study-chat-sources'),
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Row(
+              mainAxisAlignment: MainAxisAlignment.spaceBetween,
               children: [
-                for (final source in controller.sources)
-                  Padding(
-                    padding: const EdgeInsetsDirectional.only(
-                      end: AppSpacing.xs,
-                    ),
-                    child: ConstrainedBox(
-                      constraints: BoxConstraints(
-                        maxWidth: constraints.maxWidth,
-                      ),
-                      child: InputChip(
-                        key: ValueKey('study-chat-source-${source.noteId}'),
-                        avatar: const Icon(AppIcons.note, size: 16),
-                        label: Text(
-                          controller.noteOf(source.noteId)?.title ?? 'Note',
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                        ),
-                        onPressed: () {
-                          if (onOpenSource != null) {
-                            onOpenSource!(source.noteId);
-                          } else {
-                            controller.focusCitation(
-                              StudyCitation(
-                                noteId: source.noteId,
-                                pageIndex: 0,
-                                revision: controller.revisionOf(source.noteId),
-                              ),
-                              message: -1,
-                              paragraph: 0,
-                            );
-                          }
-                        },
-                        onDeleted: () => controller.removeSource(source.noteId),
-                        deleteButtonTooltipMessage: 'Remove source',
-                      ),
-                    ),
+                // Both give way, the heading first to be cut short: with large
+                // text on a narrow screen neither may push the other out.
+                Flexible(
+                  child: Text(
+                    'Sources for this chat',
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: theme.labelMedium?.copyWith(color: secondary),
                   ),
+                ),
+                Flexible(flex: 2, child: _add(context)),
               ],
             ),
+            if (any)
+              Padding(
+                padding: const EdgeInsets.only(bottom: AppSpacing.xxs),
+                child: LayoutBuilder(
+                  builder: (context, constraints) =>
+                      _chips(context, constraints.maxWidth),
+                ),
+              )
+            else
+              Padding(
+                padding: const EdgeInsets.only(bottom: AppSpacing.xs),
+                child: Text(
+                  'Searching your entire library',
+                  style: theme.labelSmall?.copyWith(color: secondary),
+                ),
+              ),
+          ],
+        );
+      }
+      return Column(
+        key: const ValueKey('study-chat-sources'),
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text('Sources for this chat', style: theme.labelMedium),
+          const SizedBox(height: AppSpacing.xs),
+          LayoutBuilder(
+            builder: (context, constraints) =>
+                _chips(context, constraints.maxWidth),
           ),
-        ),
-        const SizedBox(height: AppSpacing.xs),
-        TextButton.icon(
-          key: const ValueKey('study-chat-add-source'),
-          onPressed:
-              onAddSources ??
-              () => showStudySourcePicker(context, controller: controller),
-          icon: const Icon(AppIcons.add, size: 18),
-          label: const Text('Add source'),
-        ),
-      ],
-    ),
+          const SizedBox(height: AppSpacing.xs),
+          _add(context),
+        ],
+      );
+    },
   );
 }
 

@@ -39,6 +39,8 @@ import '../editor/widgets/tool_palette.dart';
 import 'cloud/auto_backup_scheduler.dart';
 import 'cloud/backup_destinations.dart';
 import 'cloud/cloud_sync_state.dart';
+import 'cloud/cloud_task_banner.dart';
+import 'cloud/cloud_task_controller.dart';
 import 'cloud/goodnotes_drive_replicator.dart';
 import 'cloud/google_drive_backup_service.dart';
 import 'cloud/google_drive_client.dart';
@@ -61,6 +63,7 @@ import 'shared_note_clipboard.dart';
 import 'study_desk/study_desk_controller.dart';
 import 'study_desk/study_desk_models.dart';
 import 'study_desk/study_desk_screen.dart';
+import 'study_desk/study_keyboard.dart';
 import 'study_desk/study_source_picker.dart';
 import 'study_desk/practice/import_test_paper_sheet.dart';
 import 'study_desk/practice/study_practice_models.dart';
@@ -483,6 +486,11 @@ class _LibraryScreenState extends State<LibraryScreen> {
   /// How it comes in: slowly the first time, quickly after that.
   MotionPace _studyDeskPace = MotionPace.standard;
 
+  /// Counts the times it is brought in front, for its parts to settle in one
+  /// after another as it zooms.
+  final ValueNotifier<int> _studyDeskArrival = ValueNotifier<int>(0);
+  Timer? _prewarmTimer;
+
   /// Whether the system's bars are put away for it.
   bool _studyDeskBarsAway = false;
 
@@ -582,6 +590,16 @@ class _LibraryScreenState extends State<LibraryScreen> {
 
   late final GoogleDriveClient _drive =
       widget.googleDriveClient ?? HttpGoogleDriveClient();
+
+  /// Runs the backups, restores and Goodnotes imports the person starts. It
+  /// lives as long as the library, not the page they started it from, so the
+  /// work goes on when they leave that page.
+  late final CloudTaskController _cloudTasks = CloudTaskController(
+    clock: widget.clock,
+  );
+
+  /// Goodnotes files being opened now, so a second tap does not ask twice.
+  final Set<String> _openingImports = <String>{};
 
   late final CloudStateStore _cloudState =
       widget.cloudStateStore ??
@@ -831,6 +849,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
     // Saved edits from a run that crashed may not have reached the backup.
     if (_exitMarker?.begin() ?? false) unawaited(_destinations.backUpSoon());
     unawaited(_loadToolbarLayout());
+    _prewarmStudyDesk();
     _sharedDocumentsSubscription = widget.sharedDocuments.incomingDocuments
         .listen(_enqueueSharedDocument);
     WidgetsBinding.instance.addPostFrameCallback((_) {
@@ -985,7 +1004,10 @@ class _LibraryScreenState extends State<LibraryScreen> {
     _exitMarker?.dispose();
     _openNotes.dispose();
     _editorAtRest.dispose();
+    _prewarmTimer?.cancel();
+    _studyDeskArrival.dispose();
     _destinations.dispose();
+    _cloudTasks.dispose();
     _watchedSubscription?.removeListener(_onSubscriptionChanged);
     _settingsRevision.dispose();
     if (_studyDeskBarsAway) SystemBars.showAll();
@@ -1475,6 +1497,23 @@ class _LibraryScreenState extends State<LibraryScreen> {
       _studyDeskOpen = true;
       _studyDeskBuilt = true;
     });
+    _studyDeskArrival.value++;
+  }
+
+  /// Builds the desk while the library sits quiet, behind it and out of sight,
+  /// so that the tap that opens it only has to move it. Built in the frame of
+  /// that tap, its whole tree (chat, sidebar, composer) is made while the zoom
+  /// is meant to start, and the first frames of it are lost.
+  void _prewarmStudyDesk() {
+    _prewarmTimer = Timer(const Duration(milliseconds: 1500), () async {
+      if (!mounted || _studyDeskBuilt) return;
+      await _studyDesk.load();
+      if (!mounted || _studyDeskBuilt) return;
+      // Past a frame in which something else was drawn, never in the first.
+      await WidgetsBinding.instance.endOfFrame;
+      if (!mounted || _studyDeskBuilt || _tabsShowing) return;
+      setState(() => _studyDeskBuilt = true);
+    });
   }
 
   /// Back to the folder the desk was opened over, just as it was left.
@@ -1691,6 +1730,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
         backup: _backup,
         autoBackup: _autoBackup,
         destinations: _destinations,
+        tasks: _cloudTasks,
         replicator: GoodnotesDriveReplicator(
           client: _drive,
           repository: _repository,
@@ -2223,33 +2263,46 @@ class _LibraryScreenState extends State<LibraryScreen> {
     return _LibraryEditorTransition(
       showEditor: _studyDeskOpen,
       pace: _studyDeskPace,
+      // The desk rises a little as it zooms in, and settles.
+      editorRise: 28,
       library: _buildLibrary(context),
       editor: _studyDeskBuilt
-          ? _buildStudyDesk(context)
+          // Built ahead of time and kept out of sight: while the library is in
+          // front, a keyboard raised for its search is not the desk's to lay
+          // itself out for.
+          ? IgnoreKeyboard(
+              ignoring: !_studyDeskOpen,
+              child: _buildStudyDesk(context),
+            )
           : const SizedBox.shrink(),
     );
   }
 
   Widget _buildStudyDesk(BuildContext context) {
-    return Scaffold(
-      backgroundColor: Colors.transparent,
-      body: SafeArea(
-        child: StudyDeskScreen(
-          controller: _studyDesk,
-          thumbnail: (NoteEntry note) =>
-              _NoteThumbnail(note: note, cache: _thumbnails),
-          onEditCitation: _editCitation,
-          onAddSources: _addSources,
-          onOpenPlans: _openPlans,
-          pdfRasterizer: widget.pdfRasterizer,
-          isOpenInEditor: (String noteId) =>
-              _openNotes.notes.any((NoteEntry note) => note.id == noteId),
-          penSettings: _penSettings,
-          stylusOnly: _stylusOnly,
-          exportSink: widget.exportSink,
-          onOpenTestAsNote: _openTestAsNote,
-          onSaveTestToLibrary: _saveStudyTestToLibrary,
-          onLeave: _leaveStudyDesk,
+    // The desk keeps one size as the keyboard slides: see [StudyKeyboardScope].
+    return StudyKeyboardScope(
+      child: Scaffold(
+        backgroundColor: Colors.transparent,
+        resizeToAvoidBottomInset: false,
+        body: SafeArea(
+          child: StudyDeskScreen(
+            arrival: _studyDeskArrival,
+            controller: _studyDesk,
+            thumbnail: (NoteEntry note) =>
+                _NoteThumbnail(note: note, cache: _thumbnails),
+            onEditCitation: _editCitation,
+            onAddSources: _addSources,
+            onOpenPlans: _openPlans,
+            pdfRasterizer: widget.pdfRasterizer,
+            isOpenInEditor: (String noteId) =>
+                _openNotes.notes.any((NoteEntry note) => note.id == noteId),
+            penSettings: _penSettings,
+            stylusOnly: _stylusOnly,
+            exportSink: widget.exportSink,
+            onOpenTestAsNote: _openTestAsNote,
+            onSaveTestToLibrary: _saveStudyTestToLibrary,
+            onLeave: _leaveStudyDesk,
+          ),
         ),
       ),
     );
@@ -2448,7 +2501,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
   Widget _buildBody(BuildContext context, bool compact) {
     // The last folder's items fade out quickly as the next folder's fade
     // in where they are, one after another.
-    return SceneCrossfade(
+    final Widget items = SceneCrossfade(
       scope: _scene,
       pace: _scenePace,
       child: StaggeredReveal(
@@ -2457,8 +2510,23 @@ class _LibraryScreenState extends State<LibraryScreen> {
         memoryKey: ('folder', _shownListingKey),
         child: _listing == null
             ? null
-            : _buildItems(context, compact, _listing!),
+            // The files of a Goodnotes import still to come show among the
+            // notes, and change as each one arrives.
+            : ListenableBuilder(
+                listenable: _cloudTasks,
+                builder: (BuildContext context, Widget? _) =>
+                    _buildItems(context, compact, _listing!),
+              ),
       ),
+    );
+    // What a backup, restore or import is doing stays in sight, and can be
+    // stopped, wherever it was started from.
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: <Widget>[
+        CloudTaskBanner(tasks: _cloudTasks, onTap: _openAccount),
+        Expanded(child: items),
+      ],
     );
   }
 
@@ -2467,7 +2535,14 @@ class _LibraryScreenState extends State<LibraryScreen> {
     bool compact,
     FolderListing listing,
   ) {
-    if (listing.isEmpty) {
+    final bool trash = _showingTrash;
+    final bool searching = _query.isNotEmpty;
+    // Files a Goodnotes import has listed and not yet brought in, in the
+    // open folder.
+    final List<ImportItem> pending = trash || searching
+        ? const <ImportItem>[]
+        : _cloudTasks.session?.pendingIn(_folderId) ?? const <ImportItem>[];
+    if (listing.isEmpty && pending.isEmpty) {
       return StaggerItem(
         index: 0,
         child: _EmptyState(
@@ -2477,11 +2552,9 @@ class _LibraryScreenState extends State<LibraryScreen> {
         ),
       );
     }
-    final bool trash = _showingTrash;
-    final bool searching = _query.isNotEmpty;
     final DateTime now = widget.clock();
     final int folderCount = listing.folders.length;
-    final int itemCount = folderCount + listing.notes.length;
+    final int itemCount = folderCount + listing.notes.length + pending.length;
 
     Widget buildCard(BuildContext context, int index) {
       if (index < folderCount) {
@@ -2513,6 +2586,11 @@ class _LibraryScreenState extends State<LibraryScreen> {
         );
       }
 
+      if (index - folderCount >= listing.notes.length) {
+        return _pendingCard(
+          pending[index - folderCount - listing.notes.length],
+        );
+      }
       final NoteEntry note = listing.notes[index - folderCount];
       return _LibraryItem(
         key: ValueKey<String>('note-${note.id}'),
@@ -2602,6 +2680,66 @@ class _LibraryScreenState extends State<LibraryScreen> {
     );
   }
 
+  /// A file of a Goodnotes import that is listed and not yet a note. Tapping
+  /// it loads it next and opens it as soon as it is in.
+  Widget _pendingCard(ImportItem item) {
+    final String status = switch (item.status) {
+      ImportStatus.loading => 'Importing…',
+      _ when item.requested => 'Up next',
+      _ => 'Waiting to import',
+    };
+    return _LibraryItem(
+      key: ValueKey<String>('import-${item.driveId}'),
+      grid: _grid,
+      kind: 'Note',
+      title: item.title,
+      subtitle: null,
+      date: status,
+      semanticsLabel: 'Note, ${item.title}, $status. Tap to import it now.',
+      leading: PendingImportArt(item: item),
+      dragIcon: const Icon(AppIcons.note),
+      actions: const <_ItemAction>[],
+      showMenu: false,
+      draggable: false,
+      dragData: null,
+      onOpen: _selecting ? () {} : () => _openPendingImport(item),
+      onAction: (_ItemAction action) {},
+    );
+  }
+
+  /// Loads [item] ahead of the other files of the import, and opens it once it
+  /// is a note.
+  Future<void> _openPendingImport(ImportItem item) async {
+    if (!_openingImports.add(item.driveId)) return;
+    try {
+      await _cloudTasks.prioritize(item);
+      if (!mounted) return;
+      final String? noteId = item.noteId;
+      if (noteId == null) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(
+              item.status == ImportStatus.failed
+                  ? '"${item.title}" could not be imported'
+                  : 'The import was stopped before "${item.title}" came in',
+            ),
+          ),
+        );
+        return;
+      }
+      for (final NoteEntry note in (await _repository.list(
+        item.localFolderId,
+      )).notes) {
+        if (note.id == noteId) {
+          if (mounted) await _openNote(note);
+          return;
+        }
+      }
+    } finally {
+      _openingImports.remove(item.driveId);
+    }
+  }
+
   /// How long [note] stays in Recently Deleted.
   String _daysLeft(NoteEntry note, DateTime now) {
     final int left = _trashKeeps.inDays - now.difference(note.deleted!).inDays;
@@ -2617,7 +2755,10 @@ class _LibraryScreenState extends State<LibraryScreen> {
   }
 
   String _itemSummary(Folder folder) {
-    final int items = _counts[folder.id] ?? 0;
+    // Files of a Goodnotes import still to come count as being in it.
+    final int items =
+        (_counts[folder.id] ?? 0) +
+        (_cloudTasks.session?.pendingIn(folder.id).length ?? 0);
     return switch (items) {
       0 => 'Empty',
       1 => '1 item',
@@ -2635,9 +2776,14 @@ class _LibraryEditorTransition extends StatefulWidget {
     this.onLibraryShown,
     this.onEditorShown,
     this.pace = MotionPace.standard,
+    this.editorRise = 0,
   });
 
   final bool showEditor;
+
+  /// How far below its place the editor starts, in logical pixels, and rises
+  /// from as it zooms in.
+  final double editorRise;
 
   /// How the note comes in. It is the same move as going into a folder
   /// ([SceneCrossfade]): a note not opened before zooms in slowly and
@@ -2761,13 +2907,20 @@ class _LibraryEditorTransitionState extends State<_LibraryEditorTransition>
 
   /// [child] at [level] of the way to rest and at [far] scale when out of
   /// view: the same layers a folder's scene moves with.
-  Widget _scene(double level, double far, Widget child) => Opacity(
-    opacity: _transitioning ? level.clamp(0.0, 1.0) : 1,
-    child: Transform.scale(
-      scale: _transitioning && !_still ? far + (1 - far) * level : 1,
-      child: child,
-    ),
-  );
+  Widget _scene(double level, double far, Widget child, {double rise = 0}) =>
+      Opacity(
+        opacity: _transitioning ? level.clamp(0.0, 1.0) : 1,
+        child: Transform.translate(
+          offset: Offset(
+            0,
+            _transitioning && !_still && rise != 0 ? rise * (1 - level) : 0,
+          ),
+          child: Transform.scale(
+            scale: _transitioning && !_still ? far + (1 - far) * level : 1,
+            child: child,
+          ),
+        ),
+      );
 
   @override
   Widget build(BuildContext context) {
@@ -2816,6 +2969,7 @@ class _LibraryEditorTransitionState extends State<_LibraryEditorTransition>
                     _editorLevel(_progress.value.clamp(0.0, 1.0)),
                     AppMotion.zoomFar,
                     child!,
+                    rise: widget.editorRise,
                   ),
                   child: TickerMode(
                     enabled: showEditor,
@@ -3739,9 +3893,17 @@ class _LibraryItem extends StatefulWidget {
     this.selected = false,
     this.menuOnTap = false,
     this.draggable = true,
+    this.showMenu = true,
+    this.semanticsLabel,
     this.canAccept,
     this.onAccept,
   });
+
+  /// Whether the item has the menu of actions beside its title.
+  final bool showMenu;
+
+  /// What a screen reader says, when not the usual kind, title and date.
+  final String? semanticsLabel;
 
   /// A tap opens the item's actions instead of the item.
   final bool menuOnTap;
@@ -3761,7 +3923,9 @@ class _LibraryItem extends StatefulWidget {
   final List<_ItemAction> actions;
   final VoidCallback onOpen;
   final ValueChanged<_ItemAction> onAction;
-  final _Dragged dragData;
+
+  /// What a drop receives; null where the item cannot be moved.
+  final _Dragged? dragData;
 
   /// While picking items for a bulk action, a tap toggles [selected], which
   /// shows as a check mark; there is no menu and no dragging.
@@ -3924,7 +4088,9 @@ class _LibraryItemState extends State<_LibraryItem> {
     final Widget card = Semantics(
       container: true,
       button: true,
-      label: '${widget.kind}, ${widget.title}, modified ${widget.date}',
+      label:
+          widget.semanticsLabel ??
+          '${widget.kind}, ${widget.title}, modified ${widget.date}',
       selected: widget.selecting ? widget.selected : null,
       onTap: widget.onOpen,
       onLongPress: widget.selecting ? null : _openMenu,
@@ -3979,7 +4145,7 @@ class _LibraryItemState extends State<_LibraryItem> {
                   ),
                 ),
               )
-            else
+            else if (widget.showMenu)
               PositionedDirectional(
                 end: grid ? 0 : AppSpacing.xxs,
                 bottom: grid ? 0 : null,

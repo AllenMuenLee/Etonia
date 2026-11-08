@@ -51,6 +51,9 @@ String studyEmbeddingText(StudyChunk chunk) {
 
 const int _maxText = 3000;
 
+/// Pictures a first-use search embeds when the request is about appearance.
+const int visualPictureAllowance = 6;
+
 /// Bound first-use embedding spend. Previously cached vectors remain usable for
 /// the entire collection; new work covers a small lexical/fair-spread shortlist.
 List<StudySearchDocument> studySemanticCandidates(
@@ -59,6 +62,7 @@ List<StudySearchDocument> studySemanticCandidates(
   int maxChunks = 16,
   int maxPictures = 2,
   int maxTextCharacters = 12000,
+  bool visual = false,
 }) {
   final ranked = StudyRetriever.retrieve(documents, query, limit: maxChunks);
   final spread = StudyRetriever.retrieve(
@@ -67,11 +71,22 @@ List<StudySearchDocument> studySemanticCandidates(
     mode: StudyQueryMode.overview,
     limit: maxChunks,
   );
+  // A request about how pages look is answered by their pictures, and a mark
+  // is found only there. Those chunks are embedded first, and a few more
+  // pictures than usual may be, since otherwise a first search sees at most
+  // two of them and a note's marks are never reached.
+  final marked = visual
+      ? [
+          for (final document in documents)
+            if (document.chunk.hasMarks) StudyHit(document, 0),
+        ]
+      : const <StudyHit>[];
+  if (visual) maxPictures = math.max(maxPictures, visualPictureAllowance);
   final selected = <StudySearchDocument>[];
   final seen = <StudyChunk>{};
   var pictures = 0;
   var characters = 0;
-  for (final hit in [...ranked, ...spread]) {
+  for (final hit in [...ranked, ...marked, ...spread]) {
     final chunk = hit.chunk;
     if (!seen.add(chunk)) continue;
     final size = studyEmbeddingText(chunk).length;
@@ -392,9 +407,17 @@ StudyVectorDiskCache? studyVectorCacheIn(Directory? libraryDirectory) =>
 /// What search can use of meaning for one question: the question's vector and
 /// what is known of each chunk's.
 class StudyVectorSignal {
-  const StudyVectorSignal({required this.query, required this.lookup});
+  const StudyVectorSignal({
+    required this.query,
+    required this.lookup,
+    this.visual,
+  });
 
   final Float32List query;
+
+  /// The vector of a sentence saying how the sought page looks, matched only
+  /// against pictures. Null when the question is not about appearance.
+  final Float32List? visual;
   final StudyChunkVectors? Function(StudyChunk chunk) lookup;
 }
 
@@ -562,13 +585,23 @@ class StudyVectorIndex {
   /// Brings the notes up to date and embeds [question], waiting no longer than
   /// [queryTimeout] for either. Null when meaning cannot be used: search then
   /// goes by words. What was not done in time carries on for the next question.
+  ///
+  /// [visualQuery], if given, is embedded too, to be matched against pictures.
+  /// Without it, or when it is slow or fails, only the picture search by the
+  /// question itself is lost, not the signal.
   Future<StudyVectorSignal?> signalFor(
     String question,
     Map<String, List<StudyChunk>> chunksByNote, {
     bool partial = false,
+    String visualQuery = '',
   }) async {
     if (!isAvailable) return null;
     final Future<Float32List?> query = _queryVector(question);
+    final bool wantsVisual =
+        visualQuery.trim().isNotEmpty && visualQuery.trim() != question.trim();
+    final Future<Float32List?> visual = wantsVisual
+        ? _queryVector(visualQuery).catchError((Object _) => null)
+        : Future<Float32List?>.value(null);
     final Future<void> indexing = Future.wait(<Future<void>>[
       for (final MapEntry<String, List<StudyChunk>> e in chunksByNote.entries)
         ensure(e.key, e.value, partial: partial),
@@ -579,10 +612,18 @@ class StudyVectorIndex {
       queryTimeout,
       onTimeout: () => null,
     );
+    final Float32List? visualVector = await visual.timeout(
+      queryTimeout,
+      onTimeout: () => null,
+    );
     await indexing.timeout(queryTimeout, onTimeout: () {});
     if (vector == null) return null;
     await load(chunksByNote.keys);
-    return StudyVectorSignal(query: vector, lookup: lookup);
+    return StudyVectorSignal(
+      query: vector,
+      visual: visualVector,
+      lookup: lookup,
+    );
   }
 
   Future<Float32List?> _queryVector(String question) {

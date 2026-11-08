@@ -1,4 +1,6 @@
 import 'dart:async';
+import 'dart:convert';
+import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -8,10 +10,12 @@ import 'package:greatnote/features/editor/document_io/document_importer.dart';
 import 'package:greatnote/features/library/cloud/auto_backup_scheduler.dart';
 import 'package:greatnote/features/library/cloud/backup_destinations.dart';
 import 'package:greatnote/features/library/cloud/cloud_sync_state.dart';
+import 'package:greatnote/features/library/cloud/cloud_task_controller.dart';
 import 'package:greatnote/features/library/cloud/goodnotes_drive_replicator.dart';
 import 'package:greatnote/features/library/cloud/google_drive_backup_service.dart';
 import 'package:greatnote/features/library/cloud/google_drive_client.dart';
 import 'package:greatnote/features/library/cloud/google_drive_sheet.dart';
+import 'package:greatnote/features/library/library_models.dart';
 import 'package:greatnote/features/library/library_screen.dart';
 import 'package:greatnote/features/library/note_repository.dart';
 import 'package:greatnote/features/payment/account_page.dart';
@@ -23,6 +27,20 @@ import '../../../helpers/google_drive_fakes.dart';
 import '../../../helpers/pump_app.dart';
 
 final DateTime _now = DateTime(2026, 10, 16, 9, 30);
+
+/// A Drive whose downloads wait for [gate], so a test can look at an import
+/// part way.
+class _GatedDrive extends FakeGoogleDriveClient {
+  _GatedDrive(this.gate) : super(signedIn: true);
+
+  final Completer<void> gate;
+
+  @override
+  Future<Uint8List> downloadFile(String fileId) async {
+    await gate.future;
+    return super.downloadFile(fileId);
+  }
+}
 
 void main() {
   late FakeGoogleDriveClient drive;
@@ -46,6 +64,7 @@ void main() {
     TestViewport viewport = TestViewport.tabletLandscape,
     ThemeMode themeMode = ThemeMode.light,
     ValueChanged<String>? onOpenFolder,
+    CloudTaskController? tasks,
   }) async {
     setViewportSize(tester, viewport.size);
     final AutoBackupScheduler autoBackup = AutoBackupScheduler(
@@ -81,6 +100,7 @@ void main() {
                 state: state,
               ),
               autoBackup: autoBackup,
+              tasks: tasks,
               onOpenFolder: onOpenFolder,
               clock: () => _now,
             ),
@@ -89,6 +109,14 @@ void main() {
       ),
     );
     await tester.pumpAndSettle();
+  }
+
+  /// Moves time on frame by frame, for a screen that never settles because
+  /// something on it is always moving, as a progress indicator.
+  Future<void> advance(WidgetTester tester) async {
+    for (int i = 0; i < 15; i++) {
+      await tester.pump(const Duration(milliseconds: 200));
+    }
   }
 
   Finder button(String label) => find.ancestor(
@@ -440,6 +468,148 @@ void main() {
       expect(find.text('Show folder'), findsNothing);
       expect(opened, isNull);
       expect((await repository.list(null)).notes.single.title, 'Inbox');
+    });
+
+    testDrive('keeps importing after the sheet is closed', (
+      WidgetTester tester,
+    ) async {
+      final Completer<void> gate = Completer<void>();
+      drive = _GatedDrive(gate);
+      final GoogleDriveItem root = drive.addFolder('GoodNotes');
+      final GoogleDriveItem course = drive.addFolder('Bio', parentId: root.id);
+      for (final String name in <String>['One', 'Two']) {
+        drive.addFile(
+          '$name.pdf',
+          utf8.encode('%PDF-1.7 $name'),
+          parentId: course.id,
+          mimeType: 'application/pdf',
+        );
+      }
+      final CloudTaskController tasks = CloudTaskController(clock: () => _now);
+      addTearDown(tasks.dispose);
+      await pumpSheet(tester, tasks: tasks);
+
+      await tester.tap(button('Import Goodnotes folder from Drive'));
+      for (int i = 0; i < 50 && tasks.session == null; i++) {
+        await tester.pump(const Duration(milliseconds: 10));
+      }
+
+      // The whole tree is known, and shown, before any file is fetched.
+      expect(tasks.session, isNotNull);
+      final Folder bio = (await repository.allFolders()).single;
+      expect(
+        tasks.session!.pendingIn(bio.id).map((ImportItem i) => i.title),
+        <String>['One', 'Two'],
+      );
+      expect((await repository.allNotes()), isEmpty);
+      expect(
+        find.text('This keeps going if you leave this page.'),
+        findsOneWidget,
+      );
+
+      // Leaving the page does not stop it.
+      await tester.pumpWidget(
+        const GreatnoteApp(home: Scaffold(body: SizedBox())),
+      );
+      expect(tasks.busy, isTrue);
+      expect(tasks.cancelling, isFalse);
+
+      gate.complete();
+      // Importing reads files on real time, as in the test above.
+      for (int i = 0; i < 200 && tasks.busy; i++) {
+        await tester.runAsync(
+          () => Future<void>.delayed(const Duration(milliseconds: 20)),
+        );
+        await tester.pump();
+      }
+      expect(tasks.busy, isFalse);
+      expect(tasks.message, 'Imported 2 files into Library.');
+      expect((await repository.list(bio.id)).notes, hasLength(2));
+    });
+
+    testDrive('shows the files still to come, and a tap loads one first', (
+      WidgetTester tester,
+    ) async {
+      final Completer<void> gate = Completer<void>();
+      drive = _GatedDrive(gate);
+      final GoogleDriveItem root = drive.addFolder('GoodNotes');
+      final GoogleDriveItem course = drive.addFolder('Bio', parentId: root.id);
+      for (final String name in <String>['One', 'Three', 'Two']) {
+        drive.addFile(
+          '$name.pdf',
+          utf8.encode('%PDF-1.7 $name'),
+          parentId: course.id,
+          mimeType: 'application/pdf',
+        );
+      }
+      setViewportSize(tester, TestViewport.tabletLandscape.size);
+      await tester.pumpWidget(
+        GreatnoteApp(
+          home: LibraryScreen(
+            repository: repository,
+            clock: () => _now,
+            googleDriveClient: drive,
+            cloudStateStore: state,
+            pdfRasterizer: FakePdfRasterizer(),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      await tester.tap(
+        find.ancestor(
+          of: find.byTooltip('Account'),
+          matching: find.byType(IconButton),
+        ),
+      );
+      await tester.pumpAndSettle();
+      await tester.tap(
+        find.byKey(const ValueKey<String>('account-tab-backup')),
+      );
+      await tester.pumpAndSettle();
+      await tester.tap(button('Import Goodnotes folder from Drive'));
+      for (int i = 0; i < 50 && find.text('Cancel').evaluate().isEmpty; i++) {
+        await tester.pump(const Duration(milliseconds: 10));
+      }
+
+      // Back in the library, the import goes on in view, and the folder is
+      // there with every file in it, none fetched yet.
+      Navigator.of(
+        tester.element(find.byType(AccountPage)),
+        rootNavigator: true,
+      ).pop();
+      await advance(tester);
+      expect(find.text('Importing from Goodnotes'), findsOneWidget);
+      expect(find.text('Bio'), findsWidgets);
+      await tester.tap(find.text('Bio').first);
+      await advance(tester);
+      expect(find.text('One'), findsOneWidget);
+      expect(find.text('Two'), findsOneWidget);
+      expect(find.text('Three'), findsOneWidget);
+      expect(find.text('Waiting to import'), findsWidgets);
+
+      // Asking for Three puts it ahead of Two.
+      await tester.tap(find.text('Three'));
+      await tester.pump();
+      expect(find.text('Up next'), findsOneWidget);
+      gate.complete();
+      for (
+        int i = 0;
+        i < 200 && (await repository.allNotes()).length < 3;
+        i++
+      ) {
+        await tester.runAsync(
+          () => Future<void>.delayed(const Duration(milliseconds: 20)),
+        );
+        await tester.pump();
+      }
+      expect((drive as _GatedDrive).downloads, <String>[
+        'One.pdf',
+        'Three.pdf',
+        'Two.pdf',
+      ]);
+      // Let the library settle: the note that was asked for opens.
+      await advance(tester);
     });
 
     testDrive('with several folders, asks which', (WidgetTester tester) async {

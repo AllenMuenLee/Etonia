@@ -10,6 +10,7 @@ import {
   meterPass,
   modelConfig,
   outputBudget,
+  parseModelCatalog,
   providerAnswer,
   providerRequest,
   readProviderStream,
@@ -40,6 +41,60 @@ const config = {
   outputMicroPerKilo: 10000,
   maxOutputTokens: 8192,
 };
+
+Deno.test("model catalog overrides add Flash without replacing existing provider settings", () => {
+  const flash = { ...config, provider: "gemini", model: "gemini-3.8-flash" };
+  const base = { sol: config };
+  const catalog = parseModelCatalog(JSON.stringify(base), JSON.stringify({ flash }));
+  assert.deepEqual(catalog.sol, config);
+  assert.deepEqual(modelConfig(catalog, "flash"), flash);
+  assert.deepEqual(parseModelCatalog(JSON.stringify(base)), base);
+  for (const raw of ["null", "[]", "42", "bad-json"]) {
+    assert.throws(() => parseModelCatalog(raw), (e) => e instanceof Failure && e.code === "not_configured");
+    assert.throws(() => parseModelCatalog("{}", raw));
+  }
+  assert.equal(billingModel("haiku", "flash"), "flash");
+  assert.equal(billingModel("flash", "opus"), "opus");
+});
+
+Deno.test("Gemini Flash uses native JSON, image, history and streaming request fields", () => {
+  const flash = { ...config, provider: "gemini" as const, model: "gemini-3.8-flash" };
+  const asked = {
+    ...input,
+    responseFormat: "json" as const,
+    history: [{ role: "assistant" as const, content: "Earlier answer" }],
+  };
+  for (const effort of ["low", "medium", "high"] as const) {
+    const sent = providerRequest(flash, asked, 4096, "gemini-key", undefined, effort);
+    assert.equal(sent.url, "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent");
+    assert.deepEqual(sent.headers, { "x-goog-api-key": "gemini-key" });
+    const body = sent.body as any;
+    assert.equal(body.generationConfig.responseMimeType, "application/json");
+    assert.deepEqual(body.generationConfig.thinkingConfig, { thinkingLevel: effort.toUpperCase() });
+    assert.equal(body.contents[0].role, "model");
+    assert.deepEqual(body.contents.at(-1).parts[0], { inlineData: { mimeType: "image/png", data: png } });
+    assert.equal(body.messages, undefined);
+    assert.equal(body.reasoning_effort, undefined);
+    assert(!JSON.stringify(body).includes("gemini-key"));
+  }
+  const drawing = providerRequest(flash, input, 4096, "key", { step: "notation", message: "An answer" }, "medium");
+  assert(drawing.url.endsWith(":streamGenerateContent?alt=sse"));
+});
+
+Deno.test("routing previews require an auto-routed request and never enable grading", () => {
+  const preview = {
+    ...input,
+    model: "auto",
+    routeOnly: true,
+    routing: { task: "study.answer", effort: "auto" },
+  };
+  assert.equal(validateInput(preview).routeOnly, true);
+  for (const routeOnly of [false, "true", 1, null]) {
+    assert.throws(() => validateInput({ ...preview, routeOnly }));
+  }
+  assert.throws(() => validateInput({ ...preview, model: "haiku" }));
+  assert.throws(() => validateInput({ ...preview, task: "testGrading" }));
+});
 
 Deno.test("chat instructions focus on the answer without exposing the drawing workflow", () => {
   for (const provider of ["openai", "claude", "gemini"] as const) {

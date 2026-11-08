@@ -128,7 +128,7 @@ Deno.test("the seed cases are well formed and cover every routed task", async ()
     }
   }
   for (const task of tasks) {
-    if (task === "editor.notation") continue; // Judged on a drawing: needs real pages.
+    if (task === "editor.notation" || task === "study.describe") continue; // Needs real visual pages.
     assert.ok(seed.some((c) => c.task === task), `no seed case for ${task}`);
   }
 });

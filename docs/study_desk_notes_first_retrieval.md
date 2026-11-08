@@ -69,3 +69,9 @@ the source-budget and mathematical-preservation tests in
 These changes are local. Rebuild or hot-reload the app to apply the policy,
 retrieval-depth handling and source budgets. This follow-up did not deploy an
 app/backend or change user balances.
+
+Follow-up: retrieved visual crops now pass through a dedicated lightweight
+description stage before reaching the tutor as text. That description adds to
+the brief source-text allowance; it is not included in an 800-token total cap.
+See [visual context and progress](study_desk_visual_context.md) for routing,
+cache behavior, validation, limitations and the additional deployment migration.

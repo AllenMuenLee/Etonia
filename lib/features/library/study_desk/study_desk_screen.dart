@@ -32,6 +32,7 @@ import 'study_citation_preview.dart';
 import 'study_desk_controller.dart';
 import 'study_desk_models.dart';
 import 'study_desk_overview.dart';
+import 'study_keyboard.dart';
 import 'study_motion.dart';
 import 'study_desk_widgets.dart';
 import 'study_source_picker.dart';
@@ -57,6 +58,7 @@ class StudyDeskScreen extends StatefulWidget {
     this.exportSink = const SystemExportSink(),
     this.onOpenTestAsNote,
     this.onSaveTestToLibrary,
+    this.arrival,
   });
 
   final StudyDeskController controller;
@@ -79,6 +81,11 @@ class StudyDeskScreen extends StatefulWidget {
   final Future<void> Function(Uint8List pdf, String title)? onOpenTestAsNote;
 
   final Future<void> Function(Uint8List pdf, String title)? onSaveTestToLibrary;
+
+  /// Counts the times the desk is brought in front of the library. Its toolbar,
+  /// chat, and message field settle in one after another each time it changes,
+  /// as the desk itself zooms in.
+  final ValueListenable<int>? arrival;
 
   static const String composerHint = 'Ask about your notes';
 
@@ -110,7 +117,10 @@ class _StudyDeskScreenState extends State<StudyDeskScreen> {
   final GlobalKey _mainKey = GlobalKey();
 
   /// Built the first time it is shown, and kept, as the chat is, after that.
+  /// Also built a moment after the desk arrives ([_arrived]), while nothing is
+  /// moving, so that the first move into it has no building to do.
   bool _practiceBuilt = false;
+  Timer? _warmStudio;
 
   /// The cited paragraphs built now, to find the one being read.
   final Map<(int, int), BuildContext> _paragraphs =
@@ -170,7 +180,20 @@ class _StudyDeskScreenState extends State<StudyDeskScreen> {
     _shownReviewRevision = _controller.testReviewOpenRevision;
     _scrollToEnd();
     MemoryPressure.instance.addListener(_releaseMemory);
+    widget.arrival?.addListener(_arrived);
     unawaited(_controller.load());
+  }
+
+  /// The desk has just come in front. Once its entrance has played and the
+  /// frames are quiet, builds the studio kept behind the chat, so it is
+  /// ready before it is asked for rather than built in the frame that moves to
+  /// it.
+  void _arrived() {
+    _warmStudio?.cancel();
+    _warmStudio = Timer(const Duration(milliseconds: 1200), () {
+      if (!mounted || _practiceBuilt) return;
+      setState(() => _practiceBuilt = true);
+    });
   }
 
   /// The system is low on memory: the studio, when nothing in it is open, is
@@ -193,11 +216,17 @@ class _StudyDeskScreenState extends State<StudyDeskScreen> {
       oldWidget.controller.removeListener(_onControllerChanged);
       widget.controller.addListener(_onControllerChanged);
     }
+    if (!identical(oldWidget.arrival, widget.arrival)) {
+      oldWidget.arrival?.removeListener(_arrived);
+      widget.arrival?.addListener(_arrived);
+    }
   }
 
   @override
   void dispose() {
     MemoryPressure.instance.removeListener(_releaseMemory);
+    widget.arrival?.removeListener(_arrived);
+    _warmStudio?.cancel();
     _text.removeListener(_onTextChanged);
     _controller.removeListener(_onControllerChanged);
     _text.dispose();
@@ -487,16 +516,20 @@ class _StudyDeskScreenState extends State<StudyDeskScreen> {
           playOnMount: false,
           replayKey: pageScope,
           memoryKey: ('study-page', pageScope),
-          child: onCourse
-              ? StudyDeskOverview(
-                  key: ValueKey(_controller.selectedCourseId),
-                  controller: _controller,
-                  onOpenSource: _openSource,
-                  onAddSources: widget.onAddSources,
-                  composer: _composer(),
-                  onCreate: (kind) => unawaited(_createMaterial(kind)),
-                )
-              : _buildChat(context),
+          // Rises with the keyboard by padding alone: the desk around it is
+          // never resized for it (see [StudyKeyboardScope]).
+          child: StudyKeyboardLift(
+            child: onCourse
+                ? StudyDeskOverview(
+                    key: ValueKey(_controller.selectedCourseId),
+                    controller: _controller,
+                    onOpenSource: _openSource,
+                    onAddSources: widget.onAddSources,
+                    composer: _composer(),
+                    onCreate: (kind) => unawaited(_createMaterial(kind)),
+                  )
+                : _buildChat(context),
+          ),
         ),
       ),
     );
@@ -505,7 +538,7 @@ class _StudyDeskScreenState extends State<StudyDeskScreen> {
     final Widget main = Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: <Widget>[
-        _workspaceToolbar(),
+        _Arrives(arrival: widget.arrival, child: _workspaceToolbar()),
         Expanded(
           // Both stay built: the chat comes back scrolled as it was left, and a
           // quiz as far as it had got. Only the one in view is painted,
@@ -649,13 +682,15 @@ class _StudyDeskScreenState extends State<StudyDeskScreen> {
   Widget _workspaceToolbar() => LayoutBuilder(
     builder: (context, constraints) {
       final historyVisible = _historyOpen ?? _layoutWidth >= 900;
-      final String title =
+      // The desk is not named over its own chat: a title is only for a place
+      // within it, a class or the tests and flashcards.
+      final String? title =
           _controller.browsingAllMaterials &&
               _controller.mode == StudyDeskMode.practice
           ? _controller.practiceSection == PracticeStudioSection.tests
                 ? 'Tests'
                 : 'Flashcards'
-          : _controller.selectedCourse?.name ?? 'Study Desk';
+          : _controller.selectedCourse?.name;
       return Padding(
         padding: const EdgeInsets.symmetric(
           horizontal: AppSpacing.sm,
@@ -703,13 +738,18 @@ class _StudyDeskScreenState extends State<StudyDeskScreen> {
                   alignment: AlignmentDirectional.centerStart,
                   children: <Widget>[...previous, ?current],
                 ),
-                child: Text(
-                  title,
-                  key: ValueKey<String>(title),
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: Theme.of(context).textTheme.titleMedium,
-                ),
+                child: title == null
+                    ? const SizedBox(
+                        key: ValueKey<String>('study-title-none'),
+                        height: AppSizes.minTouchTarget,
+                      )
+                    : Text(
+                        title,
+                        key: ValueKey<String>(title),
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: Theme.of(context).textTheme.titleMedium,
+                      ),
               ),
             ),
           ],
@@ -805,21 +845,9 @@ class _StudyDeskScreenState extends State<StudyDeskScreen> {
               key: _transcriptKey,
               controller: _scroll,
               padding: const EdgeInsets.all(AppSpacing.md),
-              itemCount: messages.length + 2,
+              itemCount: messages.length + 1,
               itemBuilder: (context, index) {
-                if (index == 0) {
-                  return controller.currentSession.testPaperId != null
-                      ? const SizedBox.shrink()
-                      : Padding(
-                          padding: const EdgeInsets.only(bottom: AppSpacing.md),
-                          child: StudyChatSources(
-                            controller: controller,
-                            onOpenSource: _openSource,
-                            onAddSources: widget.onAddSources,
-                          ),
-                        );
-                }
-                final i = index - 1;
+                final i = index;
                 if (messages.isEmpty && !controller.isBusy && failure == null) {
                   return _ChatWelcome(
                     controller: controller,
@@ -942,9 +970,10 @@ class _StudyDeskScreenState extends State<StudyDeskScreen> {
                       ),
                     StudyDisclose(
                       child: controller.isBusy && (partial?.isEmpty ?? true)
-                          ? _Working(
+                          ? StudyWorkingIndicator(
                               key: const ValueKey<String>('study-working'),
                               state: controller.requestState,
+                              progress: controller.requestProgress,
                             )
                           : null,
                     ),
@@ -988,22 +1017,40 @@ class _StudyDeskScreenState extends State<StudyDeskScreen> {
             ),
           ),
         ),
-        Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 16),
-          child: Text(
-            controller.currentSession.testPaperId != null
-                ? 'Using your completed test and grading as the source'
-                : controller.sources.isEmpty
-                ? 'Searching your entire library'
-                : controller.activeCount == 1
-                ? '1 selected source'
-                : '${controller.activeCount} selected sources',
-            style: Theme.of(context).textTheme.labelSmall?.copyWith(
-              color: AppColors.of(context).textSecondary,
-            ),
+        // The sources, and the way to add one, sit right above where the
+        // question is asked, with the field. They arrive with it.
+        _Arrives(
+          arrival: widget.arrival,
+          delay: AppMotion.staggerStep * 3,
+          rise: 24,
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: <Widget>[
+              Padding(
+                padding: const EdgeInsetsDirectional.fromSTEB(
+                  AppSpacing.md,
+                  AppSpacing.xs,
+                  AppSpacing.xs,
+                  0,
+                ),
+                child: controller.currentSession.testPaperId != null
+                    ? Text(
+                        'Using your completed test and grading as the source',
+                        style: Theme.of(context).textTheme.labelSmall?.copyWith(
+                          color: AppColors.of(context).textSecondary,
+                        ),
+                      )
+                    : StudyChatSources(
+                        compact: true,
+                        controller: controller,
+                        onOpenSource: _openSource,
+                        onAddSources: widget.onAddSources,
+                      ),
+              ),
+              _composer(),
+            ],
           ),
         ),
-        _composer(),
       ],
     );
   }
@@ -1233,6 +1280,41 @@ class _ChatWelcome extends StatelessWidget {
             StudySuggestedClasses(controller: controller),
           ],
         ],
+      ),
+    );
+  }
+}
+
+/// Brings [child] in each time [arrival] counts up, [delay] after the desk
+/// starts to zoom in: part of one entrance, drawn from its own layer so it
+/// moves without the rest of the desk being painted again.
+class _Arrives extends StatelessWidget {
+  const _Arrives({
+    required this.arrival,
+    required this.child,
+    this.delay = Duration.zero,
+    this.rise = 10,
+  });
+
+  final ValueListenable<int>? arrival;
+  final Widget child;
+  final Duration delay;
+  final double rise;
+
+  @override
+  Widget build(BuildContext context) {
+    final ValueListenable<int>? arrival = this.arrival;
+    if (arrival == null) return child;
+    return ValueListenableBuilder<int>(
+      valueListenable: arrival,
+      child: child,
+      builder: (BuildContext context, int count, Widget? child) => StudyAppear(
+        playOnMount: false,
+        replayKey: count,
+        memoryKey: const ('study-arrival', 'desk'),
+        delay: delay,
+        rise: rise,
+        child: child!,
       ),
     );
   }
@@ -1574,30 +1656,63 @@ class _CitationChip extends StatelessWidget {
   }
 }
 
-class _Working extends StatelessWidget {
-  const _Working({super.key, required this.state});
+class StudyWorkingIndicator extends StatelessWidget {
+  const StudyWorkingIndicator({super.key, required this.state, this.progress});
 
   final StudyRequestState state;
+  final StudyRequestProgress? progress;
 
   @override
   Widget build(BuildContext context) {
     final AppColors colors = AppColors.of(context);
-    final String label = state == StudyRequestState.searching
-        ? 'Searching your notes…'
-        : 'Reading what it found…';
-    return Row(
-      children: <Widget>[
-        EtoniaBarsLoader(size: 24, semanticsLabel: label),
-        const SizedBox(width: AppSpacing.sm),
-        Flexible(
-          child: Text(
-            label,
-            style: Theme.of(
-              context,
-            ).textTheme.bodySmall?.copyWith(color: colors.textSecondary),
+    final work =
+        progress ??
+        StudyRequestProgress(
+          state == StudyRequestState.searching
+              ? StudyProgressPhase.searching
+              : StudyProgressPhase.answering,
+        );
+    final label = work.label;
+    final detail = work.detail;
+    return Semantics(
+      liveRegion: true,
+      container: true,
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: <Widget>[
+          ExcludeSemantics(
+            child: EtoniaBarsLoader(size: 24, semanticsLabel: label),
           ),
-        ),
-      ],
+          const SizedBox(width: AppSpacing.sm),
+          Flexible(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  label,
+                  maxLines: 3,
+                  overflow: TextOverflow.ellipsis,
+                  style: Theme.of(
+                    context,
+                  ).textTheme.bodySmall?.copyWith(color: colors.textSecondary),
+                ),
+                if (detail != null)
+                  Tooltip(
+                    message: detail,
+                    child: Text(
+                      detail,
+                      maxLines: 4,
+                      overflow: TextOverflow.ellipsis,
+                      style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                        color: colors.textSecondary,
+                      ),
+                    ),
+                  ),
+              ],
+            ),
+          ),
+        ],
+      ),
     );
   }
 }
@@ -1740,8 +1855,9 @@ class _Composer extends StatelessWidget {
         AppSpacing.md,
         AppSpacing.sm,
       ),
-      // The bar warms as it is written in, and the field eases open and shut
-      // with its lines.
+      // The bar lifts as it is written in, with a soft shadow, and no frame is
+      // drawn round it, or round the field in it: the cursor says where the
+      // writing is. The field eases open and shut with its lines.
       child: ListenableBuilder(
         listenable: focusNode,
         builder: (context, child) => AnimatedContainer(
@@ -1750,18 +1866,14 @@ class _Composer extends StatelessWidget {
           decoration: BoxDecoration(
             color: colors.surface,
             borderRadius: BorderRadius.circular(AppRadii.medium),
-            border: Border.all(
-              color: focusNode.hasFocus
-                  ? colors.focus.withValues(alpha: .55)
-                  : colors.divider,
-            ),
+            border: Border.all(color: colors.divider),
             boxShadow: <BoxShadow>[
               BoxShadow(
                 color: colors.shadow.withValues(
-                  alpha: focusNode.hasFocus ? .10 : 0,
+                  alpha: focusNode.hasFocus ? .12 : 0,
                 ),
-                blurRadius: focusNode.hasFocus ? 14 : 0,
-                offset: const Offset(0, 3),
+                blurRadius: focusNode.hasFocus ? 18 : 0,
+                offset: const Offset(0, 4),
               ),
             ],
           ),
@@ -1801,15 +1913,15 @@ class _Composer extends StatelessWidget {
                       horizontal: AppSpacing.xs,
                       vertical: AppSpacing.sm,
                     ),
+                    // The theme draws a focus ring round a field; here the bar
+                    // is the field, and a second frame inside it is the black
+                    // box that showed on touch.
                     border: InputBorder.none,
                     enabledBorder: InputBorder.none,
-                    focusedBorder: OutlineInputBorder(
-                      borderRadius: AppBorderRadius.medium,
-                      borderSide: BorderSide(
-                        color: colors.focus,
-                        width: AppSizes.focusRingWidth,
-                      ),
-                    ),
+                    focusedBorder: InputBorder.none,
+                    disabledBorder: InputBorder.none,
+                    errorBorder: InputBorder.none,
+                    focusedErrorBorder: InputBorder.none,
                   ),
                 ),
               ),

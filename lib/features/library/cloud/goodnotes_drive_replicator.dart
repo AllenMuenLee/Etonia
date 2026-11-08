@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:collection';
 
 import 'package:flutter/foundation.dart';
@@ -79,10 +80,232 @@ class ReplicationSummary {
   final bool cancelled;
 }
 
+/// Where one file of a Goodnotes import is.
+enum ImportStatus {
+  /// Listed, not yet downloaded.
+  waiting,
+
+  /// Being downloaded and turned into a note now.
+  loading,
+
+  /// Now a note in the library.
+  imported,
+
+  /// Imported by an earlier run and not changed since.
+  unchanged,
+
+  /// Could not be downloaded or imported.
+  failed,
+
+  /// Of a kind that is not imported.
+  skipped,
+
+  /// A PDF that is only the export of a notebook that came in.
+  covered,
+}
+
+/// One file in Drive that an import brings in, with how far it has come.
+class ImportItem {
+  ImportItem._(this._file, this._kind);
+
+  final _RemoteFile _file;
+  final _FileKind? _kind;
+
+  ImportStatus status = ImportStatus.waiting;
+
+  /// The note it became, once [status] is imported or unchanged.
+  String? noteId;
+
+  /// Why it failed or was left out.
+  String? reason;
+
+  /// Whether it is a PDF beside a notebook of the same name: the notebook's
+  /// printed export, imported only if the notebook cannot be.
+  bool isExport = false;
+
+  /// Whether the person asked for it, so it loads ahead of the others.
+  bool requested = false;
+
+  final Completer<void> _finished = Completer<void>();
+
+  /// Completes when the file is done with, one way or another.
+  Future<void> get finished => _finished.future;
+
+  String get driveId => _file.item.id;
+  String get name => _file.item.name;
+  String get path => _file.path;
+  String? get localFolderId => _file.localFolderId;
+
+  /// The name without `.goodnotes` or `.pdf`, as a note is titled.
+  String get title {
+    final String lower = name.toLowerCase();
+    for (final String extension in const <String>['.goodnotes', '.pdf']) {
+      if (lower.endsWith(extension)) {
+        return name.substring(0, name.length - extension.length);
+      }
+    }
+    return name;
+  }
+
+  /// Whether it is still to be brought in.
+  bool get isPending =>
+      status == ImportStatus.waiting || status == ImportStatus.loading;
+
+  void _settle(ImportStatus to, {String? reason, String? noteId}) {
+    status = to;
+    this.reason = reason;
+    this.noteId = noteId ?? this.noteId;
+    if (!_finished.isCompleted) _finished.complete();
+  }
+}
+
+/// A Goodnotes import under way: every folder made in the library and every
+/// file listed before any is downloaded, then the files loaded one at a
+/// time. A file asked for with [prioritize] is loaded next.
+///
+/// It notifies as files change, so the library can show the files still to
+/// come beside the notes already in.
+class GoodnotesImportSession extends ChangeNotifier {
+  GoodnotesImportSession._({
+    required this.localRootId,
+    required this.foldersCreated,
+    required this.foldersReused,
+    required this.items,
+    required this.scanCancelled,
+    required Map<String, Object?> imports,
+    required Map<String, NoteEntry> liveNotes,
+    // ignore: prefer_initializing_formals
+  }) : _imports = imports,
+       // ignore: prefer_initializing_formals
+       _liveNotes = liveNotes;
+
+  /// The library folder the files go into; null is the library root.
+  final String? localRootId;
+  final int foldersCreated;
+  final int foldersReused;
+
+  /// Every file found, in the order they are loaded.
+  final List<ImportItem> items;
+
+  /// Whether the person stopped it before every folder was read.
+  final bool scanCancelled;
+
+  final Map<String, Object?> _imports;
+  final Map<String, NoteEntry> _liveNotes;
+  final List<ImportItem> _asked = <ImportItem>[];
+  bool _ended = false;
+
+  /// Whether it has ended, loaded or stopped.
+  bool get isFinished => _ended;
+
+  /// The files in [folderId] still to come, for the library to show; none
+  /// once the import has ended.
+  List<ImportItem> pendingIn(String? folderId) {
+    if (_ended) return const <ImportItem>[];
+    if (_pendingByFolder == null) {
+      final Map<String?, List<ImportItem>> byFolder =
+          <String?, List<ImportItem>>{};
+      for (final ImportItem item in items) {
+        if (!item.isExport && item.isPending) {
+          (byFolder[item.localFolderId] ??= <ImportItem>[]).add(item);
+        }
+      }
+      _pendingByFolder = byFolder;
+    }
+    return _pendingByFolder![folderId] ?? const <ImportItem>[];
+  }
+
+  /// The files still to come, by folder; made when asked for, and made again
+  /// after any change.
+  Map<String?, List<ImportItem>>? _pendingByFolder;
+
+  /// How many files are done with, and how many there are to do.
+  ({int done, int total}) get counts {
+    int done = 0;
+    int total = 0;
+    for (final ImportItem item in items) {
+      if (item._kind == null || item.status == ImportStatus.covered) continue;
+      total++;
+      if (!item.isPending) done++;
+    }
+    return (done: done, total: total);
+  }
+
+  /// Has [item] loaded next, ahead of the others. A notebook's printed
+  /// export stands for the notebook. Completes when the file is done with,
+  /// or the import ends.
+  Future<void> prioritize(ImportItem item) {
+    final ImportItem wanted = item.isExport
+        ? (_notebookOf(item) ?? item)
+        : item;
+    if (_ended || !wanted.isPending) return wanted.finished;
+    wanted.requested = true;
+    _asked
+      ..remove(wanted)
+      ..insert(0, wanted);
+    _changed();
+    return wanted.finished;
+  }
+
+  ImportItem? _notebookOf(ImportItem export) {
+    for (final ImportItem item in items) {
+      if (item._kind == _FileKind.goodnotes &&
+          item._file.notebookKey == export._file.notebookKey) {
+        return item;
+      }
+    }
+    return null;
+  }
+
+  /// The next file to load: one asked for, else the next in order.
+  ImportItem? _next() {
+    ImportItem? pick;
+    while (_asked.isNotEmpty && pick == null) {
+      final ImportItem asked = _asked.removeAt(0);
+      if (asked.status == ImportStatus.waiting) pick = asked;
+    }
+    if (pick == null) {
+      for (final ImportItem item in items) {
+        if (item.status == ImportStatus.waiting) {
+          pick = item;
+          break;
+        }
+      }
+    }
+    if (pick != null && pick.isExport) {
+      // An export waits for its notebook to be tried.
+      final ImportItem? notebook = _notebookOf(pick);
+      if (notebook != null && notebook.status == ImportStatus.waiting) {
+        return notebook;
+      }
+    }
+    return pick;
+  }
+
+  void _changed() {
+    _pendingByFolder = null;
+    notifyListeners();
+  }
+
+  void _end() {
+    _ended = true;
+    _pendingByFolder = null;
+    for (final ImportItem item in items) {
+      if (!item._finished.isCompleted) item._finished.complete();
+    }
+    notifyListeners();
+  }
+}
+
 /// Finds the Goodnotes folder in Google Drive and replicates it into the
 /// library: the same folders nested directly under the chosen destination,
 /// with every `.goodnotes` notebook and PDF imported as a note in its folder.
 /// A PDF that is only the export of a notebook beside it is left out.
+///
+/// It goes in two steps. [scan] reads every folder and file in Drive and
+/// makes every folder in the library, so the whole structure can be shown at
+/// once; [load] then brings the files in one at a time, a file asked for
+/// first. [replicate] does both.
 ///
 /// Running it again reuses the folders already made, matched by name and
 /// place, and leaves out files imported before that have not changed since;
@@ -169,13 +392,33 @@ class GoodnotesDriveReplicator {
     ];
   }
 
-  /// Replicates [root] into [targetFolderId], or at the top of the library.
-  ///
-  /// The folder tree is walked breadth first and made in the library, then
-  /// the files are imported one at a time. Cancelling stops before the next
-  /// file, or rolls back the one being imported; the summary then says so,
-  /// and notes already imported stay.
+  /// Replicates [root] into [targetFolderId], or at the top of the library:
+  /// [scan], then [load] every file.
   Future<ReplicationSummary> replicate(
+    GoogleDriveItem root, {
+    String? targetFolderId,
+    ValueChanged<CloudProgress>? onProgress,
+    ImportCancellationToken? cancellation,
+  }) async {
+    final ImportCancellationToken token =
+        cancellation ?? ImportCancellationToken();
+    final GoodnotesImportSession session = await scan(
+      root,
+      targetFolderId: targetFolderId,
+      onProgress: onProgress,
+      cancellation: token,
+    );
+    return load(session, onProgress: onProgress, cancellation: token);
+  }
+
+  /// Reads every folder under [root] and every file in them, and makes each
+  /// folder in the library, under [targetFolderId] or at the top. Nothing is
+  /// downloaded: the session returned lists every file, for the library to
+  /// show, and is passed to [load] to bring them in.
+  ///
+  /// The folder tree is walked breadth first. Files imported by an earlier
+  /// run and not changed since are already done in the session.
+  Future<GoodnotesImportSession> scan(
     GoogleDriveItem root, {
     String? targetFolderId,
     ValueChanged<CloudProgress>? onProgress,
@@ -198,6 +441,16 @@ class GoodnotesDriveReplicator {
       return (await repository.createFolder(clean, parentId: parentId)).id;
     }
 
+    GoodnotesImportSession cancelled() => GoodnotesImportSession._(
+      localRootId: targetFolderId,
+      foldersCreated: created,
+      foldersReused: reused,
+      items: <ImportItem>[],
+      scanCancelled: true,
+      imports: <String, Object?>{},
+      liveNotes: <String, NoteEntry>{},
+    );
+
     // The Drive folder is only the source boundary. Its contents go directly
     // into the chosen destination (the library root by default), without an
     // extra local `GoodNotes` wrapper folder.
@@ -208,14 +461,12 @@ class GoodnotesDriveReplicator {
     int visited = 0;
     final Set<String> seen = <String>{root.id};
     while (queue.isNotEmpty) {
-      if (token.isCancelled) {
-        return _summary(localRoot, created, reused, cancelled: true);
-      }
+      if (token.isCancelled) return cancelled();
       final _RemoteFolder folder = queue.removeFirst();
       visited++;
       onProgress?.call(
         CloudProgress(
-          phase: 'Replicating folder $visited / ${visited + queue.length}',
+          phase: 'Reading folder $visited / ${visited + queue.length}',
           completedItems: visited - 1,
           totalItems: visited + queue.length,
           currentName: folder.item.name,
@@ -253,169 +504,230 @@ class GoodnotesDriveReplicator {
     // beside it, as a PDF export with the ink printed on the pages. The
     // export of a notebook that came in is left out, so the notebook's ink
     // is the only copy and stays editable; it comes in only when the
-    // notebook could not. Files are in name order, so a notebook comes
-    // before its export.
-    final Set<String> notebooksIn = <String>{};
-
+    // notebook could not.
+    final Set<String> notebookKeys = <String>{
+      for (final _RemoteFile file in files)
+        if (_kindOf(file.item) == _FileKind.goodnotes) file.notebookKey,
+    };
     final Map<String, Object?> imports = _importsFrom(await state.read());
     final Map<String, NoteEntry> liveNotes = await _liveNotes();
-    final List<String> imported = <String>[];
-    final List<ReplicationIssue> skipped = <ReplicationIssue>[];
-    final List<ReplicationIssue> failed = <ReplicationIssue>[];
-    int unchanged = 0;
-    for (int i = 0; i < files.length; i++) {
-      final _RemoteFile file = files[i];
-      if (token.isCancelled) {
-        return _summary(
-          localRoot,
-          created,
-          reused,
-          imported: imported,
-          unchanged: unchanged,
-          skipped: skipped,
-          failed: failed,
-          cancelled: true,
-        );
+    final List<ImportItem> items = <ImportItem>[];
+    for (final _RemoteFile file in files) {
+      final _FileKind? kind = _kindOf(file.item);
+      final ImportItem item = ImportItem._(file, kind);
+      items.add(item);
+      if (kind == null) {
+        item._settle(ImportStatus.skipped, reason: 'Not a notebook or PDF');
+      } else if (kind == _FileKind.pdf &&
+          notebookKeys.contains(file.notebookKey)) {
+        item.isExport = true;
+      } else {
+        final NoteEntry? existing = _unchangedNote(imports, liveNotes, item);
+        if (existing != null) {
+          if (existing.folderId != file.localFolderId) {
+            await repository.moveNote(existing.id, file.localFolderId);
+          }
+          item._settle(ImportStatus.unchanged, noteId: existing.id);
+        }
       }
+    }
+    return GoodnotesImportSession._(
+      localRootId: localRoot,
+      foldersCreated: created,
+      foldersReused: reused,
+      items: items,
+      scanCancelled: false,
+      imports: imports,
+      liveNotes: liveNotes,
+    );
+  }
+
+  /// Brings in the files of [session], one at a time: one asked for with
+  /// [GoodnotesImportSession.prioritize] before the rest, then the others in
+  /// order. Cancelling stops before the next file, or rolls back the one
+  /// being imported; the summary then says so, and notes already imported
+  /// stay.
+  Future<ReplicationSummary> load(
+    GoodnotesImportSession session, {
+    ValueChanged<CloudProgress>? onProgress,
+    ImportCancellationToken? cancellation,
+  }) async {
+    final ImportCancellationToken token =
+        cancellation ?? ImportCancellationToken();
+    try {
+      if (session.scanCancelled) return _summaryOf(session, cancelled: true);
+      while (!token.isCancelled) {
+        final ImportItem? item = session._next();
+        if (item == null) break;
+        final ({int done, int total}) counts = session.counts;
+        onProgress?.call(
+          CloudProgress(
+            phase: 'Importing file ${counts.done + 1} of ${counts.total}',
+            completedItems: counts.done,
+            totalItems: counts.total,
+            currentName: item.name,
+          ),
+        );
+        item.status = ImportStatus.loading;
+        session._changed();
+        await _loadOne(session, item, token);
+        session._changed();
+      }
+      if (token.isCancelled) return _summaryOf(session, cancelled: true);
+      final ReplicationSummary summary = _summaryOf(session, cancelled: false);
+      final int total = session.counts.total;
       onProgress?.call(
         CloudProgress(
-          phase: 'Importing file ${i + 1} of ${files.length}',
-          completedItems: i,
-          totalItems: files.length,
-          currentName: file.item.name,
+          phase: 'Imported ${summary.imported.length} of $total files',
+          completedItems: total,
+          totalItems: total,
         ),
       );
-      final _FileKind? kind = _kindOf(file.item);
-      if (kind == null) {
-        skipped.add(ReplicationIssue(file.path, 'Not a notebook or PDF'));
-        continue;
-      }
-      final String modified =
-          file.item.modifiedTime?.toUtc().toIso8601String() ?? '';
-      final Object? previous = imports[file.item.id];
-      final String? previousNote = previous is Map<String, Object?>
-          ? previous['noteId'] as String?
-          : null;
-      final NoteEntry? previousEntry = previousNote == null
-          ? null
-          : liveNotes[previousNote];
-      if (kind == _FileKind.pdf && notebooksIn.contains(file.notebookKey)) {
+      return summary;
+    } finally {
+      session._end();
+    }
+  }
+
+  /// The live note an earlier run made from [item], if the file has not
+  /// changed since.
+  NoteEntry? _unchangedNote(
+    Map<String, Object?> imports,
+    Map<String, NoteEntry> liveNotes,
+    ImportItem item,
+  ) {
+    final Object? previous = imports[item.driveId];
+    if (previous is! Map<String, Object?>) return null;
+    final String? noteId = previous['noteId'] as String?;
+    final NoteEntry? entry = noteId == null ? null : liveNotes[noteId];
+    final String modified =
+        item._file.item.modifiedTime?.toUtc().toIso8601String() ?? '';
+    return entry != null && previous['modified'] == modified ? entry : null;
+  }
+
+  Future<void> _loadOne(
+    GoodnotesImportSession session,
+    ImportItem item,
+    ImportCancellationToken token,
+  ) async {
+    final _RemoteFile file = item._file;
+    final _FileKind kind = item._kind!;
+    final String modified =
+        file.item.modifiedTime?.toUtc().toIso8601String() ?? '';
+    final Object? previous = session._imports[item.driveId];
+    final String? previousNote = previous is Map<String, Object?>
+        ? previous['noteId'] as String?
+        : null;
+    final NoteEntry? previousEntry = previousNote == null
+        ? null
+        : session._liveNotes[previousNote];
+
+    if (item.isExport) {
+      final ImportItem? notebook = session._notebookOf(item);
+      final bool notebookIn =
+          notebook != null &&
+          (notebook.status == ImportStatus.imported ||
+              notebook.status == ImportStatus.unchanged);
+      if (notebookIn) {
         // An export an earlier run imported goes to Recently Deleted.
         if (previousEntry != null) {
           await repository.deleteNote(previousEntry.id);
         }
-        if (imports.remove(file.item.id) != null) {
+        if (session._imports.remove(item.driveId) != null) {
           await state.update((Map<String, Object?> values) {
-            values[_importsKey] = imports;
+            values[_importsKey] = session._imports;
           });
         }
-        continue;
+        item._settle(ImportStatus.covered);
+        return;
       }
-      final bool previousExists = previousEntry != null;
-      if (previousExists &&
-          (previous! as Map<String, Object?>)['modified'] == modified) {
-        final NoteEntry existing = previousEntry;
-        if (existing.folderId != file.localFolderId) {
-          await repository.moveNote(existing.id, file.localFolderId);
-        }
-        if (kind == _FileKind.goodnotes) notebooksIn.add(file.notebookKey);
-        unchanged++;
-        continue;
+    }
+    final NoteEntry? existing = _unchangedNote(
+      session._imports,
+      session._liveNotes,
+      item,
+    );
+    if (existing != null) {
+      if (existing.folderId != file.localFolderId) {
+        await repository.moveNote(existing.id, file.localFolderId);
       }
+      item._settle(ImportStatus.unchanged, noteId: existing.id);
+      return;
+    }
 
-      final NoteEntry note;
-      try {
-        final PickedDocument picked = PickedDocument(
-          name: file.item.name,
-          bytes: await client.downloadFile(file.item.id),
-        );
-        if (token.isCancelled) continue;
-        note =
-            kind == _FileKind.goodnotes ||
-                GoodnotesArchiveExtractor.isGoodnotesArchive(picked.bytes)
-            ? await importer.importGoodnotesAsNote(
-                repository: repository,
-                picked: picked,
-                folderId: file.localFolderId,
-                cancellation: token,
-              )
-            : await importer.importPdfAsNote(
-                repository: repository,
-                picked: picked,
-                folderId: file.localFolderId,
-                cancellation: token,
-                recoverGoodnotesInk: true,
-              );
-      } on Object catch (error) {
-        // A cancelled import has rolled its note back; the loop stops at
-        // its top.
-        if (!token.isCancelled) {
-          failed.add(ReplicationIssue(file.path, _reasonFor(error)));
-        }
-        continue;
-      }
-      imported.add(file.path);
-      if (kind == _FileKind.goodnotes) notebooksIn.add(file.notebookKey);
-      if (previousEntry != null && previousEntry.id != note.id) {
-        await repository.deleteNote(previousEntry.id);
-      }
-      imports[file.item.id] = <String, Object?>{
-        'noteId': note.id,
-        'modified': modified,
-      };
-      await state.update((Map<String, Object?> values) {
-        values[_importsKey] = imports;
-      });
-    }
-    if (token.isCancelled) {
-      return _summary(
-        localRoot,
-        created,
-        reused,
-        imported: imported,
-        unchanged: unchanged,
-        skipped: skipped,
-        failed: failed,
-        cancelled: true,
+    final NoteEntry note;
+    try {
+      final PickedDocument picked = PickedDocument(
+        name: file.item.name,
+        bytes: await client.downloadFile(file.item.id),
       );
+      if (token.isCancelled) {
+        item.status = ImportStatus.waiting;
+        return;
+      }
+      note =
+          kind == _FileKind.goodnotes ||
+              GoodnotesArchiveExtractor.isGoodnotesArchive(picked.bytes)
+          ? await importer.importGoodnotesAsNote(
+              repository: repository,
+              picked: picked,
+              folderId: file.localFolderId,
+              cancellation: token,
+            )
+          : await importer.importPdfAsNote(
+              repository: repository,
+              picked: picked,
+              folderId: file.localFolderId,
+              cancellation: token,
+              recoverGoodnotesInk: true,
+            );
+    } on Object catch (error) {
+      // A cancelled import has rolled its note back.
+      if (token.isCancelled) {
+        item.status = ImportStatus.waiting;
+      } else {
+        item._settle(ImportStatus.failed, reason: _reasonFor(error));
+      }
+      return;
     }
-    onProgress?.call(
-      CloudProgress(
-        phase: 'Imported ${imported.length} of ${files.length} files',
-        completedItems: files.length,
-        totalItems: files.length,
-      ),
-    );
-    return _summary(
-      localRoot,
-      created,
-      reused,
-      imported: imported,
-      unchanged: unchanged,
-      skipped: skipped,
-      failed: failed,
-      cancelled: false,
-    );
+    if (previousEntry != null && previousEntry.id != note.id) {
+      await repository.deleteNote(previousEntry.id);
+    }
+    session._imports[item.driveId] = <String, Object?>{
+      'noteId': note.id,
+      'modified': modified,
+    };
+    await state.update((Map<String, Object?> values) {
+      values[_importsKey] = session._imports;
+    });
+    item._settle(ImportStatus.imported, noteId: note.id);
   }
 
-  ReplicationSummary _summary(
-    String? localRoot,
-    int created,
-    int reused, {
-    List<String> imported = const <String>[],
-    int unchanged = 0,
-    List<ReplicationIssue> skipped = const <ReplicationIssue>[],
-    List<ReplicationIssue> failed = const <ReplicationIssue>[],
+  ReplicationSummary _summaryOf(
+    GoodnotesImportSession session, {
     required bool cancelled,
   }) {
     return ReplicationSummary(
-      localRootId: localRoot,
-      foldersCreated: created,
-      foldersReused: reused,
-      imported: List<String>.unmodifiable(imported),
-      unchanged: unchanged,
-      skipped: List<ReplicationIssue>.unmodifiable(skipped),
-      failed: List<ReplicationIssue>.unmodifiable(failed),
+      localRootId: session.localRootId,
+      foldersCreated: session.foldersCreated,
+      foldersReused: session.foldersReused,
+      imported: List<String>.unmodifiable(<String>[
+        for (final ImportItem item in session.items)
+          if (item.status == ImportStatus.imported) item.path,
+      ]),
+      unchanged: session.items
+          .where((ImportItem item) => item.status == ImportStatus.unchanged)
+          .length,
+      skipped: List<ReplicationIssue>.unmodifiable(<ReplicationIssue>[
+        for (final ImportItem item in session.items)
+          if (item.status == ImportStatus.skipped)
+            ReplicationIssue(item.path, item.reason ?? 'Not imported'),
+      ]),
+      failed: List<ReplicationIssue>.unmodifiable(<ReplicationIssue>[
+        for (final ImportItem item in session.items)
+          if (item.status == ImportStatus.failed)
+            ReplicationIssue(item.path, item.reason ?? 'Could not be imported'),
+      ]),
       cancelled: cancelled,
     );
   }

@@ -483,6 +483,7 @@ class _CitedPageState extends State<_CitedPage>
   /// What is cited on the page, in the place it is drawn at here.
   List<Stroke> _strokes = const <Stroke>[];
   List<Rect> _rings = const <Rect>[];
+  List<Rect> _highlights = const <Rect>[];
 
   Uint8List? _pdf;
 
@@ -520,6 +521,9 @@ class _CitedPageState extends State<_CitedPage>
     _strokes = <Stroke>[for (final int i in indices) _page.strokes[i]];
     _rings = <Rect>[
       for (final Rect r in citation.ringsOn(stored)) r.shift(_shift),
+    ];
+    _highlights = <Rect>[
+      for (final Rect r in citation.highlights) r.shift(_shift),
     ];
   }
 
@@ -790,11 +794,23 @@ class _CitedPageState extends State<_CitedPage>
       include(stroke.bounds);
     }
     _rings.map(aiCitationRing).forEach(include);
+    _highlights.forEach(include);
     final region = widget.citation.bounds;
     if (bounds == null && region != null) {
       include(region.shift(_shift));
     }
-    return bounds;
+    return _framing(bounds);
+  }
+
+  /// What to bring into view for [marked], all that is marked. A paragraph that
+  /// cites two places on a page marks both, but the view goes to the one it
+  /// is about, unless both are near enough to be shown together.
+  Rect? _framing(Rect? marked) {
+    final Rect? focus = widget.citation.focus?.shift(_shift);
+    if (marked == null || focus == null || focus.isEmpty) return marked;
+    final double all = marked.width * marked.height;
+    final double one = focus.width * focus.height;
+    return all > one * 4 ? focus : marked;
   }
 
   /// Moves to what is cited, once the view's size is known, and each time the
@@ -889,7 +905,11 @@ class _CitedPageState extends State<_CitedPage>
                   ),
                 if (_page.images.isNotEmpty)
                   PageImageLayer(controller: ink, readAsset: _readAsset),
-                AiCitationMarks(strokes: _strokes, circles: _rings),
+                AiCitationMarks(
+                  strokes: _strokes,
+                  circles: _rings,
+                  highlights: _highlights,
+                ),
                 if (session == null)
                   CustomPaint(
                     painter: NoteThumbnailPainter(

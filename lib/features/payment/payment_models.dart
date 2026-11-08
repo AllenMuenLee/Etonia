@@ -36,7 +36,7 @@ enum AiModelTier {
   /// Included in every plan without limit: Haiku and Luna.
   unlimited,
 
-  /// Paid from credits on every plan: Sonnet and Sol.
+  /// Paid from credits on every plan: Sonnet, Sol, and Flash.
   standard,
 
   /// Paid from credits on Pro and Max only: Opus, Argon, and Astra.
@@ -45,7 +45,7 @@ enum AiModelTier {
   static AiModelTier of(AiModelId model) {
     return switch (model) {
       AiModelId.haiku || AiModelId.luna => unlimited,
-      AiModelId.sonnet || AiModelId.sol => standard,
+      AiModelId.sonnet || AiModelId.sol || AiModelId.flash => standard,
       AiModelId.opus || AiModelId.argon || AiModelId.astra => frontier,
     };
   }
@@ -69,8 +69,12 @@ enum SubscriptionPlan {
     includedCreditsMicroUsd: 2450000,
     yearlyIncludedCreditsMicroUsd: 29400000,
     tokenPoolScale: 0.28,
-    meteredModels: <AiModelId>{AiModelId.sonnet, AiModelId.sol},
-    creditDescription: 'AI tokens for Sonnet & Sol combined',
+    meteredModels: <AiModelId>{
+      AiModelId.sonnet,
+      AiModelId.sol,
+      AiModelId.flash,
+    },
+    creditDescription: 'AI tokens for Sonnet, Sol & Flash combined',
   ),
   pro1499(
     title: 'Pro',
@@ -81,7 +85,7 @@ enum SubscriptionPlan {
     tokenPoolScale: 0.6,
     meteredModels: _allMetered,
     creditDescription:
-        'AI tokens for Sonnet, Sol, Opus, Argon & Astra combined',
+        'AI tokens for Sonnet, Sol, Flash, Opus, Argon & Astra combined',
   ),
   max2499(
     title: 'Max',
@@ -92,7 +96,7 @@ enum SubscriptionPlan {
     tokenPoolScale: 1.0,
     meteredModels: _allMetered,
     creditDescription:
-        'AI tokens for all models (Sonnet, Sol, Opus, Argon & '
+        'AI tokens for all models (Sonnet, Sol, Flash, Opus, Argon & '
         'Astra combined)',
   );
 
@@ -110,6 +114,7 @@ enum SubscriptionPlan {
   static const Set<AiModelId> _allMetered = <AiModelId>{
     AiModelId.sonnet,
     AiModelId.sol,
+    AiModelId.flash,
     AiModelId.opus,
     AiModelId.argon,
     AiModelId.astra,
@@ -168,6 +173,7 @@ const Set<AiModelId> freeCreditModels = <AiModelId>{
   AiModelId.luna,
   AiModelId.sonnet,
   AiModelId.sol,
+  AiModelId.flash,
 };
 
 /// What one model costs, in micro-dollars per thousand tokens: the
@@ -300,6 +306,8 @@ class PaymentConfig {
         AiModelId.sonnet: AiModelRate(inputPerKilo: 2000, outputPerKilo: 10000),
         // GPT-6.1 Sol: $2 / $10.
         AiModelId.sol: AiModelRate(inputPerKilo: 2000, outputPerKilo: 10000),
+        // Gemini 3.8 Flash introductory prices through December 31, 2026.
+        AiModelId.flash: AiModelRate(inputPerKilo: 750, outputPerKilo: 3750),
         // Claude Opus 5.5: $4 / $20.
         AiModelId.opus: AiModelRate(inputPerKilo: 4000, outputPerKilo: 20000),
         // Gemini 4 Argon: $4 / $20, its price after the launch offer.

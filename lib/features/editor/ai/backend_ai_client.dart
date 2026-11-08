@@ -98,6 +98,18 @@ class BackendAiClient implements AiModelRouter {
     AiRequest request, {
     AiPartialCallback? onPartial,
     AiNotationPartialCallback? onNotation,
+  }) => _send(request, onPartial: onPartial, onNotation: onNotation);
+
+  /// Selects a model without provider inference or usage settlement. Unknown
+  /// older servers reject the flag before doing any paid work.
+  Future<AiResult> previewRoute(AiRequest request) =>
+      _send(request, routeOnly: true);
+
+  Future<AiResult> _send(
+    AiRequest request, {
+    AiPartialCallback? onPartial,
+    AiNotationPartialCallback? onNotation,
+    bool routeOnly = false,
   }) async {
     if (_closed) return const AiError(AiFailure(AiFailureKind.interrupted));
     if (!isConfigured) {
@@ -131,6 +143,7 @@ class BackendAiClient implements AiModelRouter {
       final history = _history(request.messages, latestIndex);
       final Map<String, Object?> body = <String, Object?>{
         'requestId': newRequestId(),
+        if (routeOnly) 'routeOnly': true,
         if (request.turnId != null) 'turnId': request.turnId,
         if (request.responseFormat != AiResponseFormat.svg)
           'responseFormat': request.responseFormat.name,
@@ -188,7 +201,8 @@ class BackendAiClient implements AiModelRouter {
       } on BackendFailure catch (error) {
         // Old servers reject unknown fields before reserving or sending work.
         // Never retry a timeout/provider failure: it may already be charged.
-        if (error.code != 'rejected' ||
+        if (routeOnly ||
+            error.code != 'rejected' ||
             request.responseFormat == AiResponseFormat.svg ||
             request.legacySystemInstruction == null) {
           rethrow;
@@ -206,6 +220,13 @@ class BackendAiClient implements AiModelRouter {
         );
       }
       if (_closed) return const AiError(AiFailure(AiFailureKind.interrupted));
+      if (routeOnly) {
+        final model = _servedBy(response['servedBy']);
+        if (response['routePreview'] != true || model == null) {
+          return const AiError(AiFailure(AiFailureKind.malformed));
+        }
+        return AiSuccess('Route preview', servedBy: model);
+      }
       if (request.responseFormat != AiResponseFormat.svg &&
           response['responseFormat'] == request.responseFormat.name) {
         final rawAnswer = response['answer'] as String;
@@ -280,7 +301,9 @@ class BackendAiClient implements AiModelRouter {
     } on Object {
       return const AiError(AiFailure(AiFailureKind.network));
     } finally {
-      if (invoke == null && invokeStream == null) _backend.billingChanged();
+      if (!routeOnly && invoke == null && invokeStream == null) {
+        _backend.billingChanged();
+      }
     }
   }
 

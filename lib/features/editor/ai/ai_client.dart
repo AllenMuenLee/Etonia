@@ -396,6 +396,12 @@ class AiError extends AiResult {
 /// Answers a conversation about an image. The editor depends on this alone,
 /// so a production build can swap the direct Gemini client for one that
 /// calls a backend holding the provider key.
+/// An optional dedicated lightweight reader, separate from a custom client's
+/// answer model. Implementations must honor the enabled model in [request].
+abstract interface class AiVisualDescriptionClient {
+  Future<AiResult> describeVisual(AiRequest request);
+}
+
 abstract class AiClient {
   /// Whether [send] can work at all. False when no key is configured.
   bool get isConfigured;

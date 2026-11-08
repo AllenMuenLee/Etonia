@@ -25,14 +25,23 @@ void main() {
       final sent = <String>[];
       final client = BackendAiClient(
         invoke: (_, body) async {
-          final instruction = body['systemInstruction']! as String;
-          if (!instruction.contains('You plan tutoring lessons') &&
-              !instruction.contains('JSON array of exactly three')) {
+          // The client rewrites the system text it sends, so requests are told
+          // apart by their task.
+          final task = (body['routing'] as Map?)?['task'];
+          final planning = task == 'study.plan';
+          if (task != 'study.plan' && task != 'study.suggestions') {
             sent.add(body.toString());
           }
           return <String, dynamic>{
-            'answer': instruction.contains('You plan tutoring lessons')
-                ? '{"intent":"question"}'
+            // As the server does, so that a text or JSON reply is accepted.
+            if (body['responseFormat'] != null)
+              'responseFormat': body['responseFormat'],
+            'usage': <String, dynamic>{'inputTokens': 1, 'outputTokens': 1},
+            // Retrieval happens only when the planner asks for it.
+            'answer': planning
+                ? '{"intent":"question","retrieval":{"notes":true,'
+                      '"mistakeIndices":[],"query":"momentum lab results",'
+                      '"depth":"full"}}'
                 : 'Momentum is conserved.',
           };
         },

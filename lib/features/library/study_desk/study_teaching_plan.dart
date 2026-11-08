@@ -164,8 +164,12 @@ class StudyTeachingDecision {
     this.retrieveNotes = false,
     this.mistakeIndices = const [],
     this.retrievalQuery = '',
+    this.visualQuery = '',
     this.retrievalDepth = StudyRetrievalDepth.full,
   });
+
+  /// The longest [visualQuery] taken.
+  static const int maxVisualQuery = 300;
 
   final StudyTeachingIntent intent;
   final StudyTeachingPlan? plan;
@@ -173,6 +177,11 @@ class StudyTeachingDecision {
   final bool retrieveNotes;
   final List<int> mistakeIndices;
   final String retrievalQuery;
+
+  /// What the sought page looks like, in a sentence, rather than what it says:
+  /// a picture's embedding sits near a description of the picture, not near a
+  /// bare keyword. Empty when the request is not about how something looks.
+  final String visualQuery;
   final StudyRetrievalDepth retrievalDepth;
 
   StudyTeachingDecision withRetrieval(StudyTeachingDecision decision) =>
@@ -183,6 +192,7 @@ class StudyTeachingDecision {
         retrieveNotes: decision.retrieveNotes,
         mistakeIndices: decision.mistakeIndices,
         retrievalQuery: decision.retrievalQuery,
+        visualQuery: decision.visualQuery,
         retrievalDepth: decision.retrievalDepth,
       );
 
@@ -258,6 +268,13 @@ class StudyTeachingDecision {
           (retrieval['mistakeIndices'] as List).cast<int>().toSet(),
         ),
         retrievalQuery: (retrieval['query'] as String).trim(),
+        // Optional and advisory: a malformed one costs only the picture
+        // search it would have helped, never the whole plan.
+        visualQuery: switch (retrieval['visualQuery']) {
+          final String text when retrieval['notes'] == true =>
+            text.trim().length <= maxVisualQuery ? text.trim() : '',
+          _ => '',
+        },
         retrievalDepth: retrieval['depth'] == 'brief'
             ? StudyRetrievalDepth.brief
             : StudyRetrievalDepth.full,

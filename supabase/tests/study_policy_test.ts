@@ -149,7 +149,33 @@ Deno.test("helper ceilings preserve full high-effort and derivation output space
   assert.equal(studyOutputCeiling("study.plan", 16384, "medium"), 8192);
   assert.equal(studyOutputCeiling("study.plan", 16384, "high"), 16384);
   assert.equal(studyOutputCeiling("study.answer", 16384, "low"), 16384);
+  assert.equal(studyOutputCeiling("study.describe", 16384, "high"), 4096);
   assert.equal(isPlaceholderPng(input.selectedImage), true);
+});
+
+Deno.test("visual descriptions validate panel ordering and uncertainty bounds", () => {
+  const description = { ...input, responseFormat: "json" as const, prompt: '{"panelCount":1}' };
+  const panel = {
+    panel: "A",
+    description: "V = I R. Arrow points right.",
+    uncertainties: ["Resistor label unclear."],
+  };
+  assert(usableStudyResponse(description, "study.describe", JSON.stringify({ panels: [panel] })));
+  assert(
+    !usableStudyResponse(
+      description,
+      "study.describe",
+      JSON.stringify({ panels: [{ ...panel, panel: "B" }] }),
+    ),
+  );
+  assert(
+    !usableStudyResponse(
+      description,
+      "study.describe",
+      JSON.stringify({ panels: [{ ...panel, uncertainties: Array(9).fill("Unclear") }] }),
+    ),
+  );
+  assert(!usableStudyResponse(description, "study.describe", '{"panels":[]}'));
 });
 
 Deno.test("frozen calculation profile routes cheaply and escalates within billing constraints", () => {

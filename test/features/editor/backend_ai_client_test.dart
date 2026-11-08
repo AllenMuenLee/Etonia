@@ -12,6 +12,75 @@ import 'package:greatnote/features/editor/ai/note_image_renderer.dart';
 import 'package:greatnote/features/editor/ai/streaming_ai_client.dart';
 
 void main() {
+  group('routing preview', () {
+    AiRequest request() => AiRequest(
+      systemInstruction: 'Use the note as source.',
+      legacySystemInstruction: 'Legacy instruction',
+      imagePng: Uint8List.fromList([1, 2, 3]),
+      routing: const AiRouting(
+        task: AiRouteTask.studyAnswer,
+        needsVision: true,
+      ),
+      responseFormat: AiResponseFormat.text,
+      messages: const [AiMessage.user('Explain this diagram.')],
+    );
+    test(
+      'returns the selected model without requiring an answer or token usage',
+      () async {
+        final calls = <Map<String, Object?>>[];
+        final client = BackendAiClient(
+          invoke: (_, body) async {
+            calls.add(body);
+            return {
+              'routePreview': true,
+              'servedBy': {'model': 'luna', 'effort': 'medium'},
+            };
+          },
+        );
+        addTearDown(client.close);
+        final result = await client.previewRoute(request()) as AiSuccess;
+        expect(result.servedBy, AiModelId.luna);
+        expect(result.usage, isNull);
+        expect(calls, hasLength(1));
+        expect(calls.single['routeOnly'], true);
+        expect(calls.single['model'], 'auto');
+        expect(calls.single['prompt'], 'Explain this diagram.');
+        expect(calls.single['selectedImage'], base64Encode([1, 2, 3]));
+        expect((calls.single['routing'] as Map)['needsVision'], true);
+      },
+    );
+    test(
+      'an old server rejection never falls back to paid answer execution',
+      () async {
+        var calls = 0;
+        final client = BackendAiClient(
+          invoke: (_, _) async {
+            calls++;
+            throw const BackendFailure('rejected');
+          },
+        );
+        addTearDown(client.close);
+        final result = await client.previewRoute(request()) as AiError;
+        expect(result.failure.kind, AiFailureKind.rejected);
+        expect(calls, 1);
+      },
+    );
+    test(
+      'ordinary answer payloads are not mistaken for route decisions',
+      () async {
+        final client = BackendAiClient(
+          invoke: (_, _) async => {
+            'answer': 'Unexpected answer',
+            'servedBy': {'model': 'haiku'},
+            'usage': {'inputTokens': 1, 'outputTokens': 1},
+          },
+        );
+        addTearDown(client.close);
+        final result = await client.previewRoute(request()) as AiError;
+        expect(result.failure.kind, AiFailureKind.malformed);
+      },
+    );
+  });
   test('shows the completed chat answer before notation finishes', () async {
     final Completer<void> notation = Completer<void>();
     final List<(String, bool)> partials = <(String, bool)>[];

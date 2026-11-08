@@ -371,7 +371,7 @@ class CreditMeter extends StatelessWidget {
           const SizedBox(height: AppSpacing.xs),
           Text(
             controller.hasFreeCredit
-                ? 'Free tokens for Haiku, Luna, Sonnet & Sol${_freeEnds(controller)}. '
+                ? 'Free tokens for Haiku, Luna, Sonnet, Sol & Flash${_freeEnds(controller)}. '
                       'Haiku and Luna are unlimited on every paid plan.'
                 : 'Haiku and Luna are unlimited on every paid plan.',
             style: text.bodySmall?.copyWith(color: colors.textSecondary),

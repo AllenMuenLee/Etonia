@@ -95,17 +95,25 @@ class AiCitationMarks extends StatelessWidget {
     super.key,
     this.strokes = const <Stroke>[],
     this.circles = const <Rect>[],
+    this.highlights = const <Rect>[],
   });
 
   final List<Stroke> strokes;
   final List<Rect> circles;
+
+  /// Typed or printed lines, marked as a highlighter would mark them.
+  final List<Rect> highlights;
 
   @override
   Widget build(BuildContext context) {
     return RepaintBoundary(
       child: CustomPaint(
         key: const ValueKey<String>('ai-citation-highlight-layer'),
-        painter: _CitationPainter(strokes: strokes, circles: circles),
+        painter: _CitationPainter(
+          strokes: strokes,
+          circles: circles,
+          highlights: highlights,
+        ),
         size: Size.infinite,
       ),
     );
@@ -174,6 +182,7 @@ class _AiNoteMarksLayerState extends State<AiNoteMarksLayer> {
           .strokesIn(widget.page.strokes)
           .forEach((Stroke stroke) => include(stroke.bounds));
       marks.rings.map(aiCitationRing).forEach(include);
+      marks.highlights.forEach(include);
       if (bounds == null || revealAiCitationBounds(context, bounds!)) {
         _revealed = marks;
       }
@@ -195,6 +204,7 @@ class _AiNoteMarksLayerState extends State<AiNoteMarksLayer> {
             return AiCitationMarks(
               strokes: marks.strokesIn(widget.page.strokes),
               circles: marks.rings,
+              highlights: marks.highlights,
             );
           },
         ),
@@ -324,10 +334,15 @@ class _AiCitationHighlightState extends State<AiCitationHighlight> {
 }
 
 class _CitationPainter extends CustomPainter {
-  const _CitationPainter({required this.strokes, required this.circles});
+  const _CitationPainter({
+    required this.strokes,
+    required this.circles,
+    this.highlights = const <Rect>[],
+  });
 
   final List<Stroke> strokes;
   final List<Rect> circles;
+  final List<Rect> highlights;
 
   /// How far the mark reaches past a stroke's own width, on each side.
   static const double _spread = 4;
@@ -340,6 +355,7 @@ class _CitationPainter extends CustomPainter {
   @override
   void paint(Canvas canvas, Size size) {
     if (strokes.isNotEmpty) _paintHighlight(canvas);
+    if (highlights.isNotEmpty) _paintLines(canvas);
     final Paint edge = Paint()
       ..color = Colors.white.withValues(alpha: 0.7)
       ..style = PaintingStyle.stroke
@@ -355,6 +371,19 @@ class _CitationPainter extends CustomPainter {
       canvas
         ..drawOval(oval, edge)
         ..drawOval(oval, ring);
+    }
+  }
+
+  /// Typed or printed lines: a soft band under each, in the same yellow.
+  void _paintLines(Canvas canvas) {
+    final Paint band = Paint()
+      ..color = aiCitationHighlightColor.withValues(alpha: _opacity * 0.6)
+      ..isAntiAlias = true;
+    for (final Rect line in highlights) {
+      canvas.drawRRect(
+        RRect.fromRectAndRadius(line.inflate(2), const Radius.circular(3)),
+        band,
+      );
     }
   }
 
@@ -401,8 +430,10 @@ class _CitationPainter extends CustomPainter {
   bool shouldRepaint(_CitationPainter oldDelegate) {
     return oldDelegate.strokes.length != strokes.length ||
         oldDelegate.circles.length != circles.length ||
+        oldDelegate.highlights.length != highlights.length ||
         !_same(oldDelegate.strokes, strokes) ||
-        !_same(oldDelegate.circles, circles);
+        !_same(oldDelegate.circles, circles) ||
+        !_same(oldDelegate.highlights, highlights);
   }
 
   static bool _same(List<Object> a, List<Object> b) {

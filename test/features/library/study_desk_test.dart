@@ -1239,7 +1239,7 @@ void main() {
       expect(find.byTooltip('Sort'), findsOneWidget);
       await openDeskWithNote(tester);
       expect(find.byTooltip('Sort'), findsNothing);
-      expect(find.text('1 selected source'), findsOneWidget);
+      expect(find.text('Sources for this chat'), findsOneWidget);
       expect(
         find.byKey(const ValueKey<String>('study-chat-add-source')),
         findsOneWidget,
@@ -1707,10 +1707,9 @@ void main() {
       await ask(tester, 'Explain mitosis3');
       await answer(tester, 'In phases. [[N1:P2:L4-L7]]');
 
-      // The bar still names the desk, with little room to do it in.
-      final Finder name = find.text(StudyDesk.title);
-      expect(name, findsWidgets);
-      expect(tester.getSize(name.first).width, greaterThan(60));
+      // The bar does not name the desk over its own chat: there is little
+      // room, and nothing to say that the chat does not.
+      expect(find.text(StudyDesk.title), findsNothing);
 
       // Reading on, the pane does not cover the chat by itself.
       final Finder pane = find.byKey(
@@ -1784,7 +1783,7 @@ void main() {
       expect(find.byType(StudyDeskScreen), findsOneWidget);
       expect(tester.takeException(), isNull);
       expect(find.textContaining('In phases.'), findsOneWidget);
-      expect(find.text('1 selected source'), findsOneWidget);
+      expect(find.text('Sources for this chat'), findsOneWidget);
       expect(
         find.byTooltip('Sort'),
         findsNothing,

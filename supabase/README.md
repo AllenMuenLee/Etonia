@@ -50,7 +50,7 @@ by the provider account's own settings and terms, not by this Supabase code.
    included. A Google-signed-in free account gets a one-time $0.50 AI credit
    (`plans.one_time_credit`). The credit is granted once per account and once
    per device, never to anonymous accounts, and it never refills. It pays for
-   Haiku, Luna, Sonnet and Sol only, and is used only while no paid plan is active. `billing_private.devices` lists every device and its last account.
+   Haiku, Luna, Sonnet, Sol and Flash only, and is used only while no paid plan is active. `billing_private.devices` lists every device and its last account.
    All free credit lasts one month from when it was granted (`grants.expires_at`).
    Gift codes add $3 (`gift_codes.credit`) to a Google account's free credit, once
    per account per code, and restart that month. Create one in the SQL editor:
@@ -69,6 +69,9 @@ by the provider account's own settings and terms, not by this Supabase code.
    app configuration, **not a claim about current provider pricing**. Rates are
    integer micro-USD per 1,000 tokens: $2/million tokens means `2000`.
    Model routing, rates, output limits and allowed aliases are server-controlled.
+   `AI_MODEL_CONFIG_OVERRIDES` optionally merges additional model entries over
+   that catalog. The balanced Gemini alias is `flash` (`gemini-3.8-flash`);
+   see `docs/ai_router.md` for its introductory pricing and migration requirements.
    The optional `cachedInputMicroPerKilo` field is the provider's price for
    cached input, allowing fixed instructions to be served from cache. With
    Notation on, a request

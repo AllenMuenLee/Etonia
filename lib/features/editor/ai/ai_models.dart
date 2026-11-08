@@ -49,6 +49,14 @@ enum AiModelId {
     environmentKey: 'SOL_MODEL_ID',
     summary: 'GPT-6.1 Sol · balanced',
   ),
+  flash(
+    label: 'Flash',
+    provider: AiProvider.gemini,
+    tokenMultiplier: 20,
+    defaultProviderModelId: 'gemini-3.8-flash',
+    environmentKey: 'FLASH_MODEL_ID',
+    summary: 'Gemini 3.8 Flash · balanced',
+  ),
   opus(
     label: 'Opus',
     provider: AiProvider.claude,
