@@ -227,6 +227,10 @@ class StudyDeskController extends ChangeNotifier implements AiRoutingChooser {
   final VoidCallback? onSaved;
 
   AiUsageGate? _usageGate;
+
+  /// The plan's token allowance, for the low-tokens line over the composer.
+  AiUsageGate? get usageGate => _usageGate;
+
   bool _disposed = false;
 
   /// Whole notes kept in memory, for the pages being read and cited.
@@ -238,6 +242,9 @@ class StudyDeskController extends ChangeNotifier implements AiRoutingChooser {
   List<StudySession> _sessions = const <StudySession>[];
   List<StudyCourse> _courses = const <StudyCourse>[];
   Map<String, int> _deletedSessions = const <String, int>{};
+
+  /// Folders whose suggested class the user closed.
+  Set<String> _dismissedSuggestions = const <String>{};
   late StudySession _session = _newSession();
   bool _loaded = false;
   Future<void>? _loading;
@@ -328,23 +335,55 @@ class StudyDeskController extends ChangeNotifier implements AiRoutingChooser {
       .firstOrNull;
   List<StudyCourse> get courses => List.unmodifiable(_courses);
 
+  static String _classKey(String name) => name.trim().toLowerCase();
+
+  /// Top-level folders that could become a class. A folder is left out when a
+  /// class already has its name (a class built from it, or by hand) or when the
+  /// user closed its suggestion.
   List<Folder> get suggestedClassFolders {
     final linked = {
       for (final course in _courses) ...course.associatedFolderIds,
     };
+    final taken = {for (final course in _courses) _classKey(course.name)};
     return allFolders
         .where(
-          (folder) => folder.parentId == null && !linked.contains(folder.id),
+          (folder) =>
+              folder.parentId == null &&
+              !linked.contains(folder.id) &&
+              !_dismissedSuggestions.contains(folder.id) &&
+              !taken.contains(_classKey(folder.name)),
         )
         .toList()
       ..sort((a, b) => a.name.toLowerCase().compareTo(b.name.toLowerCase()));
+  }
+
+  /// Closes the suggestion for [folder] and keeps it closed.
+  void dismissSuggestedClass(Folder folder) {
+    if (_dismissedSuggestions.contains(folder.id)) return;
+    _dismissedSuggestions = {..._dismissedSuggestions, folder.id};
+    _save();
+    _notify();
+  }
+
+  /// Whether some class already has [name], ignoring case and the space around
+  /// it. [except] is a class that may keep its own name.
+  bool hasClassNamed(String name, {String? except}) {
+    final key = _classKey(name);
+    return _courses.any((c) => c.id != except && _classKey(c.name) == key);
   }
 
   void initializeSuggestedClass(Folder folder) {
     final existing = _courses
         .where((course) => course.associatedFolderIds.contains(folder.id))
         .firstOrNull;
-    openCourse(existing ?? addCourse(folder.name, folderIds: [folder.id]));
+    openCourse(
+      existing ??
+          addCourse(
+            folder.name,
+            colorHex: folder.color.colorHex,
+            folderIds: [folder.id],
+          ),
+    );
   }
 
   List<StudySession> get allSessions => <StudySession>[
@@ -576,6 +615,7 @@ class StudyDeskController extends ChangeNotifier implements AiRoutingChooser {
       _sessions = kept.sessions;
       _courses = kept.courses;
       _deletedSessions = kept.deletedSessions;
+      _dismissedSuggestions = kept.dismissedSuggestions.toSet();
       _semanticSearch = kept.semanticSearch;
       _session =
           _sessions
@@ -627,6 +667,7 @@ class StudyDeskController extends ChangeNotifier implements AiRoutingChooser {
           currentSessionId: _session.id,
           semanticSearch: _semanticSearch,
           deletedSessions: _deletedSessions,
+          dismissedSuggestions: _dismissedSuggestions.toList(),
         ),
       ),
     );
@@ -927,6 +968,76 @@ class StudyDeskController extends ChangeNotifier implements AiRoutingChooser {
     return course;
   }
 
+  /// Renames a class. A blank name, or one another class has, changes nothing.
+  void renameCourse(String id, String name) {
+    final String trimmed = name.trim();
+    if (trimmed.isEmpty || hasClassNamed(trimmed, except: id)) return;
+    _courses = [
+      for (final c in _courses)
+        c.id == id ? c.copyWith(name: trimmed, updatedAt: clock()) : c,
+    ];
+    _save();
+    _notify();
+  }
+
+  /// Changes the accent color of a class.
+  void recolorCourse(String id, String colorHex) {
+    final String trimmed = colorHex.trim();
+    if (trimmed.isEmpty) return;
+    _courses = [
+      for (final c in _courses)
+        c.id == id ? c.copyWith(colorHex: trimmed, updatedAt: clock()) : c,
+    ];
+    _save();
+    _notify();
+  }
+
+  void setCoursePinned(String id, bool pinned) {
+    _courses = [
+      for (final c in _courses)
+        c.id == id ? c.copyWith(isPinned: pinned, updatedAt: clock()) : c,
+    ];
+    _save();
+    _notify();
+  }
+
+  /// Removes a class. Its chats, flashcards and tests are kept, no longer in a
+  /// class; its notes and folders are untouched.
+  Future<void> deleteCourse(String id) async {
+    final StudyCourse? course = _courses.where((c) => c.id == id).firstOrNull;
+    if (course == null) return;
+    _courses = _courses.where((c) => c.id != id).toList();
+    // Remembered as gone, so another device does not bring it back.
+    _deletedSessions = <String, int>{
+      ..._deletedSessions,
+      id: clock().millisecondsSinceEpoch,
+    };
+    StudySession release(StudySession s) =>
+        s.courseId == id ? s.copyWith(courseId: null) : s;
+    _session = release(_session);
+    _sessions = [for (final s in _sessions) release(s)];
+    if (selectedCourseId == id) {
+      selectedCourseId = null;
+      if (page == StudyDeskPage.course) page = StudyDeskPage.workspace;
+    }
+    _save();
+    _notify();
+    final List<StudyPracticeSet> sets = [
+      for (final s in _practiceSets)
+        if (s.courseId == id) s,
+    ];
+    for (final StudyPracticeSet set in sets) {
+      await updatePracticeSet(set.copyWith(clearCourse: true));
+    }
+    final List<StudyTestPaper> papers = [
+      for (final p in _testPapers)
+        if (p.courseId == id) p,
+    ];
+    for (final StudyTestPaper paper in papers) {
+      await saveTestPaper(paper.copyWith(clearCourse: true));
+    }
+  }
+
   void updateSession(
     String id, {
     String? title,
@@ -1029,7 +1140,11 @@ class StudyDeskController extends ChangeNotifier implements AiRoutingChooser {
       for (final StudySession s in sessions)
         if (s.id != _session.id && !asking.contains(s.id)) s,
     ];
-    _courses = courses;
+    // A class deleted on any device stays deleted.
+    _courses = [
+      for (final StudyCourse c in courses)
+        if (!deleted.containsKey(c.id)) c,
+    ];
     _deletedSessions = deleted;
     selectedCourseId = _session.courseId;
     _save();
@@ -1960,22 +2075,27 @@ class StudyDeskController extends ChangeNotifier implements AiRoutingChooser {
     // With nothing found, nothing is said of the notes: a model told they hold
     // nothing tends to tell the user so, in place of answering.
     if (payload.contextText.isEmpty) return prompt;
-    return 'Excerpts from my notes that a search found, which may or may not '
-        'help:\n\n${payload.contextText}\n\nQuestion: $prompt';
+    return 'Reference sources:\n\n${payload.contextText}\n\nQuestion: $prompt';
   }
 
   /// What meaning can add to a search of [documents] for [query]: null when it
   /// is off, unavailable, or too slow, and the search goes by words.
+  ///
+  /// With [singleNote], [documents] are of the one note a question was asked
+  /// in, which is searched by meaning whether or not it is on the desk: it is
+  /// the only note that is sent for indexing, and what is sent is kept in the
+  /// same vectors the desk's own questions find it in.
   Future<StudyVectorSignal?> _meaningOf(
     String query,
     List<StudySearchDocument> documents, {
     String visualQuery = '',
+    bool singleNote = false,
   }) async {
     final StudyVectorIndex? vectors = _vectors;
     if (vectors == null || !semanticSearch || documents.isEmpty) return null;
     // Only notes the user put on the desk are sent for indexing: with none
     // there, every note is searched, by words alone.
-    if (sources.isEmpty) return null;
+    if (sources.isEmpty && !singleNote) return null;
     final Map<String, List<StudyChunk>> byNote = <String, List<StudyChunk>>{};
     for (final StudySearchDocument document in studySemanticCandidates(
       documents,
@@ -1993,6 +2113,52 @@ class StudyDeskController extends ChangeNotifier implements AiRoutingChooser {
         visualQuery: visualQuery,
       );
     } on Object {
+      return null;
+    }
+  }
+
+  /// The excerpts of the one note [noteId] that [question] finds, for the
+  /// editor's assistant when the user chose nothing on the page: that note is
+  /// its only source, whatever is on the desk. By words alone and as words
+  /// alone, so nothing is drawn for the request. Found by words and by meaning
+  /// together, through the desk's own vector index: a chunk already embedded
+  /// for the desk is not embedded again for the editor, nor the other way
+  /// round. Null when the note holds nothing the question finds, or cannot be
+  /// read.
+  Future<String?> excerptsOfNote(
+    String noteId,
+    String question, {
+    int reservedTextBytes = 0,
+  }) async {
+    try {
+      await load();
+      await refreshSavedNotes();
+      if (_disposed) return null;
+      final List<StudySearchDocument> documents = await _documents(<String>[
+        noteId,
+      ]);
+      if (documents.isEmpty) return null;
+      final StudyVectorSignal? meaning = await _meaningOf(
+        question,
+        documents,
+        singleNote: true,
+      );
+      if (_disposed) return null;
+      final List<StudyHit> hits = StudyRetriever.retrieve(
+        documents,
+        question,
+        vectors: meaning,
+      );
+      if (hits.isEmpty) return null;
+      final StudyPayload payload = await assembler.assemble(
+        hits,
+        query: question,
+        reservedTextBytes: reservedTextBytes,
+        includeCitableSvg: false,
+      );
+      return payload.contextText.isEmpty ? null : payload.contextText;
+    } on Object {
+      // The question is still answered, from what it says.
       return null;
     }
   }

@@ -37,6 +37,7 @@ class CloudTaskController extends ChangeNotifier {
   GoodnotesImportSession? _session;
   DateTime? _lastBackup;
   bool _signInLost = false;
+  bool _goodnotesMissing = false;
   bool _disposed = false;
 
   /// What is running, or null.
@@ -66,6 +67,10 @@ class CloudTaskController extends ChangeNotifier {
   /// The last task failed because Google no longer accepts the sign-in.
   bool get signInLost => _signInLost;
 
+  /// The last Goodnotes import found no Goodnotes folder in Drive: it has not
+  /// been synced there yet.
+  bool get goodnotesFolderMissing => _goodnotesMissing;
+
   bool get cancelling => _cancellation?.isCancelled ?? false;
 
   /// A restore past the point of downloading is not stopped part way: it
@@ -91,8 +96,12 @@ class CloudTaskController extends ChangeNotifier {
     _notify();
   }
 
-  Future<void> backUp(GoogleDriveBackupService service) {
-    return _run(CloudTask.backUp, (
+  /// Backs up, true if it completed. With [quiet], as for an automatic backup,
+  /// the progress shows but how it ended is not kept: there is no summary to
+  /// read and no error left in the sheet, and a message already waiting to be
+  /// seen stays. False too if another task was running and this one did not.
+  Future<bool> backUp(GoogleDriveBackupService service, {bool quiet = false}) {
+    return _run(CloudTask.backUp, quiet: quiet, (
       ImportCancellationToken cancellation,
       ValueChanged<CloudProgress> onProgress,
     ) async {
@@ -101,6 +110,7 @@ class CloudTaskController extends ChangeNotifier {
         cancellation: cancellation,
       );
       _lastBackup = summary.exportedAt;
+      if (quiet) return;
       _show(
         <String>[
           'Backed up ${_count(summary.noteCount, 'note')} and '
@@ -120,7 +130,7 @@ class CloudTaskController extends ChangeNotifier {
     });
   }
 
-  Future<void> restore(GoogleDriveBackupService service, RestoreMode mode) {
+  Future<bool> restore(GoogleDriveBackupService service, RestoreMode mode) {
     return _run(CloudTask.restore, (
       ImportCancellationToken cancellation,
       ValueChanged<CloudProgress> onProgress,
@@ -149,7 +159,7 @@ class CloudTaskController extends ChangeNotifier {
   /// [session], then the files come in one at a time, [prioritize] moving one
   /// to the front. [pickRoot] chooses between several Goodnotes folders; null
   /// ends the import.
-  Future<void> importGoodnotes(
+  Future<bool> importGoodnotes(
     GoodnotesDriveReplicator replicator, {
     required Future<GoodnotesDriveRoot?> Function(List<GoodnotesDriveRoot>)
     pickRoot,
@@ -214,37 +224,47 @@ class CloudTaskController extends ChangeNotifier {
     return session.prioritize(item);
   }
 
-  Future<void> _run(
+  /// Runs [work], true if it finished without an error or a cancel.
+  Future<bool> _run(
     CloudTask task,
     Future<void> Function(
       ImportCancellationToken cancellation,
       ValueChanged<CloudProgress> onProgress,
     )
-    work,
-  ) async {
-    if (busy || _disposed) return;
+    work, {
+    bool quiet = false,
+  }) async {
+    if (busy || _disposed) return false;
     final ImportCancellationToken cancellation = ImportCancellationToken();
     _task = task;
     _progress = null;
-    _message = null;
-    _messageIsError = false;
-    _issues = const <ReplicationIssue>[];
-    _replicatedFolderId = null;
-    _signInLost = false;
+    if (!quiet) {
+      _message = null;
+      _messageIsError = false;
+      _issues = const <ReplicationIssue>[];
+      _replicatedFolderId = null;
+      _signInLost = false;
+      _goodnotesMissing = false;
+    }
     _cancellation = cancellation;
     _notify();
+    var completed = false;
     try {
       await work(cancellation, (CloudProgress progress) {
         _progress = progress;
         _notify();
       });
+      completed = !cancellation.isCancelled;
     } on Object catch (error) {
-      if (error is GoogleDriveException &&
-          error.kind == GoogleDriveErrorKind.unauthorized) {
-        _signInLost = true;
+      if (!quiet) {
+        if (error is GoogleDriveException &&
+            error.kind == GoogleDriveErrorKind.unauthorized) {
+          _signInLost = true;
+        }
+        _goodnotesMissing = error is GoodnotesFolderNotFoundException;
+        _message = _describe(error);
+        _messageIsError = error is! CloudCancelledException;
       }
-      _message = _describe(error);
-      _messageIsError = error is! CloudCancelledException;
     } finally {
       _task = null;
       _progress = null;
@@ -252,6 +272,7 @@ class CloudTaskController extends ChangeNotifier {
       _session = null;
       _notify();
     }
+    return completed;
   }
 
   void _show(String message) {

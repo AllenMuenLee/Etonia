@@ -449,7 +449,7 @@ void main() {
         selectedDecoration.color,
         AppColors.of(
           tester.element(find.byKey(const ValueKey<String>('ruler-toggle'))),
-        ).accent,
+        ).selected,
       );
 
       await tester.tap(find.byTooltip('Hide ruler'));

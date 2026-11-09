@@ -786,7 +786,13 @@ void main() {
             ),
           );
           await tester.pumpAndSettle();
-          expect(find.byType(SvgPicture), findsOneWidget);
+          // Icons are SVGs too: count only the diagram.
+          expect(
+            find.byWidgetPredicate(
+              (Widget w) => w is SvgPicture && w.semanticsLabel == 'Study diagram',
+            ),
+            findsOneWidget,
+          );
           expect(find.text('Formula'), findsOneWidget);
           expect(find.text('python'), findsOneWidget);
           await tester.ensureVisible(find.byTooltip('Copy code'));

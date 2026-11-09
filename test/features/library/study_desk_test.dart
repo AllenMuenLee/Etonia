@@ -253,6 +253,15 @@ Future<NoteEntry> _storePdfNote(
   );
 }
 
+/// [child] with motion off: Etonia loops in an empty library, and a loop never
+/// lets a test settle.
+Widget _still(Widget child) => Builder(
+  builder: (BuildContext context) => MediaQuery(
+    data: MediaQuery.of(context).copyWith(disableAnimations: true),
+    child: child,
+  ),
+);
+
 void main() {
   group('PDFs', () {
     test('runs on one line join; those apart stay apart', () {
@@ -1146,10 +1155,12 @@ void main() {
       await tester.pumpWidget(
         GreatnoteApp(
           themeMode: ThemeMode.light,
-          home: LibraryScreen(
-            repository: repository,
-            clock: () => _now,
-            aiClient: client,
+          home: _still(
+            LibraryScreen(
+              repository: repository,
+              clock: () => _now,
+              aiClient: client,
+            ),
           ),
         ),
       );
@@ -1214,12 +1225,10 @@ void main() {
         lessThan(tester.getTopLeft(find.text('Folders')).dy),
       );
       expect(
-        tester.getTopLeft(row).dy,
-        lessThan(
-          tester
-              .getTopLeft(find.byKey(const ValueKey<String>('sidebar-library')))
-              .dy,
-        ),
+        tester
+            .getTopLeft(find.byKey(const ValueKey<String>('sidebar-library')))
+            .dy,
+        lessThan(tester.getTopLeft(row).dy),
       );
       await openDeskWithNote(tester);
       await tester.tap(
@@ -1239,7 +1248,7 @@ void main() {
       expect(find.byTooltip('Sort'), findsOneWidget);
       await openDeskWithNote(tester);
       expect(find.byTooltip('Sort'), findsNothing);
-      expect(find.text('Sources for this chat'), findsOneWidget);
+      expect(find.text('Sources for this chat'), findsNothing);
       expect(
         find.byKey(const ValueKey<String>('study-chat-add-source')),
         findsOneWidget,
@@ -1783,7 +1792,10 @@ void main() {
       expect(find.byType(StudyDeskScreen), findsOneWidget);
       expect(tester.takeException(), isNull);
       expect(find.textContaining('In phases.'), findsOneWidget);
-      expect(find.text('Sources for this chat'), findsOneWidget);
+      expect(
+        find.byKey(const ValueKey<String>('study-chat-add-source')),
+        findsOneWidget,
+      );
       expect(
         find.byTooltip('Sort'),
         findsNothing,
@@ -2449,11 +2461,13 @@ void main() {
           await tester.pumpWidget(
             GreatnoteApp(
               themeMode: ThemeMode.light,
-              home: LibraryScreen(
-                repository: repository,
-                clock: () => _now,
-                aiClient: client,
-                pdfRasterizer: FakePdfRasterizer(),
+              home: _still(
+                LibraryScreen(
+                  repository: repository,
+                  clock: () => _now,
+                  aiClient: client,
+                  pdfRasterizer: FakePdfRasterizer(),
+                ),
               ),
             ),
           );
@@ -2662,7 +2676,7 @@ void main() {
       await tester.tap(find.byKey(const ValueKey<String>('study-new-chat')));
       await tester.pumpAndSettle();
       expect(find.textContaining('In phases.'), findsNothing);
-      expect(find.text('Searching your entire library'), findsOneWidget);
+      expect(find.text('Searching your entire library'), findsNothing);
       expect(
         find.byKey(const ValueKey<String>('study-starters')),
         findsOneWidget,

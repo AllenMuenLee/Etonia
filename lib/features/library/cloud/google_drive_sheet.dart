@@ -14,6 +14,49 @@ import 'google_drive_client.dart';
 import '../../../shared/navigation/app_dialogs.dart';
 import '../../../shared/navigation/app_sheets.dart';
 
+/// Asks which of several Goodnotes folders in Drive to import; null if the
+/// person backs out.
+Future<GoodnotesDriveRoot?> pickGoodnotesRoot(
+  BuildContext context,
+  List<GoodnotesDriveRoot> roots,
+  DateTime Function() clock,
+) {
+  return showAppDialog<GoodnotesDriveRoot>(
+    context: context,
+    motionKey: 'drive-root',
+    builder: (BuildContext context) {
+      final DateTime now = clock();
+      return SimpleDialog(
+        title: const Text('Choose a Goodnotes folder'),
+        children: <Widget>[
+          for (final GoodnotesDriveRoot root in roots)
+            SimpleDialogOption(
+              onPressed: () => Navigator.of(context).pop(root),
+              child: ConstrainedBox(
+                constraints: const BoxConstraints(
+                  minHeight: AppSizes.minTouchTarget,
+                ),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: <Widget>[
+                    Text(root.location),
+                    if (root.folder.modifiedTime != null)
+                      Text(
+                        'Modified '
+                        '${formatModified(root.folder.modifiedTime!.toLocal(), now)}',
+                        style: Theme.of(context).textTheme.bodySmall,
+                      ),
+                  ],
+                ),
+              ),
+            ),
+        ],
+      );
+    },
+  );
+}
+
 /// Shows the Google Drive sheet: the connection, backup and restore, and
 /// importing the Goodnotes folder. [onOpenFolder] shows a non-root library
 /// destination when one is used.
@@ -250,8 +293,9 @@ class _GoogleDriveSheetState extends State<GoogleDriveSheet> {
       builder: (BuildContext context) => AlertDialog(
         title: Text('Restore from $_destinationName?'),
         content: const Text(
-          'Add the backup to this library, keeping what is here, or replace '
-          'the library with it. Replaced notes go to Recently Deleted.',
+          'Add the backup to this library, keeping what is here, or make the '
+          'library match it. Notes already here are not copied again, and '
+          'notes the backup does not have go to Recently Deleted.',
         ),
         actions: <Widget>[
           TextButton(
@@ -288,42 +332,8 @@ class _GoogleDriveSheetState extends State<GoogleDriveSheet> {
     );
   }
 
-  Future<GoodnotesDriveRoot?> _pickRoot(List<GoodnotesDriveRoot> roots) {
-    return showAppDialog<GoodnotesDriveRoot>(
-      context: context,
-      motionKey: 'drive-root',
-      builder: (BuildContext context) {
-        final DateTime now = widget.clock();
-        return SimpleDialog(
-          title: const Text('Choose a Goodnotes folder'),
-          children: <Widget>[
-            for (final GoodnotesDriveRoot root in roots)
-              SimpleDialogOption(
-                onPressed: () => Navigator.of(context).pop(root),
-                child: ConstrainedBox(
-                  constraints: const BoxConstraints(
-                    minHeight: AppSizes.minTouchTarget,
-                  ),
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    mainAxisAlignment: MainAxisAlignment.center,
-                    children: <Widget>[
-                      Text(root.location),
-                      if (root.folder.modifiedTime != null)
-                        Text(
-                          'Modified '
-                          '${formatModified(root.folder.modifiedTime!.toLocal(), now)}',
-                          style: Theme.of(context).textTheme.bodySmall,
-                        ),
-                    ],
-                  ),
-                ),
-              ),
-          ],
-        );
-      },
-    );
-  }
+  Future<GoodnotesDriveRoot?> _pickRoot(List<GoodnotesDriveRoot> roots) =>
+      pickGoodnotesRoot(context, roots, widget.clock);
 
   @override
   Widget build(BuildContext context) {
@@ -417,7 +427,11 @@ class _GoogleDriveSheetState extends State<GoogleDriveSheet> {
             children: <Widget>[
               Row(
                 children: <Widget>[
-                  Icon(AppIcons.cloud, size: 20, color: colors.textSecondary),
+                  AppIcon(
+                    AppIcons.cloud,
+                    size: 20,
+                    color: colors.textSecondary,
+                  ),
                   const SizedBox(width: AppSpacing.sm),
                   Semantics(
                     header: true,
@@ -547,7 +561,7 @@ class _BackupCard extends StatelessWidget {
           const SizedBox(height: AppSpacing.md),
           FilledButton.icon(
             onPressed: enabled ? onBackUp : null,
-            icon: const Icon(AppIcons.cloudUpload),
+            icon: const AppIcon(AppIcons.cloudUpload),
             label: const Text('Back up library now'),
           ),
         ],
@@ -569,7 +583,7 @@ class _BackupMenu extends StatelessWidget {
       alignmentOffset: const Offset(0, AppSpacing.xxs),
       menuChildren: <Widget>[
         MenuItemButton(
-          leadingIcon: const Icon(AppIcons.restore),
+          leadingIcon: const AppIcon(AppIcons.restore),
           onPressed: enabled ? onRestore : null,
           child: const Text('Restore from backup'),
         ),
@@ -580,7 +594,7 @@ class _BackupMenu extends StatelessWidget {
           onPressed: enabled
               ? () => menu.isOpen ? menu.close() : menu.open()
               : null,
-          icon: const Icon(AppIcons.more),
+          icon: const AppIcon(AppIcons.more),
         );
       },
     );
@@ -757,7 +771,7 @@ class _GoodnotesCard extends StatelessWidget {
           const SizedBox(height: AppSpacing.md),
           OutlinedButton.icon(
             onPressed: enabled ? onImport : null,
-            icon: const Icon(AppIcons.cloudDownload),
+            icon: const AppIcon(AppIcons.cloudDownload),
             label: const Text('Import Goodnotes folder from Drive'),
           ),
         ],
@@ -801,7 +815,7 @@ class _CardIcon extends StatelessWidget {
         color: colors.selected,
         borderRadius: AppBorderRadius.medium,
       ),
-      child: Icon(icon, size: 20, color: colors.accent),
+      child: AppIcon(icon, size: 20, color: colors.accent),
     );
   }
 }
@@ -836,7 +850,7 @@ class _ConnectionCard extends StatelessWidget {
         ),
         child: Row(
           children: <Widget>[
-            Icon(
+            AppIcon(
               AppIcons.account,
               size: 28,
               color: account == null ? colors.textSecondary : colors.accent,
@@ -997,7 +1011,7 @@ class _ResultPanel extends StatelessWidget {
               crossAxisAlignment: CrossAxisAlignment.start,
               children: <Widget>[
                 if (error) ...<Widget>[
-                  Icon(AppIcons.warning, size: 18, color: colors.danger),
+                  AppIcon(AppIcons.warning, size: 18, color: colors.danger),
                   const SizedBox(width: AppSpacing.xs),
                 ],
                 Expanded(

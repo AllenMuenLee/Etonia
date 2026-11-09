@@ -55,14 +55,39 @@ dev_dependencies:
 
 flutter:
   uses-material-design: true
+  # Inter is the UI face and Newsreader the editorial display face; both are
+  # variable fonts licensed under the SIL OFL (assets/fonts/OFL-*.txt).
+  fonts:
+    - family: Inter
+      fonts:
+        - asset: assets/fonts/Inter.ttf
+    - family: Newsreader
+      fonts:
+        - asset: assets/fonts/Newsreader.ttf
   assets:
     - third_party/ems_readability/OFL.txt
+    - assets/fonts/OFL-Inter.txt
+    - assets/fonts/OFL-Newsreader.txt
     - assets/icon/etonia.png
+    - assets/icons/navigation/
+    - assets/icons/library/
+    - assets/icons/tools/
+    - assets/icons/actions/
+    - assets/icons/system/
+    # Etonia's clips (12 fps; 12 frames = 1 s, grade is 24); see tool/etonia_rig.
+    - assets/animations/etonia_loops/ui/look_around/
+    - assets/animations/etonia_loops/ui/think/
+    - assets/animations/etonia_loops/ui/hop/
+    - assets/animations/etonia_loops/ui/write/
+    - assets/animations/etonia_loops/ui/run/
+    - assets/animations/etonia_loops/ui/pop_out/
+    - assets/animations/etonia_loops/ui/attend/
+    - assets/animations/etonia_loops/ui/grade/
 
 flutter_launcher_icons:
   image_path: assets/icon/etonia.png
   android: true
   ios: true
   remove_alpha_ios: true
-  adaptive_icon_background: "#000000"
+  adaptive_icon_background: "#FAE6FF"
   adaptive_icon_foreground: assets/icon/etonia.png

@@ -112,10 +112,7 @@ void main() {
 
   group('StrokeSpatialIndex.changedSince', () {
     test('sees a splice and an append where they happen, and only there', () {
-      final List<Stroke> strokes = <Stroke>[
-        _stroke(0, 0),
-        _stroke(2000, 2000),
-      ];
+      final List<Stroke> strokes = <Stroke>[_stroke(0, 0), _stroke(2000, 2000)];
       final StrokeSpatialIndex index = StrokeSpatialIndex(strokes);
       const Rect here = Rect.fromLTWH(0, 0, 50, 50);
       const Rect there = Rect.fromLTWH(2000, 2000, 50, 50);
@@ -124,9 +121,7 @@ void main() {
       expect(index.changedSince(start, here), isFalse);
 
       final List<Stroke> after = <Stroke>[strokes[1]];
-      index.apply(after, <StrokeSplice>[
-        const StrokeSplice(0, <Stroke>[]),
-      ]);
+      index.apply(after, <StrokeSplice>[const StrokeSplice(0, <Stroke>[])]);
       expect(index.changedSince(start, here), isTrue);
       expect(index.changedSince(start, there), isFalse);
       expect(index.changedSince(index.version, here), isFalse);
@@ -161,11 +156,7 @@ void main() {
           random.nextDouble() * 1500,
           random.nextDouble() * 1500,
         );
-        strokes = <Stroke>[
-          ...strokes.take(at),
-          piece,
-          ...strokes.skip(at + 1),
-        ];
+        strokes = <Stroke>[...strokes.take(at), piece, ...strokes.skip(at + 1)];
         index.apply(strokes, <StrokeSplice>[
           StrokeSplice(at, <Stroke>[piece]),
         ]);

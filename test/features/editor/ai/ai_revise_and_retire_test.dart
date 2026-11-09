@@ -82,9 +82,10 @@ void main() {
       expect(assistant.requestState, AiRequestState.sending);
       expect(_texts(assistant), <String>['user: first, reworded']);
       // The model is sent the conversation as it stands now, not as it was.
-      expect(client.requests.last.messages.map((AiMessage m) => m.text), <String>[
-        'first, reworded',
-      ]);
+      expect(
+        client.requests.last.messages.map((AiMessage m) => m.text),
+        <String>['first, reworded'],
+      );
 
       client.answer('Reworded answer.');
       await pumpEventQueue();
@@ -94,20 +95,26 @@ void main() {
       ]);
     });
 
-    test('only a user message, with words, when nothing is on its way', () async {
-      await exchange('first', 'Answer one.');
+    test(
+      'only a user message, with words, when nothing is on its way',
+      () async {
+        await exchange('first', 'Answer one.');
 
-      expect(assistant.editMessage(1, 'not yours to edit'), isFalse);
-      expect(assistant.editMessage(0, '   '), isFalse);
-      expect(assistant.editMessage(5, 'nothing there'), isFalse);
-      expect(_texts(assistant), <String>['user: first', 'model: Answer one.']);
+        expect(assistant.editMessage(1, 'not yours to edit'), isFalse);
+        expect(assistant.editMessage(0, '   '), isFalse);
+        expect(assistant.editMessage(5, 'nothing there'), isFalse);
+        expect(_texts(assistant), <String>[
+          'user: first',
+          'model: Answer one.',
+        ]);
 
-      expect(assistant.send('second'), isTrue);
-      await pumpEventQueue();
-      expect(assistant.canReviseMessage(0), isFalse);
-      expect(assistant.editMessage(0, 'too late'), isFalse);
-      expect(assistant.messages, hasLength(3));
-    });
+        expect(assistant.send('second'), isTrue);
+        await pumpEventQueue();
+        expect(assistant.canReviseMessage(0), isFalse);
+        expect(assistant.editMessage(0, 'too late'), isFalse);
+        expect(assistant.messages, hasLength(3));
+      },
+    );
 
     test('a failed question can be edited and sent again', () async {
       expect(assistant.send('oops'), isTrue);
@@ -135,9 +142,10 @@ void main() {
       expect(assistant.requestState, AiRequestState.sending);
       // Its answer and what followed it are gone, and the question stands.
       expect(_texts(assistant), <String>['user: first']);
-      expect(client.requests.last.messages.map((AiMessage m) => m.text), <String>[
-        'first',
-      ]);
+      expect(
+        client.requests.last.messages.map((AiMessage m) => m.text),
+        <String>['first'],
+      );
 
       client.answer('Answer one, better.');
       await pumpEventQueue();
@@ -184,8 +192,7 @@ void main() {
       expect(released, isTrue);
       final List<Object?> conversations = saved!['conversations']! as List;
       final List<Object?> messages =
-          (conversations.single! as Map<String, Object?>)['messages']!
-              as List;
+          (conversations.single! as Map<String, Object?>)['messages']! as List;
       expect(messages, hasLength(2));
       final Map<String, Object?> reply = messages.last! as Map<String, Object?>;
       expect(reply['role'], 'model');

@@ -34,6 +34,13 @@ Future<void> main() {
           const JsonEncoder.withIndent('  ').convert(loadingMetrics),
         );
       }
+      final Object? navigationMetrics = data['navigation_metrics'];
+      if (navigationMetrics != null) {
+        await Directory('build').create(recursive: true);
+        await File('build/navigation_metrics.json').writeAsString(
+          const JsonEncoder.withIndent('  ').convert(navigationMetrics),
+        );
+      }
       final Object? notationMetrics = data['ai_notation_metrics'];
       if (notationMetrics != null) {
         await Directory('build').create(recursive: true);

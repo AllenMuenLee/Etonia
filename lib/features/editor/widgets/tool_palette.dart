@@ -24,6 +24,7 @@ import 'ink_color_picker.dart';
 import 'palette_button.dart';
 import 'palette_popover.dart';
 import 'pen_advanced_panel.dart';
+import 'recording_bars.dart';
 import 'recording_options.dart';
 import 'select_options.dart';
 import 'sticky_options.dart';
@@ -212,8 +213,10 @@ class PalettePlacement {
 /// the pen's style, inks, and width, the
 /// eraser's mode and size, Select's Select PDF switch, the assistant's
 /// switches, and Text's formatting. Pressing the chosen tool again hides
-/// the bar, or shows it, for every tool from then on. The Sticky note and
-/// image options, and the recordings, open as panels instead.
+/// the bar, or shows it, for every tool from then on. While a recording is
+/// made or replayed the bar holds its controls instead: the time and pause
+/// while it is made, and the playback bar once it is made. The Sticky note
+/// and image options, and the list of recordings, open as panels instead.
 ///
 /// Holding it anywhere, on its tools too, moves it: held a moment, the
 /// palette lights up in the accent color; held for [liftDelay], it lifts
@@ -305,6 +308,15 @@ class ToolPalette extends StatelessWidget {
   /// chosen. The Sticky note's options open as a panel instead.
   static bool showsOptions(EditorTool tool, ValueListenable<bool>? shown) =>
       tool != EditorTool.sticky && (shown?.value ?? true);
+
+  /// Whether the options bar shows beside the palette now: with the tool's
+  /// options, or, while a recording is made or replayed ([recordingShown]),
+  /// with that recording's controls, whichever tool is chosen.
+  static bool hasSubToolbar(
+    EditorTool tool,
+    ValueListenable<bool>? shown, {
+    bool recordingShown = false,
+  }) => recordingShown || showsOptions(tool, shown);
 
   /// Which buttons the palette shows, in what order, and which fold away
   /// behind its arrow; the user changes it with [PaletteItem.customize].
@@ -506,11 +518,11 @@ class ToolPalette extends StatelessWidget {
         selectPdf,
         ?optionsShown,
         ?layout,
+        ?recording?.recorder,
+        ?recording?.replay.activity,
       ]),
       builder: (BuildContext context, Widget? _) {
-        final Widget? bar = showsOptions(tool.value, optionsShown)
-            ? _optionsBar(context, settings.value)
-            : null;
+        final Widget? bar = _subToolbar(context, settings.value);
         // Parallel to the palette and centered on where it lies folded, on
         // the side toward the page.
         final bool towardPage =
@@ -536,6 +548,32 @@ class ToolPalette extends StatelessWidget {
         );
       },
     );
+  }
+
+  /// What the sub toolbar holds now, if it shows: the recording's controls
+  /// while one is made or replayed, otherwise the chosen tool's options.
+  Widget? _subToolbar(BuildContext context, TextSettings text) {
+    final RecordingToolData? data = recording;
+    if (data != null && data.recorder.state != NoteAudioRecorderState.idle) {
+      return RecordingBar(
+        axis: axis,
+        recorder: data.recorder,
+        onPause: data.onPause,
+        onResume: data.onResume,
+        onStop: data.onStop,
+      );
+    }
+    if (data != null && data.replay.isActive && data.player != null) {
+      return ReplayBar(
+        axis: axis,
+        player: data.player!,
+        replay: data.replay,
+        onClose: data.onCloseReplay,
+      );
+    }
+    return showsOptions(tool.value, optionsShown)
+        ? _optionsBar(context, text)
+        : null;
   }
 
   /// Whether this palette has what [item] needs.
@@ -578,7 +616,7 @@ class ToolPalette extends StatelessWidget {
             controller?.closeAll();
             unawaited(showToolbarCustomizer(context, layout: layout!));
           },
-          child: const Icon(AppIcons.customizeToolbar),
+          child: const AppIcon(AppIcons.customizeToolbar),
         );
       },
     );
@@ -722,7 +760,7 @@ class ToolPalette extends StatelessWidget {
           selected: tool.value == EditorTool.select,
           dense: dense,
           onPressed: _chooseOrToggle(context, EditorTool.select),
-          child: const Icon(AppIcons.lasso),
+          child: const AppIcon(AppIcons.lasso),
         );
       },
     );
@@ -837,13 +875,14 @@ class ToolPalette extends StatelessWidget {
               Directionality.of(context),
             );
           },
-          child: Icon(icon),
+          child: AppIcon(icon),
         );
       },
     );
   }
 
   /// Opens the recording panel: record, and choose any recording to replay.
+  /// While a recording is being made, pressing it again stops and saves it.
   Widget _recordingControl() {
     final RecordingToolData data = recording!;
     return PalettePopover(
@@ -851,14 +890,26 @@ class ToolPalette extends StatelessWidget {
       controller: controller?.recordingMenu,
       onChanged: controller?.popoverChanged.notify,
       anchorBuilder: (BuildContext context, VoidCallback toggle) {
-        return PaletteButton(
-          key: const ValueKey<String>('recording-tool'),
-          tooltip: 'Recordings',
-          semanticLabel: 'Recordings',
-          selected: data.recorder.state != NoteAudioRecorderState.idle,
-          dense: dense,
-          onPressed: toggle,
-          child: RecordingGlyph(recorder: data.recorder),
+        return ListenableBuilder(
+          listenable: data.recorder,
+          builder: (BuildContext context, Widget? _) {
+            final NoteAudioRecorderState state = data.recorder.state;
+            final bool idle = state == NoteAudioRecorderState.idle;
+            return PaletteButton(
+              key: const ValueKey<String>('recording-tool'),
+              tooltip: idle ? 'Recordings' : 'Stop recording',
+              semanticLabel: idle ? 'Recordings' : 'Stop recording',
+              selected: !idle,
+              dense: dense,
+              // Already stopping, there is nothing more to ask of it.
+              onPressed: idle
+                  ? toggle
+                  : state == NoteAudioRecorderState.stopping
+                  ? null
+                  : data.onStop,
+              child: RecordingGlyph(recorder: data.recorder),
+            );
+          },
         );
       },
       panelBuilder: (BuildContext context, VoidCallback close) {
@@ -950,43 +1001,87 @@ class PaletteItemGlyph extends StatelessWidget {
   Widget build(BuildContext context) => switch (item) {
     PaletteItem.pen => const PenIcon(),
     PaletteItem.eraser => const EraserIcon(),
-    PaletteItem.select => const Icon(AppIcons.lasso),
+    PaletteItem.select => const AppIcon(AppIcons.lasso),
     PaletteItem.ai => const _AiGlyph(),
     PaletteItem.image => const PictureIcon(),
     PaletteItem.sticky => _StickyIcon(color: const StickyNoteSettings().color),
-    PaletteItem.recording => const Icon(AppIcons.microphone),
+    PaletteItem.recording => const AppIcon(AppIcons.microphone),
     PaletteItem.text => const _TextGlyph(),
     PaletteItem.ruler => const RulerIcon(),
-    PaletteItem.customize => const Icon(AppIcons.customizeToolbar),
+    PaletteItem.customize => const AppIcon(AppIcons.customizeToolbar),
   };
 }
 
-/// The letters "AI", drawn in the icon's color and size.
+/// The letters "AI" drawn as line icons, the same weight and color as the
+/// glyphs beside them, with a green leaf sprouting from the top of the I
+/// like the one at the tail of the pencil in the Etonia mark.
 class _AiGlyph extends StatelessWidget {
   const _AiGlyph();
 
   @override
   Widget build(BuildContext context) {
-    final IconThemeData icon = IconTheme.of(context);
+    final Color ink = iconTint(context);
+    // The leaf dims with the letters when the button is disabled.
+    final Color leaf = AppColors.of(context).sprout.withValues(alpha: ink.a);
     return SizedBox.square(
-      dimension: AppSizes.icon + 2,
-      child: Center(
-        child: Text(
-          'AI',
-          key: const ValueKey<String>('ai-mode-label'),
-          maxLines: 1,
-          textScaler: TextScaler.noScaling,
-          style: Theme.of(context).textTheme.labelLarge?.copyWith(
-            color: icon.color,
-            fontSize: (icon.size ?? AppSizes.icon) * 0.66,
-            height: 1,
-            fontWeight: FontWeight.w600,
-            letterSpacing: 0.4,
-          ),
-        ),
+      dimension: kIconSize,
+      child: CustomPaint(
+        key: const ValueKey<String>('ai-mode-label'),
+        painter: _AiGlyphPainter(ink: ink, leaf: leaf),
       ),
     );
   }
+}
+
+class _AiGlyphPainter extends CustomPainter {
+  const _AiGlyphPainter({required this.ink, required this.leaf});
+
+  final Color ink;
+  final Color leaf;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final double unit = size.shortestSide / 24;
+    Offset at(double x, double y) => Offset(x * unit, y * unit);
+    final Paint line = Paint()
+      ..color = ink
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = kIconStrokeWidth
+      ..strokeJoin = StrokeJoin.round
+      ..strokeCap = StrokeCap.round
+      ..isAntiAlias = true;
+
+    // The A: two straight legs meeting at a point, and a crossbar.
+    canvas
+      ..drawPath(
+        Path()
+          ..moveTo(3.5 * unit, 19 * unit)
+          ..lineTo(8.5 * unit, 7 * unit)
+          ..lineTo(13.5 * unit, 19 * unit),
+        line,
+      )
+      ..drawLine(at(5.4, 14.5), at(11.6, 14.5), line)
+      // The I: one straight stroke, as tall as the A.
+      ..drawLine(at(18.5, 7), at(18.5, 19), line);
+
+    // One leaf sprouting from the top of the I, as on the mark's pencil: a
+    // filled, pointed leaf rising up and to the right from the stem.
+    canvas.drawPath(
+      Path()
+        ..moveTo(18.5 * unit, 6.3 * unit)
+        ..quadraticBezierTo(21.6 * unit, 5.4 * unit, 22 * unit, 1.8 * unit)
+        ..quadraticBezierTo(18.6 * unit, 2.4 * unit, 18.5 * unit, 6.3 * unit)
+        ..close(),
+      Paint()
+        ..color = leaf
+        ..style = PaintingStyle.fill
+        ..isAntiAlias = true,
+    );
+  }
+
+  @override
+  bool shouldRepaint(_AiGlyphPainter oldDelegate) =>
+      oldDelegate.ink != ink || oldDelegate.leaf != leaf;
 }
 
 /// A typesetting-style T with a baseline, distinct from the pen nib.
@@ -995,11 +1090,9 @@ class _TextGlyph extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final Color color =
-        IconTheme.of(context).color ?? AppColors.of(context).textPrimary;
     return SizedBox.square(
-      dimension: AppSizes.icon,
-      child: CustomPaint(painter: _TextGlyphPainter(color)),
+      dimension: kIconSize,
+      child: CustomPaint(painter: _TextGlyphPainter(iconTint(context))),
     );
   }
 }
@@ -1014,7 +1107,7 @@ class _TextGlyphPainter extends CustomPainter {
     final Paint paint = Paint()
       ..color = color
       ..style = PaintingStyle.stroke
-      ..strokeWidth = 1.7 * unit
+      ..strokeWidth = kIconStrokeWidth
       ..strokeCap = StrokeCap.round;
     canvas
       ..drawLine(Offset(4 * unit, 5 * unit), Offset(20 * unit, 5 * unit), paint)
@@ -1355,15 +1448,15 @@ class _StickyIcon extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final Color outline = IconTheme.of(context).color ?? color.pattern;
+    final Color outline = iconTint(context);
     return SizedBox.square(
-      dimension: AppSizes.icon,
+      dimension: kIconSize - 4,
       child: DecoratedBox(
         key: const ValueKey<String>('sticky-tool-paper'),
         decoration: BoxDecoration(
           color: color.paper,
           borderRadius: BorderRadius.circular(3),
-          border: Border.all(color: outline, width: 1.2),
+          border: Border.all(color: outline, width: kIconStrokeWidth),
         ),
         child: CustomPaint(painter: _StickyLinesPainter(outline)),
       ),
@@ -1381,7 +1474,7 @@ class _StickyLinesPainter extends CustomPainter {
   void paint(Canvas canvas, Size size) {
     final Paint rule = Paint()
       ..color = color
-      ..strokeWidth = 1.2
+      ..strokeWidth = kIconStrokeWidth
       ..strokeCap = StrokeCap.round;
     final double inset = size.width * 0.25;
     for (int i = 1; i <= 3; i++) {
@@ -1401,12 +1494,9 @@ class PenIcon extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final IconThemeData theme = IconTheme.of(context);
     return SizedBox.square(
-      dimension: theme.size,
-      child: CustomPaint(
-        painter: _PenIconPainter(theme.color ?? const Color(0xFF000000)),
-      ),
+      dimension: kIconSize,
+      child: CustomPaint(painter: _PenIconPainter(iconTint(context))),
     );
   }
 }
@@ -1422,7 +1512,7 @@ class _PenIconPainter extends CustomPainter {
     final Paint paint = Paint()
       ..color = color
       ..style = PaintingStyle.stroke
-      ..strokeWidth = 1.2 * unit
+      ..strokeWidth = kIconStrokeWidth
       ..strokeJoin = StrokeJoin.round
       ..strokeCap = StrokeCap.round
       ..isAntiAlias = true;
@@ -1475,12 +1565,9 @@ class RulerIcon extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final IconThemeData theme = IconTheme.of(context);
     return SizedBox.square(
-      dimension: theme.size,
-      child: CustomPaint(
-        painter: _RulerIconPainter(theme.color ?? const Color(0xFF000000)),
-      ),
+      dimension: kIconSize,
+      child: CustomPaint(painter: _RulerIconPainter(iconTint(context))),
     );
   }
 }
@@ -1496,7 +1583,7 @@ class _RulerIconPainter extends CustomPainter {
     final Paint paint = Paint()
       ..color = color
       ..style = PaintingStyle.stroke
-      ..strokeWidth = 1.2 * unit
+      ..strokeWidth = kIconStrokeWidth
       ..strokeJoin = StrokeJoin.round
       ..strokeCap = StrokeCap.round
       ..isAntiAlias = true;
@@ -1538,12 +1625,9 @@ class PictureIcon extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final IconThemeData theme = IconTheme.of(context);
     return SizedBox.square(
-      dimension: theme.size,
-      child: CustomPaint(
-        painter: _PictureIconPainter(theme.color ?? const Color(0xFF000000)),
-      ),
+      dimension: kIconSize,
+      child: CustomPaint(painter: _PictureIconPainter(iconTint(context))),
     );
   }
 }
@@ -1559,7 +1643,7 @@ class _PictureIconPainter extends CustomPainter {
     final Paint paint = Paint()
       ..color = color
       ..style = PaintingStyle.stroke
-      ..strokeWidth = 1.2 * unit
+      ..strokeWidth = kIconStrokeWidth
       ..strokeJoin = StrokeJoin.round
       ..strokeCap = StrokeCap.round
       ..isAntiAlias = true;
@@ -1618,7 +1702,7 @@ class _PenIcon extends StatelessWidget {
     final Color color = ink.resolve(Theme.of(context).brightness);
     final bool highlighter = style == WritingStyle.highlighter;
     return SizedBox.square(
-      dimension: AppSizes.icon + AppSpacing.xxs,
+      dimension: kIconSize + AppSpacing.xxs,
       child: Stack(
         children: <Widget>[
           Align(
@@ -1725,7 +1809,7 @@ class PenOptions extends StatelessWidget {
             key: const ValueKey<String>('pen-advanced-toggle'),
             tooltip: 'Advanced pen settings',
             onPressed: onOpenAdvanced,
-            child: const Icon(AppIcons.tune),
+            child: const AppIcon(AppIcons.tune),
           ),
         ],
       ],
@@ -1741,12 +1825,10 @@ class _WritingToolGlyph extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final Color color =
-        IconTheme.of(context).color ?? AppColors.of(context).textPrimary;
     return SizedBox.square(
-      dimension: AppSizes.icon + AppSpacing.xxs,
+      dimension: kIconSize,
       child: CustomPaint(
-        painter: _WritingTipPainter(style: style, color: color),
+        painter: _WritingTipPainter(style: style, color: iconTint(context)),
       ),
     );
   }
@@ -1765,7 +1847,7 @@ class _WritingTipPainter extends CustomPainter {
     final Paint outline = Paint()
       ..color = color
       ..style = PaintingStyle.stroke
-      ..strokeWidth = 1.35
+      ..strokeWidth = kIconStrokeWidth / unit
       ..strokeCap = StrokeCap.round
       ..strokeJoin = StrokeJoin.round
       ..isAntiAlias = true;

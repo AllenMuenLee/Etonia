@@ -95,14 +95,23 @@ class StudyChatsSection extends SyncedSettingsSection {
       return session != null && at < session.updatedAt.millisecondsSinceEpoch;
     });
 
+    // A class changed on another device, its color included, is taken in the
+    // version last changed, as a chat is.
+    final Map<String, StudyCourse> courses = <String, StudyCourse>{
+      ...mine.courses,
+    };
+    for (final StudyCourse other in theirs.courses.values) {
+      final StudyCourse? have = courses[other.id];
+      if (have == null || other.changedAt.isAfter(have.changedAt)) {
+        courses[other.id] = other;
+      }
+    }
+
     return _encode(
       sessions: sessions.values,
-      courses: <StudyCourse>[
-        ...theirs.courses.values.where(
-          (StudyCourse c) => !mine.courses.containsKey(c.id),
-        ),
-        ...mine.courses.values,
-      ],
+      courses: courses.values.where(
+        (StudyCourse c) => !deleted.containsKey(c.id),
+      ),
       deleted: deleted,
     );
   }

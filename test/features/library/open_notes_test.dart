@@ -34,20 +34,23 @@ void main() {
       expect(notes.visibleNoteIds, ['a']);
     });
 
-    test('opening multiple notes adds tabs and activates newly opened note', () {
-      final OpenNotes notes = OpenNotes();
-      final NoteEntry a = makeNote('a', 'Note A');
-      final NoteEntry b = makeNote('b', 'Note B');
-      final NoteEntry c = makeNote('c', 'Note C');
+    test(
+      'opening multiple notes adds tabs and activates newly opened note',
+      () {
+        final OpenNotes notes = OpenNotes();
+        final NoteEntry a = makeNote('a', 'Note A');
+        final NoteEntry b = makeNote('b', 'Note B');
+        final NoteEntry c = makeNote('c', 'Note C');
 
-      notes.open(a);
-      notes.open(b);
-      notes.open(c);
+        notes.open(a);
+        notes.open(b);
+        notes.open(c);
 
-      expect(notes.notes.length, 3);
-      expect(notes.active, c);
-      expect(notes.activeIndex, 2);
-    });
+        expect(notes.notes.length, 3);
+        expect(notes.active, c);
+        expect(notes.activeIndex, 2);
+      },
+    );
 
     test('opening an existing note activates it without duplicating', () {
       final OpenNotes notes = OpenNotes();
@@ -122,21 +125,24 @@ void main() {
       expect(notes.active?.title, 'Renamed Note');
     });
 
-    test('retainWhere removes notes not matching predicate and clamps active', () {
-      final OpenNotes notes = OpenNotes();
-      final NoteEntry a = makeNote('a', 'Note A');
-      final NoteEntry b = makeNote('b', 'Note B');
-      final NoteEntry c = makeNote('c', 'Note C');
+    test(
+      'retainWhere removes notes not matching predicate and clamps active',
+      () {
+        final OpenNotes notes = OpenNotes();
+        final NoteEntry a = makeNote('a', 'Note A');
+        final NoteEntry b = makeNote('b', 'Note B');
+        final NoteEntry c = makeNote('c', 'Note C');
 
-      notes.open(a);
-      notes.open(b);
-      notes.open(c);
-      expect(notes.activeIndex, 2);
+        notes.open(a);
+        notes.open(b);
+        notes.open(c);
+        expect(notes.activeIndex, 2);
 
-      notes.retainWhere((n) => n.id == 'a');
-      expect(notes.notes.length, 1);
-      expect(notes.active, a);
-      expect(notes.activeIndex, 0);
-    });
+        notes.retainWhere((n) => n.id == 'a');
+        expect(notes.notes.length, 1);
+        expect(notes.active, a);
+        expect(notes.activeIndex, 0);
+      },
+    );
   });
 }

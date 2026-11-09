@@ -390,7 +390,7 @@ class _TopBar extends StatelessWidget {
               key: const ValueKey<String>('practice-player-close'),
               tooltip: 'Back to Practice Studio',
               onPressed: onClose,
-              icon: const Icon(AppIcons.back),
+              icon: const AppIcon(AppIcons.back),
             ),
           Expanded(
             child: Column(
@@ -426,20 +426,20 @@ class _TopBar extends StatelessWidget {
               key: const ValueKey('flashcard-browse-sources'),
               tooltip: 'Browse sources',
               onPressed: onBrowseSources,
-              icon: const Icon(AppIcons.folder),
+              icon: const AppIcon(AppIcons.folder),
             ),
           IconButton(
             key: const ValueKey<String>('flashcard-shuffle'),
             tooltip: 'Shuffle',
             onPressed: onShuffle,
-            icon: Icon(AppIcons.sort, color: colors.textPrimary),
+            icon: AppIcon(AppIcons.sort, color: colors.textPrimary),
           ),
           IconButton(
             key: const ValueKey<String>('flashcard-flip-all'),
             tooltip: backFirst ? 'Show questions first' : 'Show answers first',
             onPressed: onFlipAll,
             isSelected: backFirst,
-            icon: Icon(AppIcons.restore, color: colors.textPrimary),
+            icon: AppIcon(AppIcons.restore, color: colors.textPrimary),
           ),
         ],
       ),
@@ -624,7 +624,7 @@ class _CardFace extends StatelessWidget {
                   child: TextButton.icon(
                     key: const ValueKey<String>('flashcard-view-in-note'),
                     onPressed: onViewCitation,
-                    icon: const Icon(AppIcons.note, size: 18),
+                    icon: const AppIcon(AppIcons.note, size: 18),
                     label: const Text('View in Note'),
                   ),
                 )
@@ -663,7 +663,7 @@ class _AnswerPill extends StatelessWidget {
     if (icon == AppIcons.check) {
       return FilledButton.icon(
         onPressed: onPressed,
-        icon: Icon(icon, size: 18),
+        icon: AppIcon(icon, size: 18),
         label: Text(label, maxLines: 1, overflow: TextOverflow.ellipsis),
         style: FilledButton.styleFrom(
           minimumSize: const Size(0, AppSizes.minTouchTarget),
@@ -672,7 +672,7 @@ class _AnswerPill extends StatelessWidget {
     }
     return OutlinedButton.icon(
       onPressed: onPressed,
-      icon: Icon(icon, size: 18, color: color),
+      icon: AppIcon(icon, size: 18, color: color),
       label: Text(
         label,
         maxLines: 1,
@@ -681,7 +681,7 @@ class _AnswerPill extends StatelessWidget {
       ),
       style: OutlinedButton.styleFrom(
         minimumSize: const Size(0, AppSizes.minTouchTarget),
-        shape: const StadiumBorder(),
+        shape: const RoundedRectangleBorder(borderRadius: AppBorderRadius.medium),
         side: BorderSide(color: color, width: AppSizes.hairline),
       ),
     );

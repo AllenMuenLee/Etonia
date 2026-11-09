@@ -55,7 +55,7 @@ class PageTransform {
 /// fingers, a mouse wheel, or a trackpad. When two fingers start scrolling,
 /// [onScrollStart] is told which pointers they are, so that a stroke the
 /// first finger began can be dropped. When the column cannot scroll,
-/// fingers are left alone.
+/// fingers are left alone. More than two fingers neither scroll nor zoom.
 ///
 /// The page that holds the middle of the area, after a scroll, and the page
 /// a pointer goes down on, are reported; when [currentPage] changes for any
@@ -582,12 +582,29 @@ class PageViewportState extends State<PageViewport>
       return;
     }
     _touches[event.pointer] = event.localPosition;
+    if (_touches.length > 2 || _activeTouches.length > 2) {
+      if (_scrolling) {
+        _scrolling = false;
+        _pullCandidate = false;
+        _dragVelocity = Offset.zero;
+        _stopInertia();
+        if (_zoomSettle != null) _onZoomSettled();
+        _completeScroll();
+      }
+      if (_navigating) {
+        _navigating = false;
+        _dragVelocity = Offset.zero;
+        _stopInertia();
+        _completeScroll();
+      }
+      return;
+    }
     if (_fingersNavigate) {
       _navigating = true;
       _beginDrag(event.timeStamp);
       return;
     }
-    if (!_scrolling && _touches.length >= 2) {
+    if (!_scrolling && _touches.length == 2 && _activeTouches.length == 2) {
       if (_canScroll || _zoom != 1) {
         _waitingForTouchRelease = false;
         _scrolling = true;
@@ -611,12 +628,35 @@ class PageViewportState extends State<PageViewport>
     if (!_touches.containsKey(event.pointer)) {
       return;
     }
+    if (_touches.length > 2 || _activeTouches.length > 2) {
+      _touches[event.pointer] = event.localPosition;
+      return;
+    }
     final Offset before = _centroid;
     final double spreadBefore = _spread(before);
     _touches[event.pointer] = event.localPosition;
     if (_navigating && _styluses.isNotEmpty) {
       // A palm under the writing hand.
       return;
+    }
+    if (!_scrolling && !_navigating) {
+      if (_fingersNavigate &&
+          _touches.length <= 2 &&
+          _activeTouches.length <= 2) {
+        _navigating = true;
+        _beginDrag(event.timeStamp);
+      } else if (_touches.length == 2 && _activeTouches.length == 2) {
+        if (_canScroll || _zoom != 1) {
+          _waitingForTouchRelease = false;
+          _scrolling = true;
+          _beginDrag(event.timeStamp);
+          _scrollEndPending = true;
+          widget.onScrollStart?.call(Set<int>.of(_touches.keys));
+        } else if (widget.onPullToAddPage != null && !_pullCandidate) {
+          _pullCandidate = true;
+          _pullStart = _centroid;
+        }
+      }
     }
     if (_pullCandidate && !_scrolling) {
       final Offset moved = _centroid - _pullStart;
@@ -640,7 +680,9 @@ class PageViewportState extends State<PageViewport>
       scrollBy(delta);
       _trackPull(delta.dy);
       _recordDragVelocity(delta, event.timeStamp);
-      if (_touches.length >= 2 && spreadBefore > 0) {
+      if (_touches.length == 2 &&
+          _activeTouches.length == 2 &&
+          spreadBefore > 0) {
         _zoomAround(after, _spread(after) / spreadBefore);
       }
     }
@@ -1790,7 +1832,7 @@ class _PullToAddIndicator extends StatelessWidget {
                   child: Row(
                     mainAxisSize: MainAxisSize.min,
                     children: <Widget>[
-                      Icon(
+                      AppIcon(
                         ready ? AppIcons.newNote : AppIcons.up,
                         size: AppSizes.icon,
                         color: ready ? colors.onAccent : colors.textSecondary,

@@ -636,16 +636,18 @@ void main() {
       final bool notation = assistant.notationEnabled;
       final bool animation = assistant.animationEnabled;
       final bool inChat = assistant.showNotesInChat;
-      await tester.tap(
-        find.byKey(const ValueKey<String>('ai-notation-toggle')),
-      );
-      await tester.tap(
-        find.byKey(const ValueKey<String>('ai-animation-toggle')),
-      );
-      await tester.tap(
-        find.byKey(const ValueKey<String>('ai-show-notes-toggle')),
-      );
-      await tester.pump();
+      // The settings are longer than the palette they are attached to, and
+      // scroll: bring each in before pressing it.
+      for (final String key in <String>[
+        'ai-notation-toggle',
+        'ai-animation-toggle',
+        'ai-show-notes-toggle',
+      ]) {
+        await tester.ensureVisible(find.byKey(ValueKey<String>(key)));
+        await tester.pumpAndSettle();
+        await tester.tap(find.byKey(ValueKey<String>(key)));
+        await tester.pump();
+      }
       expect(assistant.notationEnabled, !notation);
       expect(assistant.animationEnabled, !animation);
       expect(assistant.showNotesInChat, !inChat);

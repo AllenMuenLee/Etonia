@@ -90,15 +90,16 @@ class _StartupHomeState extends State<_StartupHome> {
   }
 }
 
-/// The app's logo, quietly, while it starts.
+/// The app's logo, quietly, while it starts: Etonia on her lavender tile.
 class StartupWordmark extends StatelessWidget {
   const StartupWordmark({super.key});
 
   @override
   Widget build(BuildContext context) {
-    return const Scaffold(
-      key: ValueKey<String>('startup-loading'),
-      backgroundColor: Colors.black,
+    return Scaffold(
+      key: const ValueKey<String>('startup-loading'),
+      // The logo's own ground, so the picture has no visible edge.
+      backgroundColor: const Color(0xFFFAE6FF),
       body: Center(
         child: ExcludeSemantics(
           child: Image(

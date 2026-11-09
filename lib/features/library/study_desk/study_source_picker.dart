@@ -54,7 +54,7 @@ class StudyChatSources extends StatelessWidget {
               constraints: BoxConstraints(maxWidth: maxWidth),
               child: InputChip(
                 key: ValueKey('study-chat-source-${source.noteId}'),
-                avatar: const Icon(AppIcons.note, size: 16),
+                avatar: const AppIcon(AppIcons.note, size: 16),
                 label: Text(
                   controller.noteOf(source.noteId)?.title ?? 'Note',
                   maxLines: 1,
@@ -82,7 +82,7 @@ class StudyChatSources extends StatelessWidget {
             tapTargetSize: MaterialTapTargetSize.shrinkWrap,
           )
         : null,
-    icon: const Icon(AppIcons.add, size: 18),
+    icon: const AppIcon(AppIcons.add, size: 18),
     label: const Text('Add source'),
   );
 
@@ -90,30 +90,18 @@ class StudyChatSources extends StatelessWidget {
   Widget build(BuildContext context) => ListenableBuilder(
     listenable: controller,
     builder: (context, _) {
-      final TextTheme theme = Theme.of(context).textTheme;
       if (compact) {
         final bool any = controller.sources.isNotEmpty;
-        final Color secondary = AppColors.of(context).textSecondary;
+        // No heading and no placeholder: just the way to add a source, and the
+        // sources once there are some.
         return Column(
           key: const ValueKey('study-chat-sources'),
           mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
-            Row(
-              mainAxisAlignment: MainAxisAlignment.spaceBetween,
-              children: [
-                // Both give way, the heading first to be cut short: with large
-                // text on a narrow screen neither may push the other out.
-                Flexible(
-                  child: Text(
-                    'Sources for this chat',
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: theme.labelMedium?.copyWith(color: secondary),
-                  ),
-                ),
-                Flexible(flex: 2, child: _add(context)),
-              ],
+            Align(
+              alignment: AlignmentDirectional.centerStart,
+              child: _add(context),
             ),
             if (any)
               Padding(
@@ -121,14 +109,6 @@ class StudyChatSources extends StatelessWidget {
                 child: LayoutBuilder(
                   builder: (context, constraints) =>
                       _chips(context, constraints.maxWidth),
-                ),
-              )
-            else
-              Padding(
-                padding: const EdgeInsets.only(bottom: AppSpacing.xs),
-                child: Text(
-                  'Searching your entire library',
-                  style: theme.labelSmall?.copyWith(color: secondary),
                 ),
               ),
           ],
@@ -139,8 +119,6 @@ class StudyChatSources extends StatelessWidget {
         mainAxisSize: MainAxisSize.min,
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Text('Sources for this chat', style: theme.labelMedium),
-          const SizedBox(height: AppSpacing.xs),
           LayoutBuilder(
             builder: (context, constraints) =>
                 _chips(context, constraints.maxWidth),
@@ -287,7 +265,7 @@ class _StudySourcePickerState extends State<StudySourcePicker> {
       value: _stateOf(notes),
       tristate: true,
       enabled: notes.isNotEmpty,
-      icon: Icon(AppIcons.folder, size: 18, color: colors.textSecondary),
+      icon: AppIcon(AppIcons.folder, size: 18, color: colors.textSecondary),
       title: folder.name,
       subtitle: notes.length == 1 ? '1 note' : '${notes.length} notes',
       onChanged: (bool on) => _setAll(notes, on),
@@ -302,7 +280,7 @@ class _StudySourcePickerState extends State<StudySourcePicker> {
       key: ValueKey<String>('study-pick-note-${note.id}'),
       depth: depth,
       value: _chosen.contains(note.id),
-      icon: Icon(AppIcons.note, size: 18, color: colors.textSecondary),
+      icon: AppIcon(AppIcons.note, size: 18, color: colors.textSecondary),
       title: note.title,
       subtitle: attached ? 'Already added' : subtitle,
       enabled: !attached,
@@ -348,14 +326,14 @@ class _StudySourcePickerState extends State<StudySourcePicker> {
               style: text.bodyMedium?.copyWith(color: colors.textPrimary),
               decoration: InputDecoration(
                 isDense: true,
-                prefixIcon: const Icon(AppIcons.search, size: 18),
+                prefixIcon: const AppIcon(AppIcons.search, size: 18),
                 hintText: 'Search notes',
                 suffixIcon: _query.isEmpty
                     ? null
                     : IconButton(
                         tooltip: 'Clear search',
                         onPressed: () => setState(_search.clear),
-                        icon: const Icon(AppIcons.clear, size: 18),
+                        icon: const AppIcon(AppIcons.clear, size: 18),
                       ),
                 hintStyle: text.bodyMedium?.copyWith(
                   color: colors.textSecondary,
@@ -369,7 +347,7 @@ class _StudySourcePickerState extends State<StudySourcePicker> {
                   IconButton(
                     tooltip: 'All notes',
                     onPressed: () => setState(() => _folder = folder.parentId),
-                    icon: Icon(AppIcons.back, color: colors.textSecondary),
+                    icon: AppIcon(AppIcons.back, color: colors.textSecondary),
                   ),
                   Expanded(
                     child: Text(
@@ -506,9 +484,9 @@ class _PickerRow extends StatelessWidget {
     void toggle() => onChanged(value != true);
     return Material(
       color: value == true ? colors.selected : Colors.transparent,
-      shape: const StadiumBorder(),
+      shape: const RoundedRectangleBorder(borderRadius: AppBorderRadius.medium),
       child: InkWell(
-        customBorder: const StadiumBorder(),
+        customBorder: const RoundedRectangleBorder(borderRadius: AppBorderRadius.medium),
         onTap: !enabled ? null : (onOpen ?? toggle),
         child: ConstrainedBox(
           constraints: const BoxConstraints(minHeight: 60),
@@ -548,7 +526,7 @@ class _PickerRow extends StatelessWidget {
                 ),
               ),
               if (onOpen != null)
-                Icon(
+                AppIcon(
                   AppIcons.disclosure,
                   size: 16,
                   color: colors.textSecondary,

@@ -8,6 +8,7 @@ import '../../../app/theme/app_tokens.dart';
 import '../../../app/theme/app_icons.dart';
 import '../../../shared/widgets/pressable.dart';
 import 'study_desk_controller.dart';
+import 'study_history_sidebar.dart' show studyCourseColor;
 
 //// The chat beside the page a citation points at, with a handle between them to
 /// drag.
@@ -427,13 +428,34 @@ class StudySuggestedClasses extends StatelessWidget {
                 borderRadius: BorderRadius.circular(AppRadii.small),
                 side: BorderSide(color: colors.divider),
               ),
-              leading: Icon(AppIcons.folder, size: 20, color: colors.accent),
+              leading: AppIcon(
+                AppIcons.blackboard,
+                size: 20,
+                color: studyCourseColor(folder.color.colorHex),
+              ),
               title: Text(
                 folder.name,
                 maxLines: 1,
                 overflow: TextOverflow.ellipsis,
               ),
-              trailing: const Icon(AppIcons.add, size: 18),
+              trailing: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  const AppIcon(AppIcons.add, size: 16),
+                  IconButton(
+                    key: ValueKey('study-dismiss-class-${folder.id}'),
+                    tooltip: 'Dismiss suggestion',
+                    visualDensity: VisualDensity.compact,
+                    iconSize: 14,
+                    onPressed: () => controller.dismissSuggestedClass(folder),
+                    icon: AppIcon(
+                      AppIcons.close,
+                      size: 14,
+                      color: colors.textSecondary,
+                    ),
+                  ),
+                ],
+              ),
               onTap: () {
                 controller.initializeSuggestedClass(folder);
                 onSelected?.call();
@@ -578,16 +600,15 @@ class StudyEmptyState extends StatelessWidget {
               child: Text(
                 title,
                 textAlign: TextAlign.center,
-                style: Theme.of(context).textTheme.titleLarge,
+                // Set as a class's own heading and line are, on its page.
+                style: Theme.of(context).textTheme.headlineMedium,
               ),
             ),
             const SizedBox(height: AppSpacing.xs),
             Text(
               message,
               textAlign: TextAlign.center,
-              style: Theme.of(context).textTheme.bodyMedium?.copyWith(
-                color: AppColors.of(context).textSecondary,
-              ),
+              style: TextStyle(color: AppColors.of(context).textSecondary),
             ),
             if (action != null) ...[
               const SizedBox(height: AppSpacing.lg),

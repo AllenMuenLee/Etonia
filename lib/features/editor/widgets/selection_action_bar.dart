@@ -178,19 +178,19 @@ class _SelectionActionBarState extends State<SelectionActionBar> {
             PaletteButton(
               tooltip: 'Copy',
               onPressed: widget.onCopy ?? widget.controller.copySelection,
-              child: const Icon(AppIcons.copy),
+              child: const AppIcon(AppIcons.copy),
             ),
             PaletteButton(
               tooltip: 'Cut',
               onPressed: widget.onCut ?? widget.controller.cutSelection,
-              child: const Icon(AppIcons.cut),
+              child: const AppIcon(AppIcons.cut),
             ),
             if (!selection.includesPdf)
               PaletteButton(
                 tooltip: 'Duplicate',
                 onPressed:
                     widget.onDuplicate ?? widget.controller.duplicateSelection,
-                child: const Icon(AppIcons.duplicate),
+                child: const AppIcon(AppIcons.duplicate),
               ),
             // Every selection can be deleted. A sticky note is removed as a
             // whole only from here: the eraser never takes its paper.
@@ -213,7 +213,7 @@ class _SelectionActionBarState extends State<SelectionActionBar> {
                   );
                 }
               },
-              child: const Icon(AppIcons.delete),
+              child: const AppIcon(AppIcons.delete),
             ),
             if (widget.onAiPressed != null)
               PaletteButton(
@@ -304,7 +304,7 @@ class PastePrompt extends StatelessWidget {
               PaletteButton(
                 tooltip: 'Paste',
                 onPressed: () => onPaste(position),
-                child: const Icon(AppIcons.paste),
+                child: const AppIcon(AppIcons.paste),
               ),
             ],
           ),

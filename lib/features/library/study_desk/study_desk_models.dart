@@ -586,6 +586,8 @@ class StudyCourse {
     required this.createdAt,
     this.associatedFolderIds = const <String>[],
     this.associatedNoteIds = const <String>[],
+    this.isPinned = false,
+    this.updatedAt,
   });
 
   final String id;
@@ -594,6 +596,16 @@ class StudyCourse {
   final DateTime createdAt;
   final List<String> associatedFolderIds;
   final List<String> associatedNoteIds;
+
+  /// Pinned classes are listed first.
+  final bool isPinned;
+
+  /// When the class was last changed; null for one saved before this was kept.
+  final DateTime? updatedAt;
+
+  /// The last change, or the making of the class if it was never changed. It
+  /// is what decides which device's version of a class is the newer.
+  DateTime get changedAt => updatedAt ?? createdAt;
 
   factory StudyCourse.fromJson(Map<String, Object?> json) => StudyCourse(
     id: json['id']! as String,
@@ -604,6 +616,29 @@ class StudyCourse {
       json['folderIds'] as List? ?? const [],
     ),
     associatedNoteIds: List<String>.from(json['noteIds'] as List? ?? const []),
+    isPinned: json['isPinned'] == true,
+    updatedAt: json['updatedAt'] is int
+        ? DateTime.fromMillisecondsSinceEpoch(json['updatedAt']! as int)
+        : null,
+  );
+
+  /// [updatedAt] is stamped by whoever changes the class; left out, it stays.
+  StudyCourse copyWith({
+    String? name,
+    String? colorHex,
+    bool? isPinned,
+    List<String>? associatedFolderIds,
+    List<String>? associatedNoteIds,
+    DateTime? updatedAt,
+  }) => StudyCourse(
+    id: id,
+    name: name ?? this.name,
+    colorHex: colorHex ?? this.colorHex,
+    createdAt: createdAt,
+    associatedFolderIds: associatedFolderIds ?? this.associatedFolderIds,
+    associatedNoteIds: associatedNoteIds ?? this.associatedNoteIds,
+    isPinned: isPinned ?? this.isPinned,
+    updatedAt: updatedAt ?? this.updatedAt,
   );
 
   Map<String, Object?> toJson() => <String, Object?>{
@@ -613,6 +648,8 @@ class StudyCourse {
     'createdAt': createdAt.millisecondsSinceEpoch,
     'folderIds': associatedFolderIds,
     'noteIds': associatedNoteIds,
+    if (isPinned) 'isPinned': true,
+    if (updatedAt != null) 'updatedAt': updatedAt!.millisecondsSinceEpoch,
   };
 }
 
@@ -739,9 +776,15 @@ class StudyDeskState {
     this.courses = const <StudyCourse>[],
     this.semanticSearch = true,
     this.deletedSessions = const <String, int>{},
+    this.dismissedSuggestions = const <String>[],
   });
 
   factory StudyDeskState.fromJson(Map<String, Object?> json) => StudyDeskState(
+    dismissedSuggestions: <String>[
+      if (json['dismissedSuggestions'] case final List<Object?> ids)
+        for (final Object? id in ids)
+          if (id is String) id,
+    ],
     deletedSessions: <String, int>{
       if (json['deletedSessions'] case final Map<Object?, Object?> deleted)
         for (final MapEntry<Object?, Object?> entry in deleted.entries)
@@ -776,6 +819,10 @@ class StudyDeskState {
   /// brought together, that it was deleted rather than that it is new.
   final Map<String, int> deletedSessions;
 
+  /// The folders whose suggested class the user closed with its x. They are
+  /// kept on this device only.
+  final List<String> dismissedSuggestions;
+
   /// Whether notes on the desk are found by meaning too, which sends them to
   /// the embedding service. On unless the user turned it off.
   final bool semanticSearch;
@@ -792,5 +839,7 @@ class StudyDeskState {
     ],
     if (currentSessionId != null) 'current': currentSessionId,
     if (deletedSessions.isNotEmpty) 'deletedSessions': deletedSessions,
+    if (dismissedSuggestions.isNotEmpty)
+      'dismissedSuggestions': dismissedSuggestions,
   };
 }

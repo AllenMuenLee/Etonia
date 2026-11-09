@@ -1,4 +1,4 @@
-﻿import 'package:flutter/material.dart';
+import 'package:flutter/material.dart';
 
 import '../../../app/theme/app_icons.dart';
 import '../../../app/theme/app_tokens.dart';
@@ -159,7 +159,7 @@ class _PaperSwatch extends StatelessWidget {
                   ),
                   child: selected
                       ? const ExcludeSemantics(
-                          child: Icon(
+                          child: AppIcon(
                             AppIcons.check,
                             size: 16,
                             color: Color(0xFF1F2937),
@@ -237,7 +237,11 @@ class _PaperStyleTile extends StatelessWidget {
                 mainAxisSize: MainAxisSize.min,
                 children: <Widget>[
                   if (selected)
-                    Icon(AppIcons.check, size: 12, color: colors.textPrimary),
+                    AppIcon(
+                      AppIcons.check,
+                      size: 12,
+                      color: colors.textPrimary,
+                    ),
                   Flexible(
                     child: Text(
                       paper.label,

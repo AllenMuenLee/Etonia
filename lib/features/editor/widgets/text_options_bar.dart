@@ -48,7 +48,7 @@ class TextOptionsBar extends StatelessWidget {
           onPressed: () => onChanged(settings.copyWith(bold: !settings.bold)),
           child: const Text(
             'B',
-            style: TextStyle(fontWeight: FontWeight.w800, fontSize: 17),
+            style: TextStyle(fontWeight: FontWeight.w600, fontSize: 17),
           ),
         ),
         OptionsButton(
@@ -95,7 +95,7 @@ class TextOptionsBar extends StatelessWidget {
                   : TextListStyle.bullets,
             ),
           ),
-          child: const Icon(Icons.format_list_bulleted_rounded),
+          child: const AppIcon(Icons.format_list_bulleted_rounded),
         ),
         OptionsButton(
           key: const ValueKey<String>('text-numbers'),
@@ -108,7 +108,7 @@ class TextOptionsBar extends StatelessWidget {
                   : TextListStyle.numbers,
             ),
           ),
-          child: const Icon(Icons.format_list_numbered_rounded),
+          child: const AppIcon(Icons.format_list_numbered_rounded),
         ),
       ],
     );
@@ -160,7 +160,7 @@ class _FontSizeControl extends StatelessWidget {
           tooltip: 'Smaller text',
           selected: false,
           onPressed: smaller == null ? null : () => _set(smaller),
-          child: const Icon(AppIcons.remove),
+          child: const AppIcon(AppIcons.remove),
         ),
         MenuAnchor(
           animated: !MediaQuery.disableAnimationsOf(context),
@@ -170,7 +170,11 @@ class _FontSizeControl extends StatelessWidget {
               MenuItemButton(
                 onPressed: () => _set(size),
                 trailingIcon: size == settings.fontSize
-                    ? Icon(Icons.check_rounded, size: 18, color: colors.accent)
+                    ? AppIcon(
+                        Icons.check_rounded,
+                        size: 18,
+                        color: colors.accent,
+                      )
                     : null,
                 child: SizedBox(
                   width: AppSpacing.xxl,
@@ -180,7 +184,7 @@ class _FontSizeControl extends StatelessWidget {
                       fontFeatures: const <FontFeature>[
                         FontFeature.tabularFigures(),
                       ],
-                      color: size == settings.fontSize ? colors.accent : null,
+                      color: size == settings.fontSize ? colors.accentText : null,
                     ),
                   ),
                 ),
@@ -237,7 +241,7 @@ class _FontSizeControl extends StatelessWidget {
           tooltip: 'Larger text',
           selected: false,
           onPressed: larger == null ? null : () => _set(larger),
-          child: const Icon(AppIcons.add),
+          child: const AppIcon(AppIcons.add),
         ),
       ],
     );
@@ -355,7 +359,7 @@ class _AlignmentControl extends StatelessWidget {
           tooltip: label,
           selected: settings.alignment == alignment,
           onPressed: () => onChanged(settings.copyWith(alignment: alignment)),
-          child: Icon(icon),
+          child: AppIcon(icon),
         ),
     ],
   );

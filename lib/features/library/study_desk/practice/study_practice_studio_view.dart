@@ -861,7 +861,7 @@ class _ExportTestSheetState extends State<_ExportTestSheet> {
                   onPressed: () => Navigator.of(
                     context,
                   ).pop(_TestExport(_options, asNote: false)),
-                  icon: const Icon(AppIcons.share, size: 18),
+                  icon: const AppIcon(AppIcons.share, size: 18),
                   label: const Text('Share / Save PDF'),
                 ),
                 if (widget.canOpenAsNote)
@@ -870,7 +870,7 @@ class _ExportTestSheetState extends State<_ExportTestSheet> {
                     onPressed: () => Navigator.of(
                       context,
                     ).pop(_TestExport(_options, asNote: true)),
-                    icon: const Icon(AppIcons.pen, size: 18),
+                    icon: const AppIcon(AppIcons.pen, size: 18),
                     label: const Text('Open as Handwritten Test Note'),
                   ),
               ],
@@ -1106,7 +1106,7 @@ class _ItemRow extends StatelessWidget {
       trailing: IconButton(
         tooltip: 'Remove $kind',
         onPressed: onRemove,
-        icon: Icon(AppIcons.delete, color: colors.textSecondary),
+        icon: AppIcon(AppIcons.delete, color: colors.textSecondary),
       ),
     );
   }

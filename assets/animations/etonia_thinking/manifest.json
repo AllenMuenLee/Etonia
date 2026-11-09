@@ -1,0 +1,31 @@
+{
+  "fps": 12,
+  "frames": 24,
+  "duration_ms": 4000,
+  "frame_size": [
+    512,
+    603
+  ],
+  "animations": {
+    "pen_spin": {
+      "sheet": "pen_spin_sheet.png",
+      "webp": "pen_spin.webp",
+      "frames_dir": "pen_spin"
+    },
+    "walk": {
+      "sheet": "walk_sheet.png",
+      "webp": "walk.webp",
+      "frames_dir": "walk"
+    },
+    "hop": {
+      "sheet": "hop_sheet.png",
+      "webp": "hop.webp",
+      "frames_dir": "hop"
+    },
+    "look_around": {
+      "sheet": "look_around_sheet.png",
+      "webp": "look_around.webp",
+      "frames_dir": "look_around"
+    }
+  }
+}

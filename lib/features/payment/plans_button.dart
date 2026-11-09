@@ -42,7 +42,6 @@ class PlansButton extends StatelessWidget {
       listenable: controller,
       builder: (BuildContext context, Widget? _) {
         final AppColors colors = AppColors.of(context);
-        final bool dark = Theme.of(context).brightness == Brightness.dark;
         final String label = labelFor(controller);
         final bool hasTokens =
             (controller.activePlan != null || controller.hasFreeCredit) &&
@@ -52,10 +51,9 @@ class PlansButton extends StatelessWidget {
             key: const ValueKey<String>('library-plans-button'),
             tooltip: 'Plans & Credits',
             onPressed: onPressed,
-            icon: Semantics(label: label, child: const Icon(AppIcons.plans)),
+            icon: Semantics(label: label, child: const AppIcon(AppIcons.plans)),
           );
         }
-        final Color baseSurface = AppGlass.muted(colors);
         return Tooltip(
           message: 'Plans & Credits',
           child: Semantics(
@@ -65,7 +63,9 @@ class PlansButton extends StatelessWidget {
             child: InkWell(
               key: const ValueKey<String>('library-plans-button'),
               onTap: onPressed,
-              customBorder: const StadiumBorder(),
+              customBorder: const RoundedRectangleBorder(
+                borderRadius: AppBorderRadius.medium,
+              ),
               child: ConstrainedBox(
                 constraints: const BoxConstraints(
                   minWidth: AppSizes.minTouchTarget,
@@ -74,45 +74,13 @@ class PlansButton extends StatelessWidget {
                 child: Center(
                   widthFactor: 1,
                   child: DecoratedBox(
-                    decoration: hasTokens
-                        ? BoxDecoration(
-                            borderRadius: BorderRadius.circular(999),
-                            gradient: LinearGradient(
-                              begin: Alignment.topLeft,
-                              end: Alignment.bottomRight,
-                              colors: <Color>[
-                                Color.alphaBlend(
-                                  Colors.white.withValues(
-                                    alpha: dark ? 0.08 : 0.55,
-                                  ),
-                                  baseSurface,
-                                ),
-                                baseSurface,
-                                Color.alphaBlend(
-                                  colors.shadow.withValues(
-                                    alpha: dark ? 0.18 : 0.05,
-                                  ),
-                                  baseSurface,
-                                ),
-                              ],
-                              stops: const <double>[0.0, 0.52, 1.0],
-                            ),
-                            border: Border.all(
-                              color: colors.glassEdge,
-                              width: AppSizes.hairline,
-                            ),
-                            boxShadow: <BoxShadow>[
-                              BoxShadow(
-                                color: colors.shadow.withValues(alpha: 0.07),
-                                blurRadius: 6,
-                                offset: const Offset(0, 2),
-                              ),
-                            ],
-                          )
-                        : ShapeDecoration(
-                            shape: const StadiumBorder(),
-                            color: baseSurface,
-                          ),
+                    // A plain fill, like the other controls in the bar.
+                    decoration: ShapeDecoration(
+                      shape: const RoundedRectangleBorder(
+                        borderRadius: AppBorderRadius.medium,
+                      ),
+                      color: AppGlass.muted(colors),
+                    ),
                     child: Padding(
                       padding: const EdgeInsets.symmetric(
                         horizontal: AppSpacing.sm,
@@ -121,7 +89,7 @@ class PlansButton extends StatelessWidget {
                       child: Row(
                         mainAxisSize: MainAxisSize.min,
                         children: <Widget>[
-                          Icon(
+                          AppIcon(
                             AppIcons.plans,
                             size: 16,
                             color: colors.textPrimary,

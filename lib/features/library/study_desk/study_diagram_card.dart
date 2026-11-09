@@ -1,6 +1,7 @@
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 
+import '../../../app/theme/app_icons.dart';
 import '../../../app/theme/app_tokens.dart';
 import 'study_desk_controller.dart';
 import 'study_desk_models.dart';
@@ -122,7 +123,7 @@ class _StudyDiagramCardState extends State<StudyDiagramCard> {
                 child: snap.data == null
                     ? const Center(
                         key: ValueKey<String>('diagram-placeholder'),
-                        child: Icon(Icons.schema_outlined),
+                        child: AppIcon(Icons.schema_rounded),
                       )
                     : RepaintBoundary(
                         key: const ValueKey<String>('diagram-crop'),
@@ -132,7 +133,7 @@ class _StudyDiagramCardState extends State<StudyDiagramCard> {
                           cacheWidth: 640,
                           gaplessPlayback: true,
                           errorBuilder: (_, _, _) =>
-                              const Center(child: Icon(Icons.schema_outlined)),
+                              const Center(child: AppIcon(Icons.schema_rounded)),
                         ),
                       ),
               ),
@@ -142,7 +143,7 @@ class _StudyDiagramCardState extends State<StudyDiagramCard> {
             padding: const EdgeInsets.all(AppSpacing.md),
             child: Row(
               children: [
-                const Icon(Icons.zoom_in, size: 18),
+                const AppIcon(Icons.zoom_in_rounded),
                 const SizedBox(width: AppSpacing.xs),
                 Expanded(
                   child: Text(

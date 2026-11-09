@@ -373,12 +373,12 @@ void main() {
     final InMemoryNoteRepository repository = _repository();
     await repository.createNote(title: 'One');
     await _pumpLibrary(tester, repository);
-    expect(find.byType(GridView), findsOneWidget);
+    expect(find.byType(SliverGrid), findsOneWidget);
 
     await tester.tap(find.byTooltip('Show as list'));
     await tester.pumpAndSettle();
-    expect(find.byType(GridView), findsNothing);
-    expect(_items(find.byType(ListView)), findsOneWidget);
+    expect(find.byType(SliverGrid), findsNothing);
+    expect(_items(find.byType(SliverList)), findsOneWidget);
     expect(find.byTooltip('Show as grid'), findsOneWidget);
   });
 
@@ -656,40 +656,37 @@ void main() {
     expect((await repository.list(null)).notes.single.title, 'Final essay');
   });
 
-  testWidgets(
-    'New note sub-button offers test, PDF imports, and template',
-    (WidgetTester tester) async {
-      await _pumpLibrary(tester, _repository());
-      expect(find.byTooltip('Import PDF'), findsNothing);
+  testWidgets('New note sub-button offers test, PDF imports, and template', (
+    WidgetTester tester,
+  ) async {
+    await _pumpLibrary(tester, _repository());
+    expect(find.byTooltip('Import PDF'), findsNothing);
 
-      final Rect button = tester.getRect(
-        find.byKey(const ValueKey<String>('new-note-expand')),
-      );
+    final Rect button = tester.getRect(
+      find.byKey(const ValueKey<String>('new-note-expand')),
+    );
 
-      await tester.tap(find.byKey(const ValueKey<String>('new-note-expand')));
-      await tester.pumpAndSettle();
-      expect(find.text('Import editable PDF'), findsNothing);
-      expect(find.text('Import test'), findsOneWidget);
-      // Top to bottom, with the quickest last, nearest the button.
-      final List<double> rows =
-          <String>['Import test', 'Import PDF', 'Template…']
-              .map(
-                (String label) => tester
-                    .getCenter(find.widgetWithText(MenuItemButton, label))
-                    .dy,
-              )
-              .toList();
-      expect(rows[0], lessThan(rows[1]));
-      expect(rows[1], lessThan(rows[2]));
-      final Finder menu = find
-          .ancestor(
-            of: find.widgetWithText(MenuItemButton, 'Template…'),
-            matching: find.byType(Material),
-          )
-          .first;
-      expect(tester.getRect(menu).right, moreOrLessEquals(button.right));
-    },
-  );
+    await tester.tap(find.byKey(const ValueKey<String>('new-note-expand')));
+    await tester.pumpAndSettle();
+    expect(find.text('Import editable PDF'), findsNothing);
+    expect(find.text('Import test'), findsOneWidget);
+    // Top to bottom, with the quickest last, nearest the button.
+    final List<double> rows = <String>['Import test', 'Import PDF', 'Template…']
+        .map(
+          (String label) =>
+              tester.getCenter(find.widgetWithText(MenuItemButton, label)).dy,
+        )
+        .toList();
+    expect(rows[0], lessThan(rows[1]));
+    expect(rows[1], lessThan(rows[2]));
+    final Finder menu = find
+        .ancestor(
+          of: find.widgetWithText(MenuItemButton, 'Template…'),
+          matching: find.byType(Material),
+        )
+        .first;
+    expect(tester.getRect(menu).right, moreOrLessEquals(button.right));
+  });
 
   testWidgets('the template dialog moves with the keyboard, frame by frame', (
     WidgetTester tester,
@@ -1480,14 +1477,14 @@ void main() {
       find.byTooltip('Show as list'),
       find.byTooltip('Select'),
       find.descendant(
+        of: find.byKey(const ValueKey<String>('sidebar-library')),
+        matching: find.byType(InkWell),
+      ),
+      find.descendant(
         of: find.byKey(const ValueKey<String>('sidebar-study-desk')),
         matching: find.byType(InkWell),
       ),
       _sidebar(find.byTooltip('New folder')),
-      find.descendant(
-        of: find.byKey(const ValueKey<String>('sidebar-library')),
-        matching: find.byType(InkWell),
-      ),
       find.byTooltip('Plans & Credits'),
       find.descendant(
         of: find.byKey(const ValueKey<String>('sidebar-trash')),

@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:greatnote/features/library/cloud/auto_backup_scheduler.dart';
 import 'package:greatnote/features/library/cloud/cloud_sync_state.dart';
+import 'package:greatnote/features/library/cloud/cloud_task_controller.dart';
 import 'package:greatnote/features/library/cloud/google_drive_backup_service.dart';
 import 'package:greatnote/features/library/cloud/google_drive_client.dart';
 import 'package:greatnote/features/library/note_repository.dart';
@@ -73,6 +74,43 @@ void main() {
     expect(await backup.lastBackupAt(), first);
     await advance(tester, const Duration(minutes: 6));
     expect((await backup.lastBackupAt())!.isAfter(first), isTrue);
+  });
+
+  testWidgets('an automatic backup shows its progress, and leaves no message', (
+    WidgetTester tester,
+  ) async {
+    drive = FakeGoogleDriveClient(signedIn: true);
+    repository = InMemoryNoteRepository();
+    addTearDown(repository.dispose);
+    state = InMemoryCloudStateStore();
+    now = DateTime(2026, 10, 17, 9);
+    backup = GoogleDriveBackupService(
+      client: drive,
+      repository: repository,
+      state: state,
+      clock: () => now,
+    );
+    final CloudTaskController tasks = CloudTaskController(clock: () => now);
+    final List<CloudTask?> seen = <CloudTask?>[];
+    tasks.addListener(() => seen.add(tasks.task));
+    scheduler = AutoBackupScheduler(
+      backup: backup,
+      client: drive,
+      library: repository,
+      clock: () => now,
+      runBackUp: (GoogleDriveBackupService service) =>
+          tasks.backUp(service, quiet: true),
+    );
+    await backup.setLinked(true);
+    await repository.createNote(title: 'First');
+    await scheduler.start();
+    await advance(tester, const Duration(minutes: 1));
+    scheduler.dispose();
+    tasks.dispose();
+
+    expect(await backup.lastBackupAt(), isNotNull);
+    expect(seen, contains(CloudTask.backUp));
+    expect(tasks.message, isNull);
   });
 
   testScheduler('skips a turn when nothing changed', (

@@ -280,7 +280,7 @@ class ToolbarCustomizer extends StatelessWidget {
                             cursor: SystemMouseCursors.grab,
                             child: SizedBox.square(
                               dimension: AppSizes.minTouchTarget,
-                              child: Icon(
+                              child: AppIcon(
                                 AppIcons.dragHandle,
                                 size: 18,
                                 color: colors.textSecondary,

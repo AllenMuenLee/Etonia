@@ -48,7 +48,11 @@ StudyStrokeData _line(
 StudyStrokeData _tick(int index, Offset at, {String ink = studyNeutralInk}) =>
     _stroke(index, <Offset>[
       ..._along(at, at + const Offset(8, 12), 4),
-      ..._along(at + const Offset(8, 12), at + const Offset(30, -20), 7).skip(1),
+      ..._along(
+        at + const Offset(8, 12),
+        at + const Offset(30, -20),
+        7,
+      ).skip(1),
     ], ink: ink);
 
 /// An X in two strokes, [size] across.
@@ -95,11 +99,10 @@ List<StudyChunk> _chunks(
 );
 
 /// Neutral ink far from any mark, so a page has a pen of its own.
-List<StudyStrokeData> _writing(int first, {int count = 8}) =>
-    <StudyStrokeData>[
-      for (int i = 0; i < count; i++)
-        _line(first + i, Offset(0, 600.0 + 60 * i), Offset(50, 600.0 + 60 * i)),
-    ];
+List<StudyStrokeData> _writing(int first, {int count = 8}) => <StudyStrokeData>[
+  for (int i = 0; i < count; i++)
+    _line(first + i, Offset(0, 600.0 + 60 * i), Offset(50, 600.0 + 60 * i)),
+];
 
 StudyChunk _marked({String words = 'x equals four', int chunkIndex = 1}) =>
     StudyChunk(
@@ -220,10 +223,7 @@ void main() {
         ..._writing(10),
       ]);
       final StudyChunk chunk = chunks.firstWhere((c) => c.hasMarks);
-      expect(
-        chunk.tags,
-        containsAll(<String>['annotated', 'red-ink', 'red']),
-      );
+      expect(chunk.tags, containsAll(<String>['annotated', 'red-ink', 'red']));
       expect(chunk.needsPicture, isTrue);
     });
 
@@ -338,7 +338,9 @@ void main() {
       final StudyVectorIndex index = StudyVectorIndex(embedder: embedder);
       final StudyVectorSignal? signal = await index.signalFor(
         'mistakes wrong cross',
-        <String, List<StudyChunk>>{'n': <StudyChunk>[_marked()]},
+        <String, List<StudyChunk>>{
+          'n': <StudyChunk>[_marked()],
+        },
         visualQuery: 'handwriting with red crosses',
       );
       expect(signal?.visual, isNotNull);
@@ -348,32 +350,44 @@ void main() {
       ]);
     });
 
-    test('no look, or the same words twice, costs no second embedding', () async {
-      final _Embedder embedder = _Embedder()..queryVector = _vec(1);
-      final StudyVectorIndex index = StudyVectorIndex(embedder: embedder);
-      final Map<String, List<StudyChunk>> notes = <String, List<StudyChunk>>{
-        'n': <StudyChunk>[_marked()],
-      };
-      expect((await index.signalFor('q', notes))?.visual, isNull);
-      expect((await index.signalFor('q', notes, visualQuery: ' '))?.visual, isNull);
-      expect((await index.signalFor('q', notes, visualQuery: ' q '))?.visual, isNull);
-      expect(embedder.queries, <String>['q']);
-    });
-
-    test('a look that cannot be embedded leaves the question\'s signal', () async {
-      final _Embedder embedder = _Embedder()
-        ..queryFor = (String text) => text == 'q' ? _vec(1) : null;
-      final StudyVectorIndex index = StudyVectorIndex(embedder: embedder);
-      final StudyVectorSignal? signal = await index.signalFor(
-        'q',
-        <String, List<StudyChunk>>{
+    test(
+      'no look, or the same words twice, costs no second embedding',
+      () async {
+        final _Embedder embedder = _Embedder()..queryVector = _vec(1);
+        final StudyVectorIndex index = StudyVectorIndex(embedder: embedder);
+        final Map<String, List<StudyChunk>> notes = <String, List<StudyChunk>>{
           'n': <StudyChunk>[_marked()],
-        },
-        visualQuery: 'red crosses',
-      );
-      expect(signal, isNotNull);
-      expect(signal!.visual, isNull);
-    });
+        };
+        expect((await index.signalFor('q', notes))?.visual, isNull);
+        expect(
+          (await index.signalFor('q', notes, visualQuery: ' '))?.visual,
+          isNull,
+        );
+        expect(
+          (await index.signalFor('q', notes, visualQuery: ' q '))?.visual,
+          isNull,
+        );
+        expect(embedder.queries, <String>['q']);
+      },
+    );
+
+    test(
+      'a look that cannot be embedded leaves the question\'s signal',
+      () async {
+        final _Embedder embedder = _Embedder()
+          ..queryFor = (String text) => text == 'q' ? _vec(1) : null;
+        final StudyVectorIndex index = StudyVectorIndex(embedder: embedder);
+        final StudyVectorSignal? signal = await index.signalFor(
+          'q',
+          <String, List<StudyChunk>>{
+            'n': <StudyChunk>[_marked()],
+          },
+          visualQuery: 'red crosses',
+        );
+        expect(signal, isNotNull);
+        expect(signal!.visual, isNull);
+      },
+    );
 
     test('a request about appearance embeds more pictures, marks first', () {
       final List<StudySearchDocument> documents = <StudySearchDocument>[

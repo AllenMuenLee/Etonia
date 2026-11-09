@@ -1,62 +1,126 @@
 # Etonia design language
 
-Etonia is 70% Apple platform convention and 30% its own mark. When those
-directions compete, use the Apple answer: familiar navigation, grouped
-backgrounds, large titles, Dynamic Type, platform scrolling, and restrained
-motion. The Etonia portion comes only from `assets/icon/etonia.png`.
+Premium minimalism, modern stationery, soft editorial. Etonia is a digital
+notebook and study workspace: 75% clean contemporary minimalism, 20% refined
+stationery warmth, 5% editorial character. The brief is
+`implementation_prompts/39_visual_theme_redesign.md`; this file records how the
+code implements it. The theme restyles; it never changes layout, icons,
+behaviour, or anything a user wrote.
 
-## The five facts in the mark
+The logo supplies the geometry: simple shapes, controlled corners, clean
+contours, strong negative space, a single restrained accent. Warmth comes from
+colour temperature and type, never from textures or illustration. Where a
+platform convention and the theme compete, the platform decides how things are
+arranged and the theme decides how they look.
 
-1. It is two-tone: ink and paper, without a brand hue.
-2. It uses filled mass, not decorative outlines.
-3. Its openings are fat, pill-ended slots.
-4. Its top-trailing dog-ear makes the E a sheet of paper.
-5. Its outside corners are large, even, and continuous.
+## Where it lives
 
-These facts produce monochrome chrome, capsule controls, heavy rounded titles,
-continuous corners, and one document-only dog-ear. Colour belongs to user
-content. The six highlighters may mark notes, folders and tags; Lilac, Sky and
-Peach may form the single active AI glow. Danger and success are status colours,
-not brand colours.
+Everything is centralised; features read tokens and never write a literal.
 
-## Surfaces and glass
+| Concern | Home |
+| --- | --- |
+| Colour, spacing, radii, sizes, shadows, motion, tabular figures | `lib/app/theme/app_tokens.dart` |
+| `ThemeData`, `ColorScheme`, `TextTheme`, every component theme | `lib/app/theme/app_theme.dart` |
+| Icons (SVG line assets, one 1.3 px stroke) | `lib/app/theme/app_icons.dart` |
+| Fonts | `assets/fonts/` (Inter, Newsreader; SIL OFL, licences alongside) |
 
-`AppColors`, `AppRadii`, `AppBorderRadius` and `AppGlass` are the only sources
-for app chrome. Feature code does not invent colour or radius literals. The
-background is grouped gray in light mode and true black in dark mode. Cards and
-writing pages are opaque. Floating chrome uses `GlassSurface`:
+`AppColors` is a `ThemeExtension`, read with `AppColors.of(context)`. Light
+and dark are two `const` instances of the same class, so the themes cannot
+drift apart.
 
-- `GlassQuality.full` clips a shared, saturated 24-point backdrop blur and is
-  for static library chrome, menus, dialogs and sheets.
-- `GlassQuality.tinted` has the same tint, top light, rim and shadow without a
-  live filter. Editor chrome always uses this tier.
-- A screen may contain at most three full glass surfaces, none larger than
-  roughly one third of the screen. Memory-constrained presentation uses tinted
-  glass.
+## Colour
 
-Buttons, chips, switches, segmented thumbs, search fields and progress tracks
-are stadiums. Text fields use radius 14, cards and popovers 22, glass bars 24,
-and modal surfaces 28. Inner corners remain concentric with their outer surface.
-Touch targets are at least 44 points and normally 48.
+Warm off-white chrome with white cards; one lavender accent for interactive
+emphasis; layered charcoal at night. Lavender is never a large workspace
+background.
 
-`DogEar` owns the document silhouette and flap. It appears on note thumbnails,
-the document empty state, the mark and branded loading—not on general controls.
-`EtoniaMark` is the scalable mark; `EtoniaBarsLoader` is reserved for launch,
-import/export and AI thinking.
+| Token (`AppColors`) | Light | Dark |
+| --- | --- | --- |
+| `background` (backgroundPrimary) | `#FAF9F7` | `#1C1B20` |
+| `backgroundSecondary` (sidebars) | `#F3F2F0` | `#1E1D22` |
+| `surface` | `#FFFFFF` | `#25242A` |
+| `surfaceMuted` (surfaceSecondary: fields, tracks) | `#F7F6F4` | `#2D2B32` |
+| `surfaceElevated` (dialogs, popovers) | `#FFFFFF` | `#333039` |
+| `textPrimary` / `textSecondary` / `textTertiary` | `#343239` / `#706D76` / `#96919C` | `#F5F2F6` / `#B7B1BD` / `#8E8795` |
+| `divider` (borderSubtle) / `borderStrong` | `#E9E6E9` / `#D4CFD8` | `#3C3842` / `#56505D` |
+| `accent` (brandPrimary) | `#7761A5` (see below) | `#B8A2DF` |
+| `brandHover` / `brandPressed` | `#66518F` / `#574479` | `#C5B3E7` / `#A48CD4` |
+| `brandSubtle` | `#F0EBF8` | `#332A40` |
+| `accentText` (accent as small text) | `#66518F` | `#B8A2DF` |
+| `selected` (selectedSurface) | `#EEE8F7` | `#40344E` |
+| `success` / `warning` / `danger` | `#408B75` / `#B68036` / `#C45757` | `#79BFA6` / `#DDB16C` / `#DF898B` |
+| `focus` (focusRing) | `#7761A5` | `#B8A2DF` |
 
-## Type and symbols
+**One deliberate deviation.** The brief's light `brandPrimary` `#8873B4` gives
+white text 4.07:1 and the focus ring `#A58DCC` gives 2.9:1 on white, both under
+WCAG AA, which the brief also requires. Following its rule to adjust the
+pairing when a colour fails, the light brand ramp sits one step darker
+(`#7761A5` / `#66518F` / `#574479`, 5.2:1 under white text) and the focus ring
+uses `#7761A5`. Dark mode takes the brief's values unchanged. Pairs are pinned
+by `test/app/theme_test.dart` and `test/shared/etonia_identity_test.dart`.
 
-Body, labels and controls use the platform system face. Titles use the rounded
-system face where available: large title 34/800, title 22/700, headline 17/600,
-body 17, callout 16, subhead 15, footnote 13 and caption 12. Text always follows
-the system text scaler. Selection changes colour, never font weight, so labels
-do not jitter.
+The page a person writes on (`writingSurface`, `pageRule`, `pageMarginRule`,
+the ink palette and `highlighters`) belongs to the document, not the theme.
+`pencil`, `sprout`, `lilac` and `fold` survive only as aliases of the brand and
+status tokens so call sites need not change; do not add new uses.
 
-Symbols use one medium, rounded visual weight. Selected icon controls use the
-filled symbol in a solid ink capsule with paper-coloured foreground. Controls in
-a tool's options bar, one level below, are framed instead: a hairline ink outline
-around an ink symbol, with no fill. Text rows use the neutral `selected` capsule.
-Section headings have no decorative mark.
+## Type
+
+Inter carries the whole UI. Newsreader is used only for `displaySmall`, the
+large low-density titles (study overview, practice library, quiz score), and
+never for buttons, navigation, labels, dense or small text, or mathematics.
+Fallbacks for CJK, maths, and symbols are listed in `AppTheme.fontFallback`.
+
+| Brief token | `TextTheme` role | Size / weight / height |
+| --- | --- | --- |
+| display | `displaySmall` (Newsreader), `displayMedium` (Inter, tabular) | 34 / 500 / 1.15 |
+| headingLarge | `headlineMedium` | 28 / 600 / 1.20 |
+| headingMedium | `headlineSmall`, `titleLarge` | 22 / 600 / 1.25 |
+| headingSmall | `titleMedium` | 18 / 600 / 1.30 |
+| bodyLarge / bodyMedium / bodySmall | same names | 16 / 14 / 13, w400 |
+| label | `labelLarge` (14, buttons), `labelMedium` (13) | w500 |
+| micro | `labelSmall` | 11 / 500 / 1.30 |
+
+Headings are medium-weight (never w800); only sizes of 22 and up are tightened.
+Numerals that change (timers, scores, prices, dates) use
+`AppText.tabular`. Text scales with the system.
+
+## Shape, borders, shadow
+
+| Token | px | Applied to |
+| --- | --- | --- |
+| `AppRadii.xs` | 4 | tiny marks |
+| `small` | 8 | compact controls, chips, menu rows, tooltips |
+| `medium` | 12 | buttons, inputs, list tiles, snack bars |
+| `large` / `glass` | 16 | cards, menus, floating panels |
+| `xl` | 22 | dialogs, sheets, drawers |
+| `xxl` | 28 | reserved |
+
+No capsule buttons: pills remain only for true tracks (switch, progress,
+skeleton bars). Borders are 1 px hairlines (`divider`; `borderStrong` for
+secondary buttons and unchecked boxes). `GlassSurface`/`AppGlass` keep their
+names but are plain opaque, bordered surfaces: no blur, no rim gradient.
+
+Shadows are one soft neutral layer (`AppShadows`): `paper` 2/8/4%, `floating`
+6/18/7%, `raised` 12/32/10% (y / blur / opacity). In dark mode they are a
+whisper and surfaces separate by tone and border instead.
+
+## Components
+
+Primary buttons fill with `accent` (`brandHover`, `brandPressed` on hover and
+press), white text, no shadow. Secondary buttons are a `surface` with a
+`borderStrong` hairline. Text buttons are transparent with a 4% hover tint.
+Fields are `surfaceMuted` with a hairline and a 2 px `focus` ring. Switches,
+checkboxes, radios and sliders turn `accent` when on. Selection (tabs,
+segments, toolbar tools, sidebar rows) is `selected` with `accentText` or
+`accent` content. Default icons are `textSecondary`, active icons `accent`,
+disabled `textTertiary`, destructive `danger`. Every icon is a line drawing with
+one universal 1.3 px stroke (`kIconStrokeWidth`), at any size: `EtoniaIcon`
+rewrites each SVG's stroke to that width, and `AppIcon` draws the Material
+and Cupertino glyphs listed in `LineIcons` as SVGs (`assets/icons/system/`)
+instead of fills. Icons no longer take a pencil grain (`EtoniaIcon.applyPencilTexture` is opt-in).
+Sidebars and drawers sit on `backgroundSecondary`; dialogs and popovers on
+`surfaceElevated`; scrims are 28% (light) / 50% (dark) neutral.
 
 ## Motion
 
@@ -69,6 +133,9 @@ interruptible. Movement uses the four `AppMotion` springs:
 | `smooth` | 400 ms / 0 | pages, panels, tabs, popovers and chrome |
 | `bouncy` | 450 ms / 0.25 | docking and rare success emphasis |
 | `sheet` | 450 ms / 0.05 | sheets and detents |
+
+Colour and opacity changes use the duration tokens `fast` (150 ms, controls),
+`standard` (220 ms, interface) and `panel` (280 ms, large panels).
 
 Opacity and colour use `fadeIn` (160 ms ease-out), `fadeOut` (110 ms ease-in)
 and `press` (instant in, 220 ms out). Reduced motion replaces travel and scale
@@ -122,9 +189,9 @@ release, seeded with signed release velocity.
 The plans and the account are full-screen modals (`StorePageShell`): a quiet
 title with a close capsule over a centred, scrolling column. The account page
 gathers profile, subscription and backup as three headed sections. On the
-plans page the recommended plan is drawn in ink (accent fill, paper-coloured
-text) and the others as glass; no brand colour is used, and a breadcrumb or
-selection is never wrapped in a grey capsule.
+plans page the recommended plan is filled with the brand `accent` (on-accent
+text) and the others are plain surfaces; a breadcrumb or selection is never
+wrapped in a grey capsule.
 
 The editor's settings are a popover of headed groups, each a list of rows on
 one quiet surface with hairlines between them: the stylus, the assistant, then
@@ -147,4 +214,4 @@ the semantic events in `AppHaptics`: `toolSwitch`, `tap`, `lift`, `success` and
 
 Content placeholders shimmer on a 1.6-second ticker. Determinate progress moves
 forward with `smooth`. Tiny inline waits use the platform activity indicator.
-At most one Lilac–Sky–Peach ambient AI glow appears on a screen.
+At most one soft brand-tinted ambient AI glow appears on a screen.

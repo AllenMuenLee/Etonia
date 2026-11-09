@@ -282,7 +282,7 @@ class _ChapterRow extends StatelessWidget {
   Widget build(BuildContext context) {
     final AppColors colors = AppColors.of(context);
     final TextTheme text = Theme.of(context).textTheme;
-    final Color foreground = selected ? colors.accent : colors.textPrimary;
+    final Color foreground = selected ? colors.accentText : colors.textPrimary;
     final VoidCallback? onToggle = this.onToggle;
     return Semantics(
       selected: selected,
@@ -323,7 +323,7 @@ class _ChapterRow extends StatelessWidget {
                               context,
                               AppMotion.snappy.duration,
                             ),
-                            child: Icon(
+                            child: AppIcon(
                               AppIcons.disclosure,
                               size: 14,
                               color: colors.textSecondary,

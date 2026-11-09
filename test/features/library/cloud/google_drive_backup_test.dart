@@ -185,6 +185,18 @@ Future<Map<String, Object?>> _describe(NoteRepository repository) async {
   };
 }
 
+Future<NoteEntry> _entryOf(NoteRepository repository, String id) async {
+  for (final String? folder in <String?>[
+    null,
+    for (final Folder f in await repository.allFolders()) f.id,
+  ]) {
+    for (final NoteEntry note in (await repository.list(folder)).notes) {
+      if (note.id == id) return note;
+    }
+  }
+  throw StateError('No note $id in the library');
+}
+
 InMemoryNoteRepository _repository() {
   final InMemoryNoteRepository repository = InMemoryNoteRepository();
   addTearDown(repository.dispose);
@@ -507,6 +519,85 @@ void main() {
         expect((await first.search('Groceries')).notes, isEmpty);
         expect(await first.trash(), isEmpty);
       });
+
+      test(
+        'the same content with a later time there takes only the time',
+        () async {
+          await secondSync.backUp();
+          final DateTime later = DateTime(2032, 5, 6);
+          await first.setNoteModified(groceries, later);
+          await firstSync.backUp();
+          drive.uploads.clear();
+
+          final BackupSummary summary = await secondSync.backUp();
+
+          expect(summary.updatedHere, 0);
+          expect(summary.keptBoth, 0);
+          expect(
+            (await _entryOf(
+              second,
+              groceries,
+            )).modified.isAtSameMomentAs(later),
+            isTrue,
+          );
+          // Nothing but the manifest went to Drive.
+          expect(drive.uploads, <String>[
+            GoogleDriveBackupService.manifestName,
+          ]);
+        },
+      );
+
+      test(
+        'a note never synced here, the same there, takes only the time',
+        () async {
+          // Here by restoring, so this device has no record of syncing it.
+          await secondSync.restore();
+          final DateTime later = DateTime(2032, 5, 6);
+          await first.setNoteModified(groceries, later);
+          await firstSync.backUp();
+
+          final BackupSummary summary = await secondSync.backUp();
+
+          expect(summary.updatedHere, 0);
+          expect(summary.keptBoth, 0);
+          expect(
+            (await _entryOf(
+              second,
+              groceries,
+            )).modified.isAtSameMomentAs(later),
+            isTrue,
+          );
+        },
+      );
+
+      test(
+        'a later time here is sent without sending the content again',
+        () async {
+          await secondSync.backUp();
+          final DateTime later = DateTime(2032, 5, 6);
+          await second.setNoteModified(groceries, later);
+          drive.uploads.clear();
+
+          await secondSync.backUp();
+
+          expect(drive.uploads, <String>[
+            GoogleDriveBackupService.manifestName,
+          ]);
+          final Iterable<Object?> entries =
+              (manifest()['notes']! as List<Object?>).map(
+                (Object? r) => (r! as Map<String, Object?>)['entry'],
+              );
+          final Map<String, Object?> sent = entries
+              .cast<Map<String, Object?>>()
+              .firstWhere((Map<String, Object?> e) => e['id'] == groceries);
+          expect(
+            DateTime.fromMillisecondsSinceEpoch(
+              sent['modified']! as int,
+            ).isAtSameMomentAs(later),
+            isTrue,
+          );
+        },
+      );
     });
 
     group('opening the app on another device', () {
@@ -831,6 +922,200 @@ void main() {
       expect(backup.deletedForGood, 0);
       expect(titlesIn('notes'), <String>['Lecture 1']);
       expect(titlesIn('trash'), <String>['Groceries']);
+    });
+
+    group('over notes brought here already', () {
+      late InMemoryNoteRepository original;
+      late InMemoryNoteRepository other;
+      late GoogleDriveBackupService originalSync;
+      late GoogleDriveBackupService sync;
+      late NoteEntry groceries;
+
+      Future<Set<String>> idsOf(NoteRepository repository) async => <String>{
+        ...(await repository.list(null)).notes.map((NoteEntry n) => n.id),
+        for (final Folder folder in await repository.allFolders())
+          ...(await repository.list(
+            folder.id,
+          )).notes.map((NoteEntry n) => n.id),
+      };
+
+      setUp(() async {
+        original = _repository();
+        await _seed(original);
+        groceries = (await original.search('Groceries')).notes.single;
+        // Keeps its record between backups, as a device does.
+        originalSync = service(original, state: InMemoryCloudStateStore());
+        await originalSync.backUp();
+        // This device has it all from the backup, as on opening the app.
+        other = _repository();
+        sync = service(other, state: InMemoryCloudStateStore());
+        await sync.backUp();
+      });
+
+      test('makes no copies, whichever way it restores', () async {
+        final Set<String> ids = await idsOf(other);
+        final Map<String, Object?> before = await _describe(other);
+        expect(ids, hasLength(2));
+
+        for (final RestoreMode mode in RestoreMode.values) {
+          await sync.restore(mode: mode);
+
+          expect(await idsOf(other), ids, reason: '$mode');
+          expect(await other.trash(), isEmpty, reason: '$mode');
+          expect(await _describe(other), before, reason: '$mode');
+        }
+        // And nothing is logged as deleted for the other devices to see.
+        await sync.backUp();
+        expect(
+          log().values.where((Map<String, Object?> e) => e['status'] != 'live'),
+          isEmpty,
+        );
+      });
+
+      test(
+        'keeps a note deleted in the backup once, in Recently Deleted',
+        () async {
+          await original.deleteNote(groceries.id, at: DateTime(2026, 10, 1));
+          await originalSync.backUp();
+          await sync.backUp();
+          expect((await other.trash()).single.id, groceries.id);
+
+          for (final RestoreMode mode in RestoreMode.values) {
+            await sync.restore(mode: mode);
+
+            final NoteEntry deleted = (await other.trash()).single;
+            expect(deleted.id, groceries.id, reason: '$mode');
+            expect(deleted.deleted, DateTime(2026, 10, 1), reason: '$mode');
+            expect(await idsOf(other), hasLength(1), reason: '$mode');
+          }
+        },
+      );
+
+      test(
+        'replacing moves a note deleted in the backup, not a copy',
+        () async {
+          await original.deleteNote(groceries.id, at: DateTime(2026, 10, 1));
+          await originalSync.backUp();
+
+          // Restored without syncing first, so it is still in the library here.
+          await sync.restore(mode: RestoreMode.replace);
+
+          final NoteEntry deleted = (await other.trash()).single;
+          expect(deleted.id, groceries.id);
+          expect(deleted.deleted, DateTime(2026, 10, 1));
+          expect(await idsOf(other), hasLength(1));
+        },
+      );
+
+      test(
+        'merging brings back a note deleted here, as the same note',
+        () async {
+          await other.deleteNote(groceries.id);
+
+          final RestoreSummary summary = await sync.restore();
+
+          expect(summary.notesRestored, 1);
+          expect(await other.trash(), isEmpty);
+          expect(await idsOf(other), contains(groceries.id));
+          expect(await idsOf(other), hasLength(2));
+        },
+      );
+
+      test(
+        'replacing keeps what is in the backup and trashes the rest',
+        () async {
+          final NoteEntry extra = await other.createNote(
+            title: 'Not in backup',
+          );
+          final Set<String> before = await idsOf(other);
+
+          await sync.restore(mode: RestoreMode.replace);
+
+          expect((await other.trash()).single.id, extra.id);
+          expect(await idsOf(other), before..remove(extra.id));
+        },
+      );
+
+      test(
+        'a different note takes the later edit, not just the later time',
+        () async {
+          NoteContent edited(double y) => NoteContent(<StoredPage>[
+            StoredPage(setup: const PageSetup(), strokes: <Stroke>[_stroke(y)]),
+          ]);
+
+          // Edited here after the backup: replacing keeps this.
+          await other.saveNote(groceries.id, edited(500));
+          await other.setNoteModified(groceries.id, DateTime(2031));
+          await sync.restore(mode: RestoreMode.replace);
+          expect(
+            (await other.loadNote(groceries.id)).toJson(),
+            edited(500).toJson(),
+          );
+
+          // Edited there later: merging keeps this, replacing takes that.
+          await original.saveNote(groceries.id, edited(700));
+          await original.setNoteModified(groceries.id, DateTime(2032));
+          await originalSync.backUp();
+          await sync.restore();
+          expect(
+            (await other.loadNote(groceries.id)).toJson(),
+            edited(500).toJson(),
+          );
+          await sync.restore(mode: RestoreMode.replace);
+          expect(
+            (await other.loadNote(groceries.id)).toJson(),
+            edited(700).toJson(),
+          );
+          expect(
+            (await _entryOf(
+              other,
+              groceries.id,
+            )).modified.isAtSameMomentAs(DateTime(2032)),
+            isTrue,
+          );
+          expect(await other.trash(), isEmpty);
+        },
+      );
+
+      test('the same content only takes the later time', () async {
+        await original.setNoteModified(groceries.id, DateTime(2032));
+        await originalSync.backUp();
+
+        await sync.restore();
+
+        final NoteEntry here = await _entryOf(other, groceries.id);
+        expect(here.modified.isAtSameMomentAs(DateTime(2032)), isTrue);
+        expect(await other.trash(), isEmpty);
+      });
+    });
+
+    test('a restored note keeps the time it was last edited', () async {
+      final InMemoryNoteRepository original = _repository();
+      await _seed(original);
+      final NoteEntry groceries = (await original.search(
+        'Groceries',
+      )).notes.single;
+      await original.setNoteModified(groceries.id, DateTime(2026, 3, 4, 5, 6));
+      await original.deleteNote(groceries.id, at: DateTime(2026, 10, 1));
+      await service(original).backUp();
+
+      final InMemoryNoteRepository fresh = _repository();
+      await service(fresh).restore();
+
+      final NoteEntry lecture = (await fresh.search('Lecture')).notes.single;
+      final NoteEntry lectureThere = (await original.search(
+        'Lecture',
+      )).notes.single;
+      // A backup keeps times to the millisecond.
+      expect(
+        lecture.modified.millisecondsSinceEpoch,
+        lectureThere.modified.millisecondsSinceEpoch,
+      );
+      final NoteEntry deleted = (await fresh.trash()).single;
+      expect(
+        deleted.modified.isAtSameMomentAs(DateTime(2026, 3, 4, 5, 6)),
+        isTrue,
+      );
     });
 
     test('a damaged file stops the restore before anything changes', () async {

@@ -13,11 +13,13 @@ import '../../../shared/layout/breakpoints.dart';
 import '../../../shared/memory/memory_pressure.dart';
 import '../../../shared/navigation/app_sheets.dart';
 import '../../../shared/widgets/app_controls.dart';
-import '../../../shared/widgets/etonia_mark.dart';
+import '../../../shared/widgets/etonia_mascot.dart';
 import '../../../shared/widgets/hold_menu.dart';
+import '../../../shared/widgets/low_token_notice.dart';
 import '../../../shared/widgets/pressable.dart';
 import '../../editor/ai/ai_citation.dart';
 import '../../editor/ai/ai_client.dart';
+import '../../editor/ai/ai_usage_gate.dart';
 import '../../editor/document_io/document_platform.dart';
 import '../../editor/widgets/ai_assistant_panel.dart';
 import '../../editor/widgets/ai_routing_controls.dart';
@@ -724,7 +726,7 @@ class _StudyDeskScreenState extends State<StudyDeskScreen> {
                     : IconButton(
                         key: const ValueKey('study-toggle-history'),
                         tooltip: 'Open history',
-                        icon: const Icon(AppIcons.sidebar),
+                        icon: const AppIcon(AppIcons.sidebar),
                         onPressed: () => setState(() => _historyOpen = true),
                       ),
               ),
@@ -817,7 +819,7 @@ class _StudyDeskScreenState extends State<StudyDeskScreen> {
         if (controller.currentSession.testPaperId != null)
           ListTile(
             key: const ValueKey('study-test-source'),
-            leading: const Icon(Icons.assignment_turned_in_outlined),
+            leading: const AppIcon(Icons.assignment_turned_in_rounded),
             title: Text(
               controller.testPaperSource?.title ?? 'Test unavailable',
             ),
@@ -850,7 +852,6 @@ class _StudyDeskScreenState extends State<StudyDeskScreen> {
                 final i = index;
                 if (messages.isEmpty && !controller.isBusy && failure == null) {
                   return _ChatWelcome(
-                    controller: controller,
                     onStarter: controller.showStarters
                         ? (starter) => unawaited(
                             controller.send(
@@ -921,41 +922,56 @@ class _StudyDeskScreenState extends State<StudyDeskScreen> {
                   children: [
                     StudyDisclose(
                       child: controller.showTestRecommendation
-                          ? Card(
+                          // Etonia springs up from behind the card and looks at
+                          // the person: the test is ready for them.
+                          ? Column(
                               key: const ValueKey<String>(
-                                'study-test-recommendation',
+                                'study-test-recommendation-peek',
                               ),
-                              child: Padding(
-                                padding: const EdgeInsets.all(16),
-                                child: Column(
-                                  crossAxisAlignment: CrossAxisAlignment.start,
-                                  children: [
-                                    const Icon(AppIcons.studyDesk),
-                                    Text(
-                                      'Ready for a quick test on ${controller.activeTestTopic}?',
+                              crossAxisAlignment: CrossAxisAlignment.stretch,
+                              children: <Widget>[
+                                const EtoniaPeek(),
+                                Card(
+                                  key: const ValueKey<String>(
+                                    'study-test-recommendation',
+                                  ),
+                                  margin: EdgeInsets.zero,
+                                  child: Padding(
+                                    padding: const EdgeInsets.all(16),
+                                    child: Column(
+                                      crossAxisAlignment:
+                                          CrossAxisAlignment.start,
+                                      children: [
+                                        const AppIcon(AppIcons.studyDesk),
+                                        Text(
+                                          'Ready for a quick test on ${controller.activeTestTopic}?',
+                                        ),
+                                        const Text(
+                                          'Generated from your notes: 4 MCQs and 1 FRQ with a handwriting canvas.',
+                                        ),
+                                        FilledButton(
+                                          onPressed: controller.isGeneratingTest
+                                              ? null
+                                              : () => unawaited(
+                                                  _createMaterial(
+                                                    StudyMaterialKind.tests,
+                                                  ),
+                                                ),
+                                          child: Text(
+                                            controller.isGeneratingTest
+                                                ? 'Generating test…'
+                                                : 'Generate Test & Start Now',
+                                          ),
+                                        ),
+                                        if (controller.practiceFailure != null)
+                                          Text(
+                                            controller.practiceFailure!.message,
+                                          ),
+                                      ],
                                     ),
-                                    const Text(
-                                      'Generated from your notes: 4 MCQs and 1 FRQ with a handwriting canvas.',
-                                    ),
-                                    FilledButton(
-                                      onPressed: controller.isGeneratingTest
-                                          ? null
-                                          : () => unawaited(
-                                              _createMaterial(
-                                                StudyMaterialKind.tests,
-                                              ),
-                                            ),
-                                      child: Text(
-                                        controller.isGeneratingTest
-                                            ? 'Generating test…'
-                                            : 'Generate Test & Start Now',
-                                      ),
-                                    ),
-                                    if (controller.practiceFailure != null)
-                                      Text(controller.practiceFailure!.message),
-                                  ],
+                                  ),
                                 ),
-                              ),
+                              ],
                             )
                           : null,
                     ),
@@ -1047,6 +1063,9 @@ class _StudyDeskScreenState extends State<StudyDeskScreen> {
                         onAddSources: widget.onAddSources,
                       ),
               ),
+              // Only once the month's tokens are nearly gone.
+              if (controller.usageGate case final AiUsageGate gate)
+                LowTokenNotice(fraction: gate.tokenFraction),
               _composer(),
             ],
           ),
@@ -1236,48 +1255,105 @@ class _EditQuestionDialogState extends State<_EditQuestionDialog> {
   }
 }
 
+/// The blank chat: a large Etonia with a few words beside her, and the
+/// suggested messages.
 class _ChatWelcome extends StatelessWidget {
-  const _ChatWelcome({required this.controller, this.onStarter});
-
-  final StudyDeskController controller;
+  const _ChatWelcome({this.onStarter});
 
   final ValueChanged<StudyStarter>? onStarter;
 
+  /// Below this width the words go under her instead of beside her.
+  static const double _sideBySideWidth = 560;
+
   @override
   Widget build(BuildContext context) {
-    final colors = AppColors.of(context);
+    // She is the screen: as tall as a third of it, within sensible bounds.
+    final double screenHeight = MediaQuery.sizeOf(context).height;
+    final double mascotHeight = (screenHeight * 0.34).clamp(180.0, 340.0);
+    final AppColors colors = AppColors.of(context);
+    final TextTheme theme = Theme.of(context).textTheme;
+    // Etonia plays around while she waits.
+    final Widget mascot = EtoniaMascot.playlist(
+      key: const ValueKey<String>('study-welcome-etonia'),
+      playlist: const <EtoniaClip>[
+        EtoniaClip.lookAround,
+        EtoniaClip.hop,
+        EtoniaClip.think,
+        EtoniaClip.hop,
+      ],
+      // She plays in bursts, standing still in between.
+      rest: const Duration(seconds: 2),
+      height: mascotHeight,
+      semanticsLabel: 'Etonia is waiting for your first question',
+    );
+    Widget words({required TextAlign align}) => Column(
+      key: const ValueKey<String>('study-welcome-text'),
+      mainAxisSize: MainAxisSize.min,
+      crossAxisAlignment: align == TextAlign.center
+          ? CrossAxisAlignment.center
+          : CrossAxisAlignment.start,
+      children: <Widget>[
+        Text(
+          'What shall we study today?',
+          textAlign: align,
+          style: theme.headlineSmall?.copyWith(color: colors.textPrimary),
+        ),
+        const SizedBox(height: AppSpacing.xs),
+        Text(
+          'Ask about your notes, or pick a starter below.',
+          textAlign: align,
+          style: theme.bodyMedium?.copyWith(color: colors.textSecondary),
+        ),
+      ],
+    );
     return Padding(
-      padding: const EdgeInsets.symmetric(vertical: 24, horizontal: 8),
+      padding: EdgeInsets.only(
+        top: (screenHeight * 0.06).clamp(16.0, 64.0),
+        bottom: 24,
+      ),
       child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.center,
         children: [
-          Container(width: 40, height: 4, color: colors.accent),
-          const SizedBox(height: 20),
-          Text(
-            'A LITTLE CURIOSITY GOES A LONG WAY',
-            style: Theme.of(context).textTheme.labelSmall?.copyWith(
-              color: colors.textSecondary,
-              letterSpacing: 1.5,
-            ),
+          LayoutBuilder(
+            builder: (BuildContext context, BoxConstraints constraints) {
+              if (constraints.maxWidth < _sideBySideWidth) {
+                return Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: <Widget>[
+                    mascot,
+                    const SizedBox(height: AppSpacing.md),
+                    Padding(
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: AppSpacing.md,
+                      ),
+                      child: words(align: TextAlign.center),
+                    ),
+                  ],
+                );
+              }
+              return Padding(
+                padding: const EdgeInsets.symmetric(horizontal: AppSpacing.lg),
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.center,
+                  children: <Widget>[
+                    mascot,
+                    const SizedBox(width: AppSpacing.lg),
+                    Flexible(
+                      child: ConstrainedBox(
+                        constraints: const BoxConstraints(maxWidth: 320),
+                        child: words(align: TextAlign.start),
+                      ),
+                    ),
+                  ],
+                ),
+              );
+            },
           ),
-          const SizedBox(height: 12),
-          Text(
-            'Make space for\nyour next idea.',
-            style: Theme.of(context).textTheme.displaySmall?.copyWith(
-              fontWeight: FontWeight.w600,
-              letterSpacing: -1.2,
-            ),
-          ),
-          const SizedBox(height: 12),
-          Text(
-            'Explore your notes, untangle a topic, or put what you know to the test.',
-            style: TextStyle(color: colors.textSecondary),
-          ),
-          const SizedBox(height: 24),
-          if (onStarter != null) _Starters(onChosen: onStarter!),
-          if (controller.suggestedClassFolders.isNotEmpty) ...[
+          if (onStarter != null) ...<Widget>[
             const SizedBox(height: 32),
-            StudySuggestedClasses(controller: controller),
+            _Starters(onChosen: onStarter!, centered: true),
           ],
         ],
       ),
@@ -1558,7 +1634,7 @@ class _Suggestions extends StatelessWidget {
                         onPressed: busy
                             ? null
                             : () => unawaited(controller.refreshSuggestions()),
-                        icon: const Icon(Icons.refresh),
+                        icon: const AppIcon(Icons.refresh_rounded),
                       ),
                     ),
                   ],
@@ -1605,7 +1681,7 @@ class _CitationChip extends StatelessWidget {
         child: Pressable(
           child: InkWell(
             onTap: onPressed,
-            customBorder: const StadiumBorder(),
+            customBorder: const RoundedRectangleBorder(borderRadius: AppBorderRadius.medium),
             child: ConstrainedBox(
               constraints: const BoxConstraints(
                 minWidth: AppSizes.minTouchTarget,
@@ -1617,7 +1693,7 @@ class _CitationChip extends StatelessWidget {
                 heightFactor: 1,
                 child: DecoratedBox(
                   decoration: ShapeDecoration(
-                    shape: const StadiumBorder(),
+                    shape: const RoundedRectangleBorder(borderRadius: AppBorderRadius.medium),
                     color: colors.selected,
                   ),
                   child: Padding(
@@ -1628,7 +1704,7 @@ class _CitationChip extends StatelessWidget {
                     child: Row(
                       mainAxisSize: MainAxisSize.min,
                       children: <Widget>[
-                        Icon(
+                        AppIcon(
                           AppIcons.note,
                           size: 12,
                           color: colors.textPrimary,
@@ -1678,10 +1754,20 @@ class StudyWorkingIndicator extends StatelessWidget {
       liveRegion: true,
       container: true,
       child: Row(
-        crossAxisAlignment: CrossAxisAlignment.start,
+        crossAxisAlignment: CrossAxisAlignment.center,
         children: <Widget>[
-          ExcludeSemantics(
-            child: EtoniaBarsLoader(size: 24, semanticsLabel: label),
+          // Etonia looks around while the AI is searching or reading the
+          // person's files, scribbles while it is writing the answer, and
+          // thinks the rest of the time.
+          EtoniaMascot(
+            clip: switch (work.phase) {
+              StudyProgressPhase.searching ||
+              StudyProgressPhase.reading => EtoniaClip.lookAround,
+              StudyProgressPhase.answering => EtoniaClip.write,
+              _ => EtoniaClip.think,
+            },
+            height: 80,
+            semanticsLabel: label,
           ),
           const SizedBox(width: AppSpacing.sm),
           Flexible(
@@ -1776,9 +1862,10 @@ class _Failure extends StatelessWidget {
 }
 
 class _Starters extends StatelessWidget {
-  const _Starters({required this.onChosen});
+  const _Starters({required this.onChosen, this.centered = false});
 
   final ValueChanged<StudyStarter> onChosen;
+  final bool centered;
 
   @override
   Widget build(BuildContext context) {
@@ -1790,7 +1877,7 @@ class _Starters extends StatelessWidget {
       child: Wrap(
         spacing: AppSpacing.xs,
         runSpacing: AppSpacing.xs,
-        alignment: WrapAlignment.start,
+        alignment: centered ? WrapAlignment.center : WrapAlignment.start,
         children: <Widget>[
           for (final (int index, StudyStarter starter)
               in StudyStarter.all.indexed)
@@ -1947,20 +2034,19 @@ class _Composer extends StatelessWidget {
                     icon: listening
                         ? AppIcons.microphoneActive
                         : AppIcons.microphone,
+                    glyphSize: 15,
                     background: listening ? colors.danger : colors.surfaceMuted,
                     foreground: listening
                         ? colors.onAccent
                         : colors.textPrimary,
-                    size: 36,
                   ),
-                  const SizedBox(width: AppSpacing.xxs),
                   CompactIconButton(
                     tooltip: 'Send',
                     onPressed: onSend,
                     icon: AppIcons.send,
+                    glyphSize: 15,
                     background: colors.accent,
                     foreground: colors.onAccent,
-                    size: 36,
                   ),
                 ],
               ),

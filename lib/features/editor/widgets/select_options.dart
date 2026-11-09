@@ -34,7 +34,7 @@ class SelectOptions extends StatelessWidget {
           selected: selectPdf,
           toggled: selectPdf,
           onPressed: () => onSelectPdfChanged(!selectPdf),
-          child: const Icon(AppIcons.pdf),
+          child: const AppIcon(AppIcons.pdf),
         ),
       ],
     );

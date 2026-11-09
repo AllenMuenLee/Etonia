@@ -21,12 +21,21 @@ class RecordingToolData {
     required this.onResume,
     required this.onStop,
     required this.onOpen,
+    this.player,
+    this.onCloseReplay,
     this.transcription,
     this.onTranscribe,
     this.onShowTranscript,
   });
 
   final NoteAudioRecorder recorder;
+
+  /// Plays the open recording. Without it the sub toolbar has no playback
+  /// bar.
+  final NoteAudioPlayer? player;
+
+  /// Closes the open recording's replay.
+  final VoidCallback? onCloseReplay;
 
   /// Holds the recordings; listened to so a new one appears in the list.
   final NoteDocument document;
@@ -113,57 +122,21 @@ class RecordingOptions extends StatelessWidget {
     );
   }
 
+  /// Starts a recording and puts the panel away: while it runs, the Record
+  /// button stops it, and pause and the time are in the sub toolbar.
   Widget _controls(BuildContext context) {
-    final NoteAudioRecorder recorder = data.recorder;
-    final AppColors colors = AppColors.of(context);
-    if (recorder.state == NoteAudioRecorderState.idle) {
-      return Align(
-        alignment: Alignment.centerLeft,
-        child: TextButton.icon(
-          key: const ValueKey<String>('start-audio-recording'),
-          onPressed: data.onStart,
-          icon: const Icon(AppIcons.microphone),
-          label: const Text('Record audio & strokes'),
-        ),
-      );
-    }
-    final bool paused = recorder.state == NoteAudioRecorderState.paused;
-    return DecoratedBox(
-      decoration: BoxDecoration(
-        color: colors.recordingSurface,
-        borderRadius: AppBorderRadius.medium,
-      ),
-      child: Row(
-        children: <Widget>[
-          RecordingPulse(running: !paused),
-          Expanded(
-            child: Text(
-              formatRecordingDuration(
-                Duration(milliseconds: recorder.currentElapsedMs),
-              ),
-              key: const ValueKey<String>('recording-elapsed'),
-              style: TextStyle(
-                color: colors.recordingForeground,
-                fontFeatures: const <FontFeature>[FontFeature.tabularFigures()],
-                fontWeight: FontWeight.w600,
-              ),
-            ),
-          ),
-          IconButton(
-            key: const ValueKey<String>('pause-resume-recording'),
-            tooltip: paused ? 'Resume recording' : 'Pause recording',
-            onPressed: paused ? data.onResume : data.onPause,
-            icon: Icon(paused ? AppIcons.play : AppIcons.pause),
-          ),
-          IconButton(
-            key: const ValueKey<String>('stop-audio-recording'),
-            tooltip: 'Stop and save recording',
-            onPressed: recorder.state == NoteAudioRecorderState.stopping
-                ? null
-                : data.onStop,
-            icon: const Icon(AppIcons.stop),
-          ),
-        ],
+    return Align(
+      alignment: Alignment.centerLeft,
+      child: TextButton.icon(
+        key: const ValueKey<String>('start-audio-recording'),
+        onPressed: data.recorder.state == NoteAudioRecorderState.idle
+            ? () {
+                data.onStart();
+                onChosen?.call();
+              }
+            : null,
+        icon: const AppIcon(AppIcons.microphone),
+        label: const Text('Record audio & strokes'),
       ),
     );
   }
@@ -179,7 +152,7 @@ class RecordingOptions extends StatelessWidget {
       selectedColor: colors.accent,
       enabled: !recording,
       contentPadding: const EdgeInsets.symmetric(horizontal: AppSpacing.xs),
-      leading: Icon(open ? AppIcons.pause : AppIcons.play),
+      leading: AppIcon(open ? AppIcons.pause : AppIcons.play),
       title: Text(track.title, maxLines: 1, overflow: TextOverflow.ellipsis),
       subtitle: Text(
         formatRecordingDuration(Duration(milliseconds: track.durationMs)),
@@ -216,7 +189,7 @@ class RecordingOptions extends StatelessWidget {
             key: ValueKey<String>('stop-transcribing-${track.id}'),
             tooltip: 'Stop transcribing',
             onPressed: transcription.cancel,
-            icon: const Icon(AppIcons.stop),
+            icon: const AppIcon(AppIcons.stop),
           ),
         ],
       );
@@ -229,7 +202,7 @@ class RecordingOptions extends StatelessWidget {
           data.onShowTranscript!(track);
           onChosen?.call();
         },
-        icon: const Icon(AppIcons.transcript),
+        icon: const AppIcon(AppIcons.transcript),
       );
     }
     return IconButton(
@@ -239,7 +212,7 @@ class RecordingOptions extends StatelessWidget {
       onPressed: recording || transcription.isBusy
           ? null
           : () => onTranscribe(track),
-      icon: const Icon(AppIcons.transcribe),
+      icon: const AppIcon(AppIcons.transcribe),
     );
   }
 }
@@ -264,7 +237,7 @@ class RecordingGlyph extends StatelessWidget {
       listenable: recorder,
       builder: (BuildContext context, Widget? _) {
         if (recorder.state == NoteAudioRecorderState.idle) {
-          return const Icon(AppIcons.microphone);
+          return const AppIcon(AppIcons.microphone);
         }
         return RecordingPulse(
           running: recorder.state == NoteAudioRecorderState.recording,

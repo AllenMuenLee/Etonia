@@ -62,8 +62,42 @@ class _AccountPageState extends State<AccountPage> {
       : _AccountTab.profile;
   final ScrollController _scroll = ScrollController();
 
+  /// The tabs built so far. The one shown is built at once; the others
+  /// once the page has finished coming in, so laying them out (the plans,
+  /// the backup sheet) costs no frame of the move. Built, they are kept.
+  late final Set<_AccountTab> _built = <_AccountTab>{_tab};
+
+  /// The move bringing the page in, while it is under way.
+  Animation<double>? _arrival;
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    if (_built.length == _AccountTab.values.length) return;
+    final ModalRoute<Object?>? route = ModalRoute.of(context);
+    final Animation<double>? animation = route?.animation;
+    // Offstage, on its first frame while heroes are measured, a route's
+    // animation reads complete before the move has begun.
+    if (animation == null || (animation.isCompleted && !route!.offstage)) {
+      _arrival?.removeStatusListener(_arrived);
+      _arrival = null;
+      _built.addAll(_AccountTab.values);
+    } else if (animation != _arrival) {
+      _arrival?.removeStatusListener(_arrived);
+      _arrival = animation..addStatusListener(_arrived);
+    }
+  }
+
+  void _arrived(AnimationStatus status) {
+    if (status != AnimationStatus.completed) return;
+    _arrival?.removeStatusListener(_arrived);
+    _arrival = null;
+    if (mounted) setState(() => _built.addAll(_AccountTab.values));
+  }
+
   @override
   void dispose() {
+    _arrival?.removeStatusListener(_arrived);
     _scroll.dispose();
     super.dispose();
   }
@@ -84,7 +118,10 @@ class _AccountPageState extends State<AccountPage> {
 
   void _select(_AccountTab tab) {
     if (tab == _tab) return;
-    setState(() => _tab = tab);
+    setState(() {
+      _tab = tab;
+      _built.add(tab);
+    });
     // Each tab is read from its top.
     if (_scroll.hasClients) _scroll.jumpTo(0);
   }
@@ -116,11 +153,14 @@ class _AccountPageState extends State<AccountPage> {
           // The tabs left are kept, so a gift code half typed or a backup
           // under way is still there on the way back.
           for (final _AccountTab tab in _AccountTab.values)
-            Visibility(
-              visible: tab == _tab,
-              maintainState: true,
-              child: _tabBody(context, tab),
-            ),
+            if (_built.contains(tab))
+              Visibility(
+                // Keyed, so a tab built later never takes another's state.
+                key: ValueKey<_AccountTab>(tab),
+                visible: tab == _tab,
+                maintainState: true,
+                child: _tabBody(context, tab),
+              ),
         ],
       ),
     );

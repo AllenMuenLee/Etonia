@@ -7,6 +7,7 @@ import 'package:flutter/physics.dart';
 import '../../app/theme/app_tokens.dart';
 import '../feedback/app_haptics.dart';
 import 'pressable.dart';
+import 'etonia_icon.dart';
 
 // The small controls every panel is built from, so the pen's options, the
 // eraser's, the page panel, and the settings all look and behave alike.
@@ -22,6 +23,7 @@ class CompactIconButton extends StatelessWidget {
     this.background,
     this.foreground,
     this.size = 32,
+    this.glyphSize,
   });
 
   final String tooltip;
@@ -35,6 +37,12 @@ class CompactIconButton extends StatelessWidget {
 
   /// The circle's diameter.
   final double size;
+
+  /// The glyph's box, for a glyph that fills more of its 24 unit grid than
+  /// the close X does, so it sits in the circle in the same proportion. The
+  /// line stays [kIconStrokeWidth] thick at any size. Null draws it at the
+  /// size every icon shares.
+  final double? glyphSize;
 
   @override
   Widget build(BuildContext context) {
@@ -61,13 +69,27 @@ class CompactIconButton extends StatelessWidget {
                 : colors.surfaceMuted,
             shape: BoxShape.circle,
           ),
-          child: Icon(
-            icon,
-            size: 18,
-            color: enabled
-                ? foreground ?? colors.textSecondary
-                : colors.textSecondary.withValues(alpha: 0.5),
-          ),
+          child: glyphSize == null
+              ? AppIcon(
+                  icon,
+                  size: 18,
+                  color: enabled
+                      ? foreground ?? colors.textSecondary
+                      : colors.textSecondary.withValues(alpha: 0.5),
+                )
+              : Center(
+                  child: AppIcon(
+                    icon,
+                    uniform: false,
+                    size: glyphSize,
+                    color: iconTint(
+                      context,
+                      enabled
+                          ? foreground ?? colors.textSecondary
+                          : colors.textSecondary.withValues(alpha: 0.5),
+                    ),
+                  ),
+                ),
         ),
       ),
     );
@@ -103,7 +125,10 @@ class ToolbarIconButton extends StatelessWidget {
       icon: Pressable(
         enabled: onPressed != null,
         type: PressableType.icon,
-        child: SizedBox.square(dimension: 40, child: Center(child: Icon(icon))),
+        child: SizedBox.square(
+          dimension: 40,
+          child: Center(child: AppIcon(icon)),
+        ),
       ),
     );
   }
@@ -160,13 +185,13 @@ class ValuePill extends StatelessWidget {
       ),
       decoration: BoxDecoration(
         color: muted ? colors.surfaceMuted : colors.selected,
-        borderRadius: BorderRadius.circular(999),
+        borderRadius: AppBorderRadius.small,
       ),
       child: Text(
         text,
         textAlign: TextAlign.center,
         style: Theme.of(context).textTheme.labelMedium!.copyWith(
-          color: muted ? colors.textSecondary : colors.accent,
+          color: muted ? colors.textSecondary : colors.accentText,
           fontWeight: FontWeight.w600,
           fontFeatures: const <FontFeature>[FontFeature.tabularFigures()],
         ),
@@ -247,7 +272,8 @@ class _AppSliderState extends State<AppSlider> {
   }
 }
 
-/// A white thumb with a colored ring that grows a touch while dragged.
+/// A paper thumb with a graphite ring and center dot that grows a touch
+/// while dragged.
 class RingThumbShape extends SliderComponentShape {
   const RingThumbShape({
     required this.fill,
@@ -299,7 +325,8 @@ class RingThumbShape extends SliderComponentShape {
           ..color = ring
           ..style = PaintingStyle.stroke
           ..strokeWidth = 2.5,
-      );
+      )
+      ..drawCircle(center, 2.5, Paint()..color = ring);
   }
 }
 
@@ -327,7 +354,7 @@ class ToggleTrack extends StatelessWidget {
       height: 31,
       padding: const EdgeInsets.all(3),
       decoration: BoxDecoration(
-        color: value ? colors.accent : colors.divider,
+        color: value ? colors.accent : colors.borderStrong,
         borderRadius: BorderRadius.circular(999),
       ),
       child: AnimatedAlign(
@@ -338,7 +365,8 @@ class ToggleTrack extends StatelessWidget {
             : AlignmentDirectional.centerStart,
         child: DecoratedBox(
           decoration: BoxDecoration(
-            color: value ? colors.onAccent : colors.surface,
+            // A crisp white thumb, in either theme.
+            color: AppColors.light.writingSurface,
             shape: BoxShape.circle,
             boxShadow: <BoxShadow>[
               BoxShadow(
@@ -458,7 +486,7 @@ class _ToggleSettingState extends State<ToggleSetting> {
               child: Row(
                 children: <Widget>[
                   if (icon != null) ...<Widget>[
-                    Icon(icon, size: 20, color: colors.textSecondary),
+                    AppIcon(icon, size: 20, color: colors.textSecondary),
                     const SizedBox(width: AppSpacing.sm),
                   ],
                   Expanded(
@@ -515,7 +543,9 @@ class SegmentedChoice<T> extends StatelessWidget {
       padding: const EdgeInsets.all(inset),
       decoration: ShapeDecoration(
         color: AppGlass.muted(colors),
-        shape: const StadiumBorder(),
+        shape: const RoundedRectangleBorder(
+          borderRadius: AppBorderRadius.medium,
+        ),
       ),
       child: Stack(
         children: <Widget>[
@@ -526,7 +556,9 @@ class SegmentedChoice<T> extends StatelessWidget {
                 count: options.length,
                 decoration: ShapeDecoration(
                   color: colors.surface,
-                  shape: const StadiumBorder(),
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(10),
+                  ),
                   shadows: <BoxShadow>[
                     BoxShadow(
                       color: colors.shadow.withValues(alpha: 0.10),
@@ -553,7 +585,7 @@ class SegmentedChoice<T> extends StatelessWidget {
                           visualOf?.call(option, foreground) ??
                           (icon == null
                               ? null
-                              : Icon(icon, size: 16, color: foreground));
+                              : AppIcon(icon, size: 16, color: foreground));
                       return Semantics(
                         key: keyOf?.call(option),
                         container: true,
@@ -568,7 +600,7 @@ class SegmentedChoice<T> extends StatelessWidget {
                           onTap: () => onSelected(option),
                           child: Pressable(
                             type: PressableType.chip,
-                            borderRadius: BorderRadius.circular(999),
+                            borderRadius: AppBorderRadius.medium,
                             child: Center(
                               child: Row(
                                 mainAxisSize: MainAxisSize.min,
@@ -612,8 +644,9 @@ class SegmentedChoice<T> extends StatelessWidget {
   }
 }
 
-/// A recessed, shaded capsule gauge with a lit, glowing fill bar for
-/// showing remaining AI token allowance.
+/// A plain capsule gauge for showing remaining AI token allowance: a flat
+/// trough with a flat accent fill, in the same theme colors as the rest of
+/// the interface.
 class TokenMeterBar extends StatelessWidget {
   const TokenMeterBar({
     super.key,
@@ -634,55 +667,14 @@ class TokenMeterBar extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final AppColors colors = AppColors.of(context);
-    final bool dark = Theme.of(context).brightness == Brightness.dark;
     final double clamped = fraction.clamp(0.0, 1.0);
     final BorderRadius radius = BorderRadius.circular(height);
-
-    // Recessed trough: shaded at the top edge, softly catching light at the bottom.
-    final Color troughTop = Color.alphaBlend(
-      colors.shadow.withValues(alpha: dark ? 0.42 : 0.10),
-      colors.surfaceMuted,
-    );
-    final Color troughBottom = Color.alphaBlend(
-      Colors.white.withValues(alpha: dark ? 0.05 : 0.65),
-      colors.surfaceMuted,
-    );
-
-    // Lit fill: deep base -> rich accent -> luminous tip.
-    final Color fillStart = Color.alphaBlend(
-      colors.shadow.withValues(alpha: dark ? 0.22 : 0.16),
-      colors.accent,
-    );
-    final Color fillEnd = Color.lerp(
-      colors.accent,
-      Colors.white,
-      dark ? 0.28 : 0.22,
-    )!;
 
     Widget bar = SizedBox(
       width: width,
       height: height,
       child: DecoratedBox(
-        decoration: BoxDecoration(
-          borderRadius: radius,
-          gradient: LinearGradient(
-            begin: Alignment.topCenter,
-            end: Alignment.bottomCenter,
-            colors: <Color>[troughTop, colors.surfaceMuted, troughBottom],
-            stops: const <double>[0.0, 0.55, 1.0],
-          ),
-          border: Border.all(
-            color: colors.divider.withValues(alpha: dark ? 0.75 : 0.85),
-            width: AppSizes.hairline,
-          ),
-          boxShadow: <BoxShadow>[
-            BoxShadow(
-              color: Colors.white.withValues(alpha: dark ? 0.04 : 0.55),
-              blurRadius: 1,
-              offset: const Offset(0, 1),
-            ),
-          ],
-        ),
+        decoration: BoxDecoration(color: colors.divider, borderRadius: radius),
         child: ClipRRect(
           borderRadius: radius,
           child: Align(
@@ -696,43 +688,8 @@ class TokenMeterBar extends StatelessWidget {
                   ? const SizedBox.expand()
                   : DecoratedBox(
                       decoration: BoxDecoration(
+                        color: colors.accent,
                         borderRadius: radius,
-                        gradient: LinearGradient(
-                          begin: AlignmentDirectional.centerStart,
-                          end: AlignmentDirectional.centerEnd,
-                          colors: <Color>[fillStart, colors.accent, fillEnd],
-                          stops: const <double>[0.0, 0.68, 1.0],
-                        ),
-                        boxShadow: <BoxShadow>[
-                          BoxShadow(
-                            color: colors.accent.withValues(
-                              alpha: dark ? 0.50 : 0.32,
-                            ),
-                            blurRadius: height * 0.9,
-                            spreadRadius: 0.5,
-                          ),
-                        ],
-                      ),
-                      // Specular top highlight and bottom cylindrical shade.
-                      child: DecoratedBox(
-                        decoration: BoxDecoration(
-                          borderRadius: radius,
-                          gradient: LinearGradient(
-                            begin: Alignment.topCenter,
-                            end: Alignment.bottomCenter,
-                            colors: <Color>[
-                              Colors.white.withValues(
-                                alpha: dark ? 0.34 : 0.42,
-                              ),
-                              Colors.white.withValues(alpha: 0.0),
-                              colors.shadow.withValues(
-                                alpha: dark ? 0.24 : 0.14,
-                              ),
-                            ],
-                            stops: const <double>[0.0, 0.48, 1.0],
-                          ),
-                        ),
-                        child: const SizedBox.expand(),
                       ),
                     ),
             ),
@@ -827,7 +784,9 @@ class _SelectionCapsuleState extends State<SelectionCapsule>
 
   @override
   Widget build(BuildContext context) {
-    final Color fill = widget.color ?? AppColors.of(context).accent;
+    // The selection is marked as a highlighter would mark it, so what is
+    // inside keeps its ordinary ink color.
+    final Color fill = widget.color ?? AppColors.of(context).selected;
     final bool horizontal = widget.axis == Axis.horizontal;
     return LayoutBuilder(
       builder: (BuildContext context, BoxConstraints constraints) {
@@ -847,7 +806,12 @@ class _SelectionCapsuleState extends State<SelectionCapsule>
             child: DecoratedBox(
               decoration:
                   widget.decoration ??
-                  ShapeDecoration(color: fill, shape: const StadiumBorder()),
+                  ShapeDecoration(
+                    color: fill,
+                    shape: const RoundedRectangleBorder(
+                      borderRadius: AppBorderRadius.medium,
+                    ),
+                  ),
             ),
           ),
           builder: (BuildContext context, Widget? child) {

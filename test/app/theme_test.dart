@@ -50,7 +50,7 @@ void main() {
       });
 
       test('controls, selection, and focus', () {
-        // `selected` is a translucent tint; judge it as painted on a card.
+        // `selected` is an opaque tint; judge it as painted on a card.
         expect(
           contrastRatio(
             colors.accent,
@@ -88,10 +88,16 @@ void main() {
   }
 
   test('the page is distinct from the chrome', () {
+    // By day the chrome is a warm off-white and the page crisp white; the
+    // page is set apart by its own surface and a low shadow.
+    expect(AppColors.light.background, const Color(0xFFFAF9F7));
+    expect(AppColors.light.writingSurface, const Color(0xFFFFFFFF));
     expect(AppColors.light.writingSurface, isNot(AppColors.light.background));
-    expect(AppColors.dark.writingSurface, isNot(AppColors.dark.background));
-    // Dark is the logo as drawn: true black ground, lifted surfaces.
-    expect(AppColors.dark.background, const Color(0xFF000000));
+    expect(AppColors.light.surface, isNot(AppColors.light.background));
+    // By night the chrome is layered charcoal, never pure black, with lifted
+    // surfaces.
+    expect(AppColors.dark.background, isNot(const Color(0xFF000000)));
+    expect(AppColors.dark.background, const Color(0xFF161519));
     expect(AppColors.dark.surface, isNot(AppColors.dark.background));
     expect(AppColors.dark.writingSurface, isNot(AppColors.dark.background));
   });

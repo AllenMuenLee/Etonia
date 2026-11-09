@@ -3,9 +3,11 @@ import 'dart:math' as math;
 import 'package:flutter/material.dart';
 
 import '../../app/theme/app_tokens.dart';
+import 'pencil_texture.dart';
 import 'pressable.dart';
 
-/// A document surface with Etonia's single folded top-trailing corner.
+/// A document surface with Etonia's single folded top-trailing corner, the
+/// fold her own sheet of paper has, in the shade of [AppColors.fold].
 class DogEar extends StatelessWidget {
   const DogEar({
     super.key,
@@ -28,12 +30,13 @@ class DogEar extends StatelessWidget {
     final TextDirection direction = Directionality.of(context);
     final bool held = pressed || Pressable.isPressed(context);
     final Color flap = held
-        ? Color.lerp(flapColor ?? colors.surfaceMuted, colors.shadow, 0.12)!
-        : flapColor ?? colors.surfaceMuted;
+        ? Color.lerp(flapColor ?? colors.fold, colors.shadow, 0.12)!
+        : flapColor ?? colors.fold;
     return CustomPaint(
       foregroundPainter: DogEarPainter(
         flapColor: flap,
         gapColor: backgroundColor ?? colors.background,
+        inkColor: colors.textPrimary,
         textDirection: direction,
       ),
       child: ClipPath(
@@ -82,11 +85,15 @@ class DogEarPainter extends CustomPainter {
     required this.flapColor,
     required this.gapColor,
     required this.textDirection,
+    this.inkColor,
   });
 
   final Color flapColor;
   final Color gapColor;
   final TextDirection textDirection;
+
+  /// The warm charcoal of the pencil line round the flap, when it has one.
+  final Color? inkColor;
 
   @override
   void paint(Canvas canvas, Size size) {
@@ -95,12 +102,33 @@ class DogEarPainter extends CustomPainter {
     final double edge = rtl ? 0 : size.width;
     final double inner = rtl ? fold : size.width - fold;
     final double gap = math.min(1.5, fold * 0.08);
+    final double sign = rtl ? 1 : -1;
+    // A straight 45-degree flap: the folded triangle of the corner.
     final Path flap = Path()
       ..moveTo(inner + (rtl ? gap : -gap), gap)
-      ..lineTo(edge + (rtl ? fold - gap : -fold + gap), fold - gap)
+      ..lineTo(edge + sign * (fold - gap), fold - gap)
       ..lineTo(edge, fold - gap)
       ..close();
+    final Color ink = inkColor ?? flapColor;
+    // A hairline shadow under the flap.
+    canvas.drawPath(
+      flap.shift(const Offset(0, 1)),
+      Paint()..color = ink.withValues(alpha: 0.10),
+    );
     canvas.drawPath(flap, Paint()..color = flapColor);
+    if (inkColor != null) {
+      // Its edge, in pencil: straight lines with the grain of graphite.
+      PencilTexture.paintMasked(canvas, flap.getBounds().inflate(2), () {
+        canvas.drawPath(
+          flap,
+          Paint()
+            ..color = ink.withValues(alpha: 0.75)
+            ..style = PaintingStyle.stroke
+            ..strokeWidth = 1.2
+            ..strokeJoin = StrokeJoin.round,
+        );
+      });
+    }
     canvas.drawLine(
       Offset(inner, 0),
       Offset(edge, fold),
@@ -115,5 +143,6 @@ class DogEarPainter extends CustomPainter {
   bool shouldRepaint(DogEarPainter oldDelegate) =>
       oldDelegate.flapColor != flapColor ||
       oldDelegate.gapColor != gapColor ||
+      oldDelegate.inkColor != inkColor ||
       oldDelegate.textDirection != textDirection;
 }

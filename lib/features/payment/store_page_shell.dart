@@ -76,7 +76,7 @@ class StorePageShell extends StatelessWidget {
                       ),
                       IconButton(
                         key: closeKey,
-                        icon: const Icon(AppIcons.close, size: 20),
+                        icon: const AppIcon(AppIcons.close, size: 20),
                         color: colors.textPrimary,
                         tooltip: 'Close',
                         style: IconButton.styleFrom(

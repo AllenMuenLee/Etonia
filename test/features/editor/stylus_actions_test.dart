@@ -139,33 +139,29 @@ void main() {
     expect(bindings.value.secondaryPress, StylusAction.undo);
   });
 
-  testWidgets(
-    'settings offer the gestures Apple Pencil has',
-    (WidgetTester tester) async {
-      await _pumpSettings(tester);
+  testWidgets('settings offer the gestures Apple Pencil has', (
+    WidgetTester tester,
+  ) async {
+    await _pumpSettings(tester);
 
-      expect(find.text('Apple Pencil'), findsOneWidget);
-      expect(find.text('Only write with Apple Pencil'), findsOneWidget);
-      expect(_actionRow(StylusGesture.doubleTap), findsOneWidget);
-      expect(_actionRow(StylusGesture.squeeze), findsOneWidget);
-      expect(_actionRow(StylusGesture.singlePress), findsNothing);
-      expect(_actionRow(StylusGesture.secondaryPress), findsNothing);
-    },
-    variant: TargetPlatformVariant.only(TargetPlatform.iOS),
-  );
+    expect(find.text('Apple Pencil'), findsOneWidget);
+    expect(find.text('Only write with Apple Pencil'), findsOneWidget);
+    expect(_actionRow(StylusGesture.doubleTap), findsOneWidget);
+    expect(_actionRow(StylusGesture.squeeze), findsOneWidget);
+    expect(_actionRow(StylusGesture.singlePress), findsNothing);
+    expect(_actionRow(StylusGesture.secondaryPress), findsNothing);
+  }, variant: TargetPlatformVariant.only(TargetPlatform.iOS));
 
-  testWidgets(
-    'where no stylus gestures are reported, settings offer none',
-    (WidgetTester tester) async {
-      await _pumpSettings(tester);
+  testWidgets('where no stylus gestures are reported, settings offer none', (
+    WidgetTester tester,
+  ) async {
+    await _pumpSettings(tester);
 
-      for (final StylusGesture gesture in StylusGesture.values) {
-        expect(_actionRow(gesture), findsNothing);
-      }
-      expect(find.text('Only write with stylus'), findsOneWidget);
-    },
-    variant: TargetPlatformVariant.only(TargetPlatform.windows),
-  );
+    for (final StylusGesture gesture in StylusGesture.values) {
+      expect(_actionRow(gesture), findsNothing);
+    }
+    expect(find.text('Only write with stylus'), findsOneWidget);
+  }, variant: TargetPlatformVariant.only(TargetPlatform.windows));
 
   testWidgets('settings fit a narrow phone at a large text size', (
     WidgetTester tester,

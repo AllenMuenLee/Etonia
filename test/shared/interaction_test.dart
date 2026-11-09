@@ -248,18 +248,20 @@ void main() {
 
   test('glass and canvas tokens follow the style guide', () {
     const AppColors light = AppColors.light;
-    expect(light.background, const Color(0xFFF2F2F4));
-    expect(light.textPrimary, const Color(0xFF0A0A0B));
-    expect(AppGlass.surface(light).a, moreOrLessEquals(0.86));
-    expect(light.glassEdge.a, moreOrLessEquals(0.70, epsilon: 0.01));
+    expect(light.background, const Color(0xFFFAF9F7));
+    expect(light.textPrimary, const Color(0xFF343239));
+    expect(AppGlass.surface(light).a, 1);
+    expect(light.glassEdge, light.divider);
     expect(GlassBackdrop.spacing, 20);
     for (final double space in <double>[
       AppSpacing.xxs,
       AppSpacing.xs,
       AppSpacing.sm,
       AppSpacing.md,
+      AppSpacing.mdPlus,
       AppSpacing.lg,
       AppSpacing.xl,
+      AppSpacing.xlPlus,
       AppSpacing.xxl,
     ]) {
       expect(space % 4, 0);

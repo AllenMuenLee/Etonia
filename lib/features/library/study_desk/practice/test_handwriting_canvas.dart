@@ -5,6 +5,7 @@ import 'dart:ui' as ui;
 
 import 'package:flutter/material.dart';
 import 'package:flutter/widget_previews.dart';
+import '../../../../app/theme/app_icons.dart';
 import '../../../../app/theme/app_tokens.dart';
 
 import '../../../editor/ink/ink_controller.dart';
@@ -399,10 +400,10 @@ class _TestHandwritingCanvasState extends State<TestHandwritingCanvas>
                             triggerMode: TooltipTriggerMode.tap,
                             child: Semantics(
                               label: annotation.label,
-                              child: Icon(
+                              child: AppIcon(
                                 annotation.isCorrect
-                                    ? Icons.check_circle
-                                    : Icons.error,
+                                    ? Icons.check_circle_rounded
+                                    : Icons.error_rounded,
                                 color: annotation.isCorrect
                                     ? AppColors.light.success
                                     : AppColors.light.danger,

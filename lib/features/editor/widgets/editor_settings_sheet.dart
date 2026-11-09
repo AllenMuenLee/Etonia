@@ -381,7 +381,7 @@ class _SettingsRow extends StatelessWidget {
               ),
             ],
             const SizedBox(width: AppSpacing.xxs),
-            Icon(icon, size: 14, color: colors.textSecondary),
+            AppIcon(icon, size: 14, color: colors.textSecondary),
           ],
         ),
       ),
@@ -426,7 +426,11 @@ class _StylusActionRow extends StatelessWidget {
                   SizedBox(
                     width: AppSpacing.lg,
                     child: option == action
-                        ? Icon(AppIcons.check, size: 16, color: colors.accent)
+                        ? AppIcon(
+                            AppIcons.check,
+                            size: 16,
+                            color: colors.accent,
+                          )
                         : null,
                   ),
                   Expanded(child: Text(option.label)),

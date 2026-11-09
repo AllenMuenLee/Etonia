@@ -49,7 +49,11 @@ class _ExportOptionsSheetState extends State<_ExportOptionsSheet> {
             children: <Widget>[
               Row(
                 children: <Widget>[
-                  Icon(AppIcons.share, size: 20, color: colors.textSecondary),
+                  AppIcon(
+                    AppIcons.share,
+                    size: 20,
+                    color: colors.textSecondary,
+                  ),
                   const SizedBox(width: AppSpacing.sm),
                   Semantics(
                     header: true,

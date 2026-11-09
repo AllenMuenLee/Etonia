@@ -709,15 +709,11 @@ void main() {
       expect(response.message, 'I solved it.', reason: entry.key);
       expect(response.notation, isNull, reason: entry.key);
       expect(response.notationRejected, isTrue, reason: entry.key);
-      expect(
-        jsonDecode(response.toJsonString()),
-        <String, Object?>{
-          'version': 2,
-          'message': 'I solved it.',
-          'notation': null,
-        },
-        reason: '${entry.key}: nothing of it is replayed',
-      );
+      expect(jsonDecode(response.toJsonString()), <String, Object?>{
+        'version': 2,
+        'message': 'I solved it.',
+        'notation': null,
+      }, reason: '${entry.key}: nothing of it is replayed');
     }
   });
 

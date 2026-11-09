@@ -91,6 +91,11 @@ Future<void> _penLine(
 }
 
 Future<void> _openAdvanced(WidgetTester tester) async {
+  // The pen's bar is as wide as the palette it is attached to, and scrolls.
+  await tester.ensureVisible(
+    find.byKey(const ValueKey<String>('pen-advanced-toggle')),
+  );
+  await tester.pumpAndSettle();
   await tester.tap(find.byKey(const ValueKey<String>('pen-advanced-toggle')));
   await tester.pumpAndSettle();
 }
@@ -313,10 +318,7 @@ void main() {
         isSemantics(isButton: true),
       );
 
-      await tester.tap(
-        find.byKey(const ValueKey<String>('pen-advanced-toggle')),
-      );
-      await tester.pumpAndSettle();
+      await _openAdvanced(tester);
       final Finder panel = find.byKey(const ValueKey<String>('pen-advanced'));
       expect(panel, findsOneWidget);
       final Rect screen =

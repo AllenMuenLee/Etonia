@@ -9,6 +9,9 @@ import '../../../shared/motion/motion_memory.dart';
 import '../../../shared/navigation/app_dialogs.dart';
 import '../../../shared/widgets/pressable.dart';
 import '../../editor/document_io/document_platform.dart';
+import '../../editor/widgets/color_palette_dialog.dart'
+    show ColorPaletteButton, showColorPaletteDialog;
+import '../library_models.dart' show FolderColor;
 import 'study_desk_controller.dart';
 import 'study_desk_models.dart';
 import 'study_desk_widgets.dart';
@@ -111,20 +114,158 @@ Color studyCourseColor(String hex) => Color(
   0xFF000000 | (int.tryParse(hex.replaceFirst('#', ''), radix: 16) ?? 0x808080),
 );
 
+/// Asks for a class's color. Returns null when cancelled.
+Future<String?> showChangeClassColorDialog(
+  BuildContext context, {
+  required String initialHex,
+}) {
+  return showAppDialog<String>(
+    context: context,
+    motionKey: 'class-color',
+    builder: (BuildContext context) {
+      return AlertDialog(
+        title: const Text('Class color'),
+        content: SizedBox(
+          width: 320,
+          child: _ClassColorPicker(
+            initialHex: initialHex,
+            onSelected: (String hex) => Navigator.of(context).pop(hex),
+          ),
+        ),
+        actions: <Widget>[
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(),
+            child: const Text('Cancel'),
+          ),
+        ],
+      );
+    },
+  );
+}
+
+class _ClassColorPicker extends StatefulWidget {
+  const _ClassColorPicker({
+    required this.initialHex,
+    required this.onSelected,
+  });
+
+  final String initialHex;
+  final ValueChanged<String> onSelected;
+
+  @override
+  State<_ClassColorPicker> createState() => _ClassColorPickerState();
+}
+
+class _ClassColorPickerState extends State<_ClassColorPicker> {
+  late String _selectedHex = widget.initialHex;
+
+  String _formatHex(Color color) =>
+      '#${color.toARGB32().toRadixString(16).substring(2).toUpperCase()}';
+
+  Future<void> _openPalette(BuildContext context) async {
+    final Color? picked = await showColorPaletteDialog(
+      context,
+      initialColor: studyCourseColor(_selectedHex),
+      title: 'Class color',
+    );
+    if (picked != null) {
+      final hex = _formatHex(picked);
+      setState(() => _selectedHex = hex);
+      widget.onSelected(hex);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final List<(String, String)> presets = [
+      for (final FolderColor fc in FolderColor.values)
+        (fc.label, fc.colorHex),
+    ];
+    final normSelected = _selectedHex.replaceAll('#', '').toLowerCase();
+
+    return Wrap(
+      spacing: AppSpacing.xxs,
+      runSpacing: AppSpacing.xxs,
+      children: <Widget>[
+        for (final swatch in presets) ...[
+          Builder(
+            builder: (context) {
+              final norm = swatch.$2.replaceAll('#', '').toLowerCase();
+              final bool isSelected = norm == normSelected;
+              final Color color = studyCourseColor(swatch.$2);
+              final bool dark =
+                  ThemeData.estimateBrightnessForColor(color) == Brightness.dark;
+              return Tooltip(
+                message: swatch.$1,
+                excludeFromSemantics: true,
+                child: InkResponse(
+                  key: ValueKey<String>('class-color-${swatch.$2}'),
+                  onTap: () {
+                    setState(() => _selectedHex = swatch.$2);
+                    widget.onSelected(swatch.$2);
+                  },
+                  radius: AppSizes.minTouchTarget / 2,
+                  child: SizedBox.square(
+                    dimension: AppSizes.minTouchTarget,
+                    child: Center(
+                      child: AnimatedContainer(
+                        duration: AppMotion.resolve(context, AppMotion.fadeIn),
+                        curve: AppMotion.fadeInCurve,
+                        width: 38,
+                        height: 38,
+                        alignment: Alignment.center,
+                        decoration: BoxDecoration(
+                          shape: BoxShape.circle,
+                          border: Border.all(
+                            color: color.withValues(alpha: isSelected ? 1 : 0),
+                            width: AppSizes.focusRingWidth,
+                          ),
+                        ),
+                        child: Container(
+                          width: 28,
+                          height: 28,
+                          decoration: BoxDecoration(
+                            color: color,
+                            shape: BoxShape.circle,
+                          ),
+                          child: isSelected
+                              ? AppIcon(
+                                  AppIcons.check,
+                                  size: 16,
+                                  color: dark
+                                      ? Colors.white
+                                      : const Color(0xFF252329),
+                                )
+                              : null,
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
+              );
+            },
+          ),
+        ],
+        ColorPaletteButton(
+          onTap: () => _openPalette(context),
+          tooltip: 'Class color palette',
+          size: 28,
+        ),
+      ],
+    );
+  }
+}
+
 Future<StudyCourse?> showAddStudyClass(
   BuildContext context,
   StudyDeskController controller,
 ) async {
   var name = '';
   final palette = [
-    ('Ink', AppColors.light.textSecondary),
-    ('Lilac', AppColors.light.highlighters[3]),
-    ('Sky', AppColors.light.highlighters[4]),
-    ('Peach', AppColors.light.highlighters[1]),
+    for (final fc in FolderColor.values)
+      (fc.label, studyCourseColor(fc.colorHex), fc.colorHex),
   ];
-  String hexOf(Color color) =>
-      '#${color.toARGB32().toRadixString(16).substring(2)}';
-  var color = hexOf(palette.first.$2);
+  var color = palette.first.$3;
   final folders = <String>{};
   final notes = <String>{};
   final accepted = await showAppDialog<bool>(
@@ -143,17 +284,18 @@ Future<StudyCourse?> showAddStudyClass(
               ),
               Wrap(
                 spacing: AppSpacing.xs,
+                runSpacing: AppSpacing.xxs,
                 children: [
                   for (final swatch in palette)
                     ChoiceChip(
                       tooltip: '${swatch.$1} class color',
-                      label: Icon(
-                        Icons.circle,
+                      label: AppIcon(
+                        Icons.circle_rounded,
                         color: swatch.$2,
                         semanticLabel: swatch.$1,
                       ),
-                      selected: color == hexOf(swatch.$2),
-                      onSelected: (_) => update(() => color = hexOf(swatch.$2)),
+                      selected: color == swatch.$3,
+                      onSelected: (_) => update(() => color = swatch.$3),
                     ),
                 ],
               ),
@@ -446,7 +588,7 @@ class _StudyHistorySidebarState extends State<StudyHistorySidebar> {
               shape: RoundedRectangleBorder(borderRadius: radius),
               selected: selected,
               selectedColor: AppColors.of(context).textPrimary,
-              leading: Icon(
+              leading: AppIcon(
                 icon,
                 size: 20,
                 color: iconColor ?? AppColors.of(context).textSecondary,
@@ -466,20 +608,28 @@ class _StudyHistorySidebarState extends State<StudyHistorySidebar> {
     );
   }
 
-  Widget _sessionRow(StudySession session) => _row(
-    session.title,
-    session.isPinned ? Icons.push_pin_rounded : AppIcons.library,
-    () => widget.controller.openSession(session.id),
-    key: ValueKey('study-session-${session.id}'),
-    selected:
-        widget.controller.mode == StudyDeskMode.chat &&
-        session.id == widget.controller.sessionId,
-    trailing: PopupMenuButton<String>(
-      tooltip: 'Conversation actions',
-      itemBuilder: (_) => _menu(session),
-      onSelected: (action) => unawaited(_action(action, session)),
-    ),
-  );
+  Widget _sessionRow(StudySession session) {
+    // The class is looked up now, not kept with the chat, so a chat from
+    // another device takes the color the class has here.
+    final StudyCourse? course = widget.controller.courses
+        .where((c) => c.id == session.courseId)
+        .firstOrNull;
+    return _row(
+      session.title,
+      session.isPinned ? Icons.push_pin_rounded : AppIcons.chat,
+      () => widget.controller.openSession(session.id),
+      key: ValueKey('study-session-${session.id}'),
+      iconColor: course == null ? null : studyCourseColor(course.colorHex),
+      selected:
+          widget.controller.mode == StudyDeskMode.chat &&
+          session.id == widget.controller.sessionId,
+      trailing: PopupMenuButton<String>(
+        tooltip: 'Conversation actions',
+        itemBuilder: (_) => _menu(session),
+        onSelected: (action) => unawaited(_action(action, session)),
+      ),
+    );
+  }
 
   @override
   Widget build(BuildContext context) => StudyThrottledBuilder(
@@ -567,12 +717,12 @@ class _StudyHistorySidebarState extends State<StudyHistorySidebar> {
                         _searchOpen = !_searchOpen;
                         if (!_searchOpen) _query = '';
                       }),
-                      icon: const Icon(AppIcons.search, size: 20),
+                      icon: const AppIcon(AppIcons.search, size: 20),
                     ),
                     IconButton(
                       tooltip: 'Close history',
                       onPressed: widget.onClose,
-                      icon: const Icon(AppIcons.sidebar, size: 20),
+                      icon: const AppIcon(AppIcons.sidebar, size: 20),
                     ),
                   ],
                 ),
@@ -627,7 +777,7 @@ class _StudyHistorySidebarState extends State<StudyHistorySidebar> {
                           autofocus: true,
                           decoration: const InputDecoration(
                             hintText: 'Search',
-                            prefixIcon: Icon(AppIcons.search, size: 18),
+                            prefixIcon: AppIcon(AppIcons.search, size: 18),
                             isDense: true,
                             border: OutlineInputBorder(
                               borderRadius: BorderRadius.all(
@@ -641,6 +791,8 @@ class _StudyHistorySidebarState extends State<StudyHistorySidebar> {
                       )
                     : null,
               ),
+              // The rows above stay put; the list below it scrolls.
+              Divider(height: 1, thickness: 1, color: colors.divider),
               Expanded(
                 child: _LazyRows(
                   head: [
@@ -659,19 +811,28 @@ class _StudyHistorySidebarState extends State<StudyHistorySidebar> {
                             key: const ValueKey('study-add-class'),
                             tooltip: 'Add Class',
                             onPressed: _addClass,
-                            icon: const Icon(AppIcons.add, size: 18),
+                            icon: const AppIcon(AppIcons.add, size: 18),
                           ),
                         ],
                       ),
                     ),
-                    for (final course in controller.courses)
+                    for (final course in _orderedCourses(controller.courses))
                       _row(
                         course.name,
-                        AppIcons.folder,
+                        course.isPinned
+                            ? Icons.push_pin_rounded
+                            : AppIcons.blackboard,
                         () => controller.openCourse(course),
                         key: ValueKey('study-class-${course.id}'),
                         iconColor: studyCourseColor(course.colorHex),
                         selected: course.id == controller.selectedCourseId,
+                        trailing: PopupMenuButton<String>(
+                          key: ValueKey('study-class-menu-${course.id}'),
+                          tooltip: 'Class actions',
+                          itemBuilder: (_) => _courseMenu(course),
+                          onSelected: (action) =>
+                              unawaited(_courseAction(action, course)),
+                        ),
                       ),
                     if (_query.isEmpty &&
                         controller.suggestedClassFolders.isNotEmpty)
@@ -710,6 +871,7 @@ class _StudyHistorySidebarState extends State<StudyHistorySidebar> {
                   ),
                 ),
               ),
+              Divider(height: 1, thickness: 1, color: colors.divider),
               Padding(
                 padding: const EdgeInsets.all(8),
                 child: _row(
@@ -725,6 +887,98 @@ class _StudyHistorySidebarState extends State<StudyHistorySidebar> {
       );
     },
   );
+
+  /// Pinned classes first, each group in the order the classes were made.
+  List<StudyCourse> _orderedCourses(List<StudyCourse> courses) => [
+    ...courses.where((c) => c.isPinned),
+    ...courses.where((c) => !c.isPinned),
+  ];
+
+  List<PopupMenuEntry<String>> _courseMenu(StudyCourse course) => [
+    const PopupMenuItem(value: 'rename', child: Text('Rename')),
+    const PopupMenuItem(value: 'color', child: Text('Color…')),
+    PopupMenuItem(
+      value: 'pin',
+      child: Text(course.isPinned ? 'Unpin' : 'Pin'),
+    ),
+    PopupMenuItem(
+      value: 'delete',
+      child: Text(
+        'Delete',
+        style: TextStyle(color: AppColors.of(context).danger),
+      ),
+    ),
+  ];
+
+  Future<void> _courseAction(String action, StudyCourse course) async {
+    final controller = widget.controller;
+    switch (action) {
+      case 'pin':
+        controller.setCoursePinned(course.id, !course.isPinned);
+      case 'color':
+        final String? newColor = await showChangeClassColorDialog(
+          context,
+          initialHex: course.colorHex,
+        );
+        if (newColor != null) {
+          controller.recolorCourse(course.id, newColor);
+        }
+      case 'rename':
+        var text = course.name;
+        final name = await showAppDialog<String>(
+          context: context,
+          builder: (context) => StatefulBuilder(
+            builder: (context, update) {
+              final taken = controller.hasClassNamed(text, except: course.id);
+              return AlertDialog(
+                title: const Text('Rename class'),
+                content: _DialogTextField(
+                  initialText: course.name,
+                  label: 'Class name',
+                  errorText: taken ? 'A class already has this name' : null,
+                  onChanged: (value) => update(() => text = value),
+                ),
+                actions: [
+                  TextButton(
+                    onPressed: () => Navigator.pop(context),
+                    child: const Text('Cancel'),
+                  ),
+                  FilledButton(
+                    onPressed: text.trim().isEmpty || taken
+                        ? null
+                        : () => Navigator.pop(context, text.trim()),
+                    child: const Text('Save'),
+                  ),
+                ],
+              );
+            },
+          ),
+        );
+        if (name != null) controller.renameCourse(course.id, name);
+      case 'delete':
+        final confirmed = await showAppDialog<bool>(
+          context: context,
+          builder: (context) => AlertDialog(
+            title: const Text('Delete class?'),
+            content: Text(
+              '${course.name} will be removed. Its chats, flashcards and tests '
+              'are kept, and your notes are not touched.',
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.pop(context, false),
+                child: const Text('Cancel'),
+              ),
+              TextButton(
+                onPressed: () => Navigator.pop(context, true),
+                child: const Text('Delete'),
+              ),
+            ],
+          ),
+        );
+        if (confirmed == true) await controller.deleteCourse(course.id);
+    }
+  }
 
   List<PopupMenuEntry<String>> _menu(StudySession session) => [
     const PopupMenuItem(value: 'rename', child: Text('Rename')),
@@ -748,7 +1002,11 @@ class _StudyHistorySidebarState extends State<StudyHistorySidebar> {
 /// only as they scroll into view (a long history costs what is on screen, not
 /// what is kept).
 class _LazyRows extends StatelessWidget {
-  const _LazyRows({required this.head, required this.rows, required this.empty});
+  const _LazyRows({
+    required this.head,
+    required this.rows,
+    required this.empty,
+  });
 
   final List<Widget> head;
   final List<Widget Function()> rows;
@@ -773,9 +1031,11 @@ class _DialogTextField extends StatefulWidget {
     required this.label,
     required this.onChanged,
     this.initialText = '',
+    this.errorText,
   });
   final String label;
   final String initialText;
+  final String? errorText;
   final ValueChanged<String> onChanged;
   @override
   State<_DialogTextField> createState() => _DialogTextFieldState();
@@ -796,7 +1056,10 @@ class _DialogTextFieldState extends State<_DialogTextField> {
     controller: _text,
     autofocus: true,
     maxLength: 120,
-    decoration: InputDecoration(labelText: widget.label),
+    decoration: InputDecoration(
+      labelText: widget.label,
+      errorText: widget.errorText,
+    ),
     onChanged: widget.onChanged,
   );
 }

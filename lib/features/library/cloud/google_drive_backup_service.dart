@@ -865,6 +865,7 @@ class GoogleDriveBackupService {
             ? folderId
             : null,
         deleted: deletedAt,
+        modified: record.entry.modified,
       );
     }
 
@@ -1046,6 +1047,7 @@ class GoogleDriveBackupService {
     required String? folderId,
     String? title,
     DateTime? deleted,
+    DateTime? modified,
   }) async {
     final NoteEntry created = await repository.createNote(
       id: id,
@@ -1067,6 +1069,11 @@ class GoogleDriveBackupService {
         created.id,
         NoteContent.fromJson(remapAssetIds(note.content, assetIds)),
       );
+      // Saving stamps the time of the save; the note was last edited when
+      // the backup says.
+      if (modified != null) {
+        await repository.setNoteModified(created.id, modified);
+      }
       if (deleted != null) {
         await repository.deleteNote(created.id, at: deleted);
       }
@@ -1112,9 +1119,32 @@ class GoogleDriveBackupService {
           : was.hash != there.contentHash ||
                 was.title != there.entry.title ||
                 was.path != therePath;
-      if (!changedThere) continue;
       final bool changedHere =
           was != null && here.modified.isAfter(was.modified);
+      // Neither side has edited the note since the last sync, so only the
+      // time differs (the note was opened or touched, not changed): take the
+      // later time and leave the content alone.
+      if (!changedThere) {
+        if (was != null &&
+            !changedHere &&
+            there.entry.modified.isAfter(here.modified)) {
+          await repository.setNoteModified(here.id, there.entry.modified);
+          edits.versions[here.id] = thereVersion(there.entry.modified);
+          edits.changedHere = true;
+        }
+        continue;
+      }
+      // Never synced, but the same content, title and place on both sides:
+      // the same note, so again only the later time is taken.
+      if (was == null &&
+          there.entry.title == here.title &&
+          therePath == _pathOf(here.folderId, folders) &&
+          await _contentHash(here.id) == there.contentHash) {
+        await repository.setNoteModified(here.id, there.entry.modified);
+        edits.versions[here.id] = thereVersion(there.entry.modified);
+        edits.changedHere = true;
+        continue;
+      }
       if (isNoteOpen?.call(here.id) ?? false) {
         edits.leftOpen = true;
         continue;
@@ -1168,6 +1198,41 @@ class GoogleDriveBackupService {
     return edits;
   }
 
+  /// Brings the note here that [record] is the backup of in line with it,
+  /// by their last edit times. Content the same on both sides is not
+  /// touched: only the later time is taken. Content that differs is
+  /// replaced only when [backupWins] and the backup's is the later edit, and
+  /// never for a note open in the editor. True when the content was replaced.
+  Future<bool> _alignWithBackup(
+    _NoteRecord record,
+    _DownloadedNote note, {
+    required bool backupWins,
+  }) async {
+    final String id = record.entry.id;
+    final NoteEntry? here = await _entry(id);
+    if (here == null) return false;
+    final DateTime there = record.entry.modified;
+    if (await _contentHash(id) == record.contentHash) {
+      if (there.isAfter(here.modified)) {
+        await repository.setNoteModified(id, there);
+      }
+      return false;
+    }
+    if (!backupWins ||
+        !there.isAfter(here.modified) ||
+        (isNoteOpen?.call(id) ?? false)) {
+      return false;
+    }
+    await _replaceContent(id, note);
+    if (record.entry.title != here.title) {
+      await repository.renameNote(id, record.entry.title);
+    }
+    // Saving and renaming stamp the time of now; the note was last edited
+    // when the backup says.
+    await repository.setNoteModified(id, there);
+    return true;
+  }
+
   /// Puts [note]'s pages in place of those of the note [id] here, with its
   /// assets; assets already here, byte for byte, are kept rather than
   /// stored again.
@@ -1194,6 +1259,15 @@ class GoogleDriveBackupService {
       NoteContent.fromJson(remapAssetIds(note.content, ids)),
     );
     await repository.cleanupAssets(id, ids.values.toSet());
+  }
+
+  /// The hash of the note [id]'s content here, as a backup records it.
+  Future<String> _contentHash(String id) async {
+    final Map<String, Object?> json = (await repository.loadNote(id)).toJson();
+    final Map<String, Object> encoded = _largeBackupJson(json)
+        ? await compute(_encodeAndHashJson, json, debugLabel: 'sync.hash')
+        : _encodeAndHashJson(json);
+    return encoded['hash']! as String;
   }
 
   /// The note [id] here, outside Recently Deleted.
@@ -1344,14 +1418,33 @@ class GoogleDriveBackupService {
   }) async {
     final bool merge = mode == RestoreMode.merge;
     final List<Folder> existingFolders = await repository.allFolders();
-    final FolderListing previousTop = await repository.list(null);
     final List<NoteEntry> previousTrash = await repository.trash();
-    final Set<String> used = <String>{
-      for (final Folder folder in existingFolders) folder.id,
-      for (final NoteEntry note in await _allNotes(existingFolders)) note.id,
+    // A note in the backup that is already here, in the library or in
+    // Recently Deleted, is the same note: it is never made again under
+    // another id, which is what filled the library and Recently Deleted
+    // with copies of each other.
+    final Map<String, NoteEntry> live = <String, NoteEntry>{
+      for (final NoteEntry note in await _allNotes(existingFolders))
+        note.id: note,
+    };
+    final Set<String> trashedIds = <String>{
       for (final NoteEntry note in previousTrash) note.id,
     };
+    final Set<String> used = <String>{
+      for (final Folder folder in existingFolders) folder.id,
+      ...live.keys,
+      ...trashedIds,
+    };
+    // An id taken by a folder is the one case where a note gets a new id.
     String? idFor(NoteEntry entry) => used.contains(entry.id) ? null : entry.id;
+    // The ids in the backup, so a note in both its lists is made once.
+    final Set<String> seen = <String>{};
+    // Notes in the backup's library that are here already, and those here
+    // in Recently Deleted that the backup has in the library.
+    final List<_NoteRecord> alreadyHere = <_NoteRecord>[];
+    final List<_NoteRecord> backFromDeleted = <_NoteRecord>[];
+    // Notes in the library here that the backup has in Recently Deleted.
+    final List<NoteEntry> deletedInBackup = <NoteEntry>[];
     // The titles already in each folder, before anything is added.
     final Map<String?, Set<String>> titles = <String?, Set<String>>{};
     if (merge) {
@@ -1378,13 +1471,13 @@ class GoogleDriveBackupService {
         final String? parent = folder.parentId == null
             ? null
             : folderIds[folder.parentId];
+        // A folder of the same name and place is the same folder, whichever
+        // way the library is restored: notes in it stay where they are.
         Folder? match;
-        if (merge) {
-          for (final Folder candidate in existingFolders) {
-            if (candidate.name == folder.name && candidate.parentId == parent) {
-              match = candidate;
-              break;
-            }
+        for (final Folder candidate in existingFolders) {
+          if (candidate.name == folder.name && candidate.parentId == parent) {
+            match = candidate;
+            break;
           }
         }
         if (match != null) {
@@ -1405,41 +1498,55 @@ class GoogleDriveBackupService {
         final String? folderId = entry.folderId == null
             ? null
             : folderIds[entry.folderId];
-        if (merge &&
-            (used.contains(entry.id) ||
-                (titles[folderId]?.contains(entry.title) ?? false))) {
+        if (!seen.add(entry.id)) continue;
+        if (live.containsKey(entry.id)) {
+          alreadyHere.add(record);
+          continue;
+        }
+        if (trashedIds.contains(entry.id)) {
+          backFromDeleted.add(record);
+          continue;
+        }
+        if (merge && (titles[folderId]?.contains(entry.title) ?? false)) {
           skipped++;
           continue;
         }
-        createdNotes.add(
-          (await _createNote(
-            notes[entry.id]!,
-            id: idFor(entry),
-            folderId: folderId,
-          )).id,
+        final NoteEntry created = await _createNote(
+          notes[entry.id]!,
+          id: idFor(entry),
+          folderId: folderId,
+          modified: entry.modified,
         );
+        createdNotes.add(created.id);
+        used.add(created.id);
         restored++;
       }
 
-      // Recently Deleted, leaving out what is already in this device's.
+      // Recently Deleted, leaving out what is already here.
       for (final _NoteRecord record in manifest.trash.values) {
         final NoteEntry entry = record.entry;
+        if (!seen.add(entry.id)) continue;
+        if (live.containsKey(entry.id)) {
+          deletedInBackup.add(live[entry.id]!);
+          continue;
+        }
+        if (trashedIds.contains(entry.id)) continue;
         if (merge &&
             previousTrash.any(
               (NoteEntry note) =>
-                  note.id == entry.id ||
-                  (note.title == entry.title && note.deleted == entry.deleted),
+                  note.title == entry.title && note.deleted == entry.deleted,
             )) {
           continue;
         }
-        createdNotes.add(
-          (await _createNote(
-            notes[entry.id]!,
-            id: idFor(entry),
-            folderId: folderIds[entry.folderId],
-            deleted: entry.deleted ?? _clock(),
-          )).id,
+        final NoteEntry created = await _createNote(
+          notes[entry.id]!,
+          id: idFor(entry),
+          folderId: folderIds[entry.folderId],
+          deleted: entry.deleted ?? _clock(),
+          modified: entry.modified,
         );
+        createdNotes.add(created.id);
+        used.add(created.id);
         deletedRestored++;
       }
     } on Object {
@@ -1456,12 +1563,64 @@ class GoogleDriveBackupService {
       rethrow;
     }
 
-    if (!merge) {
-      for (final Folder folder in previousTop.folders) {
-        await repository.deleteFolder(folder.id);
+    // Everything is downloaded and the new notes are in; what is left is
+    // changing notes that were here already.
+    String? placeOf(NoteEntry entry) =>
+        entry.folderId == null ? null : folderIds[entry.folderId];
+    for (final _NoteRecord record in alreadyHere) {
+      // The same note on both sides: when its content is the same only the
+      // later time is taken; a different one is replaced only when
+      // replacing and the backup's is the later edit.
+      final bool changed = await _alignWithBackup(
+        record,
+        notes[record.entry.id]!,
+        backupWins: !merge,
+      );
+      if (changed) {
+        restored++;
+      } else {
+        skipped++;
       }
-      for (final NoteEntry note in previousTop.notes) {
-        await repository.deleteNote(note.id);
+      if (!merge) {
+        final String? place = placeOf(record.entry);
+        if (live[record.entry.id]!.folderId != place) {
+          await repository.moveNote(record.entry.id, place);
+        }
+      }
+    }
+    for (final _NoteRecord record in backFromDeleted) {
+      // Deleted here, in the library in the backup: back it comes, as the
+      // one note it is.
+      await repository.restoreNote(record.entry.id);
+      // When replacing, it must not stay in a folder about to go.
+      final String? place = placeOf(record.entry);
+      if (!merge || place != null) {
+        await repository.moveNote(record.entry.id, place);
+      }
+      restored++;
+    }
+    if (!merge) {
+      for (final NoteEntry note in deletedInBackup) {
+        final DateTime at = manifest.trash[note.id]?.entry.deleted ?? _clock();
+        await repository.deleteNote(note.id, at: at);
+      }
+      // What is here and not in the backup goes to Recently Deleted.
+      for (final NoteEntry note in live.values) {
+        if (!seen.contains(note.id)) await repository.deleteNote(note.id);
+      }
+      // So do the folders the backup does not have. Their notes have gone
+      // already or been moved out above.
+      final Set<String> kept = folderIds.values.toSet();
+      for (final Folder folder in existingFolders) {
+        if (kept.contains(folder.id)) continue;
+        // One below another that goes is deleted with it.
+        final String? parent = folder.parentId;
+        if (parent != null && !kept.contains(parent)) continue;
+        try {
+          await repository.deleteFolder(folder.id);
+        } on Object {
+          // Went with its parent.
+        }
       }
     }
     return RestoreSummary(

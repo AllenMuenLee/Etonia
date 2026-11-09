@@ -11,6 +11,7 @@ import '../../../../shared/navigation/app_sheets.dart';
 import '../../../editor/ai/ai_client.dart';
 import '../../../editor/document_io/document_platform.dart';
 import '../../../editor/widgets/ai_assistant_panel.dart' show AiAnswerMarkdown;
+import '../../../../shared/widgets/etonia_mascot.dart';
 import '../study_desk_controller.dart';
 import '../study_desk_models.dart';
 import '../study_material_sources.dart';
@@ -52,6 +53,9 @@ class StudyTestPaperPlayer extends StatefulWidget {
 class _StudyTestPaperPlayerState extends State<StudyTestPaperPlayer> {
   late StudyTestPaper paper = widget.paper;
   bool busy = false;
+
+  /// The AI is grading the submitted answers: Etonia hops and shakes.
+  bool grading = false;
   String? error;
   Timer? _saveTimer;
   Future<void> _writes = Future.value();
@@ -196,6 +200,7 @@ class _StudyTestPaperPlayerState extends State<StudyTestPaperPlayer> {
   Future<void> _submit() async {
     setState(() {
       busy = true;
+      grading = true;
       error = null;
     });
     _saveTimer?.cancel();
@@ -223,7 +228,12 @@ class _StudyTestPaperPlayerState extends State<StudyTestPaperPlayer> {
         );
       }
     } finally {
-      if (mounted) setState(() => busy = false);
+      if (mounted) {
+        setState(() {
+          busy = false;
+          grading = false;
+        });
+      }
     }
   }
 
@@ -310,7 +320,7 @@ class _StudyTestPaperPlayerState extends State<StudyTestPaperPlayer> {
                   PopupMenuButton<TestReferenceKind>(
                     tooltip: 'Import reference sheet',
                     enabled: !busy,
-                    icon: const Icon(AppIcons.add),
+                    icon: const AppIcon(AppIcons.add),
                     onSelected: _importReference,
                     itemBuilder: (_) => [
                       for (final kind in TestReferenceKind.values)
@@ -328,12 +338,12 @@ class _StudyTestPaperPlayerState extends State<StudyTestPaperPlayer> {
                         ? null
                         : _saveToLibrary,
                     tooltip: 'Add to library or folder',
-                    icon: const Icon(AppIcons.newFolder),
+                    icon: const AppIcon(AppIcons.newFolder),
                   ),
                   IconButton(
                     onPressed: busy ? null : _export,
                     tooltip: 'Export handwritten PDF',
-                    icon: const Icon(AppIcons.share),
+                    icon: const AppIcon(AppIcons.share),
                   ),
                 ],
               );
@@ -346,7 +356,7 @@ class _StudyTestPaperPlayerState extends State<StudyTestPaperPlayer> {
                     IconButton(
                       onPressed: busy ? null : _close,
                       tooltip: widget.closeTooltip,
-                      icon: const Icon(AppIcons.back),
+                      icon: const AppIcon(AppIcons.back),
                     ),
                   const SizedBox(width: AppSpacing.xxs),
                   Expanded(
@@ -359,7 +369,7 @@ class _StudyTestPaperPlayerState extends State<StudyTestPaperPlayer> {
                     key: const ValueKey('test-browse-sources'),
                     tooltip: 'Browse sources',
                     onPressed: busy ? null : _browseSources,
-                    icon: const Icon(AppIcons.folder),
+                    icon: const AppIcon(AppIcons.folder),
                   ),
                   IconButton(
                     tooltip: 'Reference sheets',
@@ -372,14 +382,14 @@ class _StudyTestPaperPlayerState extends State<StudyTestPaperPlayer> {
                     ),
                     onPressed: () =>
                         setState(() => _referencesOpen = !_referencesOpen),
-                    icon: const Icon(AppIcons.library),
+                    icon: const AppIcon(AppIcons.library),
                   ),
                   if (!compact)
                     actions
                   else
                     PopupMenuButton<String>(
                       tooltip: 'Test actions',
-                      icon: const Icon(AppIcons.more),
+                      icon: const AppIcon(AppIcons.more),
                       enabled: !busy,
                       onSelected: (action) {
                         if (action == 'export') {
@@ -490,6 +500,14 @@ class _StudyTestPaperPlayerState extends State<StudyTestPaperPlayer> {
                     onPressed: busy || paper.questions.isEmpty ? null : _submit,
                     child: Text(busy ? 'Grading…' : 'Grade now'),
                   ),
+                // Two hops and a shake, every two seconds, until it is marked.
+                if (grading)
+                  const EtoniaMascot(
+                    key: ValueKey<String>('study-grading-etonia'),
+                    clip: EtoniaClip.grade,
+                    height: 88,
+                    semanticsLabel: 'Grading your test',
+                  ),
               ],
             ),
           ),
@@ -557,7 +575,7 @@ class _StudyTestPaperPlayerState extends State<StudyTestPaperPlayer> {
                   busy || !widget.controller.hasSession(paper.sourceSessionId!)
                   ? null
                   : () => unawaited(_openSourceChat(paper.sourceSessionId!)),
-              icon: const Icon(AppIcons.studyDesk, size: 18),
+              icon: const AppIcon(AppIcons.studyDesk, size: 18),
               label: Text(
                 widget.controller.hasSession(paper.sourceSessionId!)
                     ? 'Open source conversation'
@@ -612,10 +630,10 @@ class _StudyTestPaperPlayerState extends State<StudyTestPaperPlayer> {
                           padding: const EdgeInsets.all(14),
                           child: Row(
                             children: [
-                              Icon(
+                              AppIcon(
                                 question.selectedOptionId == option.id
-                                    ? Icons.radio_button_checked
-                                    : Icons.radio_button_off,
+                                    ? Icons.radio_button_checked_rounded
+                                    : Icons.radio_button_off_rounded,
                               ),
                               const SizedBox(width: 12),
                               Text('${option.id}. '),

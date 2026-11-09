@@ -27,6 +27,9 @@ class _Embedder implements StudyEmbedder {
   bool available = true;
   final List<String> queries = <String>[];
 
+  /// Every chunk text ever sent to be embedded.
+  final List<String> embedded = <String>[];
+
   Float32List _of(String text) {
     final String t = text.toLowerCase();
     if (t.contains('flip') || t.contains('digital')) return _axis(0);
@@ -37,9 +40,10 @@ class _Embedder implements StudyEmbedder {
   bool get isAvailable => available;
 
   @override
-  Future<List<Float32List?>> embedTexts(List<String> texts) async => [
-    for (final String t in texts) _of(t),
-  ];
+  Future<List<Float32List?>> embedTexts(List<String> texts) async {
+    embedded.addAll(texts);
+    return [for (final String t in texts) _of(t)];
+  }
 
   @override
   Future<List<Float32List?>> embedImages(List<Uint8List> pngs) async => [
@@ -202,6 +206,121 @@ void main() {
     client.answer('ok');
     await sent;
     expect(embedder.queries, isEmpty);
+  });
+
+  group('the open note, asked about by the editor', () {
+    Future<
+      ({
+        StudyDeskController desk,
+        InMemoryNoteRepository repository,
+        FakeAiClient client,
+        NoteEntry circuits,
+        NoteEntry laplace,
+      })
+    >
+    open(StudyEmbedder? embedder) async {
+      final InMemoryNoteRepository repository = InMemoryNoteRepository();
+      final FakeAiClient client = FakeAiClient();
+      final NoteEntry circuits = await _noteWith(
+        repository,
+        'Lecture 3',
+        'A JK flip flop toggles on the clock edge. A counter chains flip '
+            'flops.',
+      );
+      final NoteEntry laplace = await _noteWith(
+        repository,
+        'Lecture 9',
+        'The Laplace transform turns linear systems into algebra.',
+      );
+      final StudyDeskController desk = StudyDeskController(
+        repository: repository,
+        client: client,
+        embedder: embedder,
+        vectorCache: _MemoryVectors(),
+      );
+      addTearDown(() {
+        desk.dispose();
+        repository.dispose();
+        client.close();
+      });
+      await desk.load();
+      return (
+        desk: desk,
+        repository: repository,
+        client: client,
+        circuits: circuits,
+        laplace: laplace,
+      );
+    }
+
+    test('are found by meaning, with nothing on the desk, in that note '
+        'alone', () async {
+      final _Embedder embedder = _Embedder();
+      final rig = await open(embedder);
+
+      final String? found = await rig.desk.excerptsOfNote(
+        rig.circuits.id,
+        'explain digital systems',
+      );
+
+      expect(found, contains('flip flop'));
+      expect(found, isNot(contains('Laplace')));
+      expect(embedder.queries, isNotEmpty);
+      // Only the open note was sent to be embedded.
+      expect(embedder.embedded, hasLength(1));
+      expect(embedder.embedded.single, contains('flip flop'));
+    });
+
+    test('share the desk\'s vectors: nothing is embedded twice', () async {
+      final _Embedder embedder = _Embedder();
+      final rig = await open(embedder);
+
+      await rig.desk.excerptsOfNote(rig.circuits.id, 'explain digital systems');
+      final int afterEditor = embedder.embedded.length;
+      expect(afterEditor, 1);
+
+      // The desk asks about the same note: its chunk is already known.
+      rig.desk.addNotes(<String>[rig.circuits.id]);
+      final Future<void> sent = rig.desk.send('explain digital systems');
+      for (int i = 0; i < 50 && rig.client.requests.isEmpty; i++) {
+        await Future<void>.delayed(const Duration(milliseconds: 20));
+      }
+      rig.client.answer('ok');
+      await sent;
+      expect(embedder.embedded, hasLength(afterEditor));
+
+      // And the editor again, after the desk: still nothing new.
+      await rig.desk.excerptsOfNote(rig.circuits.id, 'what toggles?');
+      expect(embedder.embedded, hasLength(afterEditor));
+    });
+
+    test('turned off, are found by words and nothing is sent', () async {
+      final _Embedder embedder = _Embedder();
+      final rig = await open(embedder);
+      rig.desk.semanticSearch = false;
+
+      final String? found = await rig.desk.excerptsOfNote(
+        rig.circuits.id,
+        'flip flop',
+      );
+
+      expect(found, contains('flip flop'));
+      expect(embedder.queries, isEmpty);
+      expect(embedder.embedded, isEmpty);
+    });
+
+    test('are found by words when meaning is unavailable', () async {
+      final _Embedder embedder = _Embedder()..available = false;
+      final rig = await open(embedder);
+
+      final String? found = await rig.desk.excerptsOfNote(
+        rig.circuits.id,
+        'flip flop',
+      );
+
+      expect(found, contains('flip flop'));
+      expect(embedder.embedded, isEmpty);
+    });
   });
 
   testWidgets(

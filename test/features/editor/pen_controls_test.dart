@@ -211,7 +211,7 @@ void main() {
         matching: find.byType(DecoratedBox),
       ),
     );
-    expect((capsule.decoration as ShapeDecoration).color, colors.accent);
+    expect((capsule.decoration as ShapeDecoration).color, colors.selected);
 
     BoxDecoration option(String style) {
       return tester

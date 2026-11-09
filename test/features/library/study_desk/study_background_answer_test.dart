@@ -67,41 +67,47 @@ void main() {
     expect(desk.isBusy, isFalse);
   });
 
-  test('two chats can be waiting at once, and each gets its own answer', () async {
-    final (StudyDeskController desk, FakeAiClient client) = await _desk();
+  test(
+    'two chats can be waiting at once, and each gets its own answer',
+    () async {
+      final (StudyDeskController desk, FakeAiClient client) = await _desk();
 
-    unawaited(desk.send('First question'));
-    await pumpEventQueue();
-    final String first = desk.sessionId;
-    desk.newChat();
-    unawaited(desk.send('Second question'));
-    await pumpEventQueue();
-    final String second = desk.sessionId;
-    expect(client.requests.where((AiRequest r) => r.messages.isNotEmpty), hasLength(2));
+      unawaited(desk.send('First question'));
+      await pumpEventQueue();
+      final String first = desk.sessionId;
+      desk.newChat();
+      unawaited(desk.send('Second question'));
+      await pumpEventQueue();
+      final String second = desk.sessionId;
+      expect(
+        client.requests.where((AiRequest r) => r.messages.isNotEmpty),
+        hasLength(2),
+      );
 
-    // The second chat is answered first.
-    client.answer('Second answer.', index: client.requests.length - 1);
-    await pumpEventQueue();
-    expect(_texts(desk), <String>[
-      'you: Second question',
-      'answer: Second answer.',
-    ]);
-    expect(desk.isAnswering(first), isTrue);
+      // The second chat is answered first.
+      client.answer('Second answer.', index: client.requests.length - 1);
+      await pumpEventQueue();
+      expect(_texts(desk), <String>[
+        'you: Second question',
+        'answer: Second answer.',
+      ]);
+      expect(desk.isAnswering(first), isTrue);
 
-    client.answer('First answer.', index: 0);
-    await pumpEventQueue();
+      client.answer('First answer.', index: 0);
+      await pumpEventQueue();
 
-    desk.openSession(first);
-    expect(_texts(desk), <String>[
-      'you: First question',
-      'answer: First answer.',
-    ]);
-    desk.openSession(second);
-    expect(_texts(desk), <String>[
-      'you: Second question',
-      'answer: Second answer.',
-    ]);
-  });
+      desk.openSession(first);
+      expect(_texts(desk), <String>[
+        'you: First question',
+        'answer: First answer.',
+      ]);
+      desk.openSession(second);
+      expect(_texts(desk), <String>[
+        'you: Second question',
+        'answer: Second answer.',
+      ]);
+    },
+  );
 
   test('a chat deleted while it was asking takes its answer with it', () async {
     final (StudyDeskController desk, FakeAiClient client) = await _desk();
@@ -129,7 +135,11 @@ void main() {
     desk.newChat();
     client.fail(AiFailureKind.network);
     await pumpEventQueue();
-    expect(desk.failure, isNull, reason: 'the failure belongs to the first chat');
+    expect(
+      desk.failure,
+      isNull,
+      reason: 'the failure belongs to the first chat',
+    );
 
     desk.openSession(first);
     expect(desk.failure?.kind, AiFailureKind.network);
@@ -145,7 +155,10 @@ void main() {
   });
 
   group('changing a message', () {
-    Future<StudyDeskController> twoTurns(FakeAiClient client, StudyDeskController desk) async {
+    Future<StudyDeskController> twoTurns(
+      FakeAiClient client,
+      StudyDeskController desk,
+    ) async {
       unawaited(desk.send('One?'));
       await pumpEventQueue();
       client.answer('Answer one.');
@@ -188,17 +201,17 @@ void main() {
       client.answer('Answer one, again.');
       await pumpEventQueue();
 
-      expect(_texts(desk), <String>[
-        'you: One?',
-        'answer: Answer one, again.',
-      ]);
+      expect(_texts(desk), <String>['you: One?', 'answer: Answer one, again.']);
     });
 
     test('only the right kind of message, while nothing is asking', () async {
       final (StudyDeskController desk, FakeAiClient client) = await _desk();
       await twoTurns(client, desk);
 
-      expect(await desk.editQuestion(1, 'an answer is not a question'), isFalse);
+      expect(
+        await desk.editQuestion(1, 'an answer is not a question'),
+        isFalse,
+      );
       expect(await desk.editQuestion(0, '   '), isFalse);
       expect(await desk.rerunAnswer(0), isFalse);
       expect(await desk.rerunAnswer(9), isFalse);

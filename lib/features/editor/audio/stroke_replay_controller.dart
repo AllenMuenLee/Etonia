@@ -20,6 +20,10 @@ class StrokeReplayController extends ChangeNotifier {
   Stroke? _highlighted;
   Timer? _highlightTimer;
 
+  /// Whether a recording is open: told of only when that changes, unlike the
+  /// controller itself, which tells of every move of the playhead.
+  final ValueNotifier<bool> activity = ValueNotifier<bool>(false);
+
   NoteRecordingTrack? get track => _track;
   bool get isActive => _track != null;
   int get positionMs => _positionMs;
@@ -29,6 +33,7 @@ class StrokeReplayController extends ChangeNotifier {
     _track = track;
     _positionMs = 0;
     _highlighted = null;
+    activity.value = true;
     notifyListeners();
   }
 
@@ -38,6 +43,7 @@ class StrokeReplayController extends ChangeNotifier {
     _positionMs = 0;
     _highlighted = null;
     _highlightTimer?.cancel();
+    activity.value = false;
     notifyListeners();
   }
 
@@ -96,6 +102,7 @@ class StrokeReplayController extends ChangeNotifier {
   @override
   void dispose() {
     _highlightTimer?.cancel();
+    activity.dispose();
     super.dispose();
   }
 }

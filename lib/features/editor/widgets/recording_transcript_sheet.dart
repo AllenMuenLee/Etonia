@@ -48,7 +48,7 @@ class RecordingTranscriptSheet extends StatelessWidget {
             ),
             child: Row(
               children: <Widget>[
-                Icon(
+                AppIcon(
                   AppIcons.transcript,
                   size: 20,
                   color: colors.textSecondary,
@@ -82,7 +82,7 @@ class RecordingTranscriptSheet extends StatelessWidget {
                             const SnackBar(content: Text('Transcript copied.')),
                           );
                         },
-                  icon: const Icon(AppIcons.copy),
+                  icon: const AppIcon(AppIcons.copy),
                 ),
               ],
             ),

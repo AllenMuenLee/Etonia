@@ -94,7 +94,7 @@ class ColorPaletteButton extends StatelessWidget {
                         width: AppSizes.hairline,
                       ),
                     ),
-                    child: Icon(
+                    child: AppIcon(
                       AppIcons.add,
                       size: size * 0.32,
                       color: colors.textPrimary,

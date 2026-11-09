@@ -26,11 +26,25 @@ enum FolderColor {
   teal('Sky'),
   purple('Lilac'),
   pink('Rose'),
-  gray('None');
+  gray('Gray');
 
   const FolderColor(this.label);
 
   final String label;
+
+  /// The hex color string (e.g. `#7761A5`) used to represent this folder
+  /// color across the library and study desk.
+  String get colorHex => switch (this) {
+    FolderColor.accent => '#7761A5',
+    FolderColor.red => '#D9480F',
+    FolderColor.orange => '#E8590C',
+    FolderColor.yellow => '#B45309',
+    FolderColor.green => '#2F9E44',
+    FolderColor.teal => '#0C8599',
+    FolderColor.purple => '#7048E8',
+    FolderColor.pink => '#C2255C',
+    FolderColor.gray => '#6B7280',
+  };
 
   static FolderColor byName(Object? name) {
     for (final FolderColor color in values) {

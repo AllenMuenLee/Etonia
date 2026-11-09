@@ -3,6 +3,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:greatnote/app/theme/app_theme.dart';
 import 'package:greatnote/features/library/study_desk/study_desk_controller.dart';
 import 'package:greatnote/features/library/study_desk/study_desk_screen.dart';
+import 'package:greatnote/shared/widgets/etonia_mascot.dart';
 
 void main() {
   testWidgets(
@@ -55,6 +56,11 @@ void main() {
       );
       await show(const StudyRequestProgress(StudyProgressPhase.answering));
       expect(find.text('Writing your answer…'), findsOneWidget);
+      expect(
+        tester.widget<EtoniaMascot>(find.byType(EtoniaMascot)).clip,
+        EtoniaClip.write,
+        reason: 'the write animation plays while the answer is written',
+      );
       expect(find.textContaining('Digital Logic'), findsNothing);
       expect(tester.takeException(), isNull);
       await tester.pumpWidget(const SizedBox.shrink());

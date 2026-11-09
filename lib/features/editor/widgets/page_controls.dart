@@ -348,7 +348,7 @@ class _PageNumberFieldState extends State<_PageNumberField> {
                 keyboardType: TextInputType.number,
                 textInputAction: TextInputAction.go,
                 textAlign: TextAlign.center,
-                style: labelStyle.copyWith(color: colors.accent),
+                style: labelStyle.copyWith(color: colors.accentText),
                 cursorColor: colors.accent,
                 // The capsule is the field's only edge.
                 decoration: const InputDecoration(
@@ -443,12 +443,12 @@ class ImageMenuButton extends StatelessWidget {
       alignmentOffset: const Offset(0, AppSpacing.xxs),
       menuChildren: <Widget>[
         MenuItemButton(
-          leadingIcon: const Icon(AppIcons.insertImage),
+          leadingIcon: const AppIcon(AppIcons.insertImage),
           onPressed: onChooseFromGallery,
           child: const Text('Choose from gallery'),
         ),
         MenuItemButton(
-          leadingIcon: const Icon(AppIcons.camera),
+          leadingIcon: const AppIcon(AppIcons.camera),
           onPressed: onTakePhoto,
           child: const Text('Take photo'),
         ),
@@ -460,7 +460,7 @@ class ImageMenuButton extends StatelessWidget {
           onPressed: enabled
               ? () => menu.isOpen ? menu.close() : menu.open()
               : null,
-          icon: const Icon(AppIcons.insertImage),
+          icon: const AppIcon(AppIcons.insertImage),
         );
       },
     );
@@ -510,12 +510,12 @@ class _AddMenuButtonState extends State<AddMenuButton> {
       alignmentOffset: const Offset(0, AppSpacing.xxs),
       menuChildren: <Widget>[
         MenuItemButton(
-          leadingIcon: const Icon(AppIcons.pdf),
+          leadingIcon: const AppIcon(AppIcons.pdf),
           onPressed: () => widget.onInsertPdf?.call(),
           child: const Text('Insert PDF'),
         ),
         MenuItemButton(
-          leadingIcon: const Icon(AppIcons.newNote),
+          leadingIcon: const AppIcon(AppIcons.newNote),
           onPressed: widget.onAddPage,
           child: const Text('Add blank page'),
         ),
@@ -536,7 +536,7 @@ class _AddMenuButtonState extends State<AddMenuButton> {
               color: colors.selected,
               shape: BoxShape.circle,
             ),
-            child: Icon(
+            child: AppIcon(
               AppIcons.add,
               size: AppSizes.icon,
               color: colors.accent,
@@ -955,7 +955,7 @@ class _PageOverviewGridState extends State<_PageOverviewGrid> {
               Text(
                 '${index + 1}',
                 style: text.labelMedium?.copyWith(
-                  color: selected ? colors.accent : colors.textPrimary,
+                  color: selected ? colors.accentText : colors.textPrimary,
                   fontFeatures: const <FontFeature>[
                     FontFeature.tabularFigures(),
                   ],
@@ -1168,13 +1168,13 @@ class PagePanel extends StatelessWidget {
                       child: FilledButton.tonalIcon(
                         style: FilledButton.styleFrom(
                           backgroundColor: colors.selected,
-                          foregroundColor: colors.accent,
+                          foregroundColor: colors.accentText,
                           padding: const EdgeInsets.symmetric(
                             horizontal: AppSpacing.sm,
                           ),
                         ),
                         onPressed: document.addPage,
-                        icon: const Icon(AppIcons.add, size: 18),
+                        icon: const AppIcon(AppIcons.add, size: 18),
                         label: const Text('Add page'),
                       ),
                     ),
@@ -1190,7 +1190,7 @@ class PagePanel extends StatelessWidget {
                         onPressed: document.pageCount > 1
                             ? () => _delete(context)
                             : null,
-                        icon: const Icon(AppIcons.delete, size: 18),
+                        icon: const AppIcon(AppIcons.delete, size: 18),
                         label: const Text('Delete page'),
                       ),
                     ),
@@ -1344,7 +1344,7 @@ class _PanelDropdown<T> extends StatelessWidget {
           isDense: true,
           itemHeight: null,
           style: text.bodyMedium,
-          icon: Icon(AppIcons.expand, size: 20, color: colors.textSecondary),
+          icon: AppIcon(AppIcons.expand, size: 20, color: colors.textSecondary),
           borderRadius: AppBorderRadius.large,
           dropdownColor: colors.surface,
           onChanged: onChanged == null
@@ -1390,7 +1390,7 @@ class _SizeThumbnail extends StatelessWidget {
   Widget build(BuildContext context) {
     final AppColors colors = AppColors.of(context);
     if (icon != null) {
-      return Icon(icon, size: AppSizes.icon, color: colors.textSecondary);
+      return AppIcon(icon, size: AppSizes.icon, color: colors.textSecondary);
     }
     const double box = _PanelDropdown.thumbnailSize - 4;
     final double aspect = paper.width / paper.height;
@@ -1478,7 +1478,7 @@ class PagePreview extends StatelessWidget {
                     alignment: AlignmentDirectional.bottomEnd,
                     child: Padding(
                       padding: const EdgeInsets.all(AppSpacing.xxs),
-                      child: Icon(
+                      child: AppIcon(
                         AppIcons.grows,
                         size: 16,
                         color: colors.textSecondary,

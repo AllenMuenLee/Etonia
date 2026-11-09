@@ -299,8 +299,65 @@ void main() {
         );
         await tester.pumpAndSettle();
 
-        // #D9480F is nearest the Peach highlighter among the six.
-        expect(selected, FolderColor.orange);
+        // #D9480F is nearest the Berry Rose highlighter among the six.
+        expect(selected, FolderColor.red);
+      },
+    );
+
+    testWidgets(
+      'allows selecting FolderColor.gray and matches gray hex from palette',
+      (WidgetTester tester) async {
+        FolderColor selected = FolderColor.accent;
+        await tester.pumpWidget(
+          MaterialApp(
+            theme: ThemeData.light().copyWith(
+              extensions: <ThemeExtension<dynamic>>[AppColors.light],
+            ),
+            home: Scaffold(
+              body: StatefulBuilder(
+                builder: (BuildContext context, StateSetter setState) {
+                  return FolderColorPicker(
+                    selected: selected,
+                    onSelected: (FolderColor next) {
+                      setState(() => selected = next);
+                    },
+                  );
+                },
+              ),
+            ),
+          ),
+        );
+
+        // Tap the gray folder swatch directly
+        expect(
+          find.byKey(const ValueKey<String>('folder-color-gray')),
+          findsOneWidget,
+        );
+        await tester.tap(
+          find.byKey(const ValueKey<String>('folder-color-gray')),
+        );
+        await tester.pumpAndSettle();
+        expect(selected, FolderColor.gray);
+        expect(FolderColor.gray.label, 'Gray');
+
+        // Open palette and enter a neutral gray
+        await tester.tap(
+          find.byKey(const ValueKey<String>('color-palette-button')),
+        );
+        await tester.pumpAndSettle();
+
+        await tester.enterText(
+          find.byKey(const ValueKey<String>('color-hex-input')),
+          '6B7280',
+        );
+        await tester.pumpAndSettle();
+
+        await tester.tap(
+          find.byKey(const ValueKey<String>('color-select-button')),
+        );
+        await tester.pumpAndSettle();
+
+        expect(selected, FolderColor.gray);
       },
     );
   });

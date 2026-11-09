@@ -1,7 +1,5 @@
 import 'package:flutter/widgets.dart';
 
-import '../audio/note_audio.dart';
-import '../audio/stroke_replay_controller.dart';
 import '../ink/eraser_settings.dart';
 
 /// What a tab keeps of the toolbar: the toolbar itself is one element for
@@ -31,17 +29,9 @@ class ToolbarMemo {
 /// over its settings instead of building a bar of its own.
 @immutable
 class EditorChromeEntry {
-  const EditorChromeEntry({
-    required this.onSettings,
-    required this.audioPlayer,
-    required this.replayController,
-    required this.onCloseReplay,
-  });
+  const EditorChromeEntry({required this.onSettings});
 
   final VoidCallback onSettings;
-  final NoteAudioPlayer audioPlayer;
-  final StrokeReplayController replayController;
-  final VoidCallback onCloseReplay;
 }
 
 /// Holds the [EditorChromeEntry] of every editor in a window, by note, for

@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
 import '../../app/theme/app_tokens.dart';
+import 'etonia_icon.dart';
 
 /// One thing a [HoldMenu] offers.
 class HoldMenuAction {
@@ -106,7 +107,7 @@ class _HoldMenuState extends State<HoldMenu> {
               child: Row(
                 mainAxisSize: MainAxisSize.min,
                 children: <Widget>[
-                  Icon(action.icon, size: 18, color: colors.textSecondary),
+                  AppIcon(action.icon, size: 18, color: colors.textSecondary),
                   const SizedBox(width: AppSpacing.sm),
                   Text(action.label),
                 ],

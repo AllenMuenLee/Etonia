@@ -143,7 +143,7 @@ class TextElementsLayer extends StatelessWidget {
             behavior: HitTestBehavior.opaque,
             onTap: controller.deleteEditingText,
             child: Center(
-              child: Icon(AppIcons.delete, size: 16, color: colors.danger),
+              child: AppIcon(AppIcons.delete, size: 16, color: colors.danger),
             ),
           ),
         ),

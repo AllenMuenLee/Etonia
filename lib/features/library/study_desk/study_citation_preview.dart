@@ -334,12 +334,15 @@ class _Header extends StatelessWidget {
                   key: const ValueKey<String>('study-open-in-editor'),
                   tooltip: 'Open in Editor',
                   onPressed: onOpenInEditor,
-                  icon: Icon(AppIcons.fullscreen, color: colors.textSecondary),
+                  icon: AppIcon(
+                    AppIcons.fullscreen,
+                    color: colors.textSecondary,
+                  ),
                 ),
                 OutlinedButton.icon(
                   key: const ValueKey<String>('study-edit-note'),
                   onPressed: onEdit,
-                  icon: const Icon(AppIcons.pen, size: 18),
+                  icon: const AppIcon(AppIcons.pen, size: 18),
                   label: const Text('Edit Note'),
                 ),
               ] else ...[
@@ -351,7 +354,7 @@ class _Header extends StatelessWidget {
                 FilledButton.icon(
                   key: const ValueKey<String>('study-edit-done'),
                   onPressed: saving ? null : onDone,
-                  icon: const Icon(AppIcons.check, size: 18),
+                  icon: const AppIcon(AppIcons.check, size: 18),
                   label: const Text('Done'),
                 ),
               ],
@@ -367,7 +370,7 @@ class _Header extends StatelessWidget {
                     key: const ValueKey<String>('study-inspection-close'),
                     tooltip: 'Back to the chat',
                     onPressed: saving ? null : onClose,
-                    icon: Icon(AppIcons.close, color: colors.textSecondary),
+                    icon: AppIcon(AppIcons.close, color: colors.textSecondary),
                   ),
                   const SizedBox(width: AppSpacing.xs),
                   Expanded(

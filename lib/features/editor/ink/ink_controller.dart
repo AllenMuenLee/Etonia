@@ -2622,9 +2622,7 @@ class InkController {
     final List<NoteImageElement> pastedImages = <NoteImageElement>[
       for (int i = 0; i < clipboard.images.length; i++)
         clipboard.images[i]
-            .copyWith(
-              id: NoteImageElement.newId(),
-            )
+            .copyWith(id: NoteImageElement.newId())
             .transformed(transform),
     ];
     final int first = _strokes.length;

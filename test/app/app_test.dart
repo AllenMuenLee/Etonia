@@ -15,7 +15,8 @@ void main() {
     await tester.pumpWidget(const MaterialApp(home: StartupWordmark()));
 
     final Scaffold scaffold = tester.widget<Scaffold>(find.byType(Scaffold));
-    expect(scaffold.backgroundColor, Colors.black);
+    // The logo's own lavender, so the picture has no visible edge.
+    expect(scaffold.backgroundColor, const Color(0xFFFAE6FF));
 
     final Image image = tester.widget<Image>(find.byType(Image));
     expect(image.image, isA<AssetImage>());

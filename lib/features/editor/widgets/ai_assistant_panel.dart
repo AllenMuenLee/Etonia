@@ -9,10 +9,12 @@ import 'package:speech_to_text/speech_to_text.dart';
 
 import '../../../shared/widgets/processing.dart';
 import '../../../shared/widgets/etonia_mark.dart';
+import '../../../shared/widgets/etonia_mascot.dart';
 import '../../../shared/widgets/hold_menu.dart';
 import '../../../app/theme/app_tokens.dart';
 import '../../../app/theme/app_icons.dart';
 import '../../../shared/widgets/app_controls.dart';
+import '../../../shared/widgets/low_token_notice.dart';
 import '../ai/ai_assistant_controller.dart';
 import '../ai/ai_citation.dart';
 import '../ai/ai_client.dart';
@@ -471,7 +473,6 @@ class _AiAssistantPanelState extends State<AiAssistantPanel> {
                 _Header(
                   controller: controller,
                   onClose: widget.onClose,
-                  onOpenPlans: widget.onOpenPlans,
                   onImportToStudyDesk: widget.onImportToStudyDesk,
                 ),
                 const Divider(),
@@ -529,7 +530,7 @@ class _AiAssistantPanelState extends State<AiAssistantPanel> {
                             backgroundColor: AppGlass.muted(colors),
                             side: BorderSide.none,
                             minimumSize: const Size(0, 36),
-                            shape: const StadiumBorder(),
+                            shape: const RoundedRectangleBorder(borderRadius: AppBorderRadius.medium),
                             textStyle: Theme.of(context).textTheme.labelLarge,
                             padding: const EdgeInsets.symmetric(
                               horizontal: AppSpacing.md - 2,
@@ -544,6 +545,9 @@ class _AiAssistantPanelState extends State<AiAssistantPanel> {
                     ],
                   ),
                 ),
+                // Only once the month's tokens are nearly gone.
+                if (controller.usageGate case final AiUsageGate gate)
+                  LowTokenNotice(fraction: gate.tokenFraction),
                 _Composer(
                   fieldKey: widget.composerKey,
                   text: _text,
@@ -777,8 +781,11 @@ class _AiAssistantPanelState extends State<AiAssistantPanel> {
             padding: const EdgeInsets.only(bottom: AppSpacing.sm),
             child: Row(
               children: <Widget>[
-                const EtoniaBarsLoader(
-                  size: 32,
+                // Etonia leans into her pen and writes while the notation
+                // model is working.
+                const EtoniaMascot(
+                  clip: EtoniaClip.write,
+                  height: 64,
                   semanticsLabel: 'Notation is loading',
                 ),
                 const SizedBox(width: AppSpacing.sm),
@@ -902,20 +909,16 @@ class _Header extends StatelessWidget {
   const _Header({
     required this.controller,
     required this.onClose,
-    required this.onOpenPlans,
     this.onImportToStudyDesk,
   });
 
   final AiAssistantController controller;
   final VoidCallback onClose;
-  final VoidCallback? onOpenPlans;
   final VoidCallback? onImportToStudyDesk;
 
   @override
   Widget build(BuildContext context) {
     final TextTheme text = Theme.of(context).textTheme;
-    final AiUsageGate? gate = controller.usageGate;
-    final VoidCallback? openPlans = onOpenPlans;
     return Padding(
       padding: const EdgeInsetsDirectional.only(
         start: AppSpacing.md,
@@ -923,14 +926,16 @@ class _Header extends StatelessWidget {
         top: AppSpacing.xs,
         bottom: AppSpacing.xs,
       ),
-      child: Row(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        mainAxisSize: MainAxisSize.min,
         children: <Widget>[
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              mainAxisSize: MainAxisSize.min,
-              children: <Widget>[
-                Semantics(
+          // The title, the Study Desk button and Close share one line, so the
+          // button's icon sits at the height of the title's words.
+          Row(
+            children: <Widget>[
+              Expanded(
+                child: Semantics(
                   header: true,
                   child: Text(
                     AiAssistantPanel.title,
@@ -939,172 +944,38 @@ class _Header extends StatelessWidget {
                     overflow: TextOverflow.ellipsis,
                   ),
                 ),
-                const SizedBox(height: 2),
-                if (!controller.routesModels)
-                  Text(
-                    controller.modelLabel,
-                    style: text.labelMedium,
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                  )
-                else
-                  AiThinkingSelector(
-                    controller: controller,
-                    lastServedBy: controller.lastServedBy,
-                  ),
-              ],
-            ),
-          ),
-          if (onImportToStudyDesk != null)
-            IconButton(
-              key: const ValueKey('ai-import-to-study-desk'),
-              tooltip: 'Import conversation into Study Desk',
-              onPressed:
-                  controller.messages.isEmpty ||
-                      controller.requestState == AiRequestState.sending
-                  ? null
-                  : onImportToStudyDesk,
-              icon: const Icon(AppIcons.studyDesk),
-            ),
-          if (gate != null && openPlans != null)
-            _CreditsPill(
-              label: gate.creditsLabel,
-              fraction: gate.tokenFraction,
-              onPressed: openPlans,
-            ),
-          CompactIconButton(
-            tooltip: 'Close AI assistant',
-            onPressed: onClose,
-            icon: AppIcons.close,
-          ),
-        ],
-      ),
-    );
-  }
-}
-
-/// The tokens left with a lit bar, or Upgrade; opens the plans.
-class _CreditsPill extends StatelessWidget {
-  const _CreditsPill({
-    required this.label,
-    required this.fraction,
-    required this.onPressed,
-  });
-
-  final String label;
-  final double fraction;
-  final VoidCallback onPressed;
-
-  @override
-  Widget build(BuildContext context) {
-    final AppColors colors = AppColors.of(context);
-    final bool dark = Theme.of(context).brightness == Brightness.dark;
-    final bool upgrade = label == 'Upgrade';
-    final Color foreground = upgrade ? colors.onAccent : colors.textPrimary;
-    final Color baseSurface = AppGlass.muted(colors);
-    return Tooltip(
-      message: 'Plans & Credits',
-      child: Semantics(
-        button: true,
-        label: upgrade ? 'Upgrade plan' : 'AI tokens, $label',
-        excludeSemantics: true,
-        child: InkWell(
-          key: const ValueKey<String>('ai-credits-pill'),
-          onTap: onPressed,
-          customBorder: const StadiumBorder(),
-          child: ConstrainedBox(
-            constraints: const BoxConstraints(
-              minWidth: AppSizes.minTouchTarget,
-              minHeight: AppSizes.minTouchTarget,
-            ),
-            child: Center(
-              widthFactor: 1,
-              child: DecoratedBox(
-                decoration: BoxDecoration(
-                  borderRadius: BorderRadius.circular(999),
-                  color: upgrade ? colors.accent : null,
-                  gradient: upgrade
-                      ? null
-                      : LinearGradient(
-                          begin: Alignment.topLeft,
-                          end: Alignment.bottomRight,
-                          colors: <Color>[
-                            Color.alphaBlend(
-                              Colors.white.withValues(
-                                alpha: dark ? 0.08 : 0.55,
-                              ),
-                              baseSurface,
-                            ),
-                            baseSurface,
-                            Color.alphaBlend(
-                              colors.shadow.withValues(
-                                alpha: dark ? 0.18 : 0.05,
-                              ),
-                              baseSurface,
-                            ),
-                          ],
-                          stops: const <double>[0.0, 0.52, 1.0],
-                        ),
-                  border: upgrade
-                      ? null
-                      : Border.all(
-                          color: colors.glassEdge,
-                          width: AppSizes.hairline,
-                        ),
-                  boxShadow: <BoxShadow>[
-                    BoxShadow(
-                      color: (upgrade ? colors.accent : colors.shadow)
-                          .withValues(alpha: upgrade ? 0.24 : 0.07),
-                      blurRadius: upgrade ? 10 : 6,
-                      offset: const Offset(0, 2),
-                    ),
-                  ],
-                ),
-                child: Padding(
-                  padding: EdgeInsets.symmetric(
-                    horizontal: AppSpacing.sm,
-                    vertical: upgrade ? AppSpacing.xxs + 2 : AppSpacing.xxs + 1,
-                  ),
-                  child: upgrade
-                      ? Text(
-                          label,
-                          style: Theme.of(context).textTheme.labelMedium
-                              ?.copyWith(
-                                color: foreground,
-                                fontWeight: FontWeight.w600,
-                              ),
-                        )
-                      : IntrinsicWidth(
-                          child: Column(
-                            mainAxisSize: MainAxisSize.min,
-                            crossAxisAlignment: CrossAxisAlignment.stretch,
-                            children: <Widget>[
-                              Text(
-                                label,
-                                textAlign: TextAlign.center,
-                                style: Theme.of(context).textTheme.labelSmall
-                                    ?.copyWith(
-                                      color: foreground,
-                                      fontWeight: FontWeight.w600,
-                                      fontFeatures: const <FontFeature>[
-                                        FontFeature.tabularFigures(),
-                                      ],
-                                    ),
-                              ),
-                              const SizedBox(height: 3),
-                              TokenMeterBar(
-                                key: const ValueKey<String>('ai-token-bar'),
-                                fraction: fraction,
-                                height: 6,
-                              ),
-                            ],
-                          ),
-                        ),
-                ),
               ),
-            ),
+              if (onImportToStudyDesk != null)
+                IconButton(
+                  key: const ValueKey('ai-import-to-study-desk'),
+                  tooltip: 'Import conversation into Study Desk',
+                  onPressed:
+                      controller.messages.isEmpty ||
+                          controller.requestState == AiRequestState.sending
+                      ? null
+                      : onImportToStudyDesk,
+                  icon: const AppIcon(AppIcons.studyDesk),
+                ),
+              CompactIconButton(
+                tooltip: 'Close AI assistant',
+                onPressed: onClose,
+                icon: AppIcons.close,
+              ),
+            ],
           ),
-        ),
+          if (!controller.routesModels)
+            Text(
+              controller.modelLabel,
+              style: text.labelMedium,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+            )
+          else
+            AiThinkingSelector(
+              controller: controller,
+              lastServedBy: controller.lastServedBy,
+            ),
+        ],
       ),
     );
   }
@@ -1132,7 +1003,7 @@ class _SelectionChoice extends StatelessWidget {
     final AppColors colors = AppColors.of(context);
     final ThemeData theme = Theme.of(context);
     final ButtonStyle style = TextButton.styleFrom(
-      foregroundColor: colors.accent,
+      foregroundColor: colors.accentText,
       shape: const RoundedRectangleBorder(borderRadius: AppBorderRadius.medium),
       padding: const EdgeInsets.symmetric(horizontal: AppSpacing.sm),
     );
@@ -1259,7 +1130,7 @@ class _Notice extends StatelessWidget {
                           ])
                         TextButton(
                           style: TextButton.styleFrom(
-                            foregroundColor: colors.accent,
+                            foregroundColor: colors.accentText,
                             shape: const RoundedRectangleBorder(
                               borderRadius: AppBorderRadius.medium,
                             ),
@@ -1499,7 +1370,7 @@ class _CitationChip extends StatelessWidget {
         excludeSemantics: true,
         child: InkWell(
           onTap: onPressed,
-          customBorder: const StadiumBorder(),
+          customBorder: const RoundedRectangleBorder(borderRadius: AppBorderRadius.medium),
           child: ConstrainedBox(
             constraints: const BoxConstraints(
               minWidth: AppSizes.minTouchTarget,
@@ -1511,7 +1382,7 @@ class _CitationChip extends StatelessWidget {
               heightFactor: 1,
               child: DecoratedBox(
                 decoration: ShapeDecoration(
-                  shape: const StadiumBorder(),
+                  shape: const RoundedRectangleBorder(borderRadius: AppBorderRadius.medium),
                   color: colors.selected,
                 ),
                 child: Padding(
@@ -1522,7 +1393,7 @@ class _CitationChip extends StatelessWidget {
                   child: Row(
                     mainAxisSize: MainAxisSize.min,
                     children: <Widget>[
-                      Icon(
+                      AppIcon(
                         AppIcons.note,
                         size: 12,
                         color: colors.textSecondary,
@@ -1656,18 +1527,17 @@ class _Composer extends StatelessWidget {
             tooltip: listening ? 'Stop voice input' : 'Start voice input',
             onPressed: onVoiceInput,
             icon: listening ? AppIcons.microphoneActive : AppIcons.microphone,
+            glyphSize: 15,
             background: listening ? colors.danger : AppGlass.muted(colors),
             foreground: listening ? colors.onAccent : colors.textPrimary,
-            size: 40,
           ),
-          const SizedBox(width: AppSpacing.xxs),
           CompactIconButton(
             tooltip: 'Send',
             onPressed: onSend,
             icon: AppIcons.send,
+            glyphSize: 15,
             background: colors.accent,
             foreground: colors.onAccent,
-            size: 40,
           ),
         ],
       ),

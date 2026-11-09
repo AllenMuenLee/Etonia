@@ -1,0 +1,83 @@
+{
+  "fps": 12,
+  "frame_size": [
+    512,
+    603
+  ],
+  "ui_frame_size": [
+    256,
+    301
+  ],
+  "canvas": [
+    2480,
+    2920
+  ],
+  "run_step_px": 520.0,
+  "run_travel_per_loop_px": 6240.0,
+  "animations": {
+    "look_around": {
+      "frames": 12,
+      "duration_ms": 1000,
+      "sheet": "look_around_sheet.png",
+      "webp": "look_around.webp",
+      "frames_dir": "look_around",
+      "ui_dir": "ui/look_around"
+    },
+    "think": {
+      "frames": 12,
+      "duration_ms": 1000,
+      "sheet": "think_sheet.png",
+      "webp": "think.webp",
+      "frames_dir": "think",
+      "ui_dir": "ui/think"
+    },
+    "hop": {
+      "frames": 12,
+      "duration_ms": 1000,
+      "sheet": "hop_sheet.png",
+      "webp": "hop.webp",
+      "frames_dir": "hop",
+      "ui_dir": "ui/hop"
+    },
+    "write": {
+      "frames": 12,
+      "duration_ms": 1000,
+      "sheet": "write_sheet.png",
+      "webp": "write.webp",
+      "frames_dir": "write",
+      "ui_dir": "ui/write"
+    },
+    "run": {
+      "frames": 12,
+      "duration_ms": 1000,
+      "sheet": "run_sheet.png",
+      "webp": "run.webp",
+      "frames_dir": "run",
+      "ui_dir": "ui/run"
+    },
+    "pop_out": {
+      "frames": 12,
+      "duration_ms": 1000,
+      "sheet": "pop_out_sheet.png",
+      "webp": "pop_out.webp",
+      "frames_dir": "pop_out",
+      "ui_dir": "ui/pop_out"
+    },
+    "attend": {
+      "frames": 12,
+      "duration_ms": 1000,
+      "sheet": "attend_sheet.png",
+      "webp": "attend.webp",
+      "frames_dir": "attend",
+      "ui_dir": "ui/attend"
+    },
+    "grade": {
+      "frames": 24,
+      "duration_ms": 2000,
+      "sheet": "grade_sheet.png",
+      "webp": "grade.webp",
+      "frames_dir": "grade",
+      "ui_dir": "ui/grade"
+    }
+  }
+}

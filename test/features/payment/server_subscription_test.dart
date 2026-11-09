@@ -413,6 +413,62 @@ void main() {
     );
   }
 
+  testWidgets(
+    'the account page builds its other tabs once it has come in, and keeps them',
+    (WidgetTester tester) async {
+      final backend = TestBillingBackend();
+      final controller = SubscriptionController(
+        store: InMemorySubscriptionStore(),
+        backend: backend,
+      );
+      await controller.load();
+      int backupsMade = 0;
+      await pumpApp(
+        tester,
+        home: Builder(
+          builder: (BuildContext context) => TextButton(
+            onPressed: () => showAccountPage(
+              context,
+              controller,
+              backup: _MadeCounter(onMade: () => backupsMade++),
+            ),
+            child: const Text('Open account'),
+          ),
+        ),
+      );
+      final Finder backup = find.byType(_MadeCounter, skipOffstage: false);
+
+      await tester.tap(find.text('Open account'));
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 50));
+      // Moving in: the profile is there; the hidden tabs cost nothing yet.
+      expect(find.text('person@example.com'), findsOneWidget);
+      expect(backup, findsNothing);
+
+      await tester.pumpAndSettle();
+      // At rest, the others are built out of sight, ready to be shown.
+      expect(backup, findsOneWidget);
+      expect(backupsMade, 1);
+
+      await tester.tap(
+        find.byKey(const ValueKey<String>('account-tab-backup')),
+      );
+      await tester.pumpAndSettle();
+      await tester.tap(
+        find.byKey(const ValueKey<String>('account-tab-profile')),
+      );
+      await tester.pumpAndSettle();
+      await tester.tap(
+        find.byKey(const ValueKey<String>('account-tab-backup')),
+      );
+      await tester.pumpAndSettle();
+      expect(find.byType(_MadeCounter), findsOneWidget);
+      // Kept, not made again, on the way back to it.
+      expect(backupsMade, 1);
+      controller.dispose();
+    },
+  );
+
   testWidgets('the account page without a backup section says so', (
     WidgetTester tester,
   ) async {
@@ -429,4 +485,25 @@ void main() {
     expect(find.text('Backup is not available in this build.'), findsOneWidget);
     controller.dispose();
   });
+}
+
+/// Calls [onMade] each time its state is made.
+class _MadeCounter extends StatefulWidget {
+  const _MadeCounter({required this.onMade});
+
+  final VoidCallback onMade;
+
+  @override
+  State<_MadeCounter> createState() => _MadeCounterState();
+}
+
+class _MadeCounterState extends State<_MadeCounter> {
+  @override
+  void initState() {
+    super.initState();
+    widget.onMade();
+  }
+
+  @override
+  Widget build(BuildContext context) => const Text('backup section');
 }

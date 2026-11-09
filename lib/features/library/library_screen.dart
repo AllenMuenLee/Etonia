@@ -49,6 +49,7 @@ import 'cloud/google_sign_in_screen.dart';
 import 'cloud/icloud_drive_client.dart';
 import 'cloud/library_synced_settings.dart';
 import 'cloud/synced_settings.dart';
+import 'etonia_rest.dart';
 import 'file_note_repository.dart';
 import 'library_dialogs.dart';
 import 'library_models.dart';
@@ -69,8 +70,9 @@ import 'study_desk/practice/import_test_paper_sheet.dart';
 import 'study_desk/practice/study_practice_models.dart';
 import 'toolbar_layout_store.dart';
 import '../editor/widgets/toolbar_layout.dart';
+import '../../shared/navigation/app_dialogs.dart';
 import '../../shared/widgets/app_controls.dart';
-import '../../shared/widgets/dog_ear.dart';
+import '../../shared/widgets/etonia_mascot.dart';
 import '../../shared/widgets/ignore_keyboard.dart';
 import '../../shared/widgets/scene_transitions.dart';
 import '../../shared/widgets/staggered_reveal.dart';
@@ -295,7 +297,7 @@ PopupMenuItem<T> _menuItem<T>(
     child: Row(
       children: <Widget>[
         if (icon != null) ...<Widget>[
-          Icon(
+          AppIcon(
             icon,
             size: 20,
             color: danger ? colors.danger : colors.textSecondary,
@@ -313,7 +315,7 @@ PopupMenuItem<T> _menuItem<T>(
         ),
         if (checked) ...<Widget>[
           const SizedBox(width: AppSpacing.md),
-          Icon(AppIcons.check, size: 18, color: colors.accent),
+          AppIcon(AppIcons.check, size: 18, color: colors.accent),
         ],
       ],
     ),
@@ -562,6 +564,34 @@ class _LibraryScreenState extends State<LibraryScreen> {
   }
 
   String? _folderId;
+
+  /// The folder Etonia rests in, and what she does there, once chosen. Chosen
+  /// anew each time the library is entered.
+  EtoniaRest? _rest;
+
+  /// Chooses where she rests, from the folders known now.
+  void _chooseRest() => _rest = EtoniaRest.pick(_folders.keys);
+
+  /// How tall she is where she rests in the corner.
+  static const double _restHeight = 96;
+
+  /// Whether she is in the folder open now, among its own items. She is not in
+  /// Recently Deleted or in search results, which are no folder.
+  bool _restingHere({required bool trash, required bool searching}) =>
+      EtoniaRest.enabled &&
+      !trash &&
+      !searching &&
+      _rest != null &&
+      _rest!.spot == _folderId;
+
+  /// Whether her head peeks over the card of [folder], the folder she rests in
+  /// while it is among the items on show.
+  bool _peeksOver(Folder folder, {required bool searching}) =>
+      EtoniaRest.enabled &&
+      !searching &&
+      !_showingTrash &&
+      _rest?.spot == folder.id;
+
   LibrarySort _sort = LibrarySort.modified;
   bool _grid = true;
   FolderListing? _listing;
@@ -598,6 +628,18 @@ class _LibraryScreenState extends State<LibraryScreen> {
     clock: widget.clock,
   );
 
+  /// Finds the Goodnotes folder in Drive and brings it into the library.
+  late final GoodnotesDriveReplicator _goodnotesReplicator =
+      GoodnotesDriveReplicator(
+        client: _drive,
+        repository: _repository,
+        importer: DocumentImporter(
+          rasterizer: widget.pdfRasterizer,
+          config: widget.documentIoConfig,
+        ),
+        state: _cloudState,
+      );
+
   /// Goodnotes files being opened now, so a second tap does not ask twice.
   final Set<String> _openingImports = <String>{};
 
@@ -627,7 +669,13 @@ class _LibraryScreenState extends State<LibraryScreen> {
     client: _drive,
     library: _libraryOrSettings,
     clock: widget.clock,
+    runBackUp: _backUpShown,
   );
+
+  /// An automatic backup, shown in the library's banner like one the person
+  /// started, but without a summary left behind.
+  Future<bool> _backUpShown(GoogleDriveBackupService backup) =>
+      _cloudTasks.backUp(backup, quiet: true);
 
   /// Counts every change to what follows the person to their devices (chats,
   /// configured AI, handwriting fonts), so that a backup is made for it.
@@ -736,6 +784,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
         client: client,
         library: _libraryOrSettings,
         clock: widget.clock,
+        runBackUp: _backUpShown,
       ),
     );
   }
@@ -1091,6 +1140,12 @@ class _LibraryScreenState extends State<LibraryScreen> {
       _folders = <String, Folder>{
         for (final Folder folder in folders) folder.id: folder,
       };
+      // The first reading of the library decides where she rests as the app
+      // opens; a folder deleted since sends her somewhere else.
+      if (_rest == null ||
+          (_rest!.spot != null && !_folders.containsKey(_rest!.spot))) {
+        _chooseRest();
+      }
       _counts = counts;
       if (prune) {
         _thumbnails.retainOnly(<String>{
@@ -1278,6 +1333,8 @@ class _LibraryScreenState extends State<LibraryScreen> {
     _editorAtRest.value = false;
     setState(() {
       _tabsShowing = false;
+      // Back in the library, she has moved to another folder.
+      _chooseRest();
       // Whatever happened behind the editor, as a document arriving from
       // another app and opening its folder, Back goes where Edit came from.
       if (_openedFromStudyDesk) {
@@ -1360,7 +1417,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
             key: const ValueKey('study-save-library-root'),
             onPressed: () => Navigator.pop(context, ''),
             child: const ListTile(
-              leading: Icon(Icons.local_library_outlined),
+              leading: AppIcon(Icons.local_library_rounded),
               title: Text('Library'),
             ),
           ),
@@ -1369,7 +1426,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
               key: ValueKey('study-save-folder-${folder.id}'),
               onPressed: () => Navigator.pop(context, folder.id),
               child: ListTile(
-                leading: const Icon(Icons.folder_outlined),
+                leading: const AppIcon(Icons.folder_rounded),
                 title: Text(folderPath(folder)),
               ),
             ),
@@ -1440,6 +1497,13 @@ class _LibraryScreenState extends State<LibraryScreen> {
       stylusActions: _stylusActions,
       initialNotationEnabled: widget.initialNotationEnabled,
       tabsBuilder: tabs,
+      // Nothing selected: the study desk's search, of this note alone.
+      noteRetriever: (String question, {int reservedTextBytes = 0}) =>
+          _studyDesk.excerptsOfNote(
+            note.id,
+            question,
+            reservedTextBytes: reservedTextBytes,
+          ),
       onImportConversationToStudyDesk: (messages) async {
         await _studyDesk.load();
         if (!mounted) return;
@@ -1522,6 +1586,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
     setState(() {
       _studyDeskPace = MotionPace.revisit;
       _studyDeskOpen = false;
+      _chooseRest();
     });
   }
 
@@ -1669,6 +1734,74 @@ class _LibraryScreenState extends State<LibraryScreen> {
     await _importPickedDocument(picked);
   }
 
+  /// Imports the Goodnotes folder from Google Drive, signing in first when
+  /// there is no Google account yet. When Drive has no Goodnotes folder, says
+  /// to sync Goodnotes to Google Drive first.
+  Future<void> _importGoodnotesFromDrive() async {
+    if (_cloudTasks.busy) return;
+    GoogleDriveAccount? account = _drive.currentAccount;
+    try {
+      account ??= await _drive.restoreSession();
+      account ??= await _drive.signIn();
+    } on GoogleDriveException catch (error) {
+      if (mounted) _say(error.message);
+      return;
+    } on Object {
+      if (mounted) _say("Couldn't sign in to Google");
+      return;
+    }
+    if (account == null || !mounted) return;
+    await _destinations.googleConnected();
+    await _cloudTasks.importGoodnotes(
+      _goodnotesReplicator,
+      pickRoot: (List<GoodnotesDriveRoot> roots) async => mounted
+          ? await pickGoodnotesRoot(context, roots, widget.clock)
+          : roots.first,
+    );
+    if (!mounted) return;
+    if (_cloudTasks.goodnotesFolderMissing) {
+      _cloudTasks.dismissMessage();
+      await _explainGoodnotesSync();
+      return;
+    }
+    final String? message = _cloudTasks.message;
+    if (message != null) {
+      _cloudTasks.dismissMessage();
+      _say(message);
+    }
+  }
+
+  void _say(String message) {
+    ScaffoldMessenger.of(
+      context,
+    ).showSnackBar(SnackBar(content: Text(message)));
+  }
+
+  /// Etonia reads Goodnotes from Google Drive, so the notebooks have to be
+  /// put there from Goodnotes first.
+  Future<void> _explainGoodnotesSync() {
+    return showAppDialog<void>(
+      context: context,
+      motionKey: 'goodnotes-sync-first',
+      builder: (BuildContext context) => AlertDialog(
+        title: const Text('No Goodnotes folder in Google Drive'),
+        content: const Text(
+          'Etonia imports from the GoodNotes folder in your Google Drive, and '
+          'it is not there yet.\n\n'
+          'Open Goodnotes, sync your notebooks to Google Drive (Settings → '
+          'Sync & Backup → Google Drive), wait for it to finish, then come '
+          'back and import again.',
+        ),
+        actions: <Widget>[
+          FilledButton(
+            onPressed: () => Navigator.of(context).pop(),
+            child: const Text('OK'),
+          ),
+        ],
+      ),
+    );
+  }
+
   /// Imports a PDF, or a native `.goodnotes` notebook whole: pages, paper,
   /// and editable ink.
   Future<void> _importPickedDocument(PickedDocument picked) async {
@@ -1731,15 +1864,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
         autoBackup: _autoBackup,
         destinations: _destinations,
         tasks: _cloudTasks,
-        replicator: GoodnotesDriveReplicator(
-          client: _drive,
-          repository: _repository,
-          importer: DocumentImporter(
-            rasterizer: widget.pdfRasterizer,
-            config: widget.documentIoConfig,
-          ),
-          state: _cloudState,
-        ),
+        replicator: _goodnotesReplicator,
         onOpenFolder: _openFolder,
         clock: widget.clock,
         embedded: true,
@@ -2238,21 +2363,26 @@ class _LibraryScreenState extends State<LibraryScreen> {
           _openFolder(_path.length > 1 ? _path[_path.length - 2].id : null);
         }
       },
-      child: _LibraryEditorTransition(
-        showEditor: _tabsShowing,
-        pace: _zoomPace,
-        onLibraryShown: _onLibraryShown,
-        onEditorShown: () => _editorAtRest.value = true,
-        library: library,
-        editor: NoteTabsPage(
-          notes: _openNotes,
-          builder: _noteTab,
-          onBack: _showLibrary,
-          backTooltip: _openedFromStudyDesk
-              ? 'Back to ${StudyDesk.title}'
-              : 'Back to library',
-          showing: _tabsShowing,
-        ),
+      child: Stack(
+        fit: StackFit.expand,
+        children: <Widget>[
+          _LibraryEditorTransition(
+            showEditor: _tabsShowing,
+            pace: _zoomPace,
+            onLibraryShown: _onLibraryShown,
+            onEditorShown: () => _editorAtRest.value = true,
+            library: library,
+            editor: NoteTabsPage(
+              notes: _openNotes,
+              builder: _noteTab,
+              onBack: _showLibrary,
+              backTooltip: _openedFromStudyDesk
+                  ? 'Back to ${StudyDesk.title}'
+                  : 'Back to library',
+              showing: _tabsShowing,
+            ),
+          ),
+        ],
       ),
     );
   }
@@ -2455,6 +2585,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
                       child: SizedBox(
                         width: _FolderSidebar.width,
                         child: GlassSurface(
+                          color: AppColors.of(context).backgroundSecondary,
                           child: SafeArea(right: false, child: sidebar),
                         ),
                       ),
@@ -2548,6 +2679,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
         child: _EmptyState(
           query: _query,
           onNewNote: _newNote,
+          onImportGoodnotes: _importGoodnotesFromDrive,
           trash: _showingTrash,
         ),
       );
@@ -2568,8 +2700,13 @@ class _LibraryScreenState extends State<LibraryScreen> {
               ? _locationOf(folder.parentId)
               : _itemSummary(folder),
           date: formatModified(folder.modified, now),
-          leading: _FolderArt(color: folder.color, alignment: Alignment.center),
-          dragIcon: Icon(
+          leading: _FolderArt(
+            color: folder.color,
+            alignment: Alignment.center,
+            empty: _itemSummary(folder) == 'Empty',
+            etoniaPeeks: _peeksOver(folder, searching: searching),
+          ),
+          dragIcon: AppIcon(
             AppIcons.folder,
             color: resolveFolderColor(context, folder.color),
           ),
@@ -2610,7 +2747,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
           cache: _thumbnails,
           alignment: Alignment.center,
         ),
-        dragIcon: const Icon(AppIcons.note),
+        dragIcon: const AppIcon(AppIcons.note),
         actions: trash ? _ItemAction.forDeleted : _ItemAction.forNotes,
         selecting: _selecting,
         selected: _selectedNotes.contains(note.id),
@@ -2641,6 +2778,34 @@ class _LibraryScreenState extends State<LibraryScreen> {
     final double textScale = MediaQuery.textScalerOf(
       context,
     ).scale(1).clamp(1.0, 2.0);
+    // Etonia rests at the foot of one folder, in the corner: at the bottom of
+    // the screen when its items stop short of it, and at the end of the items,
+    // out of sight until the scroll reaches it, when they run past it.
+    // While a backup, restore or import runs, the banner has Etonia running
+    // over its bar: she is not in the corner as well.
+    final EtoniaRest? rest =
+        !_cloudTasks.busy && _restingHere(trash: trash, searching: searching)
+        ? _rest
+        : null;
+    // She sits flush in the corner, with no margin to any edge.
+    final Widget? restingEtonia = rest == null
+        ? null
+        : SliverFillRemaining(
+            hasScrollBody: false,
+            child: Align(
+              alignment: Alignment.bottomLeft,
+              child: EtoniaMascot(
+                key: const ValueKey<String>('etonia-resting'),
+                clip: rest.clip,
+                height: _restHeight,
+                // The frames face left; in the bottom left corner she faces
+                // right, into the screen.
+                mirrored: true,
+                // She plays in bursts, and idles in between.
+                rest: const Duration(seconds: 5),
+              ),
+            ),
+          );
     return Align(
       key: ValueKey<int>(_scene),
       alignment: Alignment.topCenter,
@@ -2655,26 +2820,43 @@ class _LibraryScreenState extends State<LibraryScreen> {
                   // stays shorter than the view, so its title is in sight.
                   final double fitsHeight =
                       (constraints.maxHeight - padding.top) * 0.8 * aspect;
-                  return GridView.builder(
-                    padding: padding,
-                    gridDelegate: SliverGridDelegateWithMaxCrossAxisExtent(
-                      maxCrossAxisExtent: math.min(
-                        (compact ? 180 : 200) * textScale,
-                        math.max(120, fitsHeight),
+                  return CustomScrollView(
+                    slivers: <Widget>[
+                      SliverPadding(
+                        padding: padding,
+                        sliver: SliverGrid.builder(
+                          gridDelegate:
+                              SliverGridDelegateWithMaxCrossAxisExtent(
+                                maxCrossAxisExtent: math.min(
+                                  (compact ? 180 : 200) * textScale,
+                                  math.max(120, fitsHeight),
+                                ),
+                                mainAxisSpacing: AppSpacing.lg,
+                                crossAxisSpacing: compact
+                                    ? AppSpacing.md
+                                    : AppSpacing.lg,
+                                childAspectRatio: aspect,
+                              ),
+                          itemCount: itemCount,
+                          itemBuilder: buildItem,
+                        ),
                       ),
-                      mainAxisSpacing: AppSpacing.lg,
-                      crossAxisSpacing: compact ? AppSpacing.md : AppSpacing.lg,
-                      childAspectRatio: aspect,
-                    ),
-                    itemCount: itemCount,
-                    itemBuilder: buildItem,
+                      ?restingEtonia,
+                    ],
                   );
                 },
               )
-            : ListView.builder(
-                padding: padding,
-                itemCount: itemCount,
-                itemBuilder: buildItem,
+            : CustomScrollView(
+                slivers: <Widget>[
+                  SliverPadding(
+                    padding: padding,
+                    sliver: SliverList.builder(
+                      itemCount: itemCount,
+                      itemBuilder: buildItem,
+                    ),
+                  ),
+                  ?restingEtonia,
+                ],
               ),
       ),
     );
@@ -2697,7 +2879,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
       date: status,
       semanticsLabel: 'Note, ${item.title}, $status. Tap to import it now.',
       leading: PendingImportArt(item: item),
-      dragIcon: const Icon(AppIcons.note),
+      dragIcon: const AppIcon(AppIcons.note),
       actions: const <_ItemAction>[],
       showMenu: false,
       draggable: false,
@@ -3083,7 +3265,7 @@ class _LibraryBar extends StatelessWidget implements PreferredSizeWidget {
         IconButton(
           tooltip: 'Done selecting',
           onPressed: onCancelSelection,
-          icon: const Icon(AppIcons.close),
+          icon: const AppIcon(AppIcons.close),
         ),
         Expanded(
           child: Padding(
@@ -3103,17 +3285,19 @@ class _LibraryBar extends StatelessWidget implements PreferredSizeWidget {
         IconButton(
           tooltip: allSelected ? 'Deselect all' : 'Select all',
           onPressed: onSelectAll,
-          icon: Icon(allSelected ? AppIcons.deselectAll : AppIcons.selectAll),
+          icon: AppIcon(
+            allSelected ? AppIcons.deselectAll : AppIcons.selectAll,
+          ),
         ),
         IconButton(
           tooltip: 'Move selected',
           onPressed: any ? onMoveSelected : null,
-          icon: const Icon(AppIcons.move),
+          icon: const AppIcon(AppIcons.move),
         ),
         IconButton(
           tooltip: 'Delete selected',
           onPressed: any ? onDeleteSelected : null,
-          icon: const Icon(AppIcons.delete),
+          icon: const AppIcon(AppIcons.delete),
         ),
       ],
     );
@@ -3153,13 +3337,13 @@ class _LibraryBar extends StatelessWidget implements PreferredSizeWidget {
                                 IconButton(
                                   tooltip: 'Folders',
                                   onPressed: onOpenSidebar,
-                                  icon: const Icon(AppIcons.sidebar),
+                                  icon: const AppIcon(AppIcons.sidebar),
                                 ),
                               if (trash)
                                 IconButton(
                                   tooltip: 'Back to library',
                                   onPressed: onLeaveTrash,
-                                  icon: const Icon(AppIcons.back),
+                                  icon: const AppIcon(AppIcons.back),
                                 )
                               else if (path.isNotEmpty)
                                 IconButton(
@@ -3169,7 +3353,7 @@ class _LibraryBar extends StatelessWidget implements PreferredSizeWidget {
                                         ? path[path.length - 2].id
                                         : null,
                                   ),
-                                  icon: const Icon(AppIcons.back),
+                                  icon: const AppIcon(AppIcons.back),
                                 )
                               else if (onOpenSidebar == null)
                                 const SizedBox(width: AppSpacing.md),
@@ -3218,7 +3402,10 @@ class _LibraryBar extends StatelessWidget implements PreferredSizeWidget {
                                 ),
                                 tooltip: 'Account',
                                 onPressed: onAccount,
-                                icon: const Icon(AppIcons.account),
+                                icon: AppIcon(
+                                  AppIcons.account,
+                                  color: colors.textPrimary,
+                                ),
                               ),
                               // On compact widths, where the bar is full,
                               // the view toggle is in this menu too.
@@ -3231,7 +3418,10 @@ class _LibraryBar extends StatelessWidget implements PreferredSizeWidget {
                                   'sort',
                                 )),
                                 tooltip: 'Sort',
-                                icon: const Icon(AppIcons.sort),
+                                icon: AppIcon(
+                                  AppIcons.sort,
+                                  color: colors.textPrimary,
+                                ),
                                 onSelected: (Object choice) {
                                   if (choice is LibrarySort) {
                                     onSort(choice);
@@ -3286,10 +3476,11 @@ class _LibraryBar extends StatelessWidget implements PreferredSizeWidget {
                                       ? 'Show as list'
                                       : 'Show as grid',
                                   onPressed: onToggleView,
-                                  icon: Icon(
+                                  icon: AppIcon(
                                     grid
                                         ? AppIcons.listView
                                         : AppIcons.gridView,
+                                    color: colors.textPrimary,
                                   ),
                                 ),
                               // Beside the folders where they are shown.
@@ -3297,12 +3488,18 @@ class _LibraryBar extends StatelessWidget implements PreferredSizeWidget {
                                 IconButton(
                                   tooltip: 'New folder',
                                   onPressed: onNewFolder,
-                                  icon: const Icon(AppIcons.newFolder),
+                                  icon: AppIcon(
+                                    AppIcons.newFolder,
+                                    color: colors.textPrimary,
+                                  ),
                                 ),
                               IconButton(
                                 tooltip: 'Select',
                                 onPressed: onSelect,
-                                icon: const Icon(AppIcons.select),
+                                icon: AppIcon(
+                                  AppIcons.select,
+                                  color: colors.textPrimary,
+                                ),
                               ),
                             ],
                           ),
@@ -3355,14 +3552,14 @@ class _SearchField extends StatelessWidget {
                 colors.textPrimary.withValues(alpha: 0.03),
                 colors.surfaceMuted,
               ),
-              prefixIcon: const Icon(AppIcons.search, size: 20),
+              prefixIcon: const AppIcon(AppIcons.search, size: 20),
               prefixIconConstraints: const BoxConstraints(minWidth: 40),
               suffixIcon: value.text.isEmpty
                   ? null
                   : IconButton(
                       tooltip: 'Clear search',
                       onPressed: controller.clear,
-                      icon: const Icon(AppIcons.clear, size: 18),
+                      icon: const AppIcon(AppIcons.clear, size: 18),
                     ),
             ),
           );
@@ -3400,7 +3597,7 @@ class _Breadcrumbs extends StatelessWidget {
       if (i > 0) {
         crumbs.add(
           ExcludeSemantics(
-            child: Icon(
+            child: AppIcon(
               AppIcons.disclosure,
               size: 18,
               color: colors.textSecondary.withValues(alpha: 0.6),
@@ -3527,21 +3724,21 @@ class _NewNoteButton extends StatelessWidget {
         menuChildren: <Widget>[
           reads(
             MenuItemButton(
-              leadingIcon: const Icon(Icons.assignment_outlined),
+              leadingIcon: const AppIcon(Icons.assignment_rounded),
               onPressed: onImportTest,
               child: const Text('Import test'),
             ),
           ),
           reads(
             MenuItemButton(
-              leadingIcon: const Icon(AppIcons.pdf),
+              leadingIcon: const AppIcon(AppIcons.pdf),
               onPressed: onImportPdf,
               child: const Text('Import PDF'),
             ),
           ),
           reads(
             MenuItemButton(
-              leadingIcon: const Icon(AppIcons.template),
+              leadingIcon: const AppIcon(AppIcons.template),
               onPressed: onNewNote,
               child: const Text('Template…'),
             ),
@@ -3587,7 +3784,7 @@ class _NewNoteButton extends StatelessWidget {
                               child: Row(
                                 mainAxisSize: MainAxisSize.min,
                                 children: <Widget>[
-                                  Icon(
+                                  AppIcon(
                                     AppIcons.add,
                                     size: 22,
                                     color: colors.onAccent,
@@ -3616,7 +3813,7 @@ class _NewNoteButton extends StatelessWidget {
                             child: SizedBox(
                               width: AppSizes.minTouchTarget,
                               child: Center(
-                                child: Icon(
+                                child: AppIcon(
                                   AppIcons.expand,
                                   size: 16,
                                   color: colors.onAccent,
@@ -3762,11 +3959,15 @@ class _EmptyState extends StatelessWidget {
   const _EmptyState({
     required this.query,
     required this.onNewNote,
+    required this.onImportGoodnotes,
     this.trash = false,
   });
 
   final String query;
   final VoidCallback onNewNote;
+
+  /// Brings the Goodnotes folder in from Google Drive.
+  final VoidCallback onImportGoodnotes;
 
   /// For an empty Recently Deleted.
   final bool trash;
@@ -3792,7 +3993,7 @@ class _EmptyState extends StatelessWidget {
                 ),
                 child: SizedBox.square(
                   dimension: 72,
-                  child: Icon(
+                  child: AppIcon(
                     searching ? AppIcons.noResults : AppIcons.trash,
                     size: 32,
                     color: colors.textSecondary,
@@ -3800,39 +4001,21 @@ class _EmptyState extends StatelessWidget {
                 ),
               )
             else
-              SizedBox(
-                width: 84,
-                height: 104,
-                child: DogEar(
-                  flapColor: colors.surfaceMuted,
-                  backgroundColor: colors.surfaceMuted,
-                  child: Padding(
-                    padding: const EdgeInsets.fromLTRB(14, 28, 14, 14),
-                    child: Column(
-                      children: <Widget>[
-                        for (final double width in <double>[
-                          1,
-                          0.74,
-                          0.88,
-                        ]) ...<Widget>[
-                          FractionallySizedBox(
-                            widthFactor: width,
-                            child: Container(
-                              height: 7,
-                              decoration: BoxDecoration(
-                                color: colors.textSecondary.withValues(
-                                  alpha: 0.28,
-                                ),
-                                borderRadius: BorderRadius.circular(999),
-                              ),
-                            ),
-                          ),
-                          const SizedBox(height: AppSpacing.xs),
-                        ],
-                      ],
-                    ),
-                  ),
-                ),
+              // Etonia herself waits in the middle, playing in bursts.
+              EtoniaMascot.playlist(
+                key: const ValueKey<String>('etonia-empty'),
+                // Held still where the corner mascot is switched off, as in
+                // tests that wait for the screen to settle.
+                animated: EtoniaRest.enabled,
+                playlist: const <EtoniaClip>[
+                  EtoniaClip.lookAround,
+                  EtoniaClip.hop,
+                  EtoniaClip.think,
+                  EtoniaClip.hop,
+                ],
+                rest: const Duration(seconds: 2),
+                height: 160,
+                semanticsLabel: 'Etonia is waiting for your first note',
               ),
             const SizedBox(height: AppSpacing.lg),
             Text(
@@ -3861,8 +4044,15 @@ class _EmptyState extends StatelessWidget {
               const SizedBox(height: AppSpacing.lg),
               FilledButton.icon(
                 onPressed: onNewNote,
-                icon: const Icon(AppIcons.add, size: 20),
+                icon: const AppIcon(AppIcons.newNote, size: 20),
                 label: const Text('New note'),
+              ),
+              const SizedBox(height: AppSpacing.sm),
+              OutlinedButton.icon(
+                key: const ValueKey<String>('import-goodnotes'),
+                onPressed: onImportGoodnotes,
+                icon: const AppIcon(AppIcons.goodnotes, size: 20),
+                label: const Text('Import from Goodnotes'),
               ),
             ],
           ],
@@ -3971,7 +4161,7 @@ class _LibraryItemState extends State<_LibraryItem> {
       onOpened: () => MotionMemory.instance.remember(('popup', 'item-actions')),
       key: _menu,
       tooltip: 'More actions for ${widget.title}',
-      icon: Icon(AppIcons.more, size: 20, color: colors.textSecondary),
+      icon: AppIcon(AppIcons.more, size: 20, color: colors.textSecondary),
       onSelected: widget.onAction,
       itemBuilder: (BuildContext context) {
         return <PopupMenuEntry<_ItemAction>>[
@@ -4216,11 +4406,17 @@ class _Contained extends StatelessWidget {
   }
 }
 
-/// A folder, in its color: a soft folder shape, its tab at the back.
+/// A folder, in its color: straight-edged cardstock, a tab with a chamfered
+/// shoulder at the back and a front pocket with a level top edge, outlined
+/// with a dark gray frame. An [empty] folder has the mascot's sheet peeking from
+/// behind the pocket; the folder [etoniaPeeks] over has Etonia herself looking
+/// over its back edge.
 class _FolderArt extends StatelessWidget {
   const _FolderArt({
     required this.color,
     this.alignment = Alignment.bottomCenter,
+    this.empty = false,
+    this.etoniaPeeks = false,
   });
 
   /// Wider than tall, like a folder on a desk.
@@ -4228,24 +4424,59 @@ class _FolderArt extends StatelessWidget {
 
   final FolderColor color;
   final AlignmentGeometry alignment;
+  final bool empty;
+
+  /// Whether Etonia peeks over the folder's back, the folder she rests in.
+  final bool etoniaPeeks;
 
   @override
   Widget build(BuildContext context) {
     final Color tint = resolveFolderColor(context, color);
     final AppColors colors = AppColors.of(context);
-    final bool isNeutral =
-        color == FolderColor.accent || color == FolderColor.gray;
     return _Contained(
       aspect: aspect,
       alignment: alignment,
-      child: CustomPaint(
-        painter: _FolderPainter(
-          tint: tint,
-          surface: colors.surface,
-          dark: Theme.of(context).brightness == Brightness.dark,
-          isNeutral: isNeutral,
-          dividerColor: colors.divider,
-        ),
+      child: LayoutBuilder(
+        builder: (BuildContext context, BoxConstraints box) {
+          final double w = box.maxWidth;
+          final double h = box.maxHeight;
+          // Her height, and how far down the drawing the folder's back hides
+          // her: only her pencil, its sprout and the top of her sheet show.
+          final double her = h * 0.62;
+          const double shown = 0.7;
+          return Stack(
+            clipBehavior: Clip.none,
+            children: <Widget>[
+              if (etoniaPeeks)
+                Positioned(
+                  key: const ValueKey<String>('etonia-peeking'),
+                  left: w * 0.52,
+                  top: h * _FolderPainter.tabFraction - her * shown,
+                  // She springs up from behind the folder, then keeps looking,
+                  // with a breather between looks.
+                  child: EtoniaMascot(
+                    clip: EtoniaClip.popOut,
+                    then: EtoniaClip.attend,
+                    rest: const Duration(seconds: 4),
+                    height: her,
+                  ),
+                ),
+              Positioned.fill(
+                child: CustomPaint(
+                  painter: _FolderPainter(
+                    tint: tint,
+                    surface: colors.surface,
+                    paper: colors.writingSurface,
+                    ink: colors.textPrimary,
+                    dark: Theme.of(context).brightness == Brightness.dark,
+                    dividerColor: colors.divider,
+                    empty: empty,
+                  ),
+                ),
+              ),
+            ],
+          );
+        },
       ),
     );
   }
@@ -4255,89 +4486,108 @@ class _FolderPainter extends CustomPainter {
   const _FolderPainter({
     required this.tint,
     required this.surface,
+    required this.paper,
+    required this.ink,
     required this.dark,
-    this.isNeutral = false,
-    this.dividerColor,
+    required this.dividerColor,
+    this.empty = false,
   });
 
   final Color tint;
   final Color surface;
+  final Color paper;
+  final Color ink;
   final bool dark;
-  final bool isNeutral;
-  final Color? dividerColor;
+  final Color dividerColor;
+  final bool empty;
+
+  /// How tall the back's tab is, as a fraction of the folder's height.
+  static const double tabFraction = 0.14;
 
   @override
   void paint(Canvas canvas, Size size) {
     final double w = size.width;
     final double h = size.height;
-    final double r = math.min(w, h) * 0.08;
-    final double tabHeight = h * 0.1;
-    final double tabWidth = w * 0.4;
-    // The back, with its tab.
+    final double tabHeight = h * tabFraction;
+    final double tabWidth = w * 0.42;
+    final double chamfer = tabHeight;
+    // Cream cardstock lightly tinted with the folder's color.
+    Color card(double alpha) =>
+        Color.alphaBlend(tint.withValues(alpha: alpha), surface);
+    final Paint frame = Paint()
+      // A soft gray frame, a shade darker than before, so the folder's own
+      // color still carries it.
+      ..color = dark ? const Color(0xFF5C5961) : const Color(0xFF959199)
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 1.3
+      ..strokeJoin = StrokeJoin.round
+      ..strokeCap = StrokeCap.round;
+
+    // The back: a straight tab whose shoulder falls away at 45 degrees.
     final Path back = Path()
-      ..moveTo(0, r)
-      ..quadraticBezierTo(0, 0, r, 0)
-      ..lineTo(tabWidth - r * 0.5, 0)
-      ..quadraticBezierTo(tabWidth, 0, tabWidth + r * 0.6, tabHeight * 0.6)
-      ..lineTo(tabWidth + r * 0.9, tabHeight)
-      ..lineTo(w - r, tabHeight)
-      ..quadraticBezierTo(w, tabHeight, w, tabHeight + r)
-      ..lineTo(w, h - r)
-      ..quadraticBezierTo(w, h, w - r, h)
-      ..lineTo(r, h)
-      ..quadraticBezierTo(0, h, 0, h - r)
+      ..moveTo(0, 0)
+      ..lineTo(tabWidth, 0)
+      ..lineTo(tabWidth + chamfer, tabHeight)
+      ..lineTo(w, tabHeight)
+      ..lineTo(w, h)
+      ..lineTo(0, h)
       ..close();
-    // A soft shadow under the folder's body: a blurred rounded rectangle,
-    // which is drawn analytically rather than through a blur pass.
-    canvas.drawRRect(
-      RRect.fromRectAndRadius(
-        Rect.fromLTRB(w * 0.04, tabHeight + h * 0.14, w * 0.96, h + 3),
-        Radius.circular(r),
-      ),
+    // A diffuse warm shadow, drawn analytically rather than through a pass.
+    canvas.drawRect(
+      Rect.fromLTRB(w * 0.04, tabHeight + h * 0.14, w * 0.96, h + 3),
       Paint()
-        ..color = Colors.black.withValues(alpha: dark ? 0.4 : 0.14)
+        ..color = (dark ? Colors.black : const Color(0xFF241C29)).withValues(
+          alpha: dark ? 0.4 : 0.12,
+        )
         ..maskFilter = const MaskFilter.blur(BlurStyle.normal, 7),
     );
-    final Color backColor = isNeutral
-        ? surface
-        : Color.alphaBlend(tint.withValues(alpha: dark ? 0.62 : 0.55), surface);
-    canvas.drawPath(back, Paint()..color = backColor);
-    if (isNeutral && dividerColor != null) {
-      canvas.drawPath(
-        back,
-        Paint()
-          ..color = dividerColor!
-          ..style = PaintingStyle.stroke
-          ..strokeWidth = 1.0,
+    canvas.drawPath(back, Paint()..color = card(dark ? 0.28 : 0.16));
+    final Path outline = Path.from(back);
+
+    final double top = tabHeight + h * 0.1;
+    if (empty) {
+      // The mascot's sheet, peeking out from behind the pocket: straight
+      // edges and two vertical slits for eyes.
+      final Rect sheet = Rect.fromLTWH(
+        w * 0.2,
+        tabHeight + h * 0.01,
+        w * 0.6,
+        h * 0.5,
       );
+      canvas.drawRect(sheet, Paint()..color = paper);
+      outline.addRect(sheet);
+      final double ey = tabHeight + h * 0.2;
+      final double dx = w * 0.12;
+      outline
+        ..moveTo(w / 2 - dx, ey)
+        ..lineTo(w / 2 - dx, ey + h * 0.09)
+        ..moveTo(w / 2 + dx, ey)
+        ..lineTo(w / 2 + dx, ey + h * 0.09);
     }
-    // The front, a little lower, lighter, catching the light.
-    final RRect front = RRect.fromRectAndRadius(
-      Rect.fromLTRB(0, tabHeight + h * 0.08, w, h),
-      Radius.circular(r),
-    );
-    final Color frontColor = isNeutral
-        ? surface
-        : Color.alphaBlend(tint.withValues(alpha: dark ? 0.86 : 0.78), surface);
-    canvas.drawRRect(front, Paint()..color = frontColor);
-    if (isNeutral && dividerColor != null) {
-      canvas.drawRRect(
-        front,
-        Paint()
-          ..color = dividerColor!
-          ..style = PaintingStyle.stroke
-          ..strokeWidth = 1.0,
-      );
-    }
+
+    // The front pocket, a little lower, its top edge level.
+    final Path front = Path()
+      ..moveTo(0, top)
+      ..lineTo(w, top)
+      ..lineTo(w, h)
+      ..lineTo(0, h)
+      ..close();
+    canvas.drawPath(front, Paint()..color = card(dark ? 0.42 : 0.26));
+    outline.addPath(front, Offset.zero);
+
+    // Soft light gray frame around the folder.
+    canvas.drawPath(outline, frame);
   }
 
   @override
   bool shouldRepaint(_FolderPainter oldDelegate) {
     return oldDelegate.tint != tint ||
         oldDelegate.surface != surface ||
+        oldDelegate.paper != paper ||
+        oldDelegate.ink != ink ||
         oldDelegate.dark != dark ||
-        oldDelegate.isNeutral != isNeutral ||
-        oldDelegate.dividerColor != dividerColor;
+        oldDelegate.dividerColor != dividerColor ||
+        oldDelegate.empty != empty;
   }
 }
 
@@ -4548,7 +4798,7 @@ class _FolderSidebar extends StatelessWidget {
           return Material(
             // Only a pinned header needs a fill, so rows scrolling under it
             // don't show through; otherwise the sidebar's surface shows.
-            color: pinned ? colors.background : Colors.transparent,
+            color: pinned ? colors.backgroundSecondary : Colors.transparent,
             child: _target(
               folder.id,
               _SidebarRow(
@@ -4558,7 +4808,7 @@ class _FolderSidebar extends StatelessWidget {
                 count: counts[folder.id] ?? 0,
                 selected: folder.id == openFolderId,
                 expanded: hasChildren ? open : null,
-                icon: Icon(
+                icon: AppIcon(
                   open ? AppIcons.folderOpen : AppIcons.folder,
                   color: resolveFolderColor(context, folder.color),
                   size: AppSizes.icon,
@@ -4610,6 +4860,34 @@ class _FolderSidebar extends StatelessWidget {
                 AppSpacing.xs,
                 0,
               ),
+              child: _target(
+                null,
+                _SidebarRow(
+                  key: const ValueKey<String>('sidebar-library'),
+                  depth: 0,
+                  label: 'Library',
+                  count: null,
+                  selected: libraryOpen,
+                  expanded: null,
+                  icon: AppIcon(
+                    AppIcons.library,
+                    color: libraryOpen ? colors.accent : colors.textPrimary,
+                    size: AppSizes.icon,
+                  ),
+                  onTap: () => onOpenFolder(null),
+                  onToggle: null,
+                  actions: const <_ItemAction>[],
+                  onAction: null,
+                ),
+              ),
+            ),
+            Padding(
+              padding: const EdgeInsets.fromLTRB(
+                AppSpacing.xs,
+                0,
+                AppSpacing.xs,
+                0,
+              ),
               child: _DropTarget(
                 canAccept: (_Dragged item) => true,
                 onAccept: onDropOnStudyDesk,
@@ -4623,7 +4901,7 @@ class _FolderSidebar extends StatelessWidget {
                     count: studyDesk.activeCount,
                     selected: studyDeskOpen,
                     expanded: null,
-                    icon: Icon(
+                    icon: AppIcon(
                       AppIcons.studyDesk,
                       color: studyDeskOpen ? colors.accent : colors.textPrimary,
                       size: AppSizes.icon,
@@ -4655,7 +4933,10 @@ class _FolderSidebar extends StatelessWidget {
                     key: const ValueKey<String>('sidebar-new-folder'),
                     tooltip: 'New folder',
                     onPressed: onNewFolder,
-                    icon: Icon(AppIcons.newFolder, color: colors.textSecondary),
+                    icon: AppIcon(
+                      AppIcons.newFolder,
+                      color: colors.textSecondary,
+                    ),
                   ),
                 ],
               ),
@@ -4673,28 +4954,6 @@ class _FolderSidebar extends StatelessWidget {
                     ),
                     sliver: SliverMainAxisGroup(
                       slivers: <Widget>[
-                        SliverToBoxAdapter(
-                          child: _target(
-                            null,
-                            _SidebarRow(
-                              key: const ValueKey<String>('sidebar-library'),
-                              depth: 0,
-                              label: 'Library',
-                              count: null,
-                              selected: libraryOpen,
-                              expanded: null,
-                              icon: Icon(
-                                AppIcons.library,
-                                color: colors.textSecondary,
-                                size: AppSizes.icon,
-                              ),
-                              onTap: () => onOpenFolder(null),
-                              onToggle: null,
-                              actions: const <_ItemAction>[],
-                              onAction: null,
-                            ),
-                          ),
-                        ),
                         ...rows,
                         if (folders.isEmpty)
                           SliverToBoxAdapter(
@@ -4734,7 +4993,7 @@ class _FolderSidebar extends StatelessWidget {
                   count: trashCount,
                   selected: trashOpen,
                   expanded: null,
-                  icon: Icon(
+                  icon: AppIcon(
                     AppIcons.trash,
                     color: colors.textSecondary,
                     size: AppSizes.icon,
@@ -4830,7 +5089,11 @@ class _SidebarAiQuotaCard extends StatelessWidget {
                     children: <Widget>[
                       Row(
                         children: <Widget>[
-                          Icon(AppIcons.plans, size: 16, color: colors.accent),
+                          AppIcon(
+                            AppIcons.plans,
+                            size: 16,
+                            color: colors.accent,
+                          ),
                           const SizedBox(width: AppSpacing.xs),
                           Expanded(
                             child: Text(
@@ -4942,7 +5205,7 @@ class _SidebarRowState extends State<_SidebarRow> {
                 icon: AnimatedRotation(
                   turns: expanded ? 0.25 : 0,
                   duration: AppMotion.resolve(context, AppMotion.fadeIn),
-                  child: Icon(
+                  child: AppIcon(
                     AppIcons.disclosure,
                     size: 20,
                     color: colors.textSecondary,
@@ -5033,7 +5296,7 @@ class _SidebarRowState extends State<_SidebarRow> {
                     MotionMemory.instance.remember(('popup', 'folder-actions')),
                 key: _menu,
                 tooltip: 'More actions for ${widget.label}',
-                icon: Icon(
+                icon: AppIcon(
                   AppIcons.more,
                   size: 20,
                   color: colors.textSecondary,

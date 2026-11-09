@@ -68,7 +68,7 @@ class _ImageOptionRow extends StatelessWidget {
               child: Row(
                 children: <Widget>[
                   const SizedBox(width: AppSpacing.xs),
-                  Icon(icon, size: 20, color: colors.textSecondary),
+                  AppIcon(icon, size: 20, color: colors.textSecondary),
                   const SizedBox(width: AppSpacing.sm),
                   Expanded(
                     child: Text(

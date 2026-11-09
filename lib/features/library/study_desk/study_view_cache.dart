@@ -48,7 +48,10 @@ class StudyByteCache {
     return _making[key] ??= _run(key, make);
   }
 
-  Future<Uint8List?> _run(Object key, Future<Uint8List?> Function() make) async {
+  Future<Uint8List?> _run(
+    Object key,
+    Future<Uint8List?> Function() make,
+  ) async {
     try {
       final Uint8List? made = await make();
       if (made != null) put(key, made);

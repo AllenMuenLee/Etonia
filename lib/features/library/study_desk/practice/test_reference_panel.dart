@@ -77,7 +77,7 @@ class _TestReferencePanelState extends State<TestReferencePanel> {
                     IconButton(
                       tooltip: 'Close reference sheets',
                       onPressed: widget.onClose,
-                      icon: const Icon(AppIcons.close),
+                      icon: const AppIcon(AppIcons.close),
                     ),
                   ],
                 )
@@ -94,7 +94,7 @@ class _TestReferencePanelState extends State<TestReferencePanel> {
                     IconButton(
                       tooltip: 'Close reference sheets',
                       onPressed: widget.onClose,
-                      icon: const Icon(AppIcons.close),
+                      icon: const AppIcon(AppIcons.close),
                     ),
                   ],
                 ),
@@ -131,7 +131,7 @@ class _TestReferencePanelState extends State<TestReferencePanel> {
                           onPressed: widget.busy
                               ? null
                               : () => widget.onImport(widget.kind),
-                          icon: const Icon(AppIcons.add),
+                          icon: const AppIcon(AppIcons.add),
                           label: Text(
                             'Import ${widget.kind.label.toLowerCase()}',
                           ),
@@ -164,7 +164,7 @@ class _TestReferencePanelState extends State<TestReferencePanel> {
                       onPressed: page == 0
                           ? null
                           : () => setState(() => page--),
-                      icon: const Icon(AppIcons.previous),
+                      icon: const AppIcon(AppIcons.previous),
                     ),
                     Text('${page + 1} / ${paths.length}'),
                     IconButton(
@@ -172,7 +172,7 @@ class _TestReferencePanelState extends State<TestReferencePanel> {
                       onPressed: page + 1 >= paths.length
                           ? null
                           : () => setState(() => page++),
-                      icon: const Icon(AppIcons.next),
+                      icon: const AppIcon(AppIcons.next),
                     ),
                     const Spacer(),
                     IconButton(
@@ -180,7 +180,7 @@ class _TestReferencePanelState extends State<TestReferencePanel> {
                       onPressed: widget.busy
                           ? null
                           : () => widget.onImport(widget.kind),
-                      icon: const Icon(AppIcons.add),
+                      icon: const AppIcon(AppIcons.add),
                     ),
                   ],
                 ),

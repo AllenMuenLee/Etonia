@@ -104,7 +104,7 @@ class _GoogleSignInScreenState extends State<GoogleSignInScreen> {
                 mainAxisSize: MainAxisSize.min,
                 crossAxisAlignment: CrossAxisAlignment.stretch,
                 children: <Widget>[
-                  Icon(AppIcons.cloud, size: 48, color: colors.accent),
+                  AppIcon(AppIcons.cloud, size: 48, color: colors.accent),
                   const SizedBox(height: AppSpacing.md),
                   Text(
                     'Sign in to Etonia',

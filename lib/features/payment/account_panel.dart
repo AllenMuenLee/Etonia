@@ -126,7 +126,7 @@ class _AccountPanelState extends State<AccountPanel> {
                           email.characters.first.toUpperCase(),
                           style: text.titleLarge?.copyWith(
                             color: colors.onAccent,
-                            fontWeight: FontWeight.w800,
+                            fontWeight: FontWeight.w600,
                           ),
                         ),
                       ),
@@ -264,7 +264,7 @@ class _AccountPanelState extends State<AccountPanel> {
                 onPressed: _busy
                     ? null
                     : () => _run(widget.backend.signInWithGoogle),
-                icon: const Icon(AppIcons.account, size: 18),
+                icon: const AppIcon(AppIcons.account, size: 18),
                 label: GentleSwitcher(
                   value: _busy,
                   alignment: Alignment.center,

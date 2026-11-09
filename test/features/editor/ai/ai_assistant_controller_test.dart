@@ -201,6 +201,59 @@ void main() {
     expect(rig.assistant.context, same(context));
   });
 
+  test('a question with nothing selected carries the open note\'s excerpts, '
+      'in the request alone', () async {
+    final List<String> asked = <String>[];
+    final FakeAiClient client = FakeAiClient();
+    final AiAssistantController assistant = AiAssistantController(
+      client: client,
+      renderer: FakeSelectionImageRenderer(),
+      noteRetriever: (String question, {int reservedTextBytes = 0}) async {
+        asked.add(question);
+        return '[Source N1:P1:C0 | Note: "Calculus", Page 1]\nT1: d/dx x^2 = 2x';
+      },
+    );
+    addTearDown(assistant.dispose);
+
+    assistant.send('What is a derivative?');
+    await pumpEventQueue();
+
+    expect(asked, <String>['What is a derivative?']);
+    final AiRequest request = client.requests.single;
+    expect(request.messages.last.text, contains('d/dx x^2 = 2x'));
+    expect(request.messages.last.text, endsWith('What is a derivative?'));
+    // The transcript keeps the user's own words.
+    expect(_texts(assistant), <String>['user: What is a derivative?']);
+  });
+
+  test('a question about a selection does not search the note', () async {
+    int searches = 0;
+    final FakeAiClient client = FakeAiClient();
+    final AiAssistantController assistant = AiAssistantController(
+      client: client,
+      renderer: FakeSelectionImageRenderer(),
+      noteRetriever: (String question, {int reservedTextBytes = 0}) async {
+        searches++;
+        return 'excerpt';
+      },
+    );
+    addTearDown(assistant.dispose);
+    final InkController ink = InkController(strokes: <Stroke>[_line(100)]);
+    addTearDown(ink.dispose);
+
+    assistant.open(
+      _selectionOf(ink, <int>[0]),
+      brightness: Brightness.light,
+      background: Colors.white,
+    );
+    await pumpEventQueue();
+    assistant.send('Explain this');
+    await pumpEventQueue();
+
+    expect(searches, 0);
+    expect(client.requests.single.messages.last.text, 'Explain this');
+  });
+
   test('a page chat drawing on the note keeps no focus, and is found by '
       'selecting its notes', () async {
     final InkController ink = InkController(

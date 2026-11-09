@@ -25,6 +25,7 @@ class AutoBackupScheduler with WidgetsBindingObserver {
     DateTime Function()? clock,
     this.minimumDelay = const Duration(seconds: 30),
     this.soonDelay = const Duration(seconds: 2),
+    this.runBackUp,
   }) : _clock = clock ?? DateTime.now;
 
   static const Duration defaultInterval = Duration(minutes: 15);
@@ -58,6 +59,10 @@ class AutoBackupScheduler with WidgetsBindingObserver {
   /// How long [backUpSoon] waits, so several requests make one backup.
   final Duration soonDelay;
   final DateTime Function() _clock;
+
+  /// Runs a backup where the person can see its progress, true if it
+  /// completed. Without it the backup runs unseen.
+  final Future<bool> Function(GoogleDriveBackupService backup)? runBackUp;
 
   /// How often to back up; [off] when it does not.
   final ValueNotifier<Duration> interval = ValueNotifier<Duration>(
@@ -150,7 +155,13 @@ class AutoBackupScheduler with WidgetsBindingObserver {
     // Changes made while it runs are for the next one.
     _dirty = false;
     try {
-      await backup.backUp();
+      final Future<bool> Function(GoogleDriveBackupService)? run = runBackUp;
+      if (run == null) {
+        await backup.backUp();
+      } else if (!await run(backup)) {
+        // Cancelled, failed, or another task had the cloud: try again.
+        _dirty = true;
+      }
     } on Object {
       _dirty = true;
     } finally {

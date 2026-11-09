@@ -32,7 +32,7 @@ class StudyMaterialSources extends StatelessWidget {
         if (sourceSessionId != null)
           ListTile(
             key: const ValueKey('study-material-source-chat'),
-            leading: const Icon(AppIcons.studyDesk),
+            leading: const AppIcon(AppIcons.studyDesk),
             title: Text(session?.title ?? 'Original conversation unavailable'),
             subtitle: const Text('Source conversation'),
             enabled: session != null,
@@ -47,7 +47,7 @@ class StudyMaterialSources extends StatelessWidget {
           if (controller.noteOf(id) == null)
             const ListTile(
               enabled: false,
-              leading: Icon(AppIcons.note),
+              leading: AppIcon(AppIcons.note),
               title: Text('Source note unavailable'),
             ),
         if (noteIds.isEmpty && sourceSessionId == null)

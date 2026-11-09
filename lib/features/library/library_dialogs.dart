@@ -241,7 +241,7 @@ class _FolderRow extends StatelessWidget {
           ),
           child: Row(
             children: <Widget>[
-              Icon(
+              AppIcon(
                 root ? AppIcons.library : AppIcons.folder,
                 size: 20,
                 color: root
@@ -270,12 +270,15 @@ class _FolderRow extends StatelessWidget {
 /// [color] as shown in the current theme.
 Color resolveFolderColor(BuildContext context, FolderColor color) {
   final AppColors colors = AppColors.of(context);
+  final bool dark = Theme.of(context).brightness == Brightness.dark;
   // Folders sit on a pale desk; the palette is deepened so they read as
   // objects there, the neutral most of all as it is the pale one.
   Color deepen(Color base, double amount) =>
       Color.lerp(base, Colors.black, amount)!;
   return switch (color) {
-    FolderColor.accent || FolderColor.gray => deepen(colors.surfaceMuted, 0.4),
+    FolderColor.accent => deepen(colors.surfaceMuted, 0.4),
+    FolderColor.gray =>
+      dark ? const Color(0xFFADB5BD) : const Color(0xFF6B7280),
     FolderColor.yellow => deepen(colors.highlighters[0], 0.18),
     FolderColor.orange => deepen(colors.highlighters[1], 0.18),
     FolderColor.red || FolderColor.pink => deepen(colors.highlighters[2], 0.18),
@@ -526,10 +529,15 @@ class FolderColorPicker extends StatelessWidget {
                           shape: BoxShape.circle,
                         ),
                         child: color == selected
-                            ? const Icon(
+                            ? AppIcon(
                                 AppIcons.check,
                                 size: 16,
-                                color: Colors.white,
+                                color: ThemeData.estimateBrightnessForColor(
+                                          resolveFolderColor(context, color),
+                                        ) ==
+                                        Brightness.dark
+                                    ? Colors.white
+                                    : const Color(0xFF252329),
                               )
                             : null,
                       ),
@@ -816,7 +824,7 @@ class _TemplateTile extends StatelessWidget {
                     maxLines: 2,
                     textAlign: TextAlign.center,
                     style: Theme.of(context).textTheme.labelMedium!.copyWith(
-                      color: selected ? colors.accent : colors.textPrimary,
+                      color: selected ? colors.accentText : colors.textPrimary,
                       fontWeight: selected ? FontWeight.w600 : FontWeight.w500,
                       height: 1.2,
                     ),
@@ -884,7 +892,7 @@ class _PaperPreview extends StatelessWidget {
                 ),
                 if (icon != null)
                   Center(
-                    child: Icon(icon, size: 20, color: colors.textSecondary),
+                    child: AppIcon(icon, size: 20, color: colors.textSecondary),
                   ),
               ],
             ),

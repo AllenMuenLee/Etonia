@@ -26,7 +26,9 @@ Stroke _line(double y) {
 final Finder _selector = find.byKey(
   const ValueKey<String>('ai-thinking-selector'),
 );
-final Finder _pill = find.byKey(const ValueKey<String>('ai-credits-pill'));
+final Finder _lowTokens = find.byKey(
+  const ValueKey<String>('low-token-notice'),
+);
 
 String _shown(WidgetTester tester) => tester
     .widget<Text>(find.byKey(const ValueKey<String>('ai-thinking-label')))
@@ -240,7 +242,7 @@ void main() {
     },
   );
 
-  testWidgets('the credits pill shows the balance and opens the plans', (
+  testWidgets('there is no token meter, only a line once tokens run low', (
     WidgetTester tester,
   ) async {
     final SubscriptionController plan = await loadedSubscription(
@@ -248,23 +250,19 @@ void main() {
     );
     await _pumpOpen(tester, plan);
 
-    expect(
-      find.descendant(of: _pill, matching: find.text('100% tokens')),
-      findsOneWidget,
-    );
-    expect(tester.getSize(_pill).height, greaterThanOrEqualTo(48));
+    expect(find.byKey(const ValueKey<String>('ai-credits-pill')), findsNothing);
+    expect(find.byKey(const ValueKey<String>('ai-token-bar')), findsNothing);
+    expect(_lowTokens, findsNothing);
     plan.recordUsage(
       AiModelId.sol,
       const AiTokenUsage(inputTokens: 100000000, outputTokens: 0),
     );
     await tester.pump();
+    expect(_lowTokens, findsOneWidget);
     expect(
-      find.descendant(of: _pill, matching: find.text('Upgrade')),
+      find.text('You have less than 5% of your tokens left this month'),
       findsOneWidget,
     );
-    await tester.tap(_pill);
-    await tester.pumpAndSettle();
-    expect(find.byType(PaymentPage), findsOneWidget);
   });
 
   test('what the user chose survives a restart', () async {
@@ -302,11 +300,69 @@ void main() {
       );
       await tester.pumpAndSettle();
       expect(_shown(tester), 'Thinking: Medium');
-      expect(
-        find.descendant(of: _pill, matching: find.text('100% tokens')),
-        findsOneWidget,
-      );
+      expect(_lowTokens, findsNothing);
       expect(tester.takeException(), isNull);
     });
   }
+
+  testWidgets('the scrollable meter and auto button allow dragging and toggling', (
+    WidgetTester tester,
+  ) async {
+    final SubscriptionController plan = await loadedSubscription(
+      plan: SubscriptionPlan.pro1499,
+    );
+    await _pumpOpen(tester, plan);
+
+    expect(_shown(tester), 'Thinking: Auto');
+    // The options stay hidden until the Thinking button is tapped.
+    expect(find.byKey(const ValueKey<String>('ai-thinking-meter')), findsNothing);
+    expect(find.byKey(const ValueKey<String>('ai-thinking-auto')), findsNothing);
+    expect(
+      find.byKey(const ValueKey<String>('ai-thinking-advanced')),
+      findsNothing,
+    );
+    await tester.tap(find.byKey(const ValueKey<String>('ai-thinking-toggle')));
+    await tester.pumpAndSettle();
+    expect(find.byKey(const ValueKey<String>('ai-thinking-meter')), findsOneWidget);
+    expect(find.byKey(const ValueKey<String>('ai-thinking-auto')), findsOneWidget);
+
+    // Tap Low on the meter
+    await tester.tap(find.byKey(const ValueKey<String>('ai-thinking-low')));
+    await tester.pumpAndSettle();
+    expect(_shown(tester), 'Thinking: Low');
+    expect(plan.routing.effort, AiEffort.low);
+
+    // Tap High on the meter
+    await tester.tap(find.byKey(const ValueKey<String>('ai-thinking-high')));
+    await tester.pumpAndSettle();
+    expect(_shown(tester), 'Thinking: High');
+    expect(plan.routing.effort, AiEffort.high);
+
+    // Tap Auto button to return to Auto
+    await tester.tap(find.byKey(const ValueKey<String>('ai-thinking-auto')));
+    await tester.pumpAndSettle();
+    expect(_shown(tester), 'Thinking: Auto');
+    expect(plan.routing.effort, AiEffort.auto);
+
+    // Dragging along the meter across levels
+    final Finder meter = find.byKey(const ValueKey<String>('ai-thinking-meter'));
+    final Rect rect = tester.getRect(meter);
+    // Drag to the right third (High)
+    await tester.dragFrom(rect.centerLeft, Offset(rect.width * 0.9, 0));
+    await tester.pumpAndSettle();
+    expect(plan.routing.effort, AiEffort.high);
+    expect(_shown(tester), 'Thinking: High');
+
+    // Drag to the center (Medium)
+    await tester.dragFrom(rect.centerRight, Offset(-rect.width * 0.5, 0));
+    await tester.pumpAndSettle();
+    expect(plan.routing.effort, AiEffort.medium);
+    expect(_shown(tester), 'Thinking: Medium');
+
+    // Tap Auto again
+    await tester.tap(find.byKey(const ValueKey<String>('ai-thinking-auto')));
+    await tester.pumpAndSettle();
+    expect(_shown(tester), 'Thinking: Auto');
+    expect(plan.routing.effort, AiEffort.auto);
+  });
 }

@@ -50,7 +50,7 @@ class EraserOptions extends StatelessWidget {
             semanticLabel: mode.label,
             selected: settings.mode == mode,
             onPressed: () => onChanged(settings.copyWith(mode: mode)),
-            child: Icon(switch (mode) {
+            child: AppIcon(switch (mode) {
               EraserMode.area => AppIcons.eraseArea,
               EraserMode.stroke => AppIcons.eraseStroke,
             }),
@@ -83,12 +83,9 @@ class EraserIcon extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final IconThemeData theme = IconTheme.of(context);
     return SizedBox.square(
-      dimension: theme.size,
-      child: CustomPaint(
-        painter: _EraserIconPainter(theme.color ?? const Color(0xFF000000)),
-      ),
+      dimension: kIconSize,
+      child: CustomPaint(painter: _EraserIconPainter(iconTint(context))),
     );
   }
 }
@@ -104,7 +101,7 @@ class _EraserIconPainter extends CustomPainter {
     final Paint paint = Paint()
       ..color = color
       ..style = PaintingStyle.stroke
-      ..strokeWidth = 1.2 * unit
+      ..strokeWidth = kIconStrokeWidth
       ..strokeJoin = StrokeJoin.round
       ..strokeCap = StrokeCap.round
       ..isAntiAlias = true;

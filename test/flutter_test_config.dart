@@ -3,6 +3,8 @@ import 'dart:async';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:greatnote/features/editor/ink/input_defaults.dart';
+import 'package:greatnote/features/library/etonia_rest.dart';
+import 'package:greatnote/shared/widgets/etonia_mascot.dart';
 import 'package:greatnote/shared/widgets/processing.dart';
 import 'package:leak_tracker_flutter_testing/leak_tracker_flutter_testing.dart';
 
@@ -32,6 +34,11 @@ Future<void> testExecutable(FutureOr<void> Function() testMain) async {
         : Duration.zero;
   };
   setUp(LoadTimings.instance.reset);
+  // Etonia rests in a random folder of the library; the tests that look for
+  // her choose where, and every other test has her out of its way.
+  setUp(() => EtoniaRest.enabled = false);
+  // Her breathing never ends, so tests that settle do not have it.
+  setUp(() => EtoniaMascot.idles = false);
   final FontLoader icons = FontLoader('MaterialIcons')
     ..addFont(rootBundle.load('fonts/MaterialIcons-Regular.otf'));
   await icons.load();

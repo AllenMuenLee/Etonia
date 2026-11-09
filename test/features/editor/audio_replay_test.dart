@@ -11,8 +11,12 @@ import 'package:greatnote/features/editor/ink/ink_controller.dart';
 import 'package:greatnote/features/editor/ink/ink_palette.dart';
 import 'package:greatnote/features/editor/ink/ink_sample.dart';
 import 'package:greatnote/features/editor/ink/ink_selection.dart';
+import 'package:greatnote/features/editor/ink/pen_settings.dart';
 import 'package:greatnote/features/editor/ink/stroke.dart';
+import 'package:greatnote/features/editor/page/note_document.dart';
 import 'package:greatnote/features/editor/widgets/editor_app_bar.dart';
+import 'package:greatnote/features/editor/widgets/recording_options.dart';
+import 'package:greatnote/features/editor/widgets/tool_palette.dart';
 import 'package:greatnote/features/library/note_recording_track.dart';
 
 import '../../helpers/pump_app.dart';
@@ -254,7 +258,10 @@ void main() {
     expect(find.byKey(const ValueKey<String>('no-recordings')), findsOneWidget);
 
     await tester.tap(microphone);
+    // The panel goes as the recording starts. Not settled: the recording's
+    // pulse never stops, so it is pumped past the panel's closing instead.
     await tester.pump();
+    await tester.pump(const Duration(seconds: 1));
     expect(
       find.byKey(const ValueKey<String>('recording-elapsed')),
       findsOneWidget,
@@ -276,7 +283,47 @@ void main() {
     expect(recorder.state, NoteAudioRecorderState.idle);
   });
 
-  testWidgets('replay bar scrubs and changes playback speed', (
+  testWidgets('pressing Record again stops the recording', (
+    WidgetTester tester,
+  ) async {
+    final _FakeRecorder recorder = _FakeRecorder();
+    final _FakePlayer player = _FakePlayer();
+    addTearDown(recorder.dispose);
+    addTearDown(player.dispose);
+    await pumpApp(
+      tester,
+      home: EditorScreen(
+        title: 'Recorded note',
+        audioRecorder: recorder,
+        audioPlayer: player,
+        enableNativeInk: false,
+      ),
+    );
+
+    await tester.tap(find.byTooltip('Expand toolbar'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byTooltip('Recordings'));
+    await tester.pumpAndSettle();
+    await tester.tap(
+      find.byKey(const ValueKey<String>('start-audio-recording')),
+    );
+    await tester.pump();
+    await tester.pump(const Duration(seconds: 1));
+    expect(recorder.state, NoteAudioRecorderState.recording);
+    // The panel is put away; the sub toolbar holds the recording's controls.
+    expect(
+      find.byKey(const ValueKey<String>('start-audio-recording')),
+      findsNothing,
+    );
+    expect(find.byKey(const ValueKey<String>('recording-bar')), findsOneWidget);
+
+    await tester.tap(find.byKey(const ValueKey<String>('recording-tool')));
+    await tester.pump(const Duration(seconds: 1));
+    expect(recorder.state, NoteAudioRecorderState.idle);
+    expect(find.byKey(const ValueKey<String>('recording-bar')), findsNothing);
+  });
+
+  testWidgets('the replay bar takes the place of the tool options', (
     WidgetTester tester,
   ) async {
     final _FakeRecorder recorder = _FakeRecorder();
@@ -294,33 +341,76 @@ void main() {
     addTearDown(recorder.dispose);
     addTearDown(player.dispose);
     addTearDown(replay.dispose);
+    final NoteDocument document = NoteDocument();
+    addTearDown(document.dispose);
+    final ValueNotifier<EditorTool> tool = ValueNotifier<EditorTool>(
+      EditorTool.pen,
+    );
+    final ValueNotifier<PenSettings> pen = ValueNotifier<PenSettings>(
+      PenSettings.defaults(),
+    );
+    final ValueNotifier<EraserSettings> eraser = ValueNotifier<EraserSettings>(
+      EraserSettings.defaults(const EraserConfig()),
+    );
+    final ValueNotifier<bool> aiActive = ValueNotifier<bool>(false);
+    addTearDown(tool.dispose);
+    addTearDown(pen.dispose);
+    addTearDown(eraser.dispose);
+    addTearDown(aiActive.dispose);
     await pumpApp(
       tester,
       home: Scaffold(
-        appBar: EditorAppBar(
-          title: 'Recorded note',
-          centerTitle: true,
-          audioPlayer: player,
-          replayController: replay,
+        body: Align(
+          alignment: Alignment.topLeft,
+          child: ToolPalette(
+            tool: tool,
+            penSettings: pen,
+            eraserSettings: eraser,
+            selectPdf: ValueNotifier<bool>(false),
+            aiActive: aiActive,
+            onTurnOnAi: () {},
+            recording: RecordingToolData(
+              recorder: recorder,
+              document: document,
+              replay: replay,
+              player: player,
+              onCloseReplay: replay.close,
+              onStart: () {},
+              onPause: () {},
+              onResume: () {},
+              onStop: () {},
+              onOpen: (_) {},
+            ),
+          ),
         ),
       ),
     );
-    expect(
-      find.byKey(const ValueKey<String>('audio-replay-bar')),
-      findsOneWidget,
-    );
+
+    final Finder bar = find.byKey(const ValueKey<String>('audio-replay-bar'));
+    expect(bar, findsOneWidget);
+    // The tool's own options give way to the playback bar.
+    expect(find.byKey(const ValueKey<String>('pen-options-bar')), findsNothing);
+
     final Slider slider = tester.widget<Slider>(
-      find.byKey(const ValueKey<String>('audio-replay-slider')),
+      find.descendant(
+        of: find.byKey(const ValueKey<String>('audio-replay-slider')),
+        matching: find.byType(Slider),
+      ),
     );
     slider.onChanged!(5000);
     await tester.pump();
     expect(player.position, const Duration(seconds: 5));
 
-    final DropdownButton<double> speed = tester.widget<DropdownButton<double>>(
-      find.byKey(const ValueKey<String>('audio-replay-speed')),
-    );
-    speed.onChanged!(1.5);
+    await tester.tap(find.byKey(const ValueKey<String>('audio-replay-speed')));
     await tester.pump();
-    expect(player.speed, 1.5);
+    expect(player.speed, 1.25);
+
+    await tester.tap(find.byKey(const ValueKey<String>('close-audio-replay')));
+    await tester.pumpAndSettle();
+    expect(bar, findsNothing);
+    expect(
+      find.byKey(const ValueKey<String>('pen-options-bar')),
+      findsOneWidget,
+    );
   });
 }

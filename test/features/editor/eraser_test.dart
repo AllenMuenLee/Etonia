@@ -392,6 +392,11 @@ void main() {
     await tester.pumpAndSettle();
     expect(_isSelected(tester, 'Pen'), isTrue);
     expect(find.byType(EraserOptions), findsNothing);
+    // The pen's bar is as wide as the palette it is attached to, and scrolls.
+    await tester.ensureVisible(
+      find.byKey(const ValueKey<String>('ink-swatch-2')),
+    );
+    await tester.pumpAndSettle();
     await tester.tap(find.byKey(const ValueKey<String>('ink-swatch-2')));
     await tester.pumpAndSettle();
     _slider(tester).onChanged!(7);

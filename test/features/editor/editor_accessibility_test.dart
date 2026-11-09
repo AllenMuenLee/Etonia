@@ -215,7 +215,7 @@ void main() {
         return (body.decoration! as BoxDecoration).color!;
       }
 
-      expect(fill('On'), AppColors.light.accent);
+      expect(fill('On'), AppColors.light.selected);
       expect(fill('Off').a, 0);
       expect(
         tester.getSemantics(find.bySemanticsLabel('On')),

@@ -133,7 +133,7 @@ class StudyPracticeGenerator {
     final StringBuffer prompt = StringBuffer();
     if (payload.contextText.isNotEmpty) {
       prompt
-        ..write('Excerpts from my notes:\n\n')
+        ..write('Reference sources:\n\n')
         ..write(payload.contextText)
         ..write('\n\n');
     }

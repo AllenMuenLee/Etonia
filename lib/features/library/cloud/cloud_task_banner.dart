@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 
 import '../../../app/theme/app_icons.dart';
 import '../../../app/theme/app_tokens.dart';
+import '../../../shared/widgets/etonia_mascot.dart';
 import 'cloud_task_controller.dart';
 import 'goodnotes_drive_replicator.dart';
 
@@ -15,6 +16,10 @@ class CloudTaskBanner extends StatelessWidget {
 
   /// Taps open the page that started the work.
   final VoidCallback? onTap;
+
+  /// How tall Etonia is as she runs, and the width she runs back and forth in.
+  static const double _runnerHeight = 56;
+  static const double _runnerTrack = 160;
 
   static String _title(CloudTask task) => switch (task) {
     CloudTask.backUp => 'Backing up your library',
@@ -54,7 +59,7 @@ class CloudTaskBanner extends StatelessWidget {
                 ),
                 child: Row(
                   children: <Widget>[
-                    Icon(AppIcons.cloud, size: 18, color: colors.accent),
+                    AppIcon(AppIcons.cloud, size: 18, color: colors.accent),
                     const SizedBox(width: AppSpacing.sm),
                     Expanded(
                       child: ExcludeSemantics(
@@ -79,6 +84,17 @@ class CloudTaskBanner extends StatelessWidget {
                             ),
                           ],
                         ),
+                      ),
+                    ),
+                    // She runs whatever the task, and keeps to the right of
+                    // the banner, between the text and Cancel.
+                    const SizedBox(
+                      key: ValueKey<String>('banner-runner-track'),
+                      width: _runnerTrack,
+                      height: _runnerHeight,
+                      child: EtoniaRunner(
+                        key: ValueKey<String>('banner-runner'),
+                        height: _runnerHeight,
                       ),
                     ),
                     TextButton(
@@ -125,7 +141,7 @@ class PendingImportArt extends StatelessWidget {
                   height: 24,
                   child: CircularProgressIndicator(strokeWidth: 2),
                 )
-              : Icon(
+              : AppIcon(
                   item.requested ? AppIcons.cloudDownload : AppIcons.note,
                   size: 24,
                   color: item.requested

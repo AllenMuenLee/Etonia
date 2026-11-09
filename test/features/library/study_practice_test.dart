@@ -1208,15 +1208,21 @@ void main() {
       await tester.pumpWidget(
         GreatnoteApp(
           themeMode: theme,
-          home: Scaffold(
-            body: StudyPracticeStudioView(
-              controller: controller,
-              onViewCitation: (StudyCitation _) {},
-              onAddSources: () {},
-              exportSink: sink ?? FakeExportSink(),
-              onOpenTestAsNote: asNote,
-              exporter: const StudyTestPdfExporter(compress: false),
-              temporaryDirectory: () async => Directory.systemTemp,
+          // Etonia loops in an empty library, and a loop never settles.
+          home: Builder(
+            builder: (BuildContext context) => MediaQuery(
+              data: MediaQuery.of(context).copyWith(disableAnimations: true),
+              child: Scaffold(
+                body: StudyPracticeStudioView(
+                  controller: controller,
+                  onViewCitation: (StudyCitation _) {},
+                  onAddSources: () {},
+                  exportSink: sink ?? FakeExportSink(),
+                  onOpenTestAsNote: asNote,
+                  exporter: const StudyTestPdfExporter(compress: false),
+                  temporaryDirectory: () async => Directory.systemTemp,
+                ),
+              ),
             ),
           ),
         ),

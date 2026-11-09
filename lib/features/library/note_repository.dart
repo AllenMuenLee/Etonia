@@ -107,6 +107,11 @@ abstract class NoteRepository extends ChangeNotifier {
 
   Future<void> renameNote(String id, String title);
 
+  /// Sets the modified time of the note [id], in the library or in Recently
+  /// Deleted, and changes nothing else. For syncing, where a note whose
+  /// content is the same on both sides only takes the newer time.
+  Future<void> setNoteModified(String id, DateTime modified);
+
   Future<void> renameFolder(String id, String name);
 
   Future<void> recolorFolder(String id, FolderColor color);
@@ -503,6 +508,19 @@ abstract class IndexedNoteRepository extends NoteRepository {
   Future<void> renameNote(String id, String title) {
     return _mutate(() async {
       _notes[id] = _note(id).copyWith(title: _name(title), modified: _clock());
+      await writeIndex();
+    });
+  }
+
+  @override
+  Future<void> setNoteModified(String id, DateTime modified) {
+    return _mutate(() async {
+      final NoteEntry? live = _notes[id];
+      if (live != null) {
+        _notes[id] = live.copyWith(modified: modified);
+      } else {
+        _trash[id] = _trashed(id).copyWith(modified: modified);
+      }
       await writeIndex();
     });
   }

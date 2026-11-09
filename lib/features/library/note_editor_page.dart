@@ -70,6 +70,7 @@ class NoteEditorPage extends StatefulWidget {
     this.onRenamed,
     this.onBack,
     this.onImportConversationToStudyDesk,
+    this.noteRetriever,
     this.onSaved,
     this.arrived,
     this.citationMarks,
@@ -99,6 +100,10 @@ class NoteEditorPage extends StatefulWidget {
   /// Leaves the editor; by default the page's route is popped.
   final VoidCallback? onBack;
   final ValueChanged<List<AiMessage>>? onImportConversationToStudyDesk;
+
+  /// Finds what this note says about a question, for the assistant when
+  /// nothing is selected. The note is saved first, so it is found as it is.
+  final AiNoteRetriever? noteRetriever;
 
   final NoteRepository repository;
   final NoteEntry note;
@@ -566,6 +571,16 @@ class _NoteEditorPageState extends State<NoteEditorPage> {
                 await _editor.currentState?.finalizeRecording();
                 await _autosaver?.flush();
                 if (mounted) widget.onImportConversationToStudyDesk!(messages);
+              },
+        noteRetriever: widget.noteRetriever == null
+            ? null
+            : (String question, {int reservedTextBytes = 0}) async {
+                await _autosaver?.flush();
+                if (!mounted) return null;
+                return widget.noteRetriever!(
+                  question,
+                  reservedTextBytes: reservedTextBytes,
+                );
               },
         onTitlePressed: _rename,
         tabs: tabs,

@@ -68,7 +68,7 @@ class NoteTabStrip extends StatelessWidget {
                   IconButton(
                     tooltip: 'Open another note',
                     onPressed: onOpenAnother,
-                    icon: const Icon(AppIcons.add, size: 20),
+                    icon: const AppIcon(AppIcons.add, size: 20),
                   ),
               ],
             ),
@@ -104,7 +104,7 @@ class _NoteTab extends StatelessWidget {
       color: active ? colors.textPrimary : colors.textSecondary,
       fontWeight: FontWeight.w600,
     );
-    final BorderRadius radius = BorderRadius.circular(999);
+    final BorderRadius radius = AppBorderRadius.medium;
     return AnimatedContainer(
       duration: AppMotion.resolve(context, AppMotion.snappy.duration),
       curve: AppMotion.fadeInCurve,
@@ -175,7 +175,8 @@ class _NoteTab extends StatelessWidget {
                 fixedSize: const Size.square(28),
                 padding: EdgeInsets.zero,
               ),
-              icon: const Icon(AppIcons.close),
+              // The one icon that keeps its own small size and color.
+              icon: const AppIcon(AppIcons.close, uniform: false),
             ),
             const SizedBox(width: 2),
           ],

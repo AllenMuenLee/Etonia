@@ -94,8 +94,8 @@ import 'widgets/page_controls.dart';
 import 'widgets/selection_action_bar.dart';
 import 'widgets/recording_options.dart';
 import 'widgets/recording_transcript_sheet.dart';
-import 'widgets/tool_options_bar.dart';
 import 'widgets/tool_palette.dart';
+import 'widgets/tool_options_bar.dart';
 import 'widgets/toolbar_layout.dart';
 import 'widgets/writing_surface_frame.dart';
 import '../payment/payment_page.dart';
@@ -125,6 +125,7 @@ class EditorScreen extends StatefulWidget {
     this.title = 'Untitled note',
     this.onBack,
     this.onImportConversationToStudyDesk,
+    this.noteRetriever,
     this.onTitlePressed,
     this.penConfig = const PenConfig(),
     this.eraserConfig = const EraserConfig(),
@@ -229,6 +230,10 @@ class EditorScreen extends StatefulWidget {
   /// Called by the navigation control, to leave the editor.
   final VoidCallback? onBack;
   final ValueChanged<List<AiMessage>>? onImportConversationToStudyDesk;
+
+  /// Finds what this note says about a question the assistant is asked with
+  /// nothing selected, so the note is its source then.
+  final AiNoteRetriever? noteRetriever;
 
   /// Called by the title, to rename the note.
   final VoidCallback? onTitlePressed;
@@ -452,9 +457,6 @@ class EditorScreenState extends State<EditorScreen>
     if (scope == null || _chromeEntry != null) return;
     final EditorChromeEntry entry = EditorChromeEntry(
       onSettings: _openSettings,
-      audioPlayer: _audioPlayer,
-      replayController: _strokeReplay,
-      onCloseReplay: () => unawaited(_closeReplay()),
     );
     _chromeEntry = entry;
     // After this frame: publishing lays the shared bar out again.
@@ -579,9 +581,12 @@ class EditorScreenState extends State<EditorScreen>
       final double toolbarBottom = layout.paletteOrigin.dy + toolbarHeight;
       limit = math.max(limit, toolbarBottom + margin);
 
-      final bool hasSubtoolbar = ToolPalette.showsOptions(
+      final bool hasSubtoolbar = ToolPalette.hasSubToolbar(
         _tool.value,
         _toolOptionsShown,
+        recordingShown:
+            _audioRecorder.state != NoteAudioRecorderState.idle ||
+            _strokeReplay.isActive,
       );
       if (hasSubtoolbar) {
         final double subtoolbarBottom =
@@ -783,6 +788,7 @@ class EditorScreenState extends State<EditorScreen>
     endNotationPreview: _endNotationPreview,
     inkInArea: _inkInArea,
     shownPage: () => _inkController,
+    noteRetriever: widget.noteRetriever,
     notationEnabled: widget.initialNotationEnabled,
   );
 
@@ -3007,6 +3013,9 @@ class EditorScreenState extends State<EditorScreen>
     _palettePlacement.addListener(_onPalettePlacementChanged);
     _toolbarShown.addListener(_onToolbarShownChanged);
     _toolOptionsShown.addListener(_onToolbarStateChanged);
+    // The sub toolbar holds a recording's controls while one is made or open.
+    _audioRecorder.addListener(_onToolbarStateChanged);
+    _strokeReplay.activity.addListener(_onToolbarStateChanged);
     _toolbarLayout.addListener(_onPalettePlacementChanged);
     _paletteController.expanded.addListener(_onPalettePlacementChanged);
     _paletteController.expanded.addListener(_rememberToolbar);
@@ -3201,6 +3210,8 @@ class EditorScreenState extends State<EditorScreen>
     _fullscreenSettled?.removeListener(_onFullscreenSettled);
     WidgetsBinding.instance.removeObserver(this);
     _audioPlayer.removeListener(_onAudioPlayerChanged);
+    _audioRecorder.removeListener(_onToolbarStateChanged);
+    _strokeReplay.activity.removeListener(_onToolbarStateChanged);
     _strokeReplay.dispose();
     _aiPanelDragWidth.dispose();
     if (_ownsAudioRecorder) {
@@ -3642,9 +3653,6 @@ class EditorScreenState extends State<EditorScreen>
               onTitlePressed: widget.onTitlePressed ?? () {},
               onSettingsPressed: _openSettings,
               tabs: widget.tabs,
-              audioPlayer: _audioPlayer,
-              replayController: _strokeReplay,
-              onCloseReplay: () => unawaited(_closeReplay()),
             ),
       body: SafeArea(
         top: false,
@@ -4159,6 +4167,8 @@ class EditorScreenState extends State<EditorScreen>
                               recorder: _audioRecorder,
                               document: _document,
                               replay: _strokeReplay,
+                              player: _audioPlayer,
+                              onCloseReplay: () => unawaited(_closeReplay()),
                               onStart: () => unawaited(_startRecording()),
                               onPause: () => unawaited(_pauseRecording()),
                               onResume: () => unawaited(_resumeRecording()),
@@ -4663,7 +4673,7 @@ class _HandwritingFindDialogState extends State<_HandwritingFindDialog> {
               textInputAction: TextInputAction.search,
               decoration: const InputDecoration(
                 hintText: 'Type a word, phrase, or symbol',
-                prefixIcon: Icon(AppIcons.search),
+                prefixIcon: AppIcon(AppIcons.search),
               ),
               onChanged: _onQueryChanged,
               onSubmitted: (_) => _showMatch(found, selected),
@@ -4699,7 +4709,7 @@ class _HandwritingFindDialogState extends State<_HandwritingFindDialog> {
                       setState(() => _selected = previous);
                       _showMatch(found, previous);
                     },
-                    icon: const Icon(Icons.chevron_left),
+                    icon: const AppIcon(Icons.chevron_left_rounded),
                   ),
                 if (found.isNotEmpty)
                   IconButton(
@@ -4709,7 +4719,7 @@ class _HandwritingFindDialogState extends State<_HandwritingFindDialog> {
                       setState(() => _selected = next);
                       _showMatch(found, next);
                     },
-                    icon: const Icon(Icons.chevron_right),
+                    icon: const AppIcon(Icons.chevron_right_rounded),
                   ),
               ],
             ),
@@ -4809,7 +4819,7 @@ class _InkSearchPadState extends State<_InkSearchPad> {
                   });
                   widget.onChanged(const <List<InkVector>>[]);
                 },
-                icon: const Icon(Icons.close),
+                icon: const AppIcon(Icons.close_rounded),
               ),
             ),
         ],

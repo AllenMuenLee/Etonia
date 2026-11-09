@@ -96,6 +96,7 @@ class _PageImageLayerState extends State<PageImageLayer> {
             disambiguator++;
           }
         }
+
         return Stack(
           fit: StackFit.expand,
           clipBehavior: Clip.hardEdge,

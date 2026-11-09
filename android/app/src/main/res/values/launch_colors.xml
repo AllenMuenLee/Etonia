@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- The ground of the app's own startup page, so the hand-over from the
+         system's launch screen to Flutter has no visible change. -->
+    <color name="launch_ground">#FAE6FF</color>
+</resources>

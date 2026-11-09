@@ -310,8 +310,10 @@ class StudyPracticeSet {
     ],
   );
 
+  /// [clearCourse] takes the set out of its class, which [courseId] cannot say.
   StudyPracticeSet copyWith({
     String? courseId,
+    bool clearCourse = false,
     String? sourceSessionId,
     String? title,
     DateTime? updatedAt,
@@ -320,7 +322,7 @@ class StudyPracticeSet {
     double? bestQuizScore,
   }) => StudyPracticeSet(
     id: id,
-    courseId: courseId ?? this.courseId,
+    courseId: clearCourse ? null : courseId ?? this.courseId,
     sourceSessionId: sourceSessionId ?? this.sourceSessionId,
     title: title ?? this.title,
     createdAt: createdAt,
@@ -798,8 +800,10 @@ class StudyTestPaper {
         },
       )
       .length;
+  /// [clearCourse] takes the paper out of its class, which [courseId] cannot say.
   StudyTestPaper copyWith({
     String? courseId,
+    bool clearCourse = false,
     List<TestQuestion>? questions,
     DateTime? updatedAt,
     bool? isSubmitted,
@@ -808,7 +812,7 @@ class StudyTestPaper {
     List<TestReferenceSheet>? referenceSheets,
   }) => StudyTestPaper(
     id: id,
-    courseId: courseId ?? this.courseId,
+    courseId: clearCourse ? null : courseId ?? this.courseId,
     title: title,
     sourceSessionId: sourceSessionId,
     courseName: courseName,

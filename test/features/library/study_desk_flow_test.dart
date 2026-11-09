@@ -378,7 +378,7 @@ void main() {
       expect(f.desk.currentSession.courseId, isNull);
       expect(f.desk.sources, isEmpty);
       expect(f.desk.retrievalNoteIds, f.desk.allNotes.map((n) => n.id));
-      expect(find.text('Searching your entire library'), findsOneWidget);
+      expect(find.text('Searching your entire library'), findsNothing);
       expect(f.desk.allSessions.map((s) => s.id), contains('chat'));
     },
   );

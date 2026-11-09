@@ -127,9 +127,9 @@ class _PaletteButtonState extends State<PaletteButton>
                   alignment: Alignment.center,
                   decoration: BoxDecoration(
                     color: widget.selected && !widget.hostsSelection
-                        ? colors.accent
-                        : colors.accent.withValues(alpha: 0),
-                    borderRadius: BorderRadius.circular(999),
+                        ? colors.selected
+                        : colors.selected.withValues(alpha: 0),
+                    borderRadius: AppBorderRadius.medium,
                     border: Border.all(
                       color: showFocusRing
                           ? colors.focus
@@ -141,11 +141,9 @@ class _PaletteButtonState extends State<PaletteButton>
                   // would be drawn offscreen on every frame it is shown.
                   child: TweenAnimationBuilder<Color?>(
                     tween: ColorTween(
-                      end:
-                          (widget.selected
-                                  ? colors.onAccent
-                                  : colors.textPrimary)
-                              .withValues(alpha: enabled ? 1 : 0.38),
+                      end: colors.textPrimary.withValues(
+                        alpha: enabled ? 1 : 0.38,
+                      ),
                     ),
                     duration: AppMotion.resolve(context, AppMotion.fadeIn),
                     curve: AppMotion.fadeInCurve,

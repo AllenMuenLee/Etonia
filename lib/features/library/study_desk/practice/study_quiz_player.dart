@@ -177,7 +177,7 @@ class _StudyQuizPlayerState extends State<StudyQuizPlayer> {
             key: const ValueKey<String>('practice-player-close'),
             tooltip: 'Back to Practice Studio',
             onPressed: widget.onClose,
-            icon: const Icon(AppIcons.back),
+            icon: const AppIcon(AppIcons.back),
           ),
         ),
         Expanded(
@@ -272,7 +272,7 @@ class _StudyQuizPlayerState extends State<StudyQuizPlayer> {
                 key: const ValueKey<String>('practice-player-close'),
                 tooltip: 'Back to Practice Studio',
                 onPressed: widget.onClose,
-                icon: const Icon(AppIcons.back),
+                icon: const AppIcon(AppIcons.back),
               ),
               Expanded(
                 child: Semantics(
@@ -303,7 +303,7 @@ class _StudyQuizPlayerState extends State<StudyQuizPlayer> {
                       _flagged.add(question.id);
                     }
                   }),
-                  icon: Icon(
+                  icon: AppIcon(
                     AppIcons.warning,
                     color: _flagged.contains(question.id)
                         ? colors.danger
@@ -350,53 +350,53 @@ class _StudyQuizPlayerState extends State<StudyQuizPlayer> {
                   key: ValueKey<String>('quiz-question-appear-$_index'),
                   rise: 14,
                   child: SingleChildScrollView(
-                  key: ValueKey<String>('quiz-question-$_index'),
-                  padding: const EdgeInsets.all(AppSpacing.md),
-                  child: Center(
-                    child: ConstrainedBox(
-                      constraints: const BoxConstraints(maxWidth: 680),
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.stretch,
-                        children: <Widget>[
-                          AiAnswerMarkdown(question.question),
-                          const SizedBox(height: AppSpacing.md),
-                          for (final PracticeChoiceOption option
-                              in question.options)
-                            Padding(
-                              padding: const EdgeInsets.only(
-                                bottom: AppSpacing.xs,
-                              ),
-                              child: _OptionPill(
-                                key: ValueKey<String>(
-                                  'quiz-option-${option.id}',
+                    key: ValueKey<String>('quiz-question-$_index'),
+                    padding: const EdgeInsets.all(AppSpacing.md),
+                    child: Center(
+                      child: ConstrainedBox(
+                        constraints: const BoxConstraints(maxWidth: 680),
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.stretch,
+                          children: <Widget>[
+                            AiAnswerMarkdown(question.question),
+                            const SizedBox(height: AppSpacing.md),
+                            for (final PracticeChoiceOption option
+                                in question.options)
+                              Padding(
+                                padding: const EdgeInsets.only(
+                                  bottom: AppSpacing.xs,
                                 ),
-                                option: option,
-                                state: _stateOf(question, option, revealed),
-                                onPressed: revealed
-                                    ? null
-                                    : () => _select(question, option.id),
+                                child: _OptionPill(
+                                  key: ValueKey<String>(
+                                    'quiz-option-${option.id}',
+                                  ),
+                                  option: option,
+                                  state: _stateOf(question, option, revealed),
+                                  onPressed: revealed
+                                      ? null
+                                      : () => _select(question, option.id),
+                                ),
                               ),
+                            AnimatedSize(
+                              duration: AppMotion.springDuration(
+                                context,
+                                AppMotion.smooth,
+                              ),
+                              curve: AppMotion.zoomInCurve,
+                              alignment: Alignment.topCenter,
+                              child: revealed
+                                  ? _Explanation(
+                                      question: question,
+                                      labelOf: widget.labelOf,
+                                      onViewCitation: widget.onViewCitation,
+                                    )
+                                  : const SizedBox(width: double.infinity),
                             ),
-                          AnimatedSize(
-                            duration: AppMotion.springDuration(
-                              context,
-                              AppMotion.smooth,
-                            ),
-                            curve: AppMotion.zoomInCurve,
-                            alignment: Alignment.topCenter,
-                            child: revealed
-                                ? _Explanation(
-                                    question: question,
-                                    labelOf: widget.labelOf,
-                                    onViewCitation: widget.onViewCitation,
-                                  )
-                                : const SizedBox(width: double.infinity),
-                          ),
-                        ],
+                          ],
+                        ),
                       ),
                     ),
                   ),
-                ),
                 ),
         ),
         Padding(
@@ -604,7 +604,7 @@ class _Mark extends StatelessWidget {
     curve: AppMotion.popCurve,
     builder: (BuildContext context, double value, Widget? child) =>
         Transform.scale(scale: value, child: child),
-    child: Icon(icon, size: 18, color: color),
+    child: AppIcon(icon, size: 18, color: color),
   );
 }
 
@@ -683,7 +683,7 @@ class _Explanation extends StatelessWidget {
                 TextButton.icon(
                   key: const ValueKey<String>('quiz-view-in-note'),
                   onPressed: () => onViewCitation(citation),
-                  icon: const Icon(AppIcons.note, size: 18),
+                  icon: const AppIcon(AppIcons.note, size: 18),
                   label: Text(
                     labelOf(citation),
                     maxLines: 1,
@@ -732,7 +732,7 @@ class _Review extends StatelessWidget {
             style: TextStyle(color: colors.textSecondary),
           ),
           trailing: flagged.contains(question.id)
-              ? Icon(
+              ? AppIcon(
                   AppIcons.warning,
                   color: colors.danger,
                   semanticLabel: 'Flagged',
@@ -822,7 +822,7 @@ class _Summary extends StatelessWidget {
             key: ValueKey<String>('quiz-result-$i'),
             shape: const Border(),
             collapsedShape: const Border(),
-            leading: Icon(
+            leading: AppIcon(
               questions[i].isCorrect ? AppIcons.check : AppIcons.close,
               color: questions[i].isCorrect ? colors.success : colors.danger,
               semanticLabel: questions[i].isCorrect ? 'Correct' : 'Incorrect',

@@ -45,14 +45,14 @@ class StudySourceTree extends StatelessWidget {
     Widget noteRow(NoteEntry note) => onSelectionChanged == null
         ? ListTile(
             key: ValueKey('$noteKeyPrefix-${note.id}'),
-            leading: const Icon(AppIcons.note),
+            leading: const AppIcon(AppIcons.note),
             title: Text(note.title),
             onTap: () => onOpenNote?.call(note.id),
           )
         : CheckboxListTile(
             key: ValueKey('$noteKeyPrefix-${note.id}'),
             title: Text(note.title),
-            secondary: const Icon(AppIcons.note),
+            secondary: const AppIcon(AppIcons.note),
             value: selected.contains(note.id),
             onChanged: (value) => choose([note.id], value == true),
           );
@@ -84,7 +84,7 @@ class StudySourceTree extends StatelessWidget {
               return ExpansionTile(
                 key: ValueKey('source-tree-folder-${folder.id}'),
                 initiallyExpanded: true,
-                leading: const Icon(AppIcons.folder),
+                leading: const AppIcon(AppIcons.folder),
                 title: Text(folder.name),
                 trailing: onSelectionChanged == null
                     ? null

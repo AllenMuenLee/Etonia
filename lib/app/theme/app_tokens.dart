@@ -1,5 +1,5 @@
 import 'dart:typed_data' show Float32List;
-import 'dart:ui' show ImageFilter, PointMode;
+import 'dart:ui' show FontFeature, ImageFilter, PointMode;
 
 import 'package:flutter/material.dart';
 
@@ -9,18 +9,36 @@ abstract final class AppSpacing {
   static const double xs = 8;
   static const double sm = 12;
   static const double md = 16;
+  static const double mdPlus = 20;
   static const double lg = 24;
   static const double xl = 32;
+  static const double xlPlus = 40;
   static const double xxl = 48;
 }
 
-/// The only corner radii used by the app.
+/// Typography helpers that sit beside the [TextTheme].
+abstract final class AppText {
+  /// Fixed-width digits for timers, scores, dates, and statistics, so they do
+  /// not jiggle as they change.
+  static const List<FontFeature> tabular = <FontFeature>[
+    FontFeature.tabularFigures(),
+  ];
+
+  static TextStyle tabularFigures(TextStyle? style) => (style ?? const TextStyle())
+      .copyWith(fontFeatures: tabular);
+}
+
+/// The only corner radii used by the app. Compact controls use [small];
+/// buttons and inputs [medium]; cards and floating panels [large]; dialogs
+/// [xl]. Avoid anything larger on ordinary surfaces.
 abstract final class AppRadii {
+  static const double xs = 4;
   static const double small = 8;
-  static const double medium = 14;
-  static const double large = 22;
-  static const double glass = 24;
-  static const double xl = 28;
+  static const double medium = 12;
+  static const double large = 16;
+  static const double glass = 16;
+  static const double xl = 22;
+  static const double xxl = 28;
 }
 
 /// Symmetric fallback radii for widgets that do not accept a continuous
@@ -36,6 +54,9 @@ abstract final class AppBorderRadius {
     Radius.circular(AppRadii.glass),
   );
   static const BorderRadius xl = BorderRadius.all(Radius.circular(AppRadii.xl));
+  static const BorderRadius small = BorderRadius.all(
+    Radius.circular(AppRadii.small),
+  );
 
   static BorderRadius circular(double radius) => BorderRadius.circular(radius);
 }
@@ -99,6 +120,12 @@ abstract final class AppMotion {
       );
   static final SpringDescription _reducedSpring =
       SpringDescription.withDurationAndBounce(duration: reduced);
+
+  /// Duration tokens for colour and opacity changes: fast controls, standard
+  /// interface transitions, and large panels.
+  static const Duration fast = Duration(milliseconds: 150);
+  static const Duration standard = Duration(milliseconds: 220);
+  static const Duration panel = Duration(milliseconds: 280);
 
   static const Duration fadeIn = Duration(milliseconds: 160);
   static const Duration fadeOut = Duration(milliseconds: 110);
@@ -241,20 +268,33 @@ abstract final class AppMotion {
 }
 
 /// Semantic colors. Feature widgets read these instead of color literals.
+///
+/// The palette is warm-neutral with a single lavender brand accent. The
+/// legacy mascot names ([pencil], [sprout], [lilac], [fold]) are kept so that
+/// call sites need not change, but they now alias the brand and status tokens.
 @immutable
 class AppColors extends ThemeExtension<AppColors> {
   const AppColors({
     required this.background,
+    required this.backgroundSecondary,
     required this.surface,
     required this.surfaceMuted,
+    required this.surfaceElevated,
     required this.writingSurface,
     required this.textPrimary,
     required this.textSecondary,
+    required this.textTertiary,
     required this.divider,
+    required this.borderStrong,
     required this.accent,
+    required this.brandHover,
+    required this.brandPressed,
+    required this.brandSubtle,
+    required this.accentText,
     required this.onAccent,
     required this.danger,
     required this.success,
+    required this.warning,
     required this.selected,
     required this.focus,
     required this.shadow,
@@ -266,26 +306,56 @@ class AppColors extends ThemeExtension<AppColors> {
     required this.recordingSurface,
     required this.recordingForeground,
     required this.scrubberTrack,
+    required this.pencil,
+    required this.sprout,
+    required this.lilac,
+    required this.fold,
     required this.highlighters,
   });
 
-  /// App chrome behind everything else.
+  /// backgroundPrimary: the app chrome behind everything else.
   final Color background;
 
-  /// Floating chrome such as the palette and popovers.
+  /// backgroundSecondary: sidebars and other secondary navigation surfaces.
+  final Color backgroundSecondary;
+
+  /// surfacePrimary: cards, panels, and floating chrome.
   final Color surface;
 
-  /// A quiet fill set into [surface] or [background]: text fields, slider
-  /// tracks, unselected chips, and tonal buttons.
+  /// surfaceSecondary: a quiet fill set into [surface] or [background]: text
+  /// fields, slider tracks, unselected chips, and tonal buttons.
   final Color surfaceMuted;
 
-  /// The page the user writes on.
+  /// surfaceElevated: dialogs and popovers.
+  final Color surfaceElevated;
+
+  /// The page the user writes on. Independent of the app theme's chrome.
   final Color writingSurface;
 
   final Color textPrimary;
   final Color textSecondary;
+
+  /// Muted labels and placeholders.
+  final Color textTertiary;
+
+  /// borderSubtle: dividers and delicate borders.
   final Color divider;
+
+  /// borderStrong: a more prominent border.
+  final Color borderStrong;
+
+  /// brandPrimary: the interactive accent. Fills primary buttons and marks
+  /// active controls. Contrast against [onAccent] is for medium-weight labels;
+  /// use [accentText] when the accent is the colour of body-size text.
   final Color accent;
+  final Color brandHover;
+  final Color brandPressed;
+
+  /// A faint brand tint for subtle surfaces.
+  final Color brandSubtle;
+
+  /// The accent as the colour of small text: dark enough for AA on [surface].
+  final Color accentText;
   final Color onAccent;
 
   /// Destructive actions, such as Delete, and errors.
@@ -293,13 +363,15 @@ class AppColors extends ThemeExtension<AppColors> {
 
   /// Positive status only; never a brand or selection colour.
   final Color success;
+  final Color warning;
 
-  /// Fill behind a selected control.
+  /// selectedSurface: fill behind a selected control.
   final Color selected;
 
   /// Keyboard focus ring.
   final Color focus;
 
+  /// A dark neutral: the colour of every shadow and scrim.
   final Color shadow;
 
   /// Lines, grid, and dots printed on the page, under the ink.
@@ -308,10 +380,10 @@ class AppColors extends ThemeExtension<AppColors> {
   /// The margin rule of lined paper.
   final Color pageMarginRule;
 
-  /// The soft, tinted color of the wide ambient layer of a shadow.
+  /// The colour of the wide layer of a shadow (a dark neutral, never tinted).
   final Color ambientShadow;
 
-  /// The near-invisible edge of frosted glass.
+  /// The hairline edge of floating surfaces.
   final Color glassEdge;
 
   /// The dots of the grid the app's chrome floats over.
@@ -322,73 +394,114 @@ class AppColors extends ThemeExtension<AppColors> {
   final Color recordingForeground;
   final Color scrubberTrack;
 
-  /// Colour belongs to user content. These are the only non-status hues in
-  /// app chrome.
+  /// A soft lavender wash for text selection and ink ripples.
+  final Color pencil;
+
+  /// Alias of the positive status colour.
+  final Color sprout;
+
+  /// Alias of the faint brand tint.
+  final Color lilac;
+
+  /// The shade of a folded corner: a warm neutral.
+  final Color fold;
+
+  /// Colour belongs to user content. These six are the marks users make.
   final List<Color> highlighters;
 
   static const AppColors light = AppColors(
-    background: Color(0xFFF2F2F4),
+    background: Color(0xFFFAF9F7),
+    backgroundSecondary: Color(0xFFF3F2F0),
     surface: Color(0xFFFFFFFF),
-    surfaceMuted: Color(0xFFE9E9EC),
+    surfaceMuted: Color(0xFFF7F6F4),
+    surfaceElevated: Color(0xFFFFFFFF),
     writingSurface: Color(0xFFFFFFFF),
-    textPrimary: Color(0xFF0A0A0B),
-    textSecondary: Color(0xFF6B6B70),
-    divider: Color(0x1A0A0A0B),
-    accent: Color(0xFF0A0A0B),
+    textPrimary: Color(0xFF343239),
+    textSecondary: Color(0xFF706D76),
+    textTertiary: Color(0xFF96919C),
+    divider: Color(0xFFE9E6E9),
+    borderStrong: Color(0xFFD4CFD8),
+    // The light brand ramp sits one step darker than the design table's
+    // #8873B4 / #7761A5 / #66518F so that white on the brand fill reaches AA
+    // (5.2:1 rather than 4.1:1); see docs/design_language.md.
+    accent: Color(0xFF7761A5),
+    brandHover: Color(0xFF66518F),
+    brandPressed: Color(0xFF574479),
+    brandSubtle: Color(0xFFF0EBF8),
+    accentText: Color(0xFF66518F),
     onAccent: Color(0xFFFFFFFF),
-    danger: Color(0xFFE5362B),
-    success: Color(0xFF1E9E4A),
-    selected: Color(0x140A0A0B),
-    focus: Color(0xFF0A0A0B),
-    shadow: Color(0xFF000000),
-    pageRule: Color(0xFFE1E1E4),
-    pageMarginRule: Color(0xFFE8C8C8),
-    ambientShadow: Color(0xFFB8B8BD),
-    glassEdge: Color(0xB3FFFFFF),
-    canvasDot: Color(0xFFD8D8DC),
+    danger: Color(0xFFC45757),
+    success: Color(0xFF408B75),
+    warning: Color(0xFFB68036),
+    selected: Color(0xFFEEE8F7),
+    focus: Color(0xFF7761A5),
+    shadow: Color(0xFF1B1A1F),
+    pageRule: Color(0xFFE9E5EE),
+    pageMarginRule: Color(0xFFEFC9CC),
+    ambientShadow: Color(0xFF1B1A1F),
+    glassEdge: Color(0xFFE9E6E9),
+    canvasDot: Color(0xFFE9E6E9),
     recordingSurface: Color(0xFFFFFFFF),
-    recordingForeground: Color(0xFF0A0A0B),
-    scrubberTrack: Color(0xFFC7C7CC),
+    recordingForeground: Color(0xFF343239),
+    scrubberTrack: Color(0xFFD4CFD8),
+    pencil: Color(0xFFDDD3EF),
+    sprout: Color(0xFF408B75),
+    lilac: Color(0xFFF0EBF8),
+    fold: Color(0xFFEFEDEA),
     highlighters: <Color>[
-      Color(0xFFFFE66D),
-      Color(0xFFFFB48A),
-      Color(0xFFFF9DB8),
-      Color(0xFFC9B8FF),
-      Color(0xFF8FD3FF),
-      Color(0xFF8FE8C4),
+      Color(0xFFFFF09E),
+      Color(0xFFFFD7BE),
+      Color(0xFFFFAEC5),
+      Color(0xFFE1CCFF),
+      Color(0xFFBDE4FF),
+      Color(0xFFB8EDB1),
     ],
   );
 
+  /// Layered charcoal, never pure black; not an inversion of [light].
   static const AppColors dark = AppColors(
-    background: Color(0xFF000000),
-    surface: Color(0xFF151517),
-    surfaceMuted: Color(0xFF232326),
-    writingSurface: Color(0xFF161618),
-    textPrimary: Color(0xFFF5F5F7),
-    textSecondary: Color(0xFF9A9AA0),
-    divider: Color(0x24FFFFFF),
-    accent: Color(0xFFFFFFFF),
-    onAccent: Color(0xFF000000),
-    danger: Color(0xFFFF6B61),
-    success: Color(0xFF4CD27A),
-    selected: Color(0x24FFFFFF),
-    focus: Color(0xFFFFFFFF),
+    background: Color(0xFF1C1B20),
+    backgroundSecondary: Color(0xFF24232A),
+    surface: Color(0xFF2B2A31),
+    surfaceMuted: Color(0xFF333139),
+    surfaceElevated: Color(0xFF393740),
+    writingSurface: Color(0xFF1E1A24),
+    textPrimary: Color(0xFFF5F2F6),
+    textSecondary: Color(0xFFB7B1BD),
+    textTertiary: Color(0xFF8E8795),
+    divider: Color(0xFF3C3842),
+    borderStrong: Color(0xFF56505D),
+    accent: Color(0xFFB8A2DF),
+    brandHover: Color(0xFFC5B3E7),
+    brandPressed: Color(0xFFA48CD4),
+    brandSubtle: Color(0xFF332A40),
+    accentText: Color(0xFFB8A2DF),
+    onAccent: Color(0xFF1C1B20),
+    danger: Color(0xFFDF898B),
+    success: Color(0xFF79BFA6),
+    warning: Color(0xFFDDB16C),
+    selected: Color(0xFF40344E),
+    focus: Color(0xFFB8A2DF),
     shadow: Color(0xFF000000),
-    pageRule: Color(0xFF303034),
-    pageMarginRule: Color(0xFF4A3436),
+    pageRule: Color(0xFF332C3B),
+    pageMarginRule: Color(0xFF5A3E48),
     ambientShadow: Color(0xFF000000),
-    glassEdge: Color(0x6BFFFFFF),
-    canvasDot: Color(0xFF303034),
-    recordingSurface: Color(0xFF1E1E1E),
-    recordingForeground: Color(0xFFFFFFFF),
-    scrubberTrack: Color(0xFF48484A),
+    glassEdge: Color(0xFF3C3842),
+    canvasDot: Color(0xFF3C3842),
+    recordingSurface: Color(0xFF333139),
+    recordingForeground: Color(0xFFF5F2F6),
+    scrubberTrack: Color(0xFF56505D),
+    pencil: Color(0xFF55456F),
+    sprout: Color(0xFF79BFA6),
+    lilac: Color(0xFF332A40),
+    fold: Color(0xFF3C3842),
     highlighters: <Color>[
-      Color(0xFFD9C45D),
-      Color(0xFFD99975),
-      Color(0xFFD9869C),
-      Color(0xFFAB9CD9),
-      Color(0xFF7AB3D9),
-      Color(0xFF7AC5A7),
+      Color(0xFFD9C97A),
+      Color(0xFFD9A98A),
+      Color(0xFFD98CA8),
+      Color(0xFFB79CD9),
+      Color(0xFF8AB9D9),
+      Color(0xFF7CC07A),
     ],
   );
 
@@ -407,16 +520,25 @@ class AppColors extends ThemeExtension<AppColors> {
   @override
   AppColors copyWith({
     Color? background,
+    Color? backgroundSecondary,
     Color? surface,
     Color? surfaceMuted,
+    Color? surfaceElevated,
     Color? writingSurface,
     Color? textPrimary,
     Color? textSecondary,
+    Color? textTertiary,
     Color? divider,
+    Color? borderStrong,
     Color? accent,
+    Color? brandHover,
+    Color? brandPressed,
+    Color? brandSubtle,
+    Color? accentText,
     Color? onAccent,
     Color? danger,
     Color? success,
+    Color? warning,
     Color? selected,
     Color? focus,
     Color? shadow,
@@ -428,20 +550,33 @@ class AppColors extends ThemeExtension<AppColors> {
     Color? recordingSurface,
     Color? recordingForeground,
     Color? scrubberTrack,
+    Color? pencil,
+    Color? sprout,
+    Color? lilac,
+    Color? fold,
     List<Color>? highlighters,
   }) {
     return AppColors(
       background: background ?? this.background,
+      backgroundSecondary: backgroundSecondary ?? this.backgroundSecondary,
       surface: surface ?? this.surface,
       surfaceMuted: surfaceMuted ?? this.surfaceMuted,
+      surfaceElevated: surfaceElevated ?? this.surfaceElevated,
       writingSurface: writingSurface ?? this.writingSurface,
       textPrimary: textPrimary ?? this.textPrimary,
       textSecondary: textSecondary ?? this.textSecondary,
+      textTertiary: textTertiary ?? this.textTertiary,
       divider: divider ?? this.divider,
+      borderStrong: borderStrong ?? this.borderStrong,
       accent: accent ?? this.accent,
+      brandHover: brandHover ?? this.brandHover,
+      brandPressed: brandPressed ?? this.brandPressed,
+      brandSubtle: brandSubtle ?? this.brandSubtle,
+      accentText: accentText ?? this.accentText,
       onAccent: onAccent ?? this.onAccent,
       danger: danger ?? this.danger,
       success: success ?? this.success,
+      warning: warning ?? this.warning,
       selected: selected ?? this.selected,
       focus: focus ?? this.focus,
       shadow: shadow ?? this.shadow,
@@ -453,6 +588,10 @@ class AppColors extends ThemeExtension<AppColors> {
       recordingSurface: recordingSurface ?? this.recordingSurface,
       recordingForeground: recordingForeground ?? this.recordingForeground,
       scrubberTrack: scrubberTrack ?? this.scrubberTrack,
+      pencil: pencil ?? this.pencil,
+      sprout: sprout ?? this.sprout,
+      lilac: lilac ?? this.lilac,
+      fold: fold ?? this.fold,
       highlighters: highlighters ?? this.highlighters,
     );
   }
@@ -462,142 +601,110 @@ class AppColors extends ThemeExtension<AppColors> {
     if (other == null) {
       return this;
     }
+    Color mix(Color a, Color b) => Color.lerp(a, b, t)!;
     return AppColors(
-      background: Color.lerp(background, other.background, t)!,
-      surface: Color.lerp(surface, other.surface, t)!,
-      surfaceMuted: Color.lerp(surfaceMuted, other.surfaceMuted, t)!,
-      writingSurface: Color.lerp(writingSurface, other.writingSurface, t)!,
-      textPrimary: Color.lerp(textPrimary, other.textPrimary, t)!,
-      textSecondary: Color.lerp(textSecondary, other.textSecondary, t)!,
-      divider: Color.lerp(divider, other.divider, t)!,
-      accent: Color.lerp(accent, other.accent, t)!,
-      onAccent: Color.lerp(onAccent, other.onAccent, t)!,
-      danger: Color.lerp(danger, other.danger, t)!,
-      success: Color.lerp(success, other.success, t)!,
-      selected: Color.lerp(selected, other.selected, t)!,
-      focus: Color.lerp(focus, other.focus, t)!,
-      shadow: Color.lerp(shadow, other.shadow, t)!,
-      pageRule: Color.lerp(pageRule, other.pageRule, t)!,
-      pageMarginRule: Color.lerp(pageMarginRule, other.pageMarginRule, t)!,
-      ambientShadow: Color.lerp(ambientShadow, other.ambientShadow, t)!,
-      glassEdge: Color.lerp(glassEdge, other.glassEdge, t)!,
-      canvasDot: Color.lerp(canvasDot, other.canvasDot, t)!,
-      recordingSurface: Color.lerp(
-        recordingSurface,
-        other.recordingSurface,
-        t,
-      )!,
-      recordingForeground: Color.lerp(
-        recordingForeground,
-        other.recordingForeground,
-        t,
-      )!,
-      scrubberTrack: Color.lerp(scrubberTrack, other.scrubberTrack, t)!,
+      background: mix(background, other.background),
+      backgroundSecondary: mix(backgroundSecondary, other.backgroundSecondary),
+      surface: mix(surface, other.surface),
+      surfaceMuted: mix(surfaceMuted, other.surfaceMuted),
+      surfaceElevated: mix(surfaceElevated, other.surfaceElevated),
+      writingSurface: mix(writingSurface, other.writingSurface),
+      textPrimary: mix(textPrimary, other.textPrimary),
+      textSecondary: mix(textSecondary, other.textSecondary),
+      textTertiary: mix(textTertiary, other.textTertiary),
+      divider: mix(divider, other.divider),
+      borderStrong: mix(borderStrong, other.borderStrong),
+      accent: mix(accent, other.accent),
+      brandHover: mix(brandHover, other.brandHover),
+      brandPressed: mix(brandPressed, other.brandPressed),
+      brandSubtle: mix(brandSubtle, other.brandSubtle),
+      accentText: mix(accentText, other.accentText),
+      onAccent: mix(onAccent, other.onAccent),
+      danger: mix(danger, other.danger),
+      success: mix(success, other.success),
+      warning: mix(warning, other.warning),
+      selected: mix(selected, other.selected),
+      focus: mix(focus, other.focus),
+      shadow: mix(shadow, other.shadow),
+      pageRule: mix(pageRule, other.pageRule),
+      pageMarginRule: mix(pageMarginRule, other.pageMarginRule),
+      ambientShadow: mix(ambientShadow, other.ambientShadow),
+      glassEdge: mix(glassEdge, other.glassEdge),
+      canvasDot: mix(canvasDot, other.canvasDot),
+      recordingSurface: mix(recordingSurface, other.recordingSurface),
+      recordingForeground: mix(recordingForeground, other.recordingForeground),
+      scrubberTrack: mix(scrubberTrack, other.scrubberTrack),
+      pencil: mix(pencil, other.pencil),
+      sprout: mix(sprout, other.sprout),
+      lilac: mix(lilac, other.lilac),
+      fold: mix(fold, other.fold),
       highlighters: <Color>[
         for (int i = 0; i < highlighters.length; i++)
-          Color.lerp(highlighters[i], other.highlighters[i], t)!,
+          mix(highlighters[i], other.highlighters[i]),
       ],
     );
   }
 }
 
-/// The app's shadows. None is a single hard drop: each pairs a tight
-/// contact shadow that defines the edge with wide, tinted ambient layers
-/// that give depth, as light falls in a room.
+/// The app's elevation tokens. Light themes get very soft neutral shadows;
+/// dark themes rely on tonal surfaces and borders, so their shadows are only a
+/// whisper. Never stack more than one.
 abstract final class AppShadows {
-  /// Lifts the page and cards slightly off the background.
-  static List<BoxShadow> paper(AppColors colors) {
+  static List<BoxShadow> _elevation(
+    AppColors colors, {
+    required double dy,
+    required double blur,
+    required double opacity,
+  }) {
+    final bool dark = colors.background.computeLuminance() < 0.5;
     return <BoxShadow>[
-      _contact(colors),
       BoxShadow(
-        color: colors.ambientShadow.withValues(alpha: 0.5),
-        blurRadius: 6,
-        spreadRadius: -1,
-        offset: const Offset(0, 4),
-      ),
-      BoxShadow(
-        color: colors.ambientShadow.withValues(alpha: 0.5),
-        blurRadius: 4,
-        spreadRadius: -2,
-        offset: const Offset(0, 2),
+        color: colors.shadow.withValues(alpha: dark ? opacity * 2.5 : opacity),
+        blurRadius: blur,
+        offset: Offset(0, dy),
       ),
     ];
   }
 
-  /// Floating chrome above the page: toolbars, menus, and panels.
-  static List<BoxShadow> floating(AppColors colors) {
-    return <BoxShadow>[
-      _contact(colors),
-      BoxShadow(
-        color: colors.ambientShadow.withValues(alpha: 0.5),
-        blurRadius: 25,
-        spreadRadius: -5,
-        offset: const Offset(0, 20),
-      ),
-      BoxShadow(
-        color: colors.ambientShadow.withValues(alpha: 0.5),
-        blurRadius: 10,
-        spreadRadius: -6,
-        offset: const Offset(0, 8),
-      ),
-    ];
-  }
+  /// Low elevation: cards and the page lifted slightly off the background.
+  static List<BoxShadow> paper(AppColors colors) =>
+      _elevation(colors, dy: 2, blur: 8, opacity: 0.04);
 
-  /// [floating], reaching a little further: for a control under a hovering
-  /// pointer, or a surface picked up to be moved.
-  static List<BoxShadow> raised(AppColors colors) {
-    return <BoxShadow>[
-      _contact(colors),
-      BoxShadow(
-        color: colors.ambientShadow.withValues(alpha: 0.6),
-        blurRadius: 50,
-        spreadRadius: -12,
-        offset: const Offset(0, 25),
-      ),
-      BoxShadow(
-        color: colors.ambientShadow.withValues(alpha: 0.5),
-        blurRadius: 16,
-        spreadRadius: -6,
-        offset: const Offset(0, 10),
-      ),
-    ];
-  }
+  /// Medium elevation: toolbars, menus, and panels floating over the page.
+  static List<BoxShadow> floating(AppColors colors) =>
+      _elevation(colors, dy: 6, blur: 18, opacity: 0.07);
+
+  /// High elevation: dialogs, or a surface picked up to be moved.
+  static List<BoxShadow> raised(AppColors colors) =>
+      _elevation(colors, dy: 12, blur: 32, opacity: 0.10);
 
   /// The glow around a surface whose work runs in the background. [breath]
   /// runs from 0 to 1 and back as it pulses.
   static List<BoxShadow> processing(Color accent, double breath) {
     return <BoxShadow>[
       BoxShadow(
-        color: accent.withValues(alpha: 0.10 + 0.10 * breath),
+        color: accent.withValues(alpha: 0.08 + 0.08 * breath),
         blurRadius: 12 + 4 * breath,
       ),
     ];
   }
-
-  static BoxShadow _contact(AppColors colors) => BoxShadow(
-    color: colors.shadow.withValues(alpha: 0.05),
-    blurRadius: 2,
-    offset: const Offset(0, 1),
-  );
 }
 
-/// Shared treatments for the tinted chrome. Keeping opacity and edge treatment
-/// in one place makes menus, panels, and controls read as one system.
+/// Shared treatments for the chrome. Keeping opacity and edge treatment in
+/// one place makes menus, panels, and controls read as one system. The name
+/// is historical: surfaces are plain, opaque, and bordered, not frosted.
 abstract final class AppGlass {
   static const double blurSigma = 24;
-  static const double saturation = 1.6;
-  static const double fullOpacityLight = 0.60;
-  static const double fullOpacityDark = 0.50;
-  static const double tintedOpacity = 0.86;
+  static const double saturation = 1.25;
+  static const double fullOpacityLight = 1.0;
+  static const double fullOpacityDark = 1.0;
+  static const double tintedOpacity = 1.0;
 
-  static Color surface(AppColors colors) =>
-      colors.surface.withValues(alpha: colors.surface.a * tintedOpacity);
+  static Color surface(AppColors colors) => colors.surface;
 
-  static Color muted(AppColors colors) =>
-      colors.surfaceMuted.withValues(alpha: colors.surfaceMuted.a * 0.90);
+  static Color muted(AppColors colors) => colors.surfaceMuted;
 
-  static Color background(AppColors colors) =>
-      colors.background.withValues(alpha: colors.background.a * 0.96);
+  static Color background(AppColors colors) => colors.background;
 
   static BorderSide border(AppColors colors) =>
       BorderSide(color: colors.glassEdge, width: AppSizes.hairline);
@@ -655,11 +762,9 @@ class GlassBlur extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final Widget filtered = quality == GlassQuality.full
-        ? BackdropFilter.grouped(filter: AppGlass.filter, child: child)
-        : child;
-    if (borderRadius == BorderRadius.zero) return filtered;
-    return ClipRSuperellipse(borderRadius: borderRadius, child: filtered);
+    // Surfaces are opaque, so there is nothing to blur behind them.
+    if (borderRadius == BorderRadius.zero) return child;
+    return ClipRSuperellipse(borderRadius: borderRadius, child: child);
   }
 }
 
@@ -712,17 +817,7 @@ class GlassSurface extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final AppColors colors = AppColors.of(context);
-    final bool dark = Theme.of(context).brightness == Brightness.dark;
-    final Color rimLight = dark ? colors.accent : colors.onAccent;
-    final Color tint =
-        color ??
-        colors.surface.withValues(
-          alpha: quality == GlassQuality.tinted
-              ? AppGlass.tintedOpacity
-              : dark
-              ? AppGlass.fullOpacityDark
-              : AppGlass.fullOpacityLight,
-        );
+    final Color tint = color ?? colors.surface;
     // The shadow sits outside the clip, so it is not cut off by it.
     return DecoratedBox(
       decoration: BoxDecoration(
@@ -733,22 +828,12 @@ class GlassSurface extends StatelessWidget {
         borderRadius: borderRadius,
         quality: quality,
         child: DecoratedBox(
-          decoration: BoxDecoration(color: tint, borderRadius: borderRadius),
-          child: DecoratedBox(
-            decoration: BoxDecoration(
-              border: Border.fromBorderSide(AppGlass.border(colors)),
-              borderRadius: borderRadius,
-              gradient: LinearGradient(
-                begin: Alignment.topLeft,
-                end: Alignment.bottomRight,
-                colors: <Color>[
-                  rimLight.withValues(alpha: dark ? 0.08 : 0.14),
-                  rimLight.withValues(alpha: 0),
-                ],
-              ),
-            ),
-            child: child,
+          decoration: BoxDecoration(
+            color: tint,
+            borderRadius: borderRadius,
+            border: Border.fromBorderSide(AppGlass.border(colors)),
           ),
+          child: child,
         ),
       ),
     );

@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import '../../../../app/theme/app_icons.dart';
 import '../../../../app/theme/app_tokens.dart';
 import '../../../../shared/widgets/dog_ear.dart';
+import '../../../../shared/widgets/etonia_mascot.dart';
 import '../study_desk_widgets.dart';
 import '../study_motion.dart';
 import 'study_practice_models.dart';
@@ -201,13 +202,19 @@ class _StudyMaterialLibraryState extends State<StudyMaterialLibrary> {
                                         'study-material-import',
                                       ),
                                       onPressed: widget.onImport,
-                                      icon: const Icon(AppIcons.pdf, size: 18),
+                                      icon: const AppIcon(
+                                        AppIcons.pdf,
+                                        size: 18,
+                                      ),
                                       label: const Text('Import test paper'),
                                     ),
                                     FilledButton.icon(
                                       key: const ValueKey('practice-generate'),
                                       onPressed: widget.onGenerateTest,
-                                      icon: const Icon(AppIcons.add, size: 18),
+                                      icon: const AppIcon(
+                                        AppIcons.add,
+                                        size: 18,
+                                      ),
                                       label: const Text('Create test'),
                                     ),
                                   ],
@@ -215,7 +222,7 @@ class _StudyMaterialLibraryState extends State<StudyMaterialLibrary> {
                               : FilledButton.icon(
                                   key: const ValueKey('practice-generate'),
                                   onPressed: widget.onGenerateFlashcards,
-                                  icon: const Icon(AppIcons.add, size: 18),
+                                  icon: const AppIcon(AppIcons.add, size: 18),
                                   label: const Text('Create flashcards'),
                                 ),
                         ),
@@ -226,12 +233,15 @@ class _StudyMaterialLibraryState extends State<StudyMaterialLibrary> {
                           onChanged: (_) => setState(() {}),
                           decoration: InputDecoration(
                             hintText: tests ? 'Find tests' : 'Find flashcards',
-                            prefixIcon: const Icon(AppIcons.search, size: 18),
+                            prefixIcon: const AppIcon(
+                              AppIcons.search,
+                              size: 18,
+                            ),
                             suffixIcon: query.isEmpty
                                 ? null
                                 : IconButton(
                                     tooltip: 'Clear search',
-                                    icon: const Icon(AppIcons.clear),
+                                    icon: const AppIcon(AppIcons.clear),
                                     onPressed: () => setState(_search.clear),
                                   ),
                           ),
@@ -244,7 +254,7 @@ class _StudyMaterialLibraryState extends State<StudyMaterialLibrary> {
                           children: [
                             PopupMenuButton<_Sort>(
                               tooltip: 'Sort study material',
-                              icon: const Icon(AppIcons.sort),
+                              icon: const AppIcon(AppIcons.sort),
                               initialValue: _sort,
                               onSelected: (sort) =>
                                   setState(() => _sort = sort),
@@ -266,14 +276,14 @@ class _StudyMaterialLibraryState extends State<StudyMaterialLibrary> {
                               tooltip: 'Grid view',
                               isSelected: _grid,
                               onPressed: () => setState(() => _grid = true),
-                              icon: const Icon(Icons.grid_view_rounded),
+                              icon: const AppIcon(Icons.grid_view_rounded),
                             ),
                             IconButton(
                               key: const ValueKey('study-material-list'),
                               tooltip: 'List view',
                               isSelected: !_grid,
                               onPressed: () => setState(() => _grid = false),
-                              icon: const Icon(Icons.view_list_rounded),
+                              icon: const AppIcon(Icons.view_list_rounded),
                             ),
                           ],
                         ),
@@ -298,11 +308,22 @@ class _StudyMaterialLibraryState extends State<StudyMaterialLibrary> {
                     child: StudyAppear(
                       key: ValueKey('study-material-empty-$tests-$query'),
                       child: StudyEmptyState(
-                        symbol: Icon(
-                          tests ? AppIcons.note : AppIcons.template,
-                          size: 32,
-                          color: colors.textSecondary,
-                        ),
+                        // Nothing has been made yet: Etonia waits here, in place
+                        // of an icon. A search that found nothing keeps its icon.
+                        symbol: query.isEmpty
+                            ? const EtoniaMascot(
+                                key: ValueKey<String>(
+                                  'study-material-empty-etonia',
+                                ),
+                                clip: EtoniaClip.lookAround,
+                                height: 96,
+                                semanticsLabel: 'Etonia is waiting',
+                              )
+                            : AppIcon(
+                                tests ? AppIcons.note : AppIcons.template,
+                                size: 32,
+                                color: colors.textSecondary,
+                              ),
                         title: query.isNotEmpty
                             ? 'No matching material'
                             : tests
@@ -446,7 +467,7 @@ class _MaterialCard extends StatelessWidget {
             horizontal: AppSpacing.md,
             vertical: AppSpacing.xs,
           ),
-          leading: Icon(deck != null ? AppIcons.template : AppIcons.note),
+          leading: AppIcon(deck != null ? AppIcons.template : AppIcons.note),
           title: Text(
             entry.title,
             maxLines: 2,
@@ -544,7 +565,7 @@ class _MaterialCard extends StatelessWidget {
                             : 'study-paper-menu-${paper!.id}',
                       ),
                       tooltip: deck != null ? 'Deck actions' : 'Test actions',
-                      icon: Icon(
+                      icon: AppIcon(
                         AppIcons.more,
                         color: colors.textSecondary,
                         size: 20,
@@ -647,7 +668,11 @@ class _MaterialCard extends StatelessWidget {
                       style: text.labelLarge,
                     ),
                     const SizedBox(width: AppSpacing.xs),
-                    Icon(AppIcons.forward, color: colors.textPrimary, size: 16),
+                    AppIcon(
+                      AppIcons.forward,
+                      color: colors.textPrimary,
+                      size: 16,
+                    ),
                     const SizedBox(width: AppSpacing.sm),
                   ],
                 ),

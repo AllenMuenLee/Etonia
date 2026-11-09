@@ -15,6 +15,9 @@ class ToolOptionsBar extends StatelessWidget {
   /// As thick as the tool palette beside it.
   static const double thickness = AppSizes.minTouchTarget + 2 * AppSpacing.xxs;
 
+  /// The room its controls keep from the bar's ends.
+  static const double endPadding = AppSpacing.xxs;
+
   final Axis axis;
   final List<Widget> children;
 
@@ -48,8 +51,8 @@ class ToolOptionsBar extends StatelessWidget {
               child: SingleChildScrollView(
                 scrollDirection: axis,
                 padding: across
-                    ? const EdgeInsets.symmetric(horizontal: AppSpacing.xxs)
-                    : const EdgeInsets.symmetric(vertical: AppSpacing.xxs),
+                    ? const EdgeInsets.symmetric(horizontal: endPadding)
+                    : const EdgeInsets.symmetric(vertical: endPadding),
                 child: _BarAxis(
                   axis: axis,
                   child: Flex(
@@ -298,10 +301,14 @@ class OptionsSlider extends StatelessWidget {
     this.semanticFormatterCallback,
     this.start,
     this.end,
+    this.length = defaultLength,
   });
 
-  /// How long the track is.
-  static const double length = 132;
+  /// How long the track is, unless told otherwise.
+  static const double defaultLength = 132;
+
+  /// How long this slider's track is.
+  final double length;
 
   final Axis axis;
   final double value;

@@ -197,12 +197,12 @@ class _ImportTestPaperSheetState extends State<ImportTestPaperSheet> {
                 children: [
                   FilledButton.icon(
                     onPressed: () => _import(true),
-                    icon: const Icon(AppIcons.pdf, size: 18),
+                    icon: const AppIcon(AppIcons.pdf, size: 18),
                     label: const Text('Choose PDF'),
                   ),
                   OutlinedButton.icon(
                     onPressed: () => _import(false),
-                    icon: const Icon(AppIcons.insertImage, size: 18),
+                    icon: const AppIcon(AppIcons.insertImage, size: 18),
                     label: const Text('Choose Photo'),
                   ),
                 ],

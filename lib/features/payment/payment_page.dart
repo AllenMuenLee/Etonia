@@ -72,7 +72,7 @@ class _PaymentPageState extends State<PaymentPage> {
                   'Your credits',
                   style: Theme.of(
                     context,
-                  ).textTheme.titleLarge?.copyWith(fontWeight: FontWeight.w800),
+                  ).textTheme.titleLarge?.copyWith(fontWeight: FontWeight.w600),
                 ),
               ),
               const SizedBox(height: AppSpacing.sm),
@@ -241,7 +241,7 @@ class _PricingHero extends StatelessWidget {
               'Choose the space you need to think bigger.',
               style: text.displayMedium?.copyWith(
                 color: colors.textPrimary,
-                fontWeight: FontWeight.w800,
+                fontWeight: FontWeight.w600,
                 height: 1.08,
                 letterSpacing: -1,
               ),
@@ -325,7 +325,7 @@ class CreditMeter extends StatelessWidget {
                   onPressed: controller.activity == StoreActivity.idle
                       ? controller.restorePurchases
                       : null,
-                  icon: const Icon(AppIcons.restore, size: 18),
+                  icon: const AppIcon(AppIcons.restore, size: 18),
                   label: const Text('Restore Purchases'),
                   style: OutlinedButton.styleFrom(
                     foregroundColor: colors.textPrimary,
@@ -541,7 +541,7 @@ class _PlanCard extends StatelessWidget {
     // contents the paper colour.
     final Color fg = recommended ? colors.onAccent : colors.textPrimary;
     final Color muted = recommended
-        ? colors.onAccent.withValues(alpha: 0.72)
+        ? colors.onAccent.withValues(alpha: 0.9)
         : colors.textSecondary;
     final String price = controller.priceFor(plan, cycle: cycle);
     final int slash = price.indexOf(' / ');
@@ -565,7 +565,7 @@ class _PlanCard extends StatelessWidget {
                       plan.title,
                       style: text.titleLarge?.copyWith(
                         color: fg,
-                        fontWeight: FontWeight.w800,
+                        fontWeight: FontWeight.w600,
                       ),
                     ),
                   ),
@@ -595,7 +595,7 @@ class _PlanCard extends StatelessWidget {
                       text: slash < 0 ? price : price.substring(0, slash),
                       style: text.displaySmall?.copyWith(
                         color: fg,
-                        fontWeight: FontWeight.w800,
+                        fontWeight: FontWeight.w600,
                         letterSpacing: -0.8,
                       ),
                     ),
@@ -697,7 +697,7 @@ class _Feature extends StatelessWidget {
       children: <Widget>[
         Padding(
           padding: const EdgeInsets.only(top: 2),
-          child: Icon(AppIcons.check, size: 16, color: color),
+          child: AppIcon(AppIcons.check, size: 16, color: color),
         ),
         const SizedBox(width: AppSpacing.xs),
         Expanded(
@@ -742,7 +742,7 @@ class _ModelChip extends StatelessWidget {
       child: DecoratedBox(
         decoration: BoxDecoration(
           color: included ? color.withValues(alpha: 0.1) : Colors.transparent,
-          borderRadius: BorderRadius.circular(999),
+          borderRadius: AppBorderRadius.medium,
           border: Border.all(
             color: color.withValues(alpha: included ? 0 : 0.28),
             width: AppSizes.hairline,
@@ -756,17 +756,17 @@ class _ModelChip extends StatelessWidget {
           child: Row(
             mainAxisSize: MainAxisSize.min,
             children: <Widget>[
-              Icon(
+              AppIcon(
                 included ? AppIcons.check : AppIcons.lock,
                 size: 13,
-                color: included ? color : color.withValues(alpha: 0.6),
+                color: included ? color : color.withValues(alpha: 0.72),
               ),
               const SizedBox(width: AppSpacing.xxs),
               Flexible(
                 child: Text(
                   '${model.label} · $detail',
                   style: Theme.of(context).textTheme.labelMedium?.copyWith(
-                    color: included ? color : color.withValues(alpha: 0.6),
+                    color: included ? color : color.withValues(alpha: 0.72),
                   ),
                 ),
               ),
@@ -795,7 +795,7 @@ class _Badge extends StatelessWidget {
     return DecoratedBox(
       decoration: BoxDecoration(
         color: onInk ? colors.onAccent : colors.selected,
-        borderRadius: BorderRadius.circular(999),
+        borderRadius: AppBorderRadius.medium,
       ),
       child: Padding(
         padding: const EdgeInsets.symmetric(
@@ -929,7 +929,7 @@ class StoreBanner extends StatelessWidget {
         ),
         child: Row(
           children: <Widget>[
-            Icon(
+            AppIcon(
               isError ? AppIcons.warning : AppIcons.check,
               size: 18,
               color: isError ? colors.danger : colors.textPrimary,

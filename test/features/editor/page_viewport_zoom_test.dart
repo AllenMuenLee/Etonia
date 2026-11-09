@@ -356,7 +356,11 @@ void main() {
     await tester.pump(_frame);
 
     expect(first.zooming!.value, isFalse);
-    expect(paints, greaterThanOrEqualTo(1), reason: 'for the scale it ended at');
+    expect(
+      paints,
+      greaterThanOrEqualTo(1),
+      reason: 'for the scale it ended at',
+    );
     expect(_covers(first.paintArea!.value, first.visible!.value), isTrue);
     expect(first.scale!.value, greaterThan(scaleBefore));
 

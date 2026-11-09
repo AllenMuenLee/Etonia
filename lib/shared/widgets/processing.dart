@@ -663,15 +663,15 @@ class _AmbientGlowState extends State<AmbientGlow>
                       spreadRadius: -4,
                     ),
                     BoxShadow(
-                      color: colors.highlighters[4].withValues(
-                        alpha: 0.10 + (1 - breath) * 0.10,
+                      color: colors.pencil.withValues(
+                        alpha: 0.12 + (1 - breath) * 0.12,
                       ),
                       blurRadius: 28,
                       spreadRadius: -7,
                       offset: const Offset(8, 0),
                     ),
                     BoxShadow(
-                      color: colors.highlighters[1].withValues(alpha: 0.10),
+                      color: colors.sprout.withValues(alpha: 0.10),
                       blurRadius: 24,
                       spreadRadius: -8,
                       offset: const Offset(-8, 2),

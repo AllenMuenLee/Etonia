@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:greatnote/features/library/library_models.dart' show FolderColor;
 import 'package:greatnote/features/library/note_repository.dart';
 import 'package:greatnote/features/library/study_desk/practice/study_practice_models.dart';
 import 'package:greatnote/features/library/study_desk/practice/study_practice_store.dart';
@@ -21,7 +22,10 @@ void main() {
       'folder suggestions initialize a class and all descendants at $size',
       (tester) async {
         final repository = InMemoryNoteRepository();
-        final root = await repository.createFolder('Physics');
+        final root = await repository.createFolder(
+          'Physics',
+          color: FolderColor.teal,
+        );
         final nested = await repository.createFolder(
           'Mechanics',
           parentId: root.id,
@@ -64,6 +68,11 @@ void main() {
           ),
         );
         expect(key('study-chat-add-source').hitTestable(), findsOneWidget);
+        // On a phone the history, and the suggestions in it, start closed.
+        if (key('study-navigation-sidebar').evaluate().isEmpty) {
+          await tester.tap(key('study-toggle-history'));
+          await tester.pumpAndSettle();
+        }
         final suggestion = key('study-suggest-class-${root.id}').last;
         await tester.ensureVisible(suggestion);
         await tester.pumpAndSettle();
@@ -71,6 +80,7 @@ void main() {
         await tester.pumpAndSettle();
         expect(desk.page, StudyDeskPage.course);
         expect(desk.selectedCourse!.name, 'Physics');
+        expect(desk.selectedCourse!.colorHex, FolderColor.teal.colorHex);
         expect(desk.selectedCourse!.associatedFolderIds, [root.id]);
         expect(
           desk.sources.map((s) => s.noteId),
@@ -87,6 +97,65 @@ void main() {
       },
     );
   }
+
+  test('a suggested class is hidden when a class already has its name, '
+      'and when it is closed', () async {
+    final repository = InMemoryNoteRepository();
+    final physics = await repository.createFolder('Physics');
+    final art = await repository.createFolder('Art');
+    final store = InMemoryStudyDeskStore();
+    final client = FakeAiClient();
+    final desk = StudyDeskController(
+      repository: repository,
+      client: client,
+      store: store,
+    );
+    addTearDown(() {
+      desk.dispose();
+      client.close();
+      repository.dispose();
+    });
+    await desk.load();
+    expect(desk.suggestedClassFolders.map((f) => f.id), [art.id, physics.id]);
+    // The same name, in another case and with space around it.
+    desk.addCourse('  physics ');
+    expect(desk.suggestedClassFolders.map((f) => f.id), [art.id]);
+    desk.dismissSuggestedClass(art);
+    expect(desk.suggestedClassFolders, isEmpty);
+    expect((await store.read())!.dismissedSuggestions, [art.id]);
+  });
+
+  test('a class can be renamed, pinned and deleted', () async {
+    final repository = InMemoryNoteRepository();
+    final client = FakeAiClient();
+    final desk = StudyDeskController(
+      repository: repository,
+      client: client,
+      store: InMemoryStudyDeskStore(),
+    );
+    addTearDown(() {
+      desk.dispose();
+      client.close();
+      repository.dispose();
+    });
+    await desk.load();
+    final math = desk.addCourse('Math');
+    final art = desk.addCourse('Art');
+    desk.renameCourse(math.id, 'Maths');
+    expect(desk.courses.first.name, 'Maths');
+    desk.recolorCourse(math.id, '#2F9E44');
+    expect(desk.courses.first.colorHex, '#2F9E44');
+    // Neither a blank name nor another class's name is taken.
+    desk.renameCourse(math.id, ' ');
+    desk.renameCourse(math.id, 'art');
+    expect(desk.courses.first.name, 'Maths');
+    desk.setCoursePinned(art.id, true);
+    expect(desk.courses.last.isPinned, isTrue);
+    desk.newChat(courseId: art.id);
+    await desk.deleteCourse(art.id);
+    expect(desk.courses.map((c) => c.id), [math.id]);
+    expect(desk.currentSession.courseId, isNull);
+  });
 
   testWidgets(
     'recent work includes all material types and searches them together',

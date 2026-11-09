@@ -200,7 +200,7 @@ class PenAdvancedPanel extends StatelessWidget {
                                   key: const ValueKey<String>('pen-reset'),
                                   style: TextButton.styleFrom(
                                     foregroundColor: colors.textSecondary,
-                                    shape: const StadiumBorder(),
+                                    shape: const RoundedRectangleBorder(borderRadius: AppBorderRadius.medium),
                                     textStyle: text.labelLarge,
                                   ),
                                   onPressed: settings == defaults

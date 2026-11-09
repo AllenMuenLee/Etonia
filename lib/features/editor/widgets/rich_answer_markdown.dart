@@ -4,6 +4,7 @@ import 'package:flutter_svg/flutter_svg.dart';
 import 'package:gpt_markdown/gpt_markdown.dart';
 import 'package:xml/xml.dart';
 
+import '../../../app/theme/app_icons.dart';
 import '../../../app/theme/app_tokens.dart';
 import '../ai/chat_math.dart';
 
@@ -286,7 +287,7 @@ class _CodeCardState extends State<_CodeCard> {
                 const Spacer(),
                 IconButton(
                   tooltip: _copied ? 'Copied' : 'Copy code',
-                  icon: Icon(_copied ? Icons.check : Icons.copy),
+                  icon: AppIcon(_copied ? Icons.check_rounded : Icons.copy_rounded),
                   onPressed: () async {
                     final code = widget.code;
                     try {
@@ -394,7 +395,7 @@ class _SvgCardState extends State<_SvgCard> {
                         child: IconButton(
                           tooltip: 'Close diagram',
                           onPressed: () => Navigator.pop(context),
-                          icon: const Icon(Icons.close),
+                          icon: const AppIcon(Icons.close_rounded),
                         ),
                       ),
                       Expanded(
@@ -409,7 +410,7 @@ class _SvgCardState extends State<_SvgCard> {
                 ),
               ),
             ),
-            icon: const Icon(Icons.zoom_in),
+            icon: const AppIcon(Icons.zoom_in_rounded),
             label: const Text('Zoom diagram'),
           ),
         ],
@@ -431,10 +432,10 @@ class _Callout extends StatelessWidget {
         ? theme.colorScheme.tertiary
         : theme.colorScheme.primary;
     final icon = switch (kind) {
-      'caution' => Icons.warning_amber,
-      'formula' => Icons.functions,
-      'theorem' => Icons.school_outlined,
-      _ => Icons.info_outline,
+      'caution' => Icons.warning_amber_rounded,
+      'formula' => Icons.functions_rounded,
+      'theorem' => Icons.school_rounded,
+      _ => Icons.info_outline_rounded,
     };
     return Container(
       margin: const EdgeInsets.symmetric(vertical: AppSpacing.xs),
@@ -449,7 +450,7 @@ class _Callout extends StatelessWidget {
         children: [
           Row(
             children: [
-              Icon(icon, color: color, size: 20),
+              AppIcon(icon, color: color, size: 20),
               const SizedBox(width: AppSpacing.xs),
               Text(
                 '${kind[0].toUpperCase()}${kind.substring(1)}',

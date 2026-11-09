@@ -479,12 +479,12 @@ class _HandwritingCalibrationScreenState
             IconButton(
               tooltip: _page == 0 ? 'Back to the fonts' : 'Previous page',
               onPressed: _saving ? null : _back,
-              icon: const Icon(AppIcons.previous),
+              icon: const AppIcon(AppIcons.previous),
             ),
             IconButton(
               tooltip: 'Undo',
               onPressed: _history.isEmpty ? null : _undo,
-              icon: const Icon(AppIcons.undo),
+              icon: const AppIcon(AppIcons.undo),
             ),
             IconButton(
               key: const ValueKey<String>('calibration-eraser'),
@@ -537,7 +537,7 @@ class _HandwritingCalibrationScreenState
             child: Column(
               mainAxisSize: MainAxisSize.min,
               children: <Widget>[
-                Icon(AppIcons.check, size: 48, color: colors.accent),
+                AppIcon(AppIcons.check, size: 48, color: colors.accent),
                 const SizedBox(height: AppSpacing.sm),
                 Text(
                   'Calibration finished',
@@ -654,7 +654,7 @@ class _FontCard extends StatelessWidget {
                         child: const Text('Write again'),
                       ),
                     if (selected)
-                      Icon(AppIcons.check, size: 18, color: colors.accent),
+                      AppIcon(AppIcons.check, size: 18, color: colors.accent),
                   ],
                 ),
                 Text(
@@ -668,7 +668,10 @@ class _FontCard extends StatelessWidget {
                   child: style == null
                       ? Row(
                           children: <Widget>[
-                            Icon(AppIcons.newNote, color: colors.textSecondary),
+                            AppIcon(
+                              AppIcons.newNote,
+                              color: colors.textSecondary,
+                            ),
                             const SizedBox(width: AppSpacing.xs),
                             Expanded(
                               child: Text(

@@ -350,9 +350,6 @@ class _NoteTabsPageState extends State<NoteTabsPage>
           backTooltip: widget.backTooltip,
           onSettingsPressed: entry?.onSettings,
           onFullscreenPressed: _enterFullscreen,
-          audioPlayer: entry?.audioPlayer,
-          replayController: entry?.replayController,
-          onCloseReplay: entry?.onCloseReplay,
           tabs: NoteTabStrip(
             key: const ValueKey<String>('note-strip-single'),
             notes: widget.notes,

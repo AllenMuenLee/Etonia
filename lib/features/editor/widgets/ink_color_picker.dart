@@ -142,7 +142,7 @@ class _InkSwatch extends StatelessWidget {
                       ),
                       child: selected
                           ? ExcludeSemantics(
-                              child: Icon(
+                              child: AppIcon(
                                 AppIcons.check,
                                 size: 14,
                                 color: onColor,

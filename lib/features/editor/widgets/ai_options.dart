@@ -39,7 +39,7 @@ class AiOptions extends StatelessWidget {
             selected: value,
             toggled: value,
             onPressed: () => onChanged(!value),
-            child: Icon(icon),
+            child: AppIcon(icon),
           );
         }
 

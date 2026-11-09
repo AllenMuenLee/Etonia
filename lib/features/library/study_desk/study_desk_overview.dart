@@ -6,7 +6,8 @@ import '../../../shared/widgets/pressable.dart';
 import 'study_desk_widgets.dart';
 import 'study_motion.dart';
 import 'study_desk_controller.dart';
-import 'study_history_sidebar.dart' show studyCourseColor;
+import 'study_history_sidebar.dart'
+    show showChangeClassColorDialog, studyCourseColor;
 import 'study_source_picker.dart';
 
 enum StudyMaterialKind { chats, tests, flashcards }
@@ -39,7 +40,7 @@ class StudyDeskOverview extends StatelessWidget {
             id: 'chat-${chat.id}',
             title: chat.title,
             updated: chat.updatedAt,
-            icon: AppIcons.library,
+            icon: AppIcons.chat,
             label: 'Chat',
             open: () => controller.openSession(chat.id),
           ),
@@ -86,10 +87,28 @@ class StudyDeskOverview extends StatelessWidget {
                     children: [
                       Align(
                         alignment: AlignmentDirectional.centerStart,
-                        child: Container(
-                          width: 40,
-                          height: 4,
-                          color: studyCourseColor(course.colorHex),
+                        child: InkWell(
+                          borderRadius: BorderRadius.circular(2),
+                          onTap: () async {
+                            final newColor = await showChangeClassColorDialog(
+                              context,
+                              initialHex: course.colorHex,
+                            );
+                            if (newColor != null) {
+                              controller.recolorCourse(course.id, newColor);
+                            }
+                          },
+                          child: Tooltip(
+                            message: 'Change class color',
+                            child: Container(
+                              width: 40,
+                              height: 4,
+                              decoration: BoxDecoration(
+                                color: studyCourseColor(course.colorHex),
+                                borderRadius: BorderRadius.circular(2),
+                              ),
+                            ),
+                          ),
                         ),
                       ),
                       const SizedBox(height: 20),
@@ -103,7 +122,9 @@ class StudyDeskOverview extends StatelessWidget {
                       const SizedBox(height: 12),
                       Text(
                         course.name,
-                        style: Theme.of(context).textTheme.displaySmall,
+                        // The UI face, like every other text; the serif
+                        // display face is not used for class names.
+                        style: Theme.of(context).textTheme.headlineMedium,
                       ),
                       const SizedBox(height: 8),
                       Text(
@@ -142,7 +163,7 @@ class StudyDeskOverview extends StatelessWidget {
                               key: const ValueKey('study-create-tests'),
                               onPressed: () =>
                                   onCreate(StudyMaterialKind.tests),
-                              icon: const Icon(AppIcons.add, size: 18),
+                              icon: const AppIcon(AppIcons.add, size: 18),
                               label: const Text('New test'),
                             ),
                           ),
@@ -151,7 +172,7 @@ class StudyDeskOverview extends StatelessWidget {
                               key: const ValueKey('study-create-flashcards'),
                               onPressed: () =>
                                   onCreate(StudyMaterialKind.flashcards),
-                              icon: const Icon(AppIcons.add, size: 18),
+                              icon: const AppIcon(AppIcons.add, size: 18),
                               label: const Text('New flashcards'),
                             ),
                           ),
@@ -218,7 +239,7 @@ class StudyDeskOverview extends StatelessWidget {
                           onTap: entry.open,
                           child: ListTile(
                             key: ValueKey('study-class-material-${entry.id}'),
-                            leading: Icon(
+                            leading: AppIcon(
                               entry.icon,
                               size: 20,
                               color: colors.textSecondary,
@@ -237,7 +258,7 @@ class StudyDeskOverview extends StatelessWidget {
                               style: Theme.of(context).textTheme.bodySmall
                                   ?.copyWith(color: colors.textSecondary),
                             ),
-                            trailing: Icon(
+                            trailing: AppIcon(
                               AppIcons.disclosure,
                               size: 16,
                               color: colors.textSecondary,
